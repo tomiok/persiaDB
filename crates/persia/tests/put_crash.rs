@@ -330,18 +330,43 @@ fn a_crash_at_every_write_never_leaves_a_document_without_its_blob() {
                 let crashed = fs.crash(loss);
                 // A second fault, during the reopen itself (its recovery writes and syncs too), on a copy of the
                 // crashed state; then a clean reopen of what that left (invariants 1 to 3 again).
-                let faulted = crashed.crash(CrashLoss::Nothing);
                 let db = reopen(&crashed, &ctx);
                 check(&db, &model, &ctx);
-                let again = format!("{ctx}, then a fault at reopen call {}", n % 8);
-                faulted.set_fault(Some(kind(faulted.mutations() + n % 8)));
-                // It may fail anywhere, or finish if it makes fewer calls: either way, a process ending there.
-                drop(try_reopen(&faulted));
-                let db = reopen(&faulted.crash(loss), &again);
-                check(&db, &model, &again);
-                runs += 1;
+                // CI faults one reopen call (the first eight, repeating). The extended run sweeps every call a
+                // clean reopen of this file makes.
+                let reopen_at: Vec<u64> = if cfg!(feature = "slow") {
+                    let probe = crashed.crash(CrashLoss::Nothing);
+                    let start = probe.mutations();
+                    drop(reopen(
+                        &probe,
+                        &format!("{ctx}: counting the reopen's calls"),
+                    ));
+                    let n_calls = probe.mutations() - start;
+                    (0..n_calls).collect()
+                } else {
+                    vec![n % 8]
+                };
+                for at in reopen_at {
+                    let faulted = crashed.crash(CrashLoss::Nothing);
+                    let again = format!("{ctx}, then a fault at reopen call {at}");
+                    faulted.set_fault(Some(kind(faulted.mutations() + at)));
+                    // It may fail anywhere, or finish if it makes fewer calls: either way, a process ending there.
+                    drop(try_reopen(&faulted));
+                    let db = reopen(&faulted.crash(loss), &again);
+                    check(&db, &model, &again);
+                    runs += 1;
+                }
             }
         }
     }
-    assert_eq!(runs, calls * if cfg!(feature = "slow") { 6 } else { 4 });
+    // Each outer fault is two kinds and two losses (three with `slow`), and each of those faults once during
+    // reopen. `slow` faults every reopen call, so it runs more than that.
+    if cfg!(feature = "slow") {
+        assert!(
+            runs > calls * 6,
+            "{runs} runs for {calls} calls: the reopen sweep should pass the single-offset run"
+        );
+    } else {
+        assert_eq!(runs, calls * 4);
+    }
 }

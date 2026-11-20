@@ -209,8 +209,9 @@ pub(super) struct WalPut<'a> {
 }
 
 /// Calls `f` with every `Put` record of the WAL chunk frames at `chunks`, in log order (SPEC §8.2, §8.6). The one walk
-/// of the WAL's puts that [`Database::referenced_blobs`] (GC's mark) and `ReadOnlyDatabase::blob_references`
-/// (`persia verify`) share, so what they find cannot drift apart (SPEC §9.5).
+/// of the WAL's puts. GC's mark ([`Database::referenced_blobs`]) passes every WAL chunk frame the container holds;
+/// `ReadOnlyDatabase::blob_references` (`persia verify`) passes only the chunks the read-only open replayed, a subset
+/// of those. Verify therefore checks no reference GC would drop: they differ only by GC keeping more (SPEC §9.5).
 ///
 /// # Errors
 /// [`DatabaseError::Replay`] for a chunk that cannot be read or decoded; `f`'s.

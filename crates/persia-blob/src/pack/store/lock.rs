@@ -109,3 +109,19 @@ pub(super) fn unlock_after<F: ContainerFile>(file: &F, locked: bool, error: Erro
     }
     error
 }
+
+/// Unlocks `file` on drop while [`locked`](Self::locked). A failed create or rewrite must unlock, not only close
+/// (SPEC §4.5.1): a forked copy of the descriptor keeps the lock after the close. Clear `locked` to keep the lock
+/// (the caller takes the file).
+pub(super) struct UnlockOnDrop<'a, F: ContainerFile> {
+    pub(super) file: &'a F,
+    pub(super) locked: bool,
+}
+
+impl<F: ContainerFile> Drop for UnlockOnDrop<'_, F> {
+    fn drop(&mut self) {
+        if self.locked {
+            release(self.file);
+        }
+    }
+}

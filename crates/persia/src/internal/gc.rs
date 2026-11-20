@@ -9,10 +9,12 @@
 //! reference can become referenced before the sweep, except through a pin, which the sweep checks again under the
 //! pin set's lock. `put_blob` and reads may run meanwhile, from other threads.
 //!
-//! The view is this process's: readers in other processes are not seen. Locally a read-only process keeps the pack
-//! file it opened only until `refresh` returns [`persia_blob::Error::PackReplaced`]; nothing reopens on that error
-//! (ROADMAP 9.2.13). Remotely a reader that lags behind the writer may find the blob of a document the writer has
-//! deleted gone (ADR-0052, ROADMAP 13.2.5).
+//! The view is this process's: readers in other processes are not seen. [`persia_blob::PackStore::refresh`]
+//! keeps the pack file it opened until it returns [`persia_blob::Error::PackReplaced`] and does not reopen it
+//! (ROADMAP 9.2.13). [`ReadOnlyBlobDatabase::refresh`](super::documents::ReadOnlyBlobDatabase::refresh) does reopen
+//! the pack read-only at that path, and restores the previous documents if the pack refresh fails any other way.
+//! Remotely a reader that lags behind the writer may find the blob of a document the writer has deleted gone
+//! (ADR-0052, ROADMAP 13.2.5).
 
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime};

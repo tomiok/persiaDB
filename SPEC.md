@@ -2620,7 +2620,12 @@ pack, a database that never stored a blob has none, and an open that finds none 
 references one is dangling, which `verify` reports, §9.5). A read-only database opens its pack read-only and never creates it: with
 no pack, a `get_blob` fails as not bound, and its refresh opens a pack the writer has created since (ROADMAP 9.4.5). That refresh takes a newer read-only
 open of the documents, then refreshes the pack, in that order: a blob is bound before any document that references
-it is logged. The pack is found beside the container's canonical path, so a database opened through a symlink uses
+it is logged. The reopened documents must be this database (the same `db_uuid` and canonical path) and no older: a
+lower manifest `seq`, or the same `seq` with fewer replayed WAL records or an earlier end of the frames that open
+saw, is refused and nothing changes. If the pack refresh reports `PackReplaced`, the reader reopens the pack
+read-only at the same path with the same `db_uuid` (the refresh holds the reader mutably, so no stream still borrows
+the old pack). Any other pack error restores the previous documents, so the documents and the pack stay paired.
+`PackStore::refresh` itself does not reopen or remap (ROADMAP 9.2.13). The pack is found beside the container's canonical path, so a database opened through a symlink uses
 the pack beside the real file. Creating it is durable before the first blob is bound: the
 file with its header and superblock synced, then its directory synced (§4.5.2). A read-write open first removes the stale
 temporary files a crashed creation or pack rewrite left beside the pack (`<name>.persia.blobs.tmp.<nonce>.<n>`), then
@@ -2727,9 +2732,10 @@ the same process that runs `put_blob`, and keeps a **pin set** with it:
   manifest kept for any reason is read, so its upload's chunks stay; an unreadable one leaves every staged chunk.
   Before deleting an upload's chunks, under the lock, the sweep checks every pinned blob's manifest (reading those it
   has not seen, including a marked blob whose manifest the mark did not resolve) and keeps the chunks one names.
-  Readers in other processes are not in the writer's view. Locally a read-only process keeps the pack file it opened,
-  and the bytes it mapped, only until `refresh` returns `PackReplaced`; nothing reopens or remaps on that error
-  (ROADMAP 9.2.13). Remotely one that lags may find the blob of a document the writer deleted gone after the grace
+  Readers in other processes are not in the writer's view. `PackStore::refresh` keeps the pack file it opened, and
+  the bytes it mapped, only until it returns `PackReplaced`; it does not reopen or remap (ROADMAP 9.2.13).
+  `ReadOnlyBlobDatabase::refresh` reopens a read-only pack at the same path on that error, and on any other pack
+  error restores the documents it had, so a long-lived reader stays paired after a GC rewrite. Remotely one that lags may find the blob of a document the writer deleted gone after the grace
   period (ROADMAP 13.2.5, which extends 13.2.4).
 The grace period covers a crashed or replaced writer's uploads; the pins are what keeps a blob that a not-yet-committed
 document references. A referenced blob must never be missing. `verify` (ROADMAP 9.5.3) **fails** on one: a live document,
@@ -2739,10 +2745,15 @@ collection, the document id and the `blob_id`, never a warning. By default `veri
 checksum and every chunk's CRC32C, orphans included; `--quick` skips that scan, and `--deep` also re-hashes every
 referenced blob against its `blob_id` (ADR-0053). It checks the local layout; the remote one is ROADMAP 13.2.6. The references checked are those
 `ReadOnlyDatabase::blob_references` lists: each document of a committed segment that its committed tombstones leave
-live, and every put of the WAL chunks the read-only open replayed, replaced since or not (what GC's mark keeps). The
-scan reads only the committed frames `12288..log_end`; an orphan chunk is one no bound blob names, counted and never
-an error. `persia verify` opens the pack right after the documents; a dangling reference found once the container's
-committed seq has moved since then is reported as "changed during verify, rerun" (exit status 1), not as damage (exit
+live, and every put of the WAL chunks the read-only open replayed, replaced since or not. That is a subset of the WAL
+chunk frames GC's mark keeps (every WAL chunk frame, not only the ones a read-only open replayed): verify checks no
+reference GC would drop. The
+scan reads only the committed frames `12288..log_end` and bounds each frame's length before reading it; that bound
+applies after the pack is opened. The open itself still reads index frames bounded only by the file length
+(ROADMAP 9.2.14). An orphan chunk is one no bound blob names, counted and never
+an error. `persia verify` checks the documents before it opens the pack, so a document error is reported without
+opening the pack. A dangling reference found once the container's
+committed seq has moved since the documents were opened is reported as "changed during verify, rerun" (exit status 1), not as damage (exit
 status 3). The engine itself does not look a `BlobRef` up when
 it logs or commits a document (it does not depend on `persia-blob`); the public API is what keeps references bound
 (§9.6).
@@ -3179,8 +3190,8 @@ Comparison against other engines is reported with methodology, never cherry-pick
     rewrite in place, so the path names a complete old or new pack at every instant. On Windows the rename over a
     file that readers hold open or mapped succeeds on NTFS (ADR-0016 item 2) and those readers keep the old bytes;
     where it fails the rewrite fails without harm. The container's writer lock covers the pack. (a) answered by
-    ADR-0049: readers compare `(pack_id, generation)`. Reopening or remapping when `refresh` returns `PackReplaced`
-    is not implemented (ROADMAP 9.2.13). (b) answered: the writer holds its mutex from the start of the copy through
+    ADR-0049: readers compare `(pack_id, generation)`. `PackStore::refresh` does not reopen or remap when it returns
+    `PackReplaced` (ROADMAP 9.2.13). `ReadOnlyBlobDatabase::refresh` reopens the pack read-only. (b) answered: the writer holds its mutex from the start of the copy through
     the directory sync, and re-checks the pin set under that lock (`unless_pinned`) before the rename, so nothing is
     bound into the new pack before that sync succeeds; a failed sync poisons the handle, which has moved to the new
     file (a crash may bring back either; both are complete); confirmed by crash tests (ROADMAP 9.5.4). The kept
@@ -3188,7 +3199,8 @@ Comparison against other engines is reported with methodology, never cherry-pick
     unchanged and a live reader does not see `Corrupt` for a blob the rewrite kept. (c) answered for the writer
     process: a `get_blob` stream in the writer reads on, because the handle swaps file and index at once and looks
     every chunk up by id, and it pins its blob (§9.5). A read-only handle in another process keeps the file it opened
-    only until `refresh` returns `PackReplaced`; it does not reopen.
+    only until `refresh` returns `PackReplaced` and does not reopen it. `ReadOnlyBlobDatabase::refresh` reopens the pack
+    at that path.
     The mark keeps every blob a reader in the writer process can still name (§9.5), including one a non-durable
     `Buffered` or `Async` delete or replace would revive after a crash. A reader in another process, or a remote
     reader lagging the writer, is ROADMAP 13.2.4: readers pin old manifests while queries run, and GC respects reader

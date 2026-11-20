@@ -42,8 +42,13 @@ error; `Unsupported` trait defaults; a restage that makes the chunks young.
 4. **Read-only.** `ReadOnlyBlobDatabase` opens the pack read-only and never creates it. With no pack, a blob read
    fails as not bound. `refresh(reopened)` takes a newer read-only open of the documents first, then refreshes the
    pack, in that order because a blob is bound before any document that references it is logged. A reopened
-   database of another `db_uuid` is refused. The engine's `ReadOnlyDatabase` has no refresh of its own, so the caller
-   reopens it.
+   database of another `db_uuid`, at another canonical path, or older than the current open is refused and nothing
+   changes. Older is a lower manifest `seq`, or the same `seq` with fewer replayed WAL records or an earlier end of
+   the frames that open saw. `PackReplaced` (a GC rewrite) reopens the pack read-only at the same path with the same
+   `db_uuid`; the refresh holds `&mut self`, so no stream still borrows the old pack. Any other pack error, and a
+   reopen that fails, restores the previous documents so the documents and the pack stay paired. `PackStore::refresh`
+   itself does not reopen or remap (ROADMAP 9.2.13). The engine's `ReadOnlyDatabase` has no refresh of its own, so
+   the caller reopens it.
 
 ### `verify` (ROADMAP 9.5.3, 9.5.6)
 
@@ -91,10 +96,11 @@ error; `Unsupported` trait defaults; a restage that makes the chunks young.
 - Every pack test needs a real container to mint a proof. `PackStore::open(.., ReadWrite, ..)` no longer exists.
 - `persia verify` reads the whole pack by default; `--quick` restores the old cost.
 - A resume re-reads the kept run from the caller (not re-uploaded). A resumed blob's upload id may differ from the token's.
-- Remaining race (ROADMAP 9.5.10): the sweep ages an upload from its listing. A resume that pins, lists, stages a new
-  chunk under the old upload, binds and drops its pins between that listing and the upload's locked check, then is
-  referenced later by `BlobRef`, can lose the old chunks. The fix belongs to the sweep: re-list the upload under the
-  lock before deleting it.
+- Remaining race (ROADMAP 9.5.10, added on `blob/resume` and merged after this PR): the remote sweep re-lists an
+  upload's chunks under the pin set's lock before deleting them, and keeps the upload when a chunk is younger than
+  the grace period or was not in its first listing. A resume that pins, lists, stages a new chunk under the old
+  upload, binds and drops its pins between the sweep's upload listing and its locked check, and is referenced later
+  by `BlobRef`, can lose the old chunks. Without `strong_list` the first listing can also miss a fresh chunk.
 
 ## Alternatives considered
 

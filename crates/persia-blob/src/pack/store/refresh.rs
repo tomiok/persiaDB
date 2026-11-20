@@ -97,4 +97,15 @@ impl<F: ContainerFile + 'static> PackStore<F> {
         }
         Ok(true)
     }
+
+    /// A new read-only open of the pack now at this handle's path, with this handle's `db_uuid`.
+    ///
+    /// [`PackStore::refresh`] returns [`Error::PackReplaced`] and stays on the file it opened (ROADMAP 9.2.13). A
+    /// caller that holds `&mut` to its reader, so nothing still borrows this handle, opens the replacement with this.
+    ///
+    /// # Errors
+    /// As [`PackStore::open_in`].
+    pub fn reopen(&self) -> Result<Self> {
+        Self::open_in(std::sync::Arc::clone(&self.vfs), &self.path, self.db_uuid)
+    }
 }

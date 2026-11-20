@@ -486,39 +486,52 @@ fn create_pack<F: ContainerFile>(
     // Locked before it is written or linked, so the pack's name never names an unlocked pack (ROADMAP 9.2.7).
     let locked = if lock_file { lock::lock(&file) } else { Ok(()) };
     let locked_ok = lock_file && locked.is_ok();
-    let written = locked
-        .and_then(|()| {
-            file.write_all_at(&prefix, 0)
-                .map_err(io_err("write header"))
-        })
-        .and_then(|()| file.sync_data().map_err(io_err("sync")))
-        .map_err(Created::NoPack);
-    // A crash before the link leaves only the temporary file (no pack); after it, a complete empty pack.
-    let linked = written.and_then(|()| {
-        vfs.hard_link(&temp, path).map_err(|e| {
-            if e.kind() == io::ErrorKind::AlreadyExists {
-                // Another writer created a pack there: a second read-write handle opened while there was no pack file
-                // to lock (ROADMAP 9.2.7), whose creation lost the race.
-                Created::MaybePack(io_err("link: a pack already exists at the path")(e))
-            } else {
-                Created::NoPack(io_err("link")(e))
-            }
-        })
-    });
-    // One directory sync covers the link and the removal, and runs even if the removal failed.
-    // NotFound is the name already gone (another read-write handle's sweep may have removed it after the link,
-    // ROADMAP 9.2.7). That is what the removal wanted, so the creation continues.
-    let removed = match vfs.remove_file(&temp) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        other => other.map_err(io_err("remove temporary file")),
+    // The guard unlocks on drop unless disarmed. A failure must unlock, not only close: a forked copy of the
+    // descriptor keeps the lock after the close (SPEC §4.5.1).
+    let (created, was_linked) = {
+        let mut unlock = lock::UnlockOnDrop {
+            file: &file,
+            locked: locked_ok,
+        };
+        let written = locked
+            .and_then(|()| {
+                file.write_all_at(&prefix, 0)
+                    .map_err(io_err("write header"))
+            })
+            .and_then(|()| file.sync_data().map_err(io_err("sync")))
+            .map_err(Created::NoPack);
+        // A crash before the link leaves only the temporary file (no pack); after it, a complete empty pack.
+        let linked = written.and_then(|()| {
+            vfs.hard_link(&temp, path).map_err(|e| {
+                if e.kind() == io::ErrorKind::AlreadyExists {
+                    // Another writer created a pack there: a second read-write handle opened while there was no pack
+                    // file to lock (ROADMAP 9.2.7), whose creation lost the race.
+                    Created::MaybePack(io_err("link: a pack already exists at the path")(e))
+                } else {
+                    Created::NoPack(io_err("link")(e))
+                }
+            })
+        });
+        // One directory sync covers the link and the removal, and runs even if the removal failed.
+        // NotFound is the name already gone (another read-write handle's sweep may have removed it after the link,
+        // ROADMAP 9.2.7). That is what the removal wanted, so the creation continues.
+        let removed = match vfs.remove_file(&temp) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            other => other.map_err(io_err("remove temporary file")),
+        };
+        let synced = vfs
+            .sync_dir(parent_of(path))
+            .map_err(io_err("sync directory"));
+        let was_linked = linked.is_ok();
+        let created = linked
+            .and_then(|()| removed.map_err(Created::MaybePack))
+            .and_then(|()| synced.map_err(Created::MaybePack));
+        // The caller keeps the lock: the returned file, or a file the path now names (held for the handle's life).
+        if created.is_ok() || (was_linked && unlock.locked) {
+            unlock.locked = false;
+        }
+        (created, was_linked)
     };
-    let synced = vfs
-        .sync_dir(parent_of(path))
-        .map_err(io_err("sync directory"));
-    let was_linked = linked.is_ok();
-    let created = linked
-        .and_then(|()| removed.map_err(Created::MaybePack))
-        .and_then(|()| synced.map_err(Created::MaybePack));
     match created {
         Ok(()) => Ok((file, pack_id)),
         // The path names this file now: it stays locked while the (poisoned) handle lives.
@@ -528,13 +541,8 @@ fn create_pack<F: ContainerFile>(
                 .push(lock::Held(file));
             Err(e)
         }
-        Err(e) => {
-            // Unlocked, not only closed: a forked copy of the descriptor would keep a lock nobody owns.
-            if locked_ok {
-                lock::release(&file);
-            }
-            Err(e)
-        }
+        // The guard already unlocked. Closing the descriptor is what happens as `file` drops.
+        Err(e) => Err(e),
     }
 }
 

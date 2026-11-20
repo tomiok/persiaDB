@@ -66,13 +66,24 @@ pub enum Error {
         /// Where the reopened one was.
         reopened: Option<PathBuf>,
     },
-    /// [`ReadOnlyBlobDatabase::refresh`] was given an open older than the current one: nothing changed.
-    #[error("the reopened database is at seq {reopened}, older than the current seq {current}")]
+    /// [`ReadOnlyBlobDatabase::refresh`] was given an open older than the current one: nothing changed. Older is a
+    /// lower manifest `seq`, or the same `seq` with fewer replayed WAL records or an earlier end of those frames.
+    #[error(
+        "the reopened database is older than the current one (seq {reopened}, {reopened_replayed} replayed WAL records ending at {reopened_end}; current seq {current}, {current_replayed} replayed ending at {current_end})"
+    )]
     RefreshedOlder {
         /// The current manifest `seq`.
         current: u64,
         /// The reopened one's.
         reopened: u64,
+        /// WAL records the current open replayed.
+        current_replayed: u64,
+        /// WAL records the reopened one replayed.
+        reopened_replayed: u64,
+        /// End of the valid frames the current open saw ([`persia_storage::container::Container::end`]).
+        current_end: u64,
+        /// End of the valid frames the reopened one saw.
+        reopened_end: u64,
     },
 }
 
@@ -139,6 +150,12 @@ pub trait DocumentLog {
     /// [`Database::durable_mark`].
     fn durable_mark(&self) -> WalMark;
 
+    /// The container `db_uuid`, when this log is a database a pack was opened with. [`BlobDatabase::log_mut`]
+    /// checks it in debug builds so replacing the log cannot pair the pack with another database.
+    fn container_db_uuid(&self) -> Option<[u8; 16]> {
+        None
+    }
+
     /// [`Database::commit`].
     ///
     /// # Errors
@@ -166,6 +183,10 @@ impl<F: ContainerFile + Sync> DocumentLog for Database<F> {
         Database::durable_mark(self)
     }
 
+    fn container_db_uuid(&self) -> Option<[u8; 16]> {
+        Some(self.container().header().db_uuid)
+    }
+
     #[allow(clippy::result_large_err)] // As the trait.
     fn commit(&mut self) -> Result<u64, DatabaseError> {
         Database::commit(self)
@@ -182,6 +203,9 @@ pub struct BlobDatabase<S: ?Sized, L = Database> {
     /// outlive the container whose lock the proof stood for (ROADMAP 9.2.7, ADR-0053).
     blobs: Blobs<S>,
     log: L,
+    /// The `db_uuid` the pack was opened with, when [`BlobDatabase::with_pack`] did. [`LogMut`]'s drop checks the
+    /// log still names it (debug builds).
+    pack_db_uuid: Option<[u8; 16]>,
 }
 
 impl<S: BlobStore + ?Sized, L: DocumentLog> BlobDatabase<S, L> {
@@ -191,6 +215,7 @@ impl<S: BlobStore + ?Sized, L: DocumentLog> BlobDatabase<S, L> {
             log,
             held: VecDeque::new(),
             blobs,
+            pack_db_uuid: None,
         }
     }
 
@@ -199,15 +224,20 @@ impl<S: BlobStore + ?Sized, L: DocumentLog> BlobDatabase<S, L> {
         &self.log
     }
 
-    /// The document log, for the operations this layer does not wrap (commit, delete, search). Call
-    /// [`BlobDatabase::release_durable`] after one that may make records durable, or let the next `put` do it.
+    /// The document log, for the operations this layer does not wrap (create a collection, delete, finish merges,
+    /// and the engine's own `put`). Call [`BlobDatabase::release_durable`] after one that may make records durable,
+    /// or let the next `put` do it.
     ///
-    /// Not for replacing the log: the blob pack was opened with this log's writer proof. To reopen the database, drop
-    /// this value and open a new one (the pack's writer lock refuses a second writer while this pack lives, however it
-    /// is kept alive, ROADMAP 9.2.7). Its `put` takes a document with any blob reference: M10 must not expose it
-    /// (SPEC §9.6).
-    pub fn log_mut(&mut self) -> &mut L {
-        &mut self.log
+    /// The pack was opened with this log's writer proof. Replacing the log is checked in debug builds: when the
+    /// handle drops, its `db_uuid` must still be the one the pack was opened with. To reopen the database, drop
+    /// this value and open a new one (the pack's writer lock refuses a second writer while this pack lives, however
+    /// it is kept alive, ROADMAP 9.2.7). The engine's `put` takes a document with any blob reference: M10 must not
+    /// expose it (SPEC §9.6).
+    pub fn log_mut(&mut self) -> LogMut<'_, L> {
+        LogMut {
+            log: &mut self.log,
+            pack_db_uuid: self.pack_db_uuid,
+        }
     }
 
     /// The blob store with its pin set.
@@ -324,6 +354,57 @@ impl<S: BlobStore + ?Sized, L: DocumentLog> BlobDatabase<S, L> {
     }
 }
 
+/// A mutable borrow of a [`BlobDatabase`]'s document log (see [`BlobDatabase::log_mut`]).
+///
+/// It forwards the operations this layer does not wrap, and dereferences to the log. Replacing the log in a debug
+/// build is checked against the `db_uuid` the pack was opened with.
+#[derive(Debug)]
+pub struct LogMut<'a, L: DocumentLog + ?Sized> {
+    log: &'a mut L,
+    pack_db_uuid: Option<[u8; 16]>,
+}
+
+impl<L: DocumentLog + ?Sized> std::ops::Deref for LogMut<'_, L> {
+    type Target = L;
+
+    fn deref(&self) -> &L {
+        self.log
+    }
+}
+
+impl<L: DocumentLog + ?Sized> std::ops::DerefMut for LogMut<'_, L> {
+    fn deref_mut(&mut self) -> &mut L {
+        self.log
+    }
+}
+
+impl<L: DocumentLog + ?Sized> Drop for LogMut<'_, L> {
+    fn drop(&mut self) {
+        if let (Some(expected), Some(found)) = (self.pack_db_uuid, self.log.container_db_uuid()) {
+            debug_assert_eq!(
+                found, expected,
+                "replacing the log breaks the pack opened with its writer proof"
+            );
+        }
+    }
+}
+
+/// Removes the container `create` just made, after the pack failed to open. The database was dropped already, so
+/// its writer lock is released. A removal that fails is reported with the pack error: a retry would not work.
+fn remove_created_container(container: &Path, error: Error) -> Error {
+    match std::fs::remove_file(container) {
+        Ok(()) => error,
+        Err(cleanup) if cleanup.kind() == io::ErrorKind::NotFound => error,
+        Err(cleanup) => Error::Blob(persia_blob::Error::PackIo {
+            op: "remove the database created before its pack failed to open",
+            source: io::Error::other(format!(
+                "{error}; removing {} also failed: {cleanup}",
+                container.display()
+            )),
+        }),
+    }
+}
+
 impl From<DatabaseError> for Error {
     fn from(e: DatabaseError) -> Self {
         Self::Database(Box::new(e))
@@ -371,7 +452,8 @@ impl BlobDatabase<PackStore> {
     /// # Errors
     /// [`Error::PackExists`] if a file is at the pack's path already, before anything is created (a leftover pack
     /// would leave a database that opens with no usable pack); [`Error::Database`] as [`Database::create`];
-    /// [`Error::Blob`] as [`PackStore::open_writer`].
+    /// [`Error::Blob`] as [`PackStore::open_writer`]. If the container was created and the pack then fails to open
+    /// ([`persia_blob::Error::PackLocked`], an I/O error), the new container is removed so a retry can create it.
     pub fn create(path: impl AsRef<Path>, options: DatabaseOptions) -> Result<Self, Error> {
         let path = path.as_ref();
         // `path` does not exist yet, so its canonical form is unknown: the pack beside it as given names the same file
@@ -383,8 +465,21 @@ impl BlobDatabase<PackStore> {
             Err(source) => return Err(persia_blob::Error::PackIo { op: "stat", source }.into()),
         }
         let db = Database::create(path, options)?;
-        let pack = pack_beside(db.container().path(), path);
-        Self::with_pack(db, pack)
+        let container = db
+            .container()
+            .path()
+            .map_or_else(|| path.to_path_buf(), Path::to_path_buf);
+        let pack = pack_beside(Some(container.as_path()), path);
+        Self::finish_create(db, pack, &container)
+    }
+
+    /// `db`, just created at `container`, with its pack. A pack error removes the container: it was created for this
+    /// call and never returned, and a retry must not find it (SPEC §9.3).
+    fn finish_create(db: Database, pack: PathBuf, container: &Path) -> Result<Self, Error> {
+        match Self::with_pack(db, pack) {
+            Ok(opened) => Ok(opened),
+            Err(error) => Err(remove_created_container(container, error)),
+        }
     }
 
     /// Opens the database in the container file at `path` read-write ([`Database::open`]) with its blob pack, as
@@ -406,9 +501,12 @@ impl BlobDatabase<PackStore> {
     /// # Errors
     /// As [`PackStore::open_writer`]: [`persia_blob::Error::PackLocked`] while another handle writes the pack.
     pub fn with_pack(db: Database, pack: impl AsRef<Path>) -> Result<Self, Error> {
+        let db_uuid = db.writer_proof().db_uuid();
         let proof = db.writer_proof();
         let store = PackStore::open_writer(pack, &proof)?;
-        Ok(Self::new(db, Blobs::new(Arc::new(store))))
+        let mut opened = Self::new(db, Blobs::new(Arc::new(store)));
+        opened.pack_db_uuid = Some(db_uuid);
+        Ok(opened)
     }
 }
 
@@ -422,9 +520,12 @@ impl<F: ContainerFile + Sync + 'static> BlobDatabase<PackStore<F>, Database<F>> 
         vfs: Arc<dyn Vfs<File = F>>,
         pack: impl AsRef<Path>,
     ) -> Result<Self, Error> {
+        let db_uuid = db.writer_proof().db_uuid();
         let proof = db.writer_proof();
         let store = PackStore::open_writer_in(vfs, pack, &proof)?;
-        Ok(Self::new(db, Blobs::new(Arc::new(store))))
+        let mut opened = Self::new(db, Blobs::new(Arc::new(store)));
+        opened.pack_db_uuid = Some(db_uuid);
+        Ok(opened)
     }
 }
 
@@ -476,8 +577,9 @@ impl ReadOnlyBlobDatabase<File> {
     }
 
     /// `db`, opened read-only from the container at `path`, with its pack opened read-only beside the container's
-    /// canonical path, as [`ReadOnlyBlobDatabase::open`] finds it: for a caller that opens the documents itself (the
-    /// CLI's `verify` reports their errors first).
+    /// canonical path, as [`ReadOnlyBlobDatabase::open`] finds it: for a caller that opened the documents itself.
+    /// The CLI's `verify` runs [`ReadOnlyDatabase::verify`] on them before this, so a document error is reported
+    /// before the pack is opened. The pack scan's length bound applies after that open (ROADMAP 9.2.14).
     ///
     /// # Errors
     /// As [`PackStore::open`].
@@ -520,24 +622,28 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyBlobDatabase<F> {
     }
 
     /// Catches up with the writer: `reopened`, a newer read-only open of the same database (the engine's read-only
-    /// open does not follow later commits, SPEC §8.4), replaces the documents, then the pack is refreshed
-    /// ([`PackStore::refresh`]), which opens a pack the writer has created since (SPEC §9.3). In that order: the writer
-    /// binds a blob before it logs a document that references it (SPEC §9.5), so every document `reopened` shows was
-    /// logged after its blob was bound, and the refresh that follows finds the blob.
+    /// open does not follow later commits, SPEC §8.4), then the pack is refreshed ([`PackStore::refresh`]), which
+    /// opens a pack the writer has created since (SPEC §9.3). The documents change only together with that refresh:
+    /// the writer binds a blob before it logs a document that references it (SPEC §9.5), so every document
+    /// `reopened` shows was logged after its blob was bound, and the refresh finds the blob.
     ///
     /// `reopened` must be this database, opened again: the same `db_uuid`, at the same canonical path (a copy
-    /// elsewhere has the `db_uuid` but not this pack), and at a manifest `seq` no older than the current one (an older
-    /// open would show fewer documents than the pack's blobs were bound for, and could pair with an older pack).
+    /// elsewhere has the `db_uuid` but not this pack), and no older than the current open. Older is a lower manifest
+    /// `seq`, or the same `seq` with fewer replayed WAL records or an earlier end of the frames that open saw (an
+    /// older open would show fewer documents than the pack's blobs were bound for).
     ///
-    /// Returns whether the pack found anything new: `true` when it opened a pack that did not exist before or read
-    /// frames committed since the last open or refresh, `false` when the pack is as it was. The documents are replaced
-    /// either way.
+    /// Returns whether the pack found anything new: `true` when it opened a pack that did not exist before, read
+    /// frames committed since the last open or refresh, or reopened a pack a rewrite replaced; `false` when the pack
+    /// is as it was. The documents are replaced only when the pack refresh succeeds, or when a replaced pack is
+    /// reopened.
     ///
     /// # Errors
     /// Nothing changes on these: [`persia_blob::Error::PackOfAnotherDatabase`] if `reopened` is another database,
-    /// [`Error::RefreshedElsewhere`] if it was opened at another path, [`Error::RefreshedOlder`] if its `seq` is
-    /// older. Then as [`PackStore::refresh`] (the documents are replaced already;
-    /// [`persia_blob::Error::PackReplaced`] asks for a new open).
+    /// [`Error::RefreshedElsewhere`] if it was opened at another path, [`Error::RefreshedOlder`] if it is older.
+    /// Then as [`PackStore::refresh`]. [`persia_blob::Error::PackReplaced`] (a GC rewrite, SPEC §18.10) reopens the
+    /// pack read-only at the same path with the same `db_uuid`: this method holds `&mut self`, so no stream still
+    /// borrows the old pack. Any other pack error, and a reopen that itself fails, restores the previous documents,
+    /// so the documents and the pack stay paired. [`PackStore::refresh`] itself does not reopen (ROADMAP 9.2.13).
     pub fn refresh(&mut self, reopened: ReadOnlyDatabase<F>) -> Result<bool, Error> {
         let found = reopened.container().header().db_uuid;
         if found != self.db.container().header().db_uuid {
@@ -550,14 +656,39 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyBlobDatabase<F> {
                 reopened: other.map(Path::to_path_buf),
             });
         }
-        if reopened.seq() < self.db.seq() {
+        let same_seq = reopened.seq() == self.db.seq();
+        if reopened.seq() < self.db.seq()
+            || (same_seq && reopened.replayed() < self.db.replayed())
+            || (same_seq && reopened.container().end() < self.db.container().end())
+        {
             return Err(Error::RefreshedOlder {
                 current: self.db.seq(),
                 reopened: reopened.seq(),
+                current_replayed: self.db.replayed(),
+                reopened_replayed: reopened.replayed(),
+                current_end: self.db.container().end(),
+                reopened_end: reopened.container().end(),
             });
         }
-        self.db = reopened;
-        Ok(self.blobs.store().refresh()?)
+        let previous = std::mem::replace(&mut self.db, reopened);
+        match self.blobs.store().refresh() {
+            Ok(found) => Ok(found),
+            Err(persia_blob::Error::PackReplaced { .. }) => match self.blobs.store().reopen() {
+                Ok(store) => {
+                    // `&mut self`: no blob stream still borrows the old pack. A fresh handle drops that file.
+                    self.blobs = Blobs::new(Arc::new(store));
+                    Ok(true)
+                }
+                Err(error) => {
+                    self.db = previous;
+                    Err(error.into())
+                }
+            },
+            Err(error) => {
+                self.db = previous;
+                Err(error.into())
+            }
+        }
     }
 
     /// A reader of the blob `blob_ref` refers to: as [`Blobs::get_blob`].
@@ -595,6 +726,40 @@ impl Error {
             | Self::RefreshedElsewhere { .. }
             | Self::RefreshedOlder { .. } => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use persia_engine::db::DatabaseOptions;
+
+    use super::*;
+
+    /// A pack that fails to open after `Database::create` is not [`Error::PackExists`]: the container just created
+    /// is removed, and a retry creates the database.
+    #[test]
+    fn a_pack_open_failure_after_create_removes_the_container() {
+        if cfg!(miri) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.persia");
+        let db = Database::create(&path, DatabaseOptions::default()).unwrap();
+        let pack = pack_path(&path);
+        // A directory is not a pack. `open` fails with an I/O error, not [`Error::PackExists`] (that check runs
+        // before anything is created, and only when the path already exists).
+        std::fs::create_dir(&pack).unwrap();
+        let err = BlobDatabase::finish_create(db, pack.clone(), &path).unwrap_err();
+        assert!(
+            matches!(err, Error::Blob(persia_blob::Error::PackIo { .. })),
+            "{err:?}"
+        );
+        assert!(
+            !path.exists(),
+            "the container just created is removed so a retry can create it"
+        );
+        std::fs::remove_dir(&pack).unwrap();
+        BlobDatabase::create(&path, DatabaseOptions::default()).unwrap();
     }
 }
 // -- end wiring --

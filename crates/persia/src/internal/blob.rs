@@ -56,8 +56,8 @@ pub struct PutBlobOptions {
     /// most [`MAX_BIND_BUDGET`].
     pub bind_budget: Duration,
     /// The upload to resume (SPEC §9.4, ROADMAP 9.3.4, ADR-0053): the token of an [`Error::UploadInterrupted`], with
-    /// a reader that yields the blob from its start. `None` (the default) starts a new upload. A store that cannot
-    /// resume (the pack) fails with [`Error::ResumeUnsupported`] before any byte is read.
+    /// a reader that yields the blob from its start. `None` (the default) starts a new upload. Until the resume
+    /// implementation lands, every store returns [`Error::ResumeUnsupported`] before any byte is read.
     pub resume: Option<ResumeToken>,
 }
 
@@ -180,6 +180,7 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         // -- resume (9.3.4, 9.3.6) --
         // blob/resume: the resumed upload, from pinning the old upload id before listing to restaging under a new one.
         if options.resume.is_some() {
+            // ROADMAP 9.3.4 is not implemented yet: every store, the pack and the remote one alike, refuses here.
             return Err(Error::ResumeUnsupported);
         }
         // -- end resume --

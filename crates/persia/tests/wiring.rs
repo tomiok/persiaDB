@@ -9,7 +9,10 @@
 //!    bound, and its refresh (a newer read-only open of the documents, then the pack) finds a pack created since.
 //! 4. The pack is found beside the container's canonical path, whatever name opened it.
 //! 5. A create with a file at the pack's path fails before creating anything.
-//! 6. A refresh takes only the same database at the same canonical path and no older `seq`.
+//! 6. A refresh takes only the same database at the same canonical path and no older open: a lower `seq`, or the
+//!    same `seq` with fewer replayed WAL records or an earlier end.
+//! 7. A GC rewrite (`PackReplaced`) reopens the pack; the reader then sees every blob, including one bound after
+//!    the rewrite. Any other pack error leaves the documents and the pack as they were.
 #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)] // Tests: inputs are fixed.
 
 use std::io::Read;
@@ -17,6 +20,8 @@ use std::path::Path;
 
 use persia::internal::blob::PutBlobOptions;
 use persia::internal::documents::{Blob, BlobDatabase, Error, ReadOnlyBlobDatabase};
+use persia::internal::gc::GcOptions;
+use persia_blob::gc::Rewrite;
 use persia_blob::{BlobStore, PackMode, PackStore, pack_path};
 use persia_engine::db::{Database, DatabaseError, DatabaseOptions, ReadOnlyDatabase};
 use persia_engine::document::Document;
@@ -295,7 +300,7 @@ fn a_refresh_with_a_copy_or_an_older_open_changes_nothing() {
     );
     let refreshed = reader.refresh(older);
     assert!(
-        matches!(refreshed, Err(Error::RefreshedOlder { current, reopened }) if current == seq && reopened < seq),
+        matches!(refreshed, Err(Error::RefreshedOlder { current, reopened, .. }) if current == seq && reopened < seq),
         "{refreshed:?}"
     );
     assert_eq!(reader.database().seq(), seq);
@@ -307,10 +312,138 @@ fn a_refresh_with_a_copy_or_an_older_open_changes_nothing() {
             .unwrap()
             .ends_with("app.persia")
     );
-    // The same database at the same seq is fine.
+    // The same database at the same seq, with the same replayed WAL, is fine.
     assert!(
         !reader
             .refresh(ReadOnlyDatabase::open(&path, &options.registry).unwrap())
             .unwrap()
     );
+}
+
+/// The same manifest `seq` with fewer replayed WAL records is an older open: nothing changes.
+#[test]
+fn a_refresh_with_fewer_replayed_wal_records_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let options = DatabaseOptions::default();
+    let mut writer = create(&path);
+    let earlier = ReadOnlyDatabase::open(&path, &options.registry).unwrap();
+    writer
+        .put(
+            "c",
+            &Document::new("a"),
+            Blob::from_reader(&b"wal"[..]),
+            Durability::Fsync,
+        )
+        .unwrap();
+    let mut reader = ReadOnlyBlobDatabase::open(&path, &options).unwrap();
+    assert_eq!(reader.database().seq(), earlier.seq());
+    assert!(reader.database().replayed() > earlier.replayed());
+    assert!(reader.database().container().end() > earlier.container().end());
+    let replayed = reader.database().replayed();
+    let end = reader.database().container().end();
+
+    let refreshed = reader.refresh(earlier);
+    assert!(
+        matches!(
+            refreshed,
+            Err(Error::RefreshedOlder {
+                current_replayed,
+                reopened_replayed,
+                ..
+            }) if current_replayed == replayed && reopened_replayed < replayed
+        ),
+        "{refreshed:?}"
+    );
+    assert_eq!(reader.database().replayed(), replayed);
+    assert_eq!(reader.database().container().end(), end);
+}
+
+/// A GC rewrite replaces the pack. Refresh reopens it and finds every blob, including one bound after the rewrite.
+#[test]
+fn a_refresh_reopens_a_pack_a_gc_rewrite_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let options = DatabaseOptions::default();
+    let mut writer = create(&path);
+    let kept = writer
+        .put(
+            "c",
+            &Document::new("kept"),
+            Blob::from_reader(&b"kept"[..]),
+            Durability::Fsync,
+        )
+        .unwrap();
+    writer.commit().unwrap();
+    let mut reader = ReadOnlyBlobDatabase::open(&path, &options).unwrap();
+    let report = writer
+        .gc(&GcOptions {
+            rewrite_ratio: 0.0,
+            ..GcOptions::default()
+        })
+        .unwrap();
+    assert!(
+        matches!(report.sweep.rewrite, Some(Rewrite::Done { .. })),
+        "{report:?}"
+    );
+    let after = writer
+        .put(
+            "c",
+            &Document::new("after"),
+            Blob::from_reader(&b"after"[..]),
+            Durability::Fsync,
+        )
+        .unwrap();
+    writer.commit().unwrap();
+
+    assert!(
+        reader
+            .refresh(ReadOnlyDatabase::open(&path, &options.registry).unwrap())
+            .unwrap()
+    );
+    assert_eq!(read_all(&reader, &kept), b"kept");
+    assert_eq!(read_all(&reader, &after), b"after");
+}
+
+/// A pack error during refresh restores the documents, so they stay paired with the pack this reader opened.
+#[cfg(unix)]
+#[test]
+fn a_pack_error_on_refresh_leaves_the_reader_paired() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let options = DatabaseOptions::default();
+    let mut writer = create(&path);
+    let blob = writer
+        .put(
+            "c",
+            &Document::new("a"),
+            Blob::from_reader(&b"kept"[..]),
+            Durability::Fsync,
+        )
+        .unwrap();
+    writer.commit().unwrap();
+    let mut reader = ReadOnlyBlobDatabase::open(&path, &options).unwrap();
+    let seq = reader.database().seq();
+    let replayed = reader.database().replayed();
+    writer
+        .put(
+            "c",
+            &Document::new("b"),
+            Blob::from_reader(&b"newer"[..]),
+            Durability::Fsync,
+        )
+        .unwrap();
+    writer.commit().unwrap();
+    let newer = ReadOnlyDatabase::open(&path, &options.registry).unwrap();
+    assert!(newer.seq() > seq);
+    // A new file at the pack's path. The reader's descriptor keeps the pack it opened (Unix).
+    let pack = pack_path(&path);
+    std::fs::remove_file(&pack).unwrap();
+    std::fs::write(&pack, b"not a pack").unwrap();
+
+    let refreshed = reader.refresh(newer);
+    assert!(refreshed.is_err(), "{refreshed:?}");
+    assert_eq!(reader.database().seq(), seq);
+    assert_eq!(reader.database().replayed(), replayed);
+    assert_eq!(read_all(&reader, &blob), b"kept");
 }

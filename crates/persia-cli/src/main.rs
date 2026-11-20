@@ -12,9 +12,11 @@
 //!
 //! `persia inspect container` prints a container's superblock, the frames recovery reads and, by document id, the WAL
 //! records replay applies (ROADMAP 6.6.10, module `container`). `persia verify` checks a whole database read-only
-//! (ROADMAP 6.6.3, module `database`), then its blobs (ROADMAP 9.5.3, ADR-0053): every blob a live document or a WAL
-//! record from `wal_start` on references must be bound in the blob pack, and by default every frame of the pack is
-//! checksummed (`--quick` skips that scan, `--deep` also re-hashes every referenced blob). Only the local layout is
+//! (ROADMAP 6.6.3, module `database`) before it opens the blob pack, then its blobs (ROADMAP 9.5.3, ADR-0053): every
+//! blob a live document or a WAL record from `wal_start` on references must be bound in the blob pack, and by default
+//! every frame of the pack is checksummed (`--quick` skips that scan, `--deep` also re-hashes every referenced blob).
+//! The scan bounds each frame's length before reading it; that bound applies after the pack is opened. The open
+//! itself still reads index frames bounded only by the file length (ROADMAP 9.2.14). Only the local layout is
 //! checked (the remote one is ROADMAP 13.2.6).
 //!
 //! Exit status (ROADMAP 6.6.7, SPEC §8.6): 0 on success, 3 when the command failed on corrupt stored bytes (a database,
@@ -73,16 +75,19 @@ enum Command {
     #[command(subcommand)]
     Dump(DumpCommand),
     /// Checks a whole database read-only (no lock, no writes, so a live writer may have it open): every check an
-    /// open makes, every segment's bytes, one live copy per document id, and the bytes after the last commit; then
-    /// its blobs: every blob a live document or a WAL record references must be bound in the blob pack
-    /// (`<name>.persia.blobs`), and every frame's checksum and chunk's CRC32C of the pack is checked. Exits with
+    /// open makes, every segment's bytes, one live copy per document id, and the bytes after the last commit.
+    /// Those document checks run before the blob pack is opened. Then its blobs: every blob a live document or a
+    /// WAL record references must be bound in the blob pack (`<name>.persia.blobs`), and every frame's checksum
+    /// and chunk's CRC32C of the pack is checked. That scan bounds each frame's length before reading it, and the
+    /// bound applies after the pack is opened; the open itself is not bounded that way (ROADMAP 9.2.14). Exits with
     /// status 3 on corruption or a missing referenced blob, 4 when the file is not a Persia container, and 1 on any
     /// other failure (see the crate docs).
     Verify {
         /// The container file.
         path: PathBuf,
         // -- wiring (9.5.3) --
-        /// Skip the checksum scan of the blob pack: only check that every referenced blob is bound.
+        /// Skip the checksum scan of the blob pack: only check that every referenced blob is bound. The scan is
+        /// what bounds each frame's length, and that bound applies after the pack is opened (ROADMAP 9.2.14).
         #[arg(long, conflicts_with = "deep")]
         quick: bool,
         /// Also read every referenced blob whole and check its SHA-256 against its id.

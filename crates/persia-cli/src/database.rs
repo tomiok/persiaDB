@@ -1,12 +1,14 @@
-//! `persia verify` (ROADMAP 6.6.3, 9.5.3): checks a whole database read-only, with [`ReadOnlyDatabase::verify`], then
-//! its blobs with [`ReadOnlyBlobDatabase::verify_blobs`] (SPEC §9.5, ADR-0053).
+//! `persia verify` (ROADMAP 6.6.3, 9.5.3): checks a whole database read-only, with [`ReadOnlyDatabase::verify`]
+//! before the blob pack is opened, then its blobs with [`ReadOnlyBlobDatabase::verify_blobs`] (SPEC §9.5, ADR-0053).
+//! A document error is reported without opening the pack. The pack scan bounds each frame's length before reading
+//! it, and that bound applies after the open; the open itself is not bounded that way (ROADMAP 9.2.14).
 //!
 //! The output is for people: `key  value` lines, then `verify  ok`. A failed check is the command's error.
 //!
-//! A live writer may commit and collect blobs while this runs: the pack is opened right after the documents, and a
-//! dangling reference is reported as such only if the container's committed `seq` has not moved since the documents
-//! were opened. Otherwise the documents may be older than the pack (a document deleted, then its blob collected), and
-//! the run fails with "changed during verify, rerun" (exit status 1, not 3).
+//! A live writer may commit and collect blobs while this runs. A dangling reference is reported as such only if the
+//! container's committed `seq` has not moved since the documents were opened. Otherwise the documents may be older
+//! than the pack (a document deleted, then its blob collected), and the run fails with "changed during verify,
+//! rerun" (exit status 1, not 3).
 
 use std::io::Write;
 use std::path::Path;
@@ -26,18 +28,17 @@ pub fn verify(out: &mut dyn Write, path: &Path, scan: Scan) -> Result<()> {
     // The built-in analyzers: replay analyzes the `text` fields of the logged documents, and a schema names only
     // built-in analyzers (SPEC §6.2.2); one this build lacks, from a newer build, fails the open as unsupported.
     let options = DatabaseOptions::default();
-    let db = ReadOnlyDatabase::open(path, &options.registry)
+    let docs = ReadOnlyDatabase::open(path, &options.registry)
         .with_context(|| format!("opening {}", path.display()))?;
-    // -- wiring (9.5.3, 9.5.6) --
-    // The pack right after the documents, before the (long) document checks: the narrowest window for a writer's
-    // pack rewrite between the two opens.
-    let db = ReadOnlyBlobDatabase::with_pack_beside(db, path)
-        .with_context(|| format!("opening the blob pack of {}", path.display()))?;
-    // -- end wiring --
-    let report = db
-        .database()
+    // Document checks before the pack is opened, so a damaged container is reported without opening the pack.
+    // The scan's length bound applies only after that open (ROADMAP 9.2.14).
+    let report = docs
         .verify()
         .with_context(|| format!("verifying {}", path.display()))?;
+    // -- wiring (9.5.3, 9.5.6) --
+    let db = ReadOnlyBlobDatabase::with_pack_beside(docs, path)
+        .with_context(|| format!("opening the blob pack of {}", path.display()))?;
+    // -- end wiring --
     let tail = match report.tail {
         Tail::Clean => "clean".to_owned(),
         Tail::Torn { offset } => {

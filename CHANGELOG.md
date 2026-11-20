@@ -13,10 +13,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia` (internal API): `BlobDatabase::create` / `open` open a database with its blob pack `<name>.persia.blobs`,
   read-write with the container's writer proof; the pack is still created by the first `put_blob` (ROADMAP 9.4.5;
   ADR-0053). `ReadOnlyBlobDatabase` opens the pack read-only and never creates it; its `refresh` finds a pack the
-  writer created since.
+  writer created since, and reopens the pack when a GC rewrite replaced it. Any other pack error leaves the documents
+  as they were. A same-seq open with fewer replayed WAL records, or an earlier end of those frames, is refused.
+  `BlobDatabase::log_mut` checks in debug builds that the log still has the `db_uuid` the pack was opened with. If the pack fails
+  to open after `create`, the new container is removed so a retry works.
 - `persia verify` checks blobs (ROADMAP 9.5.3, 9.5.6): a live document or WAL put whose blob is missing is an error
-  (exit 3) naming the collection, document id and `blob_id`. By default it scans every pack frame's checksum and every
-  chunk's CRC32C; `--quick` skips that scan, and `--deep` also re-hashes every referenced blob.
+  (exit 3) naming the collection, document id and `blob_id`. Document checks run before the pack is opened. By default
+  it scans every pack frame's checksum and every chunk's CRC32C; `--quick` skips that scan, and `--deep` also
+  re-hashes every referenced blob. The scan bounds each frame's length before reading it, and that bound applies
+  after the pack is opened (the open itself is ROADMAP 9.2.14).
 - `persia-blob`: `PackStore::scan_checksums`; `persia-engine`: `ReadOnlyDatabase::blob_references`;
   `persia-storage`: `WriterProof` and `Container::writer_proof` (ROADMAP 9.2.7, 9.5.3).
 - `persia-blob`: the blob pack takes its own writer lock; a second writer fails with `PackLocked` (ROADMAP 9.2.7).
