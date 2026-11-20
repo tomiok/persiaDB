@@ -58,6 +58,38 @@ impl ResumedUpload {
         &self.crcs
     }
 
+    /// Reads the kept run's bytes from `reader`, a reader of the whole blob from its start, and checks each chunk of
+    /// them against the CRC32C of the chunk staged there (SPEC §9.4: the resuming client passes the whole blob, and
+    /// its kept bytes are not uploaded again). The reader is left at [`ResumedUpload::offset`], where
+    /// [`ResumedUpload::into_chunker`] continues. One chunk of the token's size is buffered at a time.
+    ///
+    /// # Errors
+    /// [`Error::Read`] when the reader fails; [`Error::InvalidResume`] when it ends inside the kept run or yields a
+    /// chunk whose CRC32C is not the staged one's: it is not the blob the upload was staging (a caller's error).
+    pub fn skip_kept<R: Read>(&self, reader: &mut R) -> Result<()> {
+        let full = u64::from(self.token.chunk_size.get());
+        let mut buf = Vec::new();
+        for &crc in &self.crcs {
+            buf.clear();
+            reader
+                .by_ref()
+                .take(full)
+                .read_to_end(&mut buf)
+                .map_err(Error::Read)?;
+            if u64_from_usize(buf.len()) != full {
+                return Err(Error::InvalidResume {
+                    what: "the reader ends inside the chunks the upload kept",
+                });
+            }
+            if crc32c(&buf) != crc {
+                return Err(Error::InvalidResume {
+                    what: "the reader's bytes are not the ones the upload staged",
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// A chunker that continues the blob after the kept chunks, over `reader` (which yields the blob from
     /// [`ResumedUpload::offset`] on), and the kept chunks' CRCs, which the caller extends with the new chunks'.
     ///
@@ -175,4 +207,128 @@ fn chunk_index(start: usize, i: usize) -> Result<u32> {
         .ok_or(Error::InvalidResume {
             what: "more than u32::MAX chunks",
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use core::num::NonZeroUsize;
+    use std::io;
+    use std::sync::Arc;
+    use std::time::UNIX_EPOCH;
+
+    use persia_storage::MemoryStorage;
+    use persia_storage::retry::ManualClock;
+
+    use super::*;
+    use crate::store::MemoryBlobStore;
+
+    /// A remote store on a manual clock (no system time, so Miri runs it), one request at a time.
+    fn store() -> RemoteBlobStore<MemoryStorage> {
+        let clock = Arc::new(ManualClock::new(UNIX_EPOCH));
+        RemoteBlobStore::new(MemoryStorage::with_clock(clock)).with_parallelism(NonZeroUsize::MIN)
+    }
+
+    fn token(upload: u128) -> ResumeToken {
+        ResumeToken {
+            upload_id: UploadId::new(upload),
+            chunk_size: ChunkSize::from_encoding(4).unwrap(),
+        }
+    }
+
+    /// `abcd efgh ijkl mnop q`, with chunks 0, 1, 3 and 4 staged (2 is missing): the kept run is 0 and 1.
+    fn staged(store: &RemoteBlobStore<MemoryStorage>, t: ResumeToken) {
+        for (index, bytes) in [
+            (0, b"abcd".as_slice()),
+            (1, b"efgh"),
+            (3, b"mnop"),
+            (4, b"q"),
+        ] {
+            store.stage_chunk(t.upload_id, index, bytes).unwrap();
+        }
+    }
+
+    struct Failing;
+
+    impl Read for Failing {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("the reader failed"))
+        }
+    }
+
+    #[test]
+    fn skip_kept_reads_the_kept_run_checked_and_leaves_the_reader_after_it() {
+        let store = store();
+        let t = token(1);
+        staged(&store, t);
+        // Through the trait, which forwards to the inherent method (ADR-0053).
+        let resumed = BlobStore::resume(&store, t).unwrap();
+        assert_eq!(resumed.next_index(), 2);
+        let mut reader = &b"abcdefghijklmnopq"[..];
+        resumed.skip_kept(&mut reader).unwrap();
+        assert_eq!(reader, b"ijklmnopq");
+        // The kept run continues where the reader was left: the blob binds whole.
+        let (mut chunker, crcs) = resumed.clone().into_chunker(reader).unwrap();
+        assert_eq!(crcs.len(), 2);
+        while chunker.next_chunk().unwrap().is_some() {}
+        assert_eq!(
+            chunker.summary().unwrap().blob_id,
+            crate::blob_id_of(b"abcdefghijklmnopq")
+        );
+
+        for other in [&b"abcdefgX"[..], b"Xbcdefgh"] {
+            assert!(
+                matches!(
+                    resumed.skip_kept(&mut &other[..]),
+                    Err(Error::InvalidResume { .. })
+                ),
+                "{other:?}"
+            );
+        }
+        for short in [&b""[..], b"abcd", b"abcdefg"] {
+            assert!(matches!(
+                resumed.skip_kept(&mut &short[..]),
+                Err(Error::InvalidResume { .. })
+            ));
+        }
+        assert!(matches!(
+            resumed.skip_kept(&mut Failing),
+            Err(Error::Read(_))
+        ));
+    }
+
+    #[test]
+    fn an_empty_kept_run_skips_nothing() {
+        let store = store();
+        let resumed = BlobStore::resume(&store, token(2)).unwrap();
+        assert_eq!(resumed.next_index(), 0);
+        resumed.skip_kept(&mut Failing).unwrap();
+    }
+
+    #[test]
+    fn only_the_remote_layout_resumes() {
+        let memory = MemoryBlobStore::new();
+        assert!(!memory.resumable());
+        assert!(matches!(
+            memory.resume(token(1)),
+            Err(Error::ResumeUnsupported)
+        ));
+        assert!(matches!(
+            memory.restage(token(1), &[], UploadId::new(2)),
+            Err(Error::ResumeUnsupported)
+        ));
+
+        let remote = store();
+        assert!(remote.resumable());
+        let t = token(1);
+        staged(&remote, t);
+        let resumed = BlobStore::resume(&remote, t).unwrap();
+        BlobStore::restage(&remote, t, resumed.chunk_crcs(), UploadId::new(2)).unwrap();
+        let copied: Vec<u32> = remote
+            .staged_chunks(UploadId::new(2))
+            .unwrap()
+            .iter()
+            .map(|c| c.index)
+            .collect();
+        assert_eq!(copied, [0, 1]);
+    }
 }

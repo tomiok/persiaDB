@@ -318,6 +318,21 @@ impl<S: Storage> BlobStore for RemoteBlobStore<S> {
         }
         first.map_or(Ok(()), Err)
     }
+
+    // -- resume (9.3.4) --
+    // The remote layout is the one that resumes (SPEC §9.4, ADR-0053): the trait forwards to the inherent methods.
+    fn resumable(&self) -> bool {
+        true
+    }
+
+    fn resume(&self, token: ResumeToken) -> Result<ResumedUpload> {
+        Self::resume(self, token)
+    }
+
+    fn restage(&self, from: ResumeToken, chunk_crcs: &[u32], to: UploadId) -> Result<()> {
+        Self::restage(self, from, chunk_crcs, to)
+    }
+    // -- end resume --
 }
 
 /// A backend error as this crate reports it: corruption the backend detected stays corruption.

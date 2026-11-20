@@ -20,6 +20,11 @@ use persia_engine::db::SegmentIds;
 use super::pins::{PinSet, Pinned, Pins};
 use super::retry::{RetryClock, SystemRetryClock, backoff};
 
+// -- resume (9.3.4, 9.3.6) --
+// The resumed upload of `put_blob` (SPEC §9.4, ROADMAP 9.3.4, 9.3.6, ADR-0053).
+mod resume;
+// -- end resume --
+
 /// The MIME type of a blob whose caller names none.
 pub const DEFAULT_MIME: &str = "application/octet-stream";
 
@@ -145,11 +150,28 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     /// a bind whose outcome is unknown is retried with the same manifest (with `bind_small` for a small blob), with
     /// backoff, within `bind_budget`, and its upload is never discarded. A duplicate's chunks, and a mismatched upload's, are discarded best-effort.
     ///
+    /// **Resuming** (SPEC §9.4, ROADMAP 9.3.4, ADR-0053). On a store that can resume ([`BlobStore::resumable`]: the
+    /// remote layout), a blob that fails after its upload staged chunks fails with [`Error::UploadInterrupted`],
+    /// whose token a later call passes as [`PutBlobOptions::resume`] with a reader of the whole blob from its start.
+    /// That call pins the token's upload before listing it ([`BlobStore::resume`]), reads past the bytes of the run
+    /// of chunks it kept without uploading them (each checked against the staged chunk's CRC32C), and stages the
+    /// rest under the same upload. The token's chunk size is the blob's, whatever `chunk_size` says. A chunk staged
+    /// there with other bytes restarts it under a new upload id, pinned before its chunks are copied
+    /// ([`BlobStore::restage`]).
+    /// A resume that fails again returns [`Error::UploadInterrupted`] with the upload it was staging then.
+    ///
     /// # Errors
-    /// - [`Error::ChunkSizeBelowMin`] for a chunk size below [`ChunkSize::MIN`], however it was built, and
-    ///   [`Error::InvalidBlobRef`] for an invalid `mime` or `user_meta`, and [`Error::BindBudgetAboveMax`] for a
-    ///   `bind_budget` above [`MAX_BIND_BUDGET`], before any byte is read;
+    /// - [`Error::ChunkSizeBelowMin`] for a chunk size below [`ChunkSize::MIN`], however it was built (the token's
+    ///   when resuming), and [`Error::InvalidBlobRef`] for an invalid `mime` or `user_meta`, and
+    ///   [`Error::BindBudgetAboveMax`] for a `bind_budget` above [`MAX_BIND_BUDGET`], before any byte is read;
+    /// - [`Error::ResumeUnsupported`] for a `resume` on a store that cannot resume, before any byte is read;
+    /// - [`Error::UploadInterrupted`], on a store that can resume, for a reader failure ([`Error::Read`]) or a store
+    ///   error ([`Error::Storage`], [`Error::StagedChunkConflict`], [`Error::Corrupt`] while staging or restaging)
+    ///   after the upload staged chunks or while resuming, and for a bind that failed with a store error and a known
+    ///   outcome (nothing bound): the other errors below are never wrapped;
     /// - [`Error::Read`] when the reader fails, [`Error::InvalidChunking`] for a blob of more than `u32::MAX` chunks;
+    /// - [`Error::InvalidResume`] when the reader of a resume ends inside the kept run or is not the blob the upload
+    ///   staged there (nothing staged);
     /// - [`Error::BlobIdMismatch`] when the bytes do not hash to `expected_id` (nothing bound);
     /// - an error with [`Error::is_bind_outcome_unknown`] when the outcome stayed unknown for the whole `bind_budget`: the blob may be
     ///   bound later, and nothing references it (its upload is left to GC). Also before the budget runs out when the
@@ -162,7 +184,12 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         mut reader: impl Read,
         options: &PutBlobOptions,
     ) -> Result<(BlobRef, Pins)> {
-        let chunk_size = options.chunk_size;
+        // -- resume (9.3.4) --
+        // A resumed blob keeps the chunk size it was staged with: the chunk objects do not record it (SPEC §9.4).
+        let chunk_size = options
+            .resume
+            .map_or(options.chunk_size, |token| token.chunk_size);
+        // -- end resume --
         if chunk_size.get() < ChunkSize::MIN {
             return Err(Error::ChunkSizeBelowMin {
                 chunk_size: chunk_size.get(),
@@ -179,8 +206,8 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         reference(blob_id_of(&[]), 0, chunk_size, options)?;
         // -- resume (9.3.4, 9.3.6) --
         // blob/resume: the resumed upload, from pinning the old upload id before listing to restaging under a new one.
-        if options.resume.is_some() {
-            return Err(Error::ResumeUnsupported);
+        if let Some(token) = options.resume {
+            return self.put_resumed(reader, token, options);
         }
         // -- end resume --
         let upload_id = UploadId::new(self.next_upload_id());
@@ -203,21 +230,31 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
             });
             (manifest, outcome)
         } else {
+            // ADR-0053: what a later `put_blob` resumes with, once a chunk write was attempted (a store that cannot
+            // resume has none).
+            let token = self.store.resumable().then_some(ResumeToken {
+                upload_id,
+                chunk_size,
+            });
+            let mut attempted = false;
             let window = window_chunks(chunk_size);
             let mut staged: Vec<Chunk> = Vec::new();
             let bytes = io::Cursor::new(head).chain(reader);
             let (crcs, blob) = chunk_crcs(bytes, chunk_size, |chunk| {
                 staged.push(chunk);
                 if staged.len() >= window {
+                    attempted = true;
                     self.stage(upload_id, &mut staged)?;
                 }
                 Ok(())
-            })?;
-            self.stage(upload_id, &mut staged)?;
+            })
+            .map_err(|e| interrupted(token.filter(|_| attempted), e))?;
+            self.stage(upload_id, &mut staged)
+                .map_err(|e| interrupted(token, e))?;
             let manifest = self.checked_manifest(blob, upload_id, crcs, options, true)?;
             pins.add(Pinned::Blob(manifest.blob_id()));
             let outcome = self.bind(upload_id, options, || self.store.bind(&manifest));
-            (manifest, outcome)
+            (manifest, bind_interrupted(token, outcome))
         };
         let blob_ref = self.bound(&manifest, outcome, options, &mut pins)?;
         Ok((blob_ref, pins))
@@ -456,6 +493,52 @@ fn still_unknown(poisoned: Error, first: Option<&Error>) -> Error {
         Error::BindOutcomeUnknown(Box::new(poisoned))
     }
 }
+
+// -- resume (9.3.4) --
+/// `e` as [`Error::UploadInterrupted`] with `token` when a later `put_blob` can resume after it (ADR-0053): the
+/// caller's reader failed, or the store failed to stage, restage or list (a backend error, a chunk staged with other
+/// bytes, a staged chunk gone or changed). Not when `token` is `None` (a store that cannot resume, or nothing staged
+/// yet), nor for a caller's error ([`Error::InvalidResume`], [`Error::InvalidChunking`], ...), which a resume repeats.
+fn interrupted(token: Option<ResumeToken>, e: Error) -> Error {
+    match token {
+        Some(token)
+            if matches!(
+                e,
+                Error::Read(_)
+                    | Error::Storage(_)
+                    | Error::StagedChunkConflict { .. }
+                    | Error::Corrupt { .. }
+            ) =>
+        {
+            Error::UploadInterrupted {
+                token,
+                source: Box::new(e),
+            }
+        }
+        _ => e,
+    }
+}
+
+/// `bind`'s outcome, its failure as [`Error::UploadInterrupted`] when it is a backend error whose outcome is known
+/// (nothing was bound, so the chunks are still the upload's). An unknown outcome is never wrapped: the blob may be
+/// bound later, and the caller must not take it for a failure it can resume (SPEC §9.4). Nor is a corrupt bound
+/// manifest, which a resume would find again.
+fn bind_interrupted(
+    token: Option<ResumeToken>,
+    (outcome, unknown): (Result<BindOutcome>, bool),
+) -> (Result<BindOutcome>, bool) {
+    match (token, outcome) {
+        (Some(token), Err(e @ Error::Storage(_))) if !unknown => (
+            Err(Error::UploadInterrupted {
+                token,
+                source: Box::new(e),
+            }),
+            false,
+        ),
+        (_, outcome) => (outcome, unknown),
+    }
+}
+// -- end resume --
 
 /// The CRC32C of each chunk of the blob `reader` yields, and its summary; `sink` gets each chunk in order.
 fn chunk_crcs(
