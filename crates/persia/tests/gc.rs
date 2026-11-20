@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use persia::internal::blob::DEFAULT_BIND_BUDGET;
+use persia::internal::blob::MAX_BIND_BUDGET;
 use persia::internal::blob::{Blobs, PutBlobOptions};
 use persia::internal::documents::{Blob, BlobDatabase};
 use persia::internal::gc::{BlobReferences, GcError, GcOptions};
@@ -186,8 +186,8 @@ fn gc_rejects_a_grace_below_the_bind_budget_and_a_bad_ratio() {
     let dir = tempfile::tempdir().unwrap();
     let db = pack_database(dir.path());
     let short = GcOptions {
-        grace: DEFAULT_BIND_BUDGET
-            .checked_sub(Duration::from_secs(1))
+        grace: MAX_BIND_BUDGET
+            .checked_sub(Duration::from_nanos(1))
             .unwrap(),
         ..GcOptions::default()
     };
@@ -196,10 +196,11 @@ fn gc_rejects_a_grace_below_the_bind_budget_and_a_bad_ratio() {
         Err(GcError::GraceBelowBindBudget { .. })
     ));
     let at_budget = GcOptions {
-        grace: DEFAULT_BIND_BUDGET,
+        grace: MAX_BIND_BUDGET,
         ..GcOptions::default()
     };
     db.gc(&at_budget).unwrap();
+    assert_eq!(MAX_BIND_BUDGET, Duration::from_hours(1));
     for ratio in [f64::NAN, -0.1] {
         let bad = GcOptions {
             rewrite_ratio: ratio,

@@ -14,17 +14,19 @@ per-prefix remote listing). §9.3 says GC rewrites the pack "like container comp
 replace. Left open: who triggers GC, what the engine exposes to the mark (it must not depend on `persia-blob`), what a
 snapshot is for the mark, whether the pack has a grace period, when a rewrite is worth it, where the chunks of
 uploads in flight go in a new pack, and how the sweep meets ADR-0051 item 5 (a pinned blob's manifest keeps its
-upload). The user decided (2026-11-19): an explicit `gc` only; grace 24 h by default and never below the bind budget;
-a rewrite past a ratio of dead bytes; the writer's view as the snapshot set; no grace locally; unknown ages kept.
+upload). The user decided (2026-11-19): an explicit `gc` only; grace 24 h by default and never below the longest bind
+budget (1 h, `MAX_BIND_BUDGET`); a rewrite past a ratio of dead bytes; the writer's view as the snapshot set; no
+grace locally; unknown ages kept.
 
 ## Decision
 
 1. **Entry point.** `persia::internal::BlobDatabase::gc(&GcOptions) -> Result<GcReport, GcError>`, called by the
    writer, never in the background. `GcOptions { grace (24 h), rewrite_ratio (0.5), now (None: the system clock) }`.
-   A grace below `DEFAULT_BIND_BUDGET` (60 s) is `GraceBelowBindBudget` (SPEC §9.4: a conditional write may still land
-   that long after `put_blob` gave up); a negative or NaN ratio is `InvalidRewriteRatio`. `gc` borrows the database
-   shared: no document can be logged, deleted or committed while it runs (`put` and `commit` take `&mut`), while
-   `put_blob` and reads may go on in other threads. No state is kept between calls.
+   A grace below `MAX_BIND_BUDGET` (1 h, the longest `bind_budget` `put_blob` accepts) is `GraceBelowBindBudget`
+   (SPEC §9.4: a conditional write may still land that long after `put_blob` gave up); a negative or NaN ratio is
+   `InvalidRewriteRatio`. `gc` borrows the database shared: no document can be logged, deleted or committed while it
+   runs (`put` and `commit` take `&mut`), while `put_blob` and reads may go on in other threads. No state is kept
+   between calls.
 2. **The engine's side of the mark** is `Database::referenced_blobs() -> HashSet<BlobId>` (persia-engine
    `db/blob_refs.rs`, behind `persia`'s `BlobReferences` trait, as `DocumentLog` is): the ids of the documents
    - live in the current state: each segment as its tombstones leave it, each memtable whole (replaced and deleted
@@ -109,9 +111,8 @@ a rewrite past a ratio of dead bytes; the writer's view as the snapshot set; no 
 - Remotely an upload's chunks are deleted in one step under the pin set's lock, not one chunk per step: a pin taken
   midway (a blob bound late that names the upload) must find the upload whole. The lock is held for one request per
   chunk of that upload.
-- `grace` is checked against `DEFAULT_BIND_BUDGET`, not against the budget a caller passed to `put_blob`
-  (`PutBlobOptions::bind_budget` has no upper bound): a caller who raises the budget must raise the grace with it.
-  Open: cap the budget, or record the largest one used.
+- `grace` has a floor of `MAX_BIND_BUDGET` (1 h), the longest `bind_budget` `put_blob` accepts (a larger one is
+  `BindBudgetAboveMax`): whatever budget a caller chose, a late conditional write lands within the grace period.
 - Holding the pin set's lock across the rename and the directory sync blocks new pins (a `put_blob`'s first pin, a
   read's) for that long, as a remote delete does under SPEC §9.5.
 - A segment's deleted documents stop protecting their blobs once no held snapshot predates the deletion; `verify`

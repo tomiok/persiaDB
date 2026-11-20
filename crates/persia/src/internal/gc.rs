@@ -20,7 +20,7 @@ use persia_blob::gc::{GcObject, Mark, PinCheck, PinGate, Sweep, SweepOptions, Sw
 use persia_blob::{BlobId, BlobStore};
 use persia_engine::db::{Database, DatabaseError};
 
-use super::blob::DEFAULT_BIND_BUDGET;
+use super::blob::MAX_BIND_BUDGET;
 use super::documents::{BlobDatabase, DocumentLog};
 use super::pins::{PinSet, PinView, Pinned};
 
@@ -34,8 +34,9 @@ pub const DEFAULT_REWRITE_RATIO: f64 = 0.5;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GcOptions {
     /// How long an unmarked remote object is kept after it was written (staged chunks: after their upload's newest
-    /// chunk). [`DEFAULT_GRACE`] by default; at least [`DEFAULT_BIND_BUDGET`], since a conditional write still in flight
-    /// may bind an upload that long after `put_blob` gave up (SPEC §9.4). The pack has none.
+    /// chunk). [`DEFAULT_GRACE`] by default; at least [`MAX_BIND_BUDGET`] (1 h), the longest bind budget `put_blob`
+    /// accepts: a conditional write still in flight may bind an upload that long after `put_blob` gave up (SPEC §9.4).
+    /// The pack has none.
     pub grace: Duration,
     /// The pack is rewritten only when it would drop at least this share of its frames' bytes: 0 forces the rewrite,
     /// above 1 it never runs. [`DEFAULT_REWRITE_RATIO`] by default. The remote layout ignores it.
@@ -79,13 +80,13 @@ pub enum GcError {
     /// was deleted.
     #[error(transparent)]
     Database(Box<DatabaseError>),
-    /// [`GcOptions::grace`] is below [`DEFAULT_BIND_BUDGET`] (SPEC §9.4: the grace period must stay far above the
-    /// bind budget). Nothing was done.
+    /// [`GcOptions::grace`] is below [`MAX_BIND_BUDGET`], the longest bind budget `put_blob` accepts
+    /// (SPEC §9.4: the grace period must stay far above the bind budget). Nothing was done.
     #[error("the grace period {grace:?} is below the bind budget {budget:?}")]
     GraceBelowBindBudget {
         /// The grace period asked for.
         grace: Duration,
-        /// [`DEFAULT_BIND_BUDGET`].
+        /// [`MAX_BIND_BUDGET`].
         budget: Duration,
     },
     /// [`GcOptions::rewrite_ratio`] is negative or not a number. Nothing was done.
@@ -180,10 +181,10 @@ impl<S: BlobStore + Sweep + ?Sized, L: DocumentLog + BlobReferences> BlobDatabas
     /// [`BlobDatabase::mark`] and the store's sweep ([`GcError::Blob`]): the sweep stops at the first error, and what
     /// it deleted before was unmarked.
     pub fn gc(&self, options: &GcOptions) -> Result<GcReport, GcError> {
-        if options.grace < DEFAULT_BIND_BUDGET {
+        if options.grace < MAX_BIND_BUDGET {
             return Err(GcError::GraceBelowBindBudget {
                 grace: options.grace,
-                budget: DEFAULT_BIND_BUDGET,
+                budget: MAX_BIND_BUDGET,
             });
         }
         if options.rewrite_ratio.is_nan() || options.rewrite_ratio < 0.0 {
