@@ -630,6 +630,22 @@ fn write(lock: &RwLock<Inner>) -> Result<RwLockWriteGuard<'_, Inner>, MemtableEr
 }
 
 impl Inner {
+    /// Calls `f` with the encoding of every document the memtable holds, replaced and deleted ones included, in docid
+    /// order: what GC's mark reads (SPEC §9.5), since a view taken before the replacement still shows them. A range
+    /// outside `docs` (a broken invariant) gives `f` no bytes, which no decoder accepts: the mark fails rather than
+    /// leaving a document out.
+    pub(crate) fn for_each_encoded<E>(
+        &self,
+        mut f: impl FnMut(&[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut start = 0;
+        for &end in &self.doc_ends {
+            f(self.docs.get(start..end).unwrap_or_default())?;
+            start = end;
+        }
+        Ok(())
+    }
+
     pub(crate) fn version(&self) -> u64 {
         u64::try_from(self.ops.len()).unwrap_or(u64::MAX)
     }

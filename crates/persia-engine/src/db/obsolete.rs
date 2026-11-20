@@ -121,6 +121,38 @@ impl Obsolete {
         self.objects.iter().map(|(o, pin)| (o, pin.referenced()))
     }
 
+    /// Every superseded or removed tombstone sidecar a snapshot, job or reader still holds, with its collection and
+    /// segment: a reader holding one may see as live documents a later sidecar deletes, so GC's mark reads the
+    /// segment with it (SPEC §9.5).
+    pub fn held_sidecars(&self) -> Vec<(&str, SegmentId, Arc<Tombstones>)> {
+        self.objects
+            .iter()
+            .filter_map(|(o, pin)| match (o.kind, pin) {
+                (ObsoleteKind::Sidecar { segment, .. }, Pin::Sidecar(w)) => {
+                    w.upgrade().map(|t| (o.collection.as_str(), segment, t))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every instance of an obsolete segment a snapshot, job or reader still holds, with its collection: what GC's
+    /// mark reads besides the live segments (SPEC §9.5). Each is a strong reference until dropped.
+    pub fn held_segments(&self) -> Vec<(&str, Arc<Segment>)> {
+        self.objects
+            .iter()
+            .filter_map(|(o, pin)| match pin {
+                Pin::Segment(all) => Some((o.collection.as_str(), all)),
+                Pin::Sidecar(_) => None,
+            })
+            .flat_map(|(collection, all)| {
+                all.iter()
+                    .filter_map(Weak::upgrade)
+                    .map(move |s| (collection, s))
+            })
+            .collect()
+    }
+
     /// After a container compaction (SPEC §4.6): moves each object's frame to `moved(offset)`, and stops tracking the
     /// ones it did not copy, which are reclaimed. A compaction copies every object still referenced when it started
     /// (an unreferenced one cannot be read again), so only unreferenced ones are dropped.

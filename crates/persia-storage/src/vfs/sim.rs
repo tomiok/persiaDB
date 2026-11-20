@@ -10,6 +10,12 @@
 //!
 //! One fault schedule ([`SimFault`]) counts every mutating call, of the file system and of its files: after the
 //! fault fires, every later mutating call fails, as if the process had died.
+//!
+//! Files keep a modification time only on a file system given a clock ([`SimFs::with_clock`], ROADMAP 9.5.7): each
+//! file is stamped with the clock's time when it is created and at every write or length change through one of its
+//! handles, and keeps it across renames, links and crashes. The stamp is dropped once no current or durable name
+//! still reaches the file, so a final unlink does not leave one behind. That is what [`Vfs::entry_kind`] reports, so a GC sweep
+//! over the local backend on a `SimFs` can age objects (SPEC §9.5, §10.1). Without a clock no file has one (`None`).
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
@@ -17,13 +23,24 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use persia_format::widen::u64_from_usize;
 
 use super::{DirEntry, EntryKind, FileType, Vfs};
 use crate::container::ContainerFile;
 use crate::container::sim::{CrashLoss, Faults, SimFault, SimFile, lock};
-use crate::retry::Jitter;
+use crate::retry::{Clock, Jitter};
+
+/// The clock a [`SimFs`] stamps its files with.
+#[derive(Clone)]
+struct SimClock(Arc<dyn Clock>);
+
+impl std::fmt::Debug for SimClock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SimClock")
+    }
+}
 
 /// What a name points at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +88,10 @@ struct State {
     per_process_locks: bool,
     next_handle: u64,
     faults: Arc<Mutex<Faults>>,
+    /// What stamps files' modification times; `None`: files have none.
+    clock: Option<SimClock>,
+    /// Each file's modification time, by inode, while a clock is set.
+    mtimes: HashMap<u64, SystemTime>,
 }
 
 /// A simulated file system with crash semantics. Clones share it.
@@ -161,6 +182,33 @@ impl State {
             .ok_or_else(|| io::Error::other("dangling inode"))
     }
 
+    /// Whether any current or durable directory entry still names `ino`.
+    fn inode_linked(&self, ino: u64) -> bool {
+        let file = Node::File(ino);
+        self.dirs.values().any(|d| {
+            d.current.values().any(|n| *n == file) || d.durable.values().any(|n| *n == file)
+        })
+    }
+
+    /// Drops modification times of inodes no name still reaches, current or durable.
+    fn drop_unlinked_mtimes(&mut self) {
+        let inos: Vec<u64> = self.mtimes.keys().copied().collect();
+        let stale: Vec<u64> = inos
+            .into_iter()
+            .filter(|ino| !self.inode_linked(*ino))
+            .collect();
+        for ino in stale {
+            self.mtimes.remove(&ino);
+        }
+    }
+
+    /// Stamps the file `ino` with the clock's time, if there is a clock.
+    fn touch(&mut self, ino: u64) {
+        if let Some(SimClock(clock)) = &self.clock {
+            self.mtimes.insert(ino, clock.now());
+        }
+    }
+
     /// Counts a mutating call (see [`Faults::begin`]).
     fn begin(&self) -> io::Result<bool> {
         lock(&self.faults).begin()
@@ -199,8 +247,47 @@ impl SimFs {
                 per_process_locks: false,
                 next_handle: 1,
                 faults: Arc::default(),
+                clock: None,
+                mtimes: HashMap::new(),
             })),
         }
+    }
+
+    /// An empty file system whose files keep modification times read from `clock` (a
+    /// [`ManualClock`](crate::retry::ManualClock) in tests): stamped at creation and at every write or length change
+    /// through a handle, kept across renames, links and crashes, and reported by [`Vfs::entry_kind`] (so by the local
+    /// backend's `list` as [`ObjectMeta::last_modified`](crate::ObjectMeta::last_modified)). A crash's file system
+    /// keeps the clock.
+    ///
+    /// ```
+    /// use std::path::Path;
+    /// use std::sync::Arc;
+    /// use std::time::{Duration, UNIX_EPOCH};
+    /// use persia_storage::container::ContainerFile;
+    /// use persia_storage::retry::ManualClock;
+    /// use persia_storage::vfs::{EntryKind, Vfs};
+    /// use persia_storage::vfs::sim::SimFs;
+    ///
+    /// let clock = Arc::new(ManualClock::new(UNIX_EPOCH));
+    /// let fs = SimFs::with_clock(clock.clone());
+    /// let f = fs.create_new(Path::new("/a"))?;
+    /// clock.advance(Duration::from_secs(5));
+    /// f.write_all_at(b"data", 0)?;
+    /// let modified = |fs: &SimFs| match fs.entry_kind(Path::new("/a")) {
+    ///     Ok(EntryKind::File { modified, .. }) => modified,
+    ///     _ => None,
+    /// };
+    /// assert_eq!(modified(&fs), Some(UNIX_EPOCH + Duration::from_secs(5)));
+    ///
+    /// let no_clock = SimFs::new();
+    /// no_clock.create_new(Path::new("/a"))?;
+    /// assert_eq!(modified(&no_clock), None);
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
+        let fs = Self::new();
+        lock(&fs.state).clock = Some(SimClock(clock));
+        fs
     }
 
     /// Arms (or with `None` disarms) a fault, counting mutating calls of the file system and all its files since it
@@ -214,6 +301,12 @@ impl SimFs {
     /// lock, and [`ContainerFile::locks_per_handle`] is `false` (ADR-0019).
     pub fn set_per_process_locks(&self, on: bool) {
         lock(&self.state).per_process_locks = on;
+    }
+
+    /// How many file modification times are stored. A final unlink drops the file's.
+    #[cfg(test)]
+    fn mtime_count(&self) -> usize {
+        lock(&self.state).mtimes.len()
     }
 
     /// How many mutating calls have been made: the `n` of the next one.
@@ -262,6 +355,7 @@ impl SimFs {
         };
         let new = Self::new();
         let mut out = lock(&new.state);
+        out.clock.clone_from(&state.clock);
         let faults = Arc::clone(&out.faults);
         let mut inodes: HashMap<u64, u64> = HashMap::new();
         let mut stack = vec![PathBuf::from("/")];
@@ -309,6 +403,11 @@ impl SimFs {
                             out.next_ino = n.saturating_add(1);
                             out.files
                                 .insert(n, SimFile::with_faults(image, Arc::clone(&faults)));
+                            // A crash keeps the latest stamp even if it loses the write that set it: the time is
+                            // then later than the bytes', so an age read from it is never too old (SPEC §9.5).
+                            if let Some(&t) = state.mtimes.get(&ino) {
+                                out.mtimes.insert(n, t);
+                            }
                             inodes.insert(ino, n);
                             n
                         };
@@ -361,6 +460,7 @@ impl Vfs for SimFs {
             state
                 .files
                 .insert(ino, SimFile::with_faults(Vec::new(), faults));
+            state.touch(ino);
             state.handle(ino, true, &self.state)
         })
     }
@@ -426,11 +526,16 @@ impl Vfs for SimFs {
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
         self.mutate(|state| {
-            if state.lookup(path)? == Node::Dir {
+            let Node::File(ino) = state.lookup(path)? else {
                 return Err(io::ErrorKind::IsADirectory.into());
-            }
+            };
             let (dir, name) = State::split(path)?;
             state.dir_mut(&dir)?.apply(vec![(name, None)]);
+            // A name the durable image still has keeps the stamp: a crash that loses this unlink restores the file
+            // with its time. The last name, once gone from both, does not.
+            if !state.inode_linked(ino) {
+                state.mtimes.remove(&ino);
+            }
             Ok(())
         })
     }
@@ -438,9 +543,13 @@ impl Vfs for SimFs {
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
         self.mutate(|state| {
             let dir = normalize(dir).ok_or_else(|| not_found(dir))?;
-            let d = state.dir_mut(&dir)?;
-            d.durable = d.current.clone();
-            d.pending.clear();
+            {
+                let d = state.dir_mut(&dir)?;
+                d.durable = d.current.clone();
+                d.pending.clear();
+            }
+            // The unlink is durable now: a file no name reaches drops its stamp.
+            state.drop_unlinked_mtimes();
             Ok(())
         })
     }
@@ -451,8 +560,8 @@ impl Vfs for SimFs {
             Node::Dir => EntryKind::Dir,
             Node::File(ino) => EntryKind::File {
                 len: state.file(ino)?.file_len()?,
-                // Simulated files keep no times.
-                modified: None,
+                // Only a file system with a clock keeps times (`SimFs::with_clock`).
+                modified: state.mtimes.get(&ino).copied(),
             },
         })
     }
@@ -527,10 +636,16 @@ impl SimFsFile {
             ))
         }
     }
+
+    /// Stamps the file before a change, so its time is never earlier than its bytes', even if the change fails after
+    /// it applied (a fault).
+    fn touch(&self) {
+        lock(&self.state).touch(self.ino);
+    }
 }
 
 impl SimFsFile {
-    /// The underlying file.
+    /// The underlying file. Writes made through it directly bypass the modification time.
     pub fn file(&self) -> &SimFile {
         &self.file
     }
@@ -547,6 +662,7 @@ impl ContainerFile for SimFsFile {
 
     fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
         self.check_writable()?;
+        self.touch();
         self.file.write_all_at(buf, offset)
     }
 
@@ -560,6 +676,7 @@ impl ContainerFile for SimFsFile {
 
     fn set_len(&self, len: u64) -> io::Result<()> {
         self.check_writable()?;
+        self.touch();
         self.file.set_len(len)
     }
 
@@ -658,6 +775,44 @@ mod tests {
     }
 
     #[test]
+    fn a_final_unlink_drops_the_modification_time() {
+        let clock = Arc::new(crate::retry::ManualClock::new(std::time::UNIX_EPOCH));
+        let fs = SimFs::with_clock(clock);
+        let f = fs.create_new(p("/a")).unwrap();
+        f.write_all_at(b"x", 0).unwrap();
+        f.sync_data().unwrap();
+        fs.sync_dir(p("/")).unwrap();
+        assert_eq!(fs.mtime_count(), 1);
+        // A second name keeps the stamp.
+        fs.hard_link(p("/a"), p("/b")).unwrap();
+        fs.remove_file(p("/a")).unwrap();
+        fs.sync_dir(p("/")).unwrap();
+        assert_eq!(fs.mtime_count(), 1);
+        assert!(matches!(
+            fs.entry_kind(p("/b")),
+            Ok(EntryKind::File {
+                modified: Some(_),
+                ..
+            })
+        ));
+        // An unsynced unlink keeps the stamp, so a crash that restores the name restores the time.
+        fs.remove_file(p("/b")).unwrap();
+        assert_eq!(fs.mtime_count(), 1);
+        let back = fs.crash(CrashLoss::All);
+        assert_eq!(back.mtime_count(), 1);
+        assert!(matches!(
+            back.entry_kind(p("/b")),
+            Ok(EntryKind::File {
+                modified: Some(_),
+                ..
+            })
+        ));
+        // Once the unlink is durable, the stamp is gone.
+        fs.sync_dir(p("/")).unwrap();
+        assert_eq!(fs.mtime_count(), 0);
+    }
+
+    #[test]
     fn hard_links_share_the_file_across_a_crash() {
         let fs = SimFs::new();
         let f = fs.create_new(p("/t")).unwrap();
@@ -732,5 +887,95 @@ mod tests {
         assert_eq!(fs.canonicalize(p("/d/./")).unwrap(), PathBuf::from("/d"));
         assert_eq!(fs.read_dir(p("/d")).unwrap(), []);
         assert_eq!(fs.read_dir(p("/")).unwrap().len(), 1);
+    }
+
+    // --- Modification times (ROADMAP 9.5.7) ---
+
+    fn modified(fs: &SimFs, path: &str) -> Option<SystemTime> {
+        match fs.entry_kind(p(path)).unwrap() {
+            EntryKind::File { modified, .. } => modified,
+            other => panic!("{path} is {other:?}"),
+        }
+    }
+
+    fn at(secs: u64) -> SystemTime {
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+    }
+
+    fn clocked() -> (Arc<crate::retry::ManualClock>, SimFs) {
+        let clock = Arc::new(crate::retry::ManualClock::new(at(100)));
+        let fs = SimFs::with_clock(Arc::clone(&clock) as Arc<dyn Clock>);
+        (clock, fs)
+    }
+
+    #[test]
+    fn files_have_no_time_without_a_clock() {
+        let fs = SimFs::new();
+        let f = fs.create_new(p("/a")).unwrap();
+        f.write_all_at(b"x", 0).unwrap();
+        assert_eq!(modified(&fs, "/a"), None);
+    }
+
+    #[test]
+    fn creation_writes_and_length_changes_stamp_the_file() {
+        let (clock, fs) = clocked();
+        let f = fs.create_new(p("/a")).unwrap();
+        assert_eq!(modified(&fs, "/a"), Some(at(100)));
+        clock.advance(std::time::Duration::from_secs(5));
+        f.write_all_at(b"data", 0).unwrap();
+        assert_eq!(modified(&fs, "/a"), Some(at(105)));
+        clock.advance(std::time::Duration::from_secs(5));
+        f.set_len(2).unwrap();
+        assert_eq!(modified(&fs, "/a"), Some(at(110)));
+        // Reads, syncs, opens and a refused write change nothing.
+        clock.advance(std::time::Duration::from_secs(5));
+        let mut buf = [0; 2];
+        f.read_exact_at(&mut buf, 0).unwrap();
+        f.sync_data().unwrap();
+        let ro = fs.open(p("/a"), false).unwrap();
+        assert!(ro.write_all_at(b"no", 0).is_err());
+        assert!(ro.set_len(0).is_err());
+        assert_eq!(modified(&fs, "/a"), Some(at(110)));
+    }
+
+    #[test]
+    fn times_follow_the_file_across_renames_links_and_crashes() {
+        let (clock, fs) = clocked();
+        let f = fs.create_new(p("/t")).unwrap();
+        f.write_all_at(b"data", 0).unwrap();
+        f.sync_data().unwrap();
+        clock.advance(std::time::Duration::from_secs(50));
+        fs.hard_link(p("/t"), p("/l")).unwrap();
+        fs.rename(p("/t"), p("/r")).unwrap();
+        fs.sync_dir(p("/")).unwrap();
+        assert_eq!(modified(&fs, "/r"), Some(at(100)));
+        assert_eq!(modified(&fs, "/l"), Some(at(100)));
+        // A write lost to the crash still leaves its later stamp: a time is never earlier than the bytes'.
+        f.write_all_at(b"lost", 0).unwrap();
+        let crashed = fs.crash(CrashLoss::All);
+        assert_eq!(crashed.read(p("/r")).unwrap(), b"data");
+        assert_eq!(modified(&crashed, "/r"), Some(at(150)));
+        assert_eq!(modified(&crashed, "/l"), Some(at(150)));
+        // The crashed file system keeps the clock.
+        clock.advance(std::time::Duration::from_secs(1));
+        crashed.create_new(p("/n")).unwrap();
+        assert_eq!(modified(&crashed, "/n"), Some(at(151)));
+    }
+
+    #[test]
+    fn the_local_backend_lists_the_times() {
+        use crate::{Key, KeyPrefix, LocalStorage, Storage};
+        let (clock, fs) = clocked();
+        let storage = LocalStorage::open_in(fs, "/store").unwrap();
+        storage
+            .put(&Key::new("a/1").unwrap(), bytes::Bytes::from_static(b"x"))
+            .unwrap();
+        clock.advance(std::time::Duration::from_secs(60));
+        storage
+            .put(&Key::new("a/2").unwrap(), bytes::Bytes::from_static(b"y"))
+            .unwrap();
+        let listed = storage.list(&KeyPrefix::new("a/").unwrap()).unwrap();
+        let times: Vec<_> = listed.iter().map(|m| m.last_modified).collect();
+        assert_eq!(times, [Some(at(100)), Some(at(160))]);
     }
 }

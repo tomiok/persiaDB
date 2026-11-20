@@ -229,6 +229,14 @@ pub(super) fn encoded_id(bytes: &[u8]) -> Result<String, DecodeError> {
     decode_id(&mut d).map_err(|(offset, reason)| DecodeError::Corrupt { offset, reason })
 }
 
+/// The blob reference of an encoding, read without a schema: the checks of [`decode`] up to the reference; the
+/// fields after it are not read.
+pub(super) fn encoded_blob_ref(bytes: &[u8]) -> Result<Option<BlobRef>, DecodeError> {
+    let mut d = decode_header(bytes)?;
+    decode_id(&mut d).map_err(|(offset, reason)| DecodeError::Corrupt { offset, reason })?;
+    decode_blob_ref(&mut d)
+}
+
 /// Checks the length, the array and the version (SPEC §6.4.2); returns the decoder at the id.
 fn decode_header(bytes: &[u8]) -> Result<Decoder<'_>, DecodeError> {
     let corrupt = |(offset, reason): Failure| DecodeError::Corrupt { offset, reason };

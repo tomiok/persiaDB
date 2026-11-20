@@ -245,6 +245,12 @@ impl Document {
         codec::encoded_id(bytes)
     }
 
+    /// The blob reference of an encoding (SPEC §6.4.2), read without its schema, as [`Self::encoded_id`] reads the
+    /// id: what GC's mark takes from WAL puts and memtables (SPEC §9.5). The fields after it are not read.
+    pub(crate) fn encoded_blob_ref(bytes: &[u8]) -> Result<Option<BlobRef>, DecodeError> {
+        codec::encoded_blob_ref(bytes)
+    }
+
     /// Parses a JSON document for `schema` and validates it (SPEC §6.4.1).
     ///
     /// # Errors

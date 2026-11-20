@@ -227,8 +227,7 @@ impl<F: ContainerFile + Sync + 'static> Database<F> {
             })?;
         self.merges.obsolete.relocate(moved);
         self.manifest = Arc::new(next);
-        self.published
-            .store(Arc::new(snapshot_of(&self.manifest, &self.collections)));
+        self.publish(snapshot_of(&self.manifest, &self.collections));
         Ok(())
     }
 }
