@@ -23,9 +23,9 @@ use persia_storage::container::{ContainerFile, MapPermit};
 use persia_storage::vfs::{RealFs, Vfs};
 
 use super::layout::{
-    self, ChunkHead, PackSuperblock, check_chunk_frame, corrupt, decode_chunk_payload,
-    decode_frame, decode_index_payload, decode_prefix, encode_chunk, encode_index_frame,
-    from_format,
+    self, ChunkHead, PackSuperblock, at, check_chunk_frame, corrupt, corrupt_at,
+    decode_chunk_payload, decode_frame, decode_index_payload, decode_prefix, encode_chunk,
+    encode_index_frame, from_format_at,
 };
 use crate::error::{Error, Result};
 use crate::manifest::{BlobManifest, UploadId};
@@ -459,17 +459,18 @@ impl<F: ContainerFile> Pack<F> {
     fn bytes_at(&self, offset: u64, len: u64) -> Result<ByteSource> {
         let end = offset
             .checked_add(len)
-            .ok_or_else(|| corrupt("a frame runs past the end of the file"))?;
+            .ok_or_else(|| corrupt_at("a frame runs past the end of the file", offset))?;
         if let Some(w) = &self.window
             && offset >= w.base_offset()
             && end <= w.end_offset()
         {
-            return w.slice(offset..end).map_err(from_format);
+            return w.slice(offset..end).map_err(|e| from_format_at(e, offset));
         }
-        let len = usize::try_from(len).map_err(|_| corrupt("a frame too large to read"))?;
+        let len =
+            usize::try_from(len).map_err(|_| corrupt_at("a frame too large to read", offset))?;
         let mut buf = Vec::new();
         buf.try_reserve_exact(len)
-            .map_err(|_| corrupt("a frame too large to read"))?;
+            .map_err(|_| corrupt_at("a frame too large to read", offset))?;
         buf.resize(len, 0);
         self.file
             .read_exact_at(&mut buf, offset)
@@ -481,11 +482,17 @@ impl<F: ContainerFile> Pack<F> {
     fn frame_at(&self, offset: u64, limit: u64) -> Result<ByteSource> {
         let head_len = u64_from_usize(FRAME_HEADER_LEN);
         if offset < FIRST_FRAME_OFFSET || offset.checked_add(head_len).is_none_or(|e| e > limit) {
-            return Err(corrupt("a frame offset outside the pack's frames"));
+            return Err(corrupt_at(
+                "a frame offset outside the pack's frames",
+                offset,
+            ));
         }
         let head = self.bytes_at(offset, head_len)?;
-        let header = FrameHeader::decode(&mut head.reader()).map_err(from_format)?;
-        header.check_fits(limit).map_err(from_format)?;
+        let header =
+            FrameHeader::decode(&mut head.reader()).map_err(|e| from_format_at(e, offset))?;
+        header
+            .check_fits(limit)
+            .map_err(|e| from_format_at(e, offset))?;
         self.bytes_at(offset, header.total_len())
     }
 
@@ -494,7 +501,9 @@ impl<F: ContainerFile> Pack<F> {
         let bytes = self.bytes_at(entry.index_off, entry.index_len)?;
         let (_, payload) = decode_frame(&bytes, entry.index_off, FrameKind::BlobIndex)?;
         let (manifest, _) = decode_index_payload(payload, entry.index_off)?;
-        manifest.check_blob_id(blob_id)?;
+        manifest
+            .check_blob_id(blob_id)
+            .map_err(at(entry.index_off))?;
         Ok(manifest)
     }
 
@@ -512,7 +521,7 @@ impl<F: ContainerFile> Pack<F> {
         let end = offset
             .checked_add(total)
             .filter(|&end| offset >= FIRST_FRAME_OFFSET && end <= self.end)
-            .ok_or_else(|| corrupt("a chunk frame outside the pack's frames"))?;
+            .ok_or_else(|| corrupt_at("a chunk frame outside the pack's frames", offset))?;
         if let Some(w) = &self.window
             && offset >= w.base_offset()
             && end <= w.end_offset()
@@ -520,9 +529,10 @@ impl<F: ContainerFile> Pack<F> {
             return w
                 .slice(offset..end)
                 .map(FrameBytes::Mapped)
-                .map_err(from_format);
+                .map_err(|e| from_format_at(e, offset));
         }
-        let n = usize::try_from(total).map_err(|_| corrupt("a frame too large to read"))?;
+        let n =
+            usize::try_from(total).map_err(|_| corrupt_at("a frame too large to read", offset))?;
         if scratch.len() < n {
             scratch
                 .try_reserve_exact(n.saturating_sub(scratch.len()))
@@ -534,7 +544,7 @@ impl<F: ContainerFile> Pack<F> {
         }
         let buf = scratch
             .get_mut(..n)
-            .ok_or_else(|| corrupt("a frame too large to read"))?;
+            .ok_or_else(|| corrupt_at("a frame too large to read", offset))?;
         self.file
             .read_exact_at(buf, offset)
             .map_err(io_err("read"))?;
@@ -764,7 +774,7 @@ impl<F: ContainerFile + 'static> PackStore<F> {
         let start = offset.saturating_add(u64_from_usize(layout::CHUNK_BYTES_OFFSET));
         frame
             .slice(start..start.saturating_add(len))
-            .map_err(from_format)
+            .map_err(|e| from_format_at(e, offset))
     }
 }
 
@@ -830,10 +840,11 @@ fn staged_bytes<F: ContainerFile>(
     };
     let frame = pack.frame_at(offset, pack.end)?;
     let (_, payload) = decode_frame(&frame, offset, FrameKind::BlobChunk)?;
-    let (head, bytes) = decode_chunk_payload(payload)?;
+    let (head, bytes) = decode_chunk_payload(payload).map_err(at(offset))?;
     if head.upload_id != upload_id || head.index != index {
-        return Err(corrupt(
+        return Err(corrupt_at(
             "a chunk frame of another upload or index than recorded",
+            offset,
         ));
     }
     Ok(Some(bytes.to_vec()))

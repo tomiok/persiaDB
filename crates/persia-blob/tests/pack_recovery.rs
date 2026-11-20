@@ -317,8 +317,16 @@ fn a_failed_refresh_keeps_what_the_reader_had() {
     bytes[c_index + 40] ^= 1;
     let f = fs.open(Path::new(PACK), true).unwrap();
     f.write_all_at(&bytes, 0).unwrap();
-    assert!(reader.refresh().unwrap_err().is_corruption());
+    let err = reader.refresh().unwrap_err();
+    assert!(err.is_corruption(), "{err}");
+    assert_eq!(err.corrupt_offset(), Some(sb.index_off), "c's index frame");
     assert_eq!(reader.blob_ids(), [a.blob_id()]);
+    // A slot that moves back is named: the active slot the reader found.
+    let moved = edit_slot(&bytes, |s| s.log_end = FIRST_FRAME);
+    let slot = decode_prefix(&moved).unwrap().slot.offset();
+    f.write_all_at(&moved, 0).unwrap();
+    let err = reader.refresh().unwrap_err();
+    assert_eq!(err.corrupt_offset(), Some(slot), "{err}");
     assert_eq!(reader.manifest(b.blob_id()).unwrap(), None);
     assert_eq!(reader.manifest(c.blob_id()).unwrap(), None);
     assert_eq!(read_all(&reader, &a).unwrap(), b"first");
@@ -345,41 +353,52 @@ fn damage_below_log_end_fails_the_open() {
     let sb = decode_prefix(&bytes).unwrap().superblock;
     let first = FIRST_FRAME as usize;
     let index = sb.index_off as usize;
-    let mut cases: Vec<(&str, Vec<u8>)> = Vec::new();
+    // ROADMAP 9.2.8: each error names the slot or frame it was found in.
+    let slot = decode_prefix(&bytes).unwrap().slot.offset();
+    let (first_at, index_at) = (FIRST_FRAME, sb.index_off);
+    let mut cases: Vec<(&str, Vec<u8>, u64)> = Vec::new();
     let flip = |at: usize| {
         let mut b = bytes.clone();
         b[at] ^= 0x10;
         b
     };
-    cases.push(("header", flip(100)));
-    cases.push(("chunk frame magic", flip(first)));
-    cases.push(("chunk frame length", flip(first + 9)));
-    cases.push(("chunk frame seq", flip(first + 16)));
-    cases.push(("index frame payload", flip(index + 30)));
-    cases.push(("index frame crc", flip(sb.log_end as usize - 8)));
-    cases.push(("blob_count", edit_slot(&bytes, |s| s.blob_count += 1)));
+    cases.push(("header", flip(100), 0));
+    let mut both = flip(4100);
+    both[8200] ^= 0x10;
+    cases.push(("both slots", both, 4096));
+    cases.push(("chunk frame magic", flip(first), first_at));
+    cases.push(("chunk frame length", flip(first + 9), first_at));
+    cases.push(("chunk frame seq", flip(first + 16), first_at));
+    cases.push(("index frame payload", flip(index + 30), index_at));
+    cases.push(("index frame crc", flip(sb.log_end as usize - 8), index_at));
+    cases.push(("blob_count", edit_slot(&bytes, |s| s.blob_count += 1), slot));
     cases.push((
         "index_off",
         edit_slot(&bytes, |s| s.index_off = FIRST_FRAME),
+        slot,
     ));
     cases.push((
         "next_frame_seq",
         edit_slot(&bytes, |s| s.next_frame_seq += 1),
+        slot,
     ));
     cases.push((
         "log_end inside a frame",
         edit_slot(&bytes, |s| s.log_end -= 8),
+        slot,
     ));
     cases.push((
         "log_end past the file",
         edit_slot(&bytes, |s| s.log_end += 8),
+        slot,
     ));
-    cases.push(("short file", bytes[..12000].to_vec()));
-    for (what, file) in cases {
+    cases.push(("short file", bytes[..12000].to_vec(), 0));
+    for (what, file, want) in cases {
         for mode in [PackMode::ReadOnly, PackMode::ReadWrite] {
             let fs = with_pack(&file);
             let err = open(&fs, mode).map(|_| ()).unwrap_err();
             assert!(err.is_corruption(), "{what}: {err:?}");
+            assert_eq!(err.corrupt_offset(), Some(want), "{what}: {err}");
             assert_eq!(
                 fs.read(Path::new(PACK)).unwrap(),
                 file,
@@ -390,7 +409,13 @@ fn damage_below_log_end_fails_the_open() {
     // A chunk's bytes are checked when read, not at open.
     let damaged = flip(first + 24 + 32);
     let store = open(&with_pack(&damaged), PackMode::ReadOnly).unwrap();
-    assert!(read_all(&store, &a).unwrap_err().is_corruption());
+    let err = read_all(&store, &a).unwrap_err();
+    assert!(err.is_corruption(), "{err}");
+    assert_eq!(
+        err.corrupt_offset(),
+        Some(first_at),
+        "the damaged chunk frame"
+    );
 }
 
 #[test]
@@ -727,20 +752,29 @@ fn every_flipped_bit_of_a_chunk_frame_is_corrupt_at_the_open_or_the_read() {
             let mut damaged = bytes.clone();
             damaged[at as usize] ^= 1 << bit;
             let what = format!("byte {at} bit {bit}");
+            let second = FIRST_FRAME + persia_blob::pack::layout::chunk_frame_len(8);
+            let (chunk, frame) = if at < second {
+                (0, FIRST_FRAME)
+            } else {
+                (1, second)
+            };
             let store = match open(&with_pack(&damaged), PackMode::ReadOnly) {
                 Ok(store) => store,
                 Err(e) => {
                     assert!(e.is_corruption(), "{what}: {e}");
+                    // A damaged header misaligns the walk: the error names a frame at or after the damaged one.
+                    let found = e.corrupt_offset().unwrap_or_else(|| panic!("{what}: {e}"));
+                    assert!(found >= frame, "{what}: {e}");
                     found_at_open += 1;
                     continue;
                 }
             };
             let e = read_all(&store, &m).unwrap_err();
             assert!(e.is_corruption(), "{what}: {e}");
-            let chunk =
-                u32::from(at >= FIRST_FRAME + persia_blob::pack::layout::chunk_frame_len(8));
+            assert_eq!(e.corrupt_offset(), Some(frame), "{what}: {e}");
             let e = store.read_chunk_source(&m, chunk).unwrap_err();
             assert!(e.is_corruption(), "{what}: {e}");
+            assert_eq!(e.corrupt_offset(), Some(frame), "{what}: {e}");
         }
     }
     // The headers' magic, kind, length and frame_seq are the open's; the rest is the read's.
@@ -795,4 +829,31 @@ fn a_chunk_read_sized_past_the_committed_frames_is_corrupt() {
                 .is_corruption()
         );
     }
+}
+
+/// ROADMAP 9.2.8: a refresh whose new frames disagree with the new slot names that slot, not the one the reader had,
+/// and leaves the reader as it was.
+#[test]
+fn a_refresh_that_disagrees_with_the_new_slot_names_it() {
+    let fs = sim();
+    let writer = open(&fs, PackMode::ReadWrite).unwrap();
+    let a = put(&writer, b"first", 4, 1);
+    let reader = open(&fs, PackMode::ReadOnly).unwrap();
+    let old = decode_prefix(&fs.read(Path::new(PACK)).unwrap())
+        .unwrap()
+        .slot;
+    put(&writer, b"second blob", 4, 2);
+    drop(writer);
+    let bytes = fs.read(Path::new(PACK)).unwrap();
+    let new = decode_prefix(&bytes).unwrap().slot;
+    assert_ne!(new, old);
+    let damaged = edit_slot(&bytes, |s| s.blob_count += 1);
+    fs.open(Path::new(PACK), true)
+        .unwrap()
+        .write_all_at(&damaged, 0)
+        .unwrap();
+    let err = reader.refresh().unwrap_err();
+    assert_eq!(err.corrupt_offset(), Some(new.offset()), "{err}");
+    assert_eq!(reader.blob_ids(), [a.blob_id()]);
+    assert_eq!(read_all(&reader, &a).unwrap(), b"first");
 }

@@ -1,7 +1,7 @@
 //! A read-only handle catching up with the writer (SPEC §9.3, ADR-0049 item 10).
 
 use super::{
-    ContainerFile, Error, PackMode, PackStore, Result, check_scan, corrupt, io, io_err,
+    ContainerFile, Error, PackMode, PackStore, Result, at, check_scan, corrupt_at, io, io_err,
     read_prefix, recover, scan_committed,
 };
 
@@ -34,10 +34,10 @@ impl<F: ContainerFile + 'static> PackStore<F> {
             return Ok(true);
         };
         let at_path = self.vfs.open(&self.path, false).map_err(io_err("open"))?;
-        let at = read_prefix(&at_path)?.superblock;
-        let found = at.generation;
+        let at_path_sb = read_prefix(&at_path)?.superblock;
+        let found = at_path_sb.generation;
         // The generation alone repeats when a pack is recreated or restored: the pack id tells the files apart.
-        if found != pack.sb.generation || at.pack_id != pack.sb.pack_id {
+        if found != pack.sb.generation || at_path_sb.pack_id != pack.sb.pack_id {
             return Err(Error::PackReplaced {
                 opened: pack.sb.generation,
                 found,
@@ -50,7 +50,10 @@ impl<F: ContainerFile + 'static> PackStore<F> {
         }
         if new.seq == old.seq {
             // Two commits never share a seq (SPEC §4.3): one of the two slots is wrong.
-            return Err(corrupt("the same seq with other contents"));
+            return Err(corrupt_at(
+                "the same seq with other contents",
+                p.slot.offset(),
+            ));
         }
         if new.seq < old.seq
             // Every commit appends its index frame: a newer seq always moves log_end forward.
@@ -58,10 +61,16 @@ impl<F: ContainerFile + 'static> PackStore<F> {
             || new.generation != old.generation
             || new.pack_id != old.pack_id
         {
-            return Err(corrupt("the committed superblock moved back"));
+            return Err(corrupt_at(
+                "the committed superblock moved back",
+                p.slot.offset(),
+            ));
         }
-        new.check_bounds(pack.file.file_len().map_err(io_err("stat"))?)?;
+        new.check_bounds(pack.file.file_len().map_err(io_err("stat"))?)
+            .map_err(at(p.slot.offset()))?;
         let (chunk_frames, end, seq) = (pack.chunk_frames.len(), pack.end, pack.next_frame_seq);
+        // The new slot is the one the scan is checked against (`check_scan` locates its errors there).
+        let old_slot = std::mem::replace(&mut pack.slot, p.slot);
         let mut added = Vec::new();
         let mut last_index = None;
         pack.sb = new;
@@ -79,10 +88,9 @@ impl<F: ContainerFile + 'static> PackStore<F> {
                 }
             }
             pack.chunk_frames.truncate(chunk_frames);
-            (pack.sb, pack.end, pack.next_frame_seq) = (old, end, seq);
+            (pack.sb, pack.end, pack.next_frame_seq, pack.slot) = (old, end, seq, old_slot);
             return Err(e);
         }
-        pack.slot = p.slot;
         if let Some(mapper) = &mut inner.mapper {
             mapper.remap(pack);
         }

@@ -77,6 +77,59 @@ pub(crate) fn from_format(e: persia_format::Error) -> Error {
     corrupt(what)
 }
 
+// -- followups (9.2.8) --
+// Pack corruption located at the slot or frame it was found in. `corrupt` and `from_format` keep their meaning
+// (unlocated `Error::Corrupt`), so code that builds those keeps compiling.
+
+/// [`corrupt`] in the slot or frame that starts at `offset` ([`Error::CorruptAt`], ROADMAP 9.2.8).
+pub(crate) const fn corrupt_at(what: &'static str, offset: u64) -> Error {
+    Error::CorruptAt {
+        encoding: ENCODING,
+        what,
+        offset,
+    }
+}
+
+/// [`from_format`] in the slot or frame that starts at `offset`.
+pub(crate) fn from_format_at(e: persia_format::Error, offset: u64) -> Error {
+    locate(from_format(e), offset)
+}
+
+/// Locates an error at the slot or frame that starts at `offset`: an unlocated [`Error::Corrupt`] (of any encoding,
+/// e.g. a blob manifest in a `BlobIndex` frame) becomes [`Error::CorruptAt`]; an error already located (in an inner,
+/// more precise slot or frame) or that is not corruption is kept.
+pub(crate) fn locate(e: Error, offset: u64) -> Error {
+    match e {
+        Error::Corrupt { encoding, what } => Error::CorruptAt {
+            encoding,
+            what,
+            offset,
+        },
+        other => other,
+    }
+}
+
+/// [`locate`] as a `map_err` argument.
+pub(crate) fn at(offset: u64) -> impl Fn(Error) -> Error {
+    move |e| locate(e, offset)
+}
+
+/// [`from_format`] for the header and slots: at the page the format error found its field in, the header (0) or a
+/// slot (4096, 8192). A format error carries the offset of its field; ours, the start of the slot.
+fn from_format_in_prefix(e: persia_format::Error) -> Error {
+    match e.corruption() {
+        Some((offset, _)) => {
+            let page = offset
+                .min(FIRST_FRAME.saturating_sub(1))
+                .checked_div(4096)
+                .unwrap_or(0)
+                .saturating_mul(4096);
+            from_format_at(e, page)
+        }
+        None => from_format(e),
+    }
+}
+
 /// One superblock slot of a pack (SPEC §9.3), the double-buffered commit record of SPEC §4.3 with the pack's fields:
 ///
 /// ```text
@@ -262,13 +315,14 @@ pub fn new_pack_prefix(db_uuid: [u8; 16], pack_id: u128) -> Result<Vec<u8>> {
 /// the file ([`PackSuperblock::check_bounds`]).
 ///
 /// # Errors
-/// [`Error::Corrupt`] (a short prefix, a bad magic, a CRC mismatch, no valid slot, conflicting slots), or
+/// [`Error::CorruptAt`] at the header (0) or the slot (4096, 8192) found damaged: a short prefix, a bad magic, a CRC
+/// mismatch, no valid slot (at slot A) or conflicting slots (at slot B); or
 /// [`Error::PackUnsupported`] for a newer major or unknown `incompat_flags`.
 pub fn decode_prefix(bytes: &[u8]) -> Result<Prefix> {
     let mut r = Reader::new(bytes);
-    let header = Header::decode_with(&mut r, &BLOB_PACK).map_err(from_format)?;
+    let header = Header::decode_with(&mut r, &BLOB_PACK).map_err(from_format_in_prefix)?;
     debug_assert_eq!(r.position(), HEADER_LEN);
-    let mut slots = r.sub_reader(SLOTS_LEN).map_err(from_format)?;
+    let mut slots = r.sub_reader(SLOTS_LEN).map_err(from_format_in_prefix)?;
     let a_offset = Slot::A.offset();
     let b_offset = Slot::B.offset();
     let a = slots
@@ -284,7 +338,7 @@ pub fn decode_prefix(bytes: &[u8]) -> Result<Prefix> {
         a_offset,
         b_offset,
     )
-    .map_err(from_format)?;
+    .map_err(from_format_in_prefix)?;
     Ok(Prefix {
         header,
         slot,
@@ -427,9 +481,14 @@ pub fn chunk_frame_len(len: u32) -> u64 {
 /// combined with the head's and the padding's into the frame's.
 ///
 /// # Errors
-/// [`Error::Corrupt`] for any rule that does not hold, [`Error::PackUnsupported`] for unknown frame flags in an
-/// otherwise valid frame.
+/// [`Error::CorruptAt`] at `offset` for any rule that does not hold, [`Error::PackUnsupported`] for unknown frame
+/// flags in an otherwise valid frame.
 pub fn check_chunk_frame(frame: &[u8], offset: u64, expected: ChunkHead) -> Result<&[u8]> {
+    check_chunk_frame_unlocated(frame, offset, expected).map_err(at(offset))
+}
+
+/// [`check_chunk_frame`] before its errors are located.
+fn check_chunk_frame_unlocated(frame: &[u8], offset: u64, expected: ChunkHead) -> Result<&[u8]> {
     let header =
         FrameHeader::decode(&mut Reader::with_base_offset(frame, offset)).map_err(from_format)?;
     if header.payload_len()
@@ -590,12 +649,20 @@ pub fn encode_index_frame(
 /// offsets. Allocates at most the payload's length.
 ///
 /// # Errors
-/// - the blob manifest's errors ([`BlobManifest::decode`]): [`Error::Corrupt`], [`Error::UnsupportedVersion`],
-///   [`Error::UnsupportedFlags`];
-/// - [`Error::Corrupt`] for a short payload, non-zero reserved or padding bytes, a `manifest_len` past the payload,
-///   not exactly one offset per chunk after it, or an offset that is not 8-aligned in `12288..frame_offset` (a chunk
-///   is staged before the index that names it).
+/// - the blob manifest's errors ([`BlobManifest::decode`]): [`Error::CorruptAt`] at `frame_offset`,
+///   [`Error::UnsupportedVersion`], [`Error::UnsupportedFlags`];
+/// - [`Error::CorruptAt`] at `frame_offset` for a short payload, non-zero reserved or padding bytes, a `manifest_len`
+///   past the payload, not exactly one offset per chunk after it, or an offset that is not 8-aligned in
+///   `12288..frame_offset` (a chunk is staged before the index that names it).
 pub fn decode_index_payload(payload: &[u8], frame_offset: u64) -> Result<(BlobManifest, Vec<u64>)> {
+    decode_index_payload_unlocated(payload, frame_offset).map_err(at(frame_offset))
+}
+
+/// [`decode_index_payload`] before its errors are located.
+fn decode_index_payload_unlocated(
+    payload: &[u8],
+    frame_offset: u64,
+) -> Result<(BlobManifest, Vec<u64>)> {
     let short = || corrupt("an index frame shorter than its head");
     let mut r = Reader::new(payload);
     let manifest_len = usize_from_u32(r.read_u32().map_err(|_| short())?);
@@ -642,9 +709,14 @@ pub fn decode_index_payload(payload: &[u8], frame_offset: u64) -> Result<(BlobMa
 /// `frame_seq` and payload. `bytes` start at absolute offset `offset`.
 ///
 /// # Errors
-/// [`Error::Corrupt`] for an invalid frame (SPEC §4.4), one that is not exactly `bytes` long, of another kind, or
-/// compressed (a pack never compresses, SPEC §9.2); [`Error::PackUnsupported`] for unknown frame flags.
+/// [`Error::CorruptAt`] at `offset` for an invalid frame (SPEC §4.4), one that is not exactly `bytes` long, of another
+/// kind, or compressed (a pack never compresses, SPEC §9.2); [`Error::PackUnsupported`] for unknown frame flags.
 pub fn decode_frame(bytes: &[u8], offset: u64, kind: FrameKind) -> Result<(u64, &[u8])> {
+    decode_frame_unlocated(bytes, offset, kind).map_err(at(offset))
+}
+
+/// [`decode_frame`] before its errors are located.
+fn decode_frame_unlocated(bytes: &[u8], offset: u64, kind: FrameKind) -> Result<(u64, &[u8])> {
     let mut r = Reader::with_base_offset(bytes, offset);
     let frame = Frame::decode(&mut r).map_err(from_format)?;
     if !r.is_empty() {
@@ -998,6 +1070,7 @@ mod tests {
                 f[i] ^= 1 << bit;
                 let e = check_chunk_frame(&f, FIRST_FRAME, expected).unwrap_err();
                 assert!(e.is_corruption(), "byte {i} bit {bit}: {e:?}");
+                assert_eq!(e.corrupt_offset(), Some(FIRST_FRAME), "byte {i} bit {bit}");
             }
         }
         for cut in [0, 23, 24, frame.len() - 1] {
@@ -1040,8 +1113,9 @@ mod tests {
         reseal(&mut forged);
         assert!(matches!(
             check_chunk_frame(&forged, FIRST_FRAME, expected),
-            Err(Error::Corrupt {
+            Err(Error::CorruptAt {
                 what: "a chunk's CRC32C differs from its manifest's",
+                offset: FIRST_FRAME,
                 ..
             })
         ));
