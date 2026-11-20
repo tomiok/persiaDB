@@ -238,6 +238,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "remote_resume"
+path = "fuzz_targets/remote_resume.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "pack_reader"
 path = "fuzz_targets/pack_reader.rs"
 test = false
