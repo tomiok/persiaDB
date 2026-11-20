@@ -92,7 +92,7 @@ pub use search::{
     Cursor, CursorOrigin, DEFAULT_LIMIT, SearchHit, SearchRequest, SearchResults, StepCursor,
 };
 pub use snapshot::{CollectionSnapshot, DatabaseReader, Located, Snapshot};
-pub use verify::{Tail, VerifyReport};
+pub use verify::{BlobRefSite, BlobReference, Tail, VerifyReport};
 pub use views::{CollectionHit, CollectionViews};
 
 use crate::document::Document;

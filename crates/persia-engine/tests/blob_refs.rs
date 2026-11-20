@@ -13,6 +13,7 @@
     clippy::unwrap_used,
     clippy::panic,
     clippy::indexing_slicing,
+    clippy::result_large_err,
     missing_docs
 )] // Tests: inputs are generated or fixed.
 
@@ -272,4 +273,47 @@ fn held_collection_snapshots_memtable_views_and_sidecars_keep_their_blobs() {
     assert_eq!(db.referenced_blobs().unwrap(), ids([4, 5, 6]));
     drop((segment, deleted));
     assert_eq!(db.referenced_blobs().unwrap(), ids([4, 6]));
+}
+
+/// What `ReadOnlyDatabase::blob_references` lists for `verify` (SPEC §9.5, ROADMAP 9.5.3): `(collection, id, blob
+/// seed, in a segment)` of each reference, in order.
+fn listed(file: &SimFile) -> Vec<(String, String, u8, bool)> {
+    let reader = persia_engine::db::ReadOnlyDatabase::open_on(
+        file.crash(CrashLoss::Nothing),
+        &persia_analysis::AnalyzerRegistry::builtin(),
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    reader
+        .blob_references(|r| {
+            let in_segment = matches!(r.site, persia_engine::db::BlobRefSite::Segment { .. });
+            let seed = r.blob_ref.blob_id().as_bytes()[0];
+            out.push((r.collection, r.id, seed, in_segment));
+            Ok::<_, persia_engine::db::DatabaseError>(())
+        })
+        .unwrap();
+    out
+}
+
+/// Live segment documents as their committed tombstones leave them, then every WAL put from `wal_start` on, replaced
+/// or deleted since included; documents without a reference are skipped.
+#[test]
+fn blob_references_lists_live_segment_documents_and_every_wal_put() {
+    let (file, mut db) = create();
+    db.put("c", &doc(1, Some(1)), Durability::Fsync).unwrap();
+    db.put("c", &doc(2, Some(2)), Durability::Fsync).unwrap();
+    db.put("c", &doc(3, None), Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    db.delete("c", "d2", Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    // After the last commit: only in the WAL, the replaced put too.
+    db.put("c", &doc(4, Some(4)), Durability::Fsync).unwrap();
+    db.put("c", &doc(4, Some(5)), Durability::Fsync).unwrap();
+    db.delete("c", "d4", Durability::Fsync).unwrap();
+    let found = listed(&file);
+    let row = |id: &str, seed, seg| ("c".to_owned(), id.to_owned(), seed, seg);
+    assert_eq!(
+        found,
+        [row("d1", 1, true), row("d4", 4, false), row("d4", 5, false)]
+    );
 }

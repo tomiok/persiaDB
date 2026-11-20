@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 pub mod layout;
 mod store;
 
-pub use store::{PackMode, PackRecovery, PackStore};
+pub use store::{PackMode, PackRecovery, PackScan, PackStore};
 // The writer-lock proof a read-write open takes (ROADMAP 9.2.7, ADR-0053), for callers that reach `persia-storage`
 // only through this crate.
 pub use persia_storage::container::WriterProof;

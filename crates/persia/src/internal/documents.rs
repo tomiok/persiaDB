@@ -438,8 +438,17 @@ impl ReadOnlyBlobDatabase<File> {
     /// one of another database).
     pub fn open(path: impl AsRef<Path>, options: &DatabaseOptions) -> Result<Self, Error> {
         let path = path.as_ref();
-        let db = ReadOnlyDatabase::open(path, &options.registry)?;
-        let pack = pack_beside(db.container().path(), path);
+        Self::with_pack_beside(ReadOnlyDatabase::open(path, &options.registry)?, path)
+    }
+
+    /// `db`, opened read-only from the container at `path`, with its pack opened read-only beside the container's
+    /// canonical path, as [`ReadOnlyBlobDatabase::open`] finds it: for a caller that opens the documents itself (the
+    /// CLI's `verify` reports their errors first).
+    ///
+    /// # Errors
+    /// As [`PackStore::open`].
+    pub fn with_pack_beside(db: ReadOnlyDatabase, path: impl AsRef<Path>) -> Result<Self, Error> {
+        let pack = pack_beside(db.container().path(), path.as_ref());
         let store = PackStore::open(pack, db.container().header().db_uuid)?;
         Ok(Self {
             blobs: Blobs::new(Arc::new(store)),
@@ -515,6 +524,18 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyBlobDatabase<F> {
         range: core::ops::Range<u64>,
     ) -> Result<Vec<u8>, Error> {
         Ok(self.blobs.get_blob_range(blob_ref, range)?)
+    }
+}
+
+impl Error {
+    /// Whether this reports corrupt stored bytes: a damaged pack or database ([`persia_blob::Error::is_corruption`],
+    /// [`DatabaseError::is_corruption`]). What `persia verify` exits with its corruption status for.
+    pub fn is_corruption(&self) -> bool {
+        match self {
+            Self::Blob(e) => e.is_corruption(),
+            Self::Database(e) => e.is_corruption(),
+            Self::Open { .. } | Self::BlobNotStored { .. } => false,
+        }
     }
 }
 // -- end wiring --

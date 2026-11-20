@@ -372,6 +372,13 @@ fn verify_reports_a_sound_database_also_beside_its_writer() {
         pair("replayed", "1 WAL records"),
         pair("uncommitted", "1 frames"),
         pair("tail", "clean"),
+        pair("references", "0 to 0 blobs"),
+        pair("pack", "none"),
+        pair("scan", "no pack"),
+        pair(
+            "rehashed",
+            "skipped (--deep re-hashes every referenced blob)",
+        ),
         pair("verify", "ok"),
     ];
     // Read-only: the writer keeps its lock and the file is unchanged.
@@ -965,4 +972,159 @@ fn inspect_container_reports_a_wal_frame_it_cannot_read() {
         ],
         "{rows:?}"
     );
+}
+
+/// A database whose collection `files` holds `a` with a stored blob, committed (in a segment), and `b` with another,
+/// only in the WAL; its writer is dropped. Returns the two blob references.
+fn blob_database(path: &Path) -> (persia_format::BlobRef, persia_format::BlobRef) {
+    use persia::internal::documents::{Blob, BlobDatabase};
+    use persia_engine::db::DatabaseOptions;
+    use persia_engine::document::Document;
+    use persia_engine::schema::SchemaBuilder;
+    use persia_engine::wal::Durability;
+
+    let mut db = BlobDatabase::create(path, DatabaseOptions::default()).unwrap();
+    db.log_mut()
+        .create_collection(SchemaBuilder::new("files").build().unwrap())
+        .unwrap();
+    let a = db
+        .put(
+            "files",
+            &Document::new("a"),
+            Blob::from_reader(&[1_u8; 3000][..]),
+            Durability::Fsync,
+        )
+        .unwrap();
+    db.commit().unwrap();
+    let b = db
+        .put(
+            "files",
+            &Document::new("b"),
+            Blob::from_reader(&vec![2_u8; 70_000][..]),
+            Durability::Fsync,
+        )
+        .unwrap();
+    (a, b)
+}
+
+/// A reference set below the public API (`Document::set_blob_ref`), with no blob behind it, in a document `id`.
+fn dangling(path: &Path, id: &str, commit: bool) -> persia_format::BlobId {
+    use persia_engine::db::{Database, DatabaseOptions};
+    use persia_engine::document::Document;
+    use persia_engine::wal::Durability;
+    use persia_format::{BlobId, BlobRef};
+
+    let blob_id = BlobId::from_bytes([0x5a; 32]);
+    let mut db = Database::open(path, DatabaseOptions::default()).unwrap();
+    let mut doc = Document::new(id);
+    doc.set_blob_ref(Some(
+        BlobRef::new(
+            blob_id,
+            3,
+            "text/plain",
+            1 << 16,
+            std::collections::BTreeMap::new(),
+        )
+        .unwrap(),
+    ));
+    db.put("files", &doc, Durability::Fsync).unwrap();
+    if commit {
+        db.commit().unwrap();
+    }
+    blob_id
+}
+
+#[test]
+fn verify_checks_every_referenced_blob_and_scans_the_pack() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    blob_database(&path);
+    let found = report(&persia(&["verify", path_arg(&path)]));
+    for row in [
+        pair("references", "2 to 2 blobs"),
+        pair("pack", "2 blobs bound"),
+        // Each blob is one chunk at the default chunk size (4 MiB), then its index frame.
+        pair("scan", "4 frames: 2 chunks (0 orphans), 2 indexes"),
+        pair(
+            "rehashed",
+            "skipped (--deep re-hashes every referenced blob)",
+        ),
+    ] {
+        assert!(found.contains(&row), "{found:?}");
+    }
+    let quick = report(&persia(&["verify", "--quick", path_arg(&path)]));
+    assert!(
+        quick.contains(&pair("scan", "skipped (--quick)")),
+        "{quick:?}"
+    );
+    let deep = report(&persia(&["verify", "--deep", path_arg(&path)]));
+    assert!(deep.contains(&pair("rehashed", "2 blobs")), "{deep:?}");
+    // The two cannot be asked for together.
+    let both = persia(&["verify", "--quick", "--deep", path_arg(&path)]);
+    assert_eq!(both.status.code(), Some(2));
+}
+
+/// The failure of a `persia verify` that must exit with the corruption status: its stderr.
+fn corrupt(args: &[&str]) -> String {
+    let out = persia(args);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(3), "{args:?}: {err}");
+    assert_eq!(out.stdout, b"", "{args:?}");
+    err
+}
+
+#[test]
+fn verify_fails_on_a_dangling_reference_in_a_segment_or_the_wal() {
+    let _serial = serial();
+    for commit in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.persia");
+        blob_database(&path);
+        let id = if commit { "in-segment" } else { "in-wal" };
+        let blob_id = dangling(&path, id, commit);
+        for mode in ["--quick", "--deep"] {
+            let err = corrupt(&["verify", mode, path_arg(&path)]);
+            for named in ["\"files\"", &format!("\"{id}\""), &blob_id.to_string()] {
+                assert!(err.contains(named), "{mode}: {named} in {err}");
+            }
+            let place = if commit { "in segment" } else { "WAL record" };
+            assert!(err.contains(place), "{mode}: {err}");
+        }
+    }
+}
+
+#[test]
+fn verify_fails_on_a_container_copied_without_its_pack() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let (a, _) = blob_database(&path);
+    let copy = dir.path().join("copy.persia");
+    std::fs::copy(&path, &copy).unwrap();
+    let err = corrupt(&["verify", "--quick", path_arg(&copy)]);
+    assert!(err.contains("no blob pack"), "{err}");
+    assert!(err.contains(&a.blob_id().to_string()), "{err}");
+    // A database whose documents reference no blob needs no pack.
+    let empty = dir.path().join("empty.persia");
+    drop(database(&empty));
+    report(&persia(&["verify", path_arg(&empty)]));
+}
+
+#[test]
+fn verify_scans_every_pack_frame_unless_quick() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    blob_database(&path);
+    let pack = dir.path().join("app.persia.blobs");
+    let mut bytes = std::fs::read(&pack).unwrap();
+    // A byte of the first chunk's data (12288: the first frame; 24 + 32: its frame header and chunk head).
+    bytes[12288 + 24 + 32 + 100] ^= 0x01;
+    std::fs::write(&pack, &bytes).unwrap();
+    let err = corrupt(&["verify", path_arg(&path)]);
+    assert!(err.contains("scanning the blob pack"), "{err}");
+    assert!(err.contains("12288"), "{err}");
+    // The references are all bound: only the scan reads chunk bytes.
+    report(&persia(&["verify", "--quick", path_arg(&path)]));
 }

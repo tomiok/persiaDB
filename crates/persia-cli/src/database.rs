@@ -1,4 +1,5 @@
-//! `persia verify` (ROADMAP 6.6.3): checks a whole database read-only, with [`ReadOnlyDatabase::verify`].
+//! `persia verify` (ROADMAP 6.6.3, 9.5.3): checks a whole database read-only, with [`ReadOnlyDatabase::verify`], then
+//! its blobs with [`ReadOnlyBlobDatabase::verify_blobs`] (SPEC §9.5, ADR-0053).
 //!
 //! The output is for people: `key  value` lines, then `verify  ok`. A failed check is the command's error.
 
@@ -6,10 +7,13 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use persia::internal::documents::ReadOnlyBlobDatabase;
+use persia::internal::verify::Scan;
 use persia_engine::db::{DatabaseOptions, ReadOnlyDatabase, Tail};
 
-/// Opens the database at `path` read-only, verifies it, and writes what it found to `out`.
-pub fn verify(out: &mut dyn Write, path: &Path) -> Result<()> {
+/// Opens the database at `path` read-only, verifies it and its blobs as deep as `scan` asks, and writes what it found
+/// to `out`.
+pub fn verify(out: &mut dyn Write, path: &Path, scan: Scan) -> Result<()> {
     if !path.is_file() {
         bail!("{} is not a container file", path.display());
     }
@@ -31,7 +35,7 @@ pub fn verify(out: &mut dyn Write, path: &Path) -> Result<()> {
         }
         other => format!("{other:?}"),
     };
-    let rows = [
+    let mut rows = vec![
         ("seq", report.seq.to_string()),
         ("collections", report.collections.to_string()),
         ("segments", report.segments.to_string()),
@@ -47,7 +51,42 @@ pub fn verify(out: &mut dyn Write, path: &Path) -> Result<()> {
         ("tail", tail),
     ];
     // -- wiring (9.5.3, 9.5.6) --
-    // blob/wiring: the blob rows and the dangling-reference errors (SPEC §9.5) go here.
+    // The blob rows; a dangling reference (SPEC §9.5) or a damaged pack frame is the command's error.
+    let db = ReadOnlyBlobDatabase::with_pack_beside(db, path)
+        .with_context(|| format!("opening the blob pack of {}", path.display()))?;
+    let blobs = db
+        .verify_blobs(scan)
+        .with_context(|| format!("verifying the blobs of {}", path.display()))?;
+    rows.push((
+        "references",
+        format!("{} to {} blobs", blobs.references, blobs.blobs),
+    ));
+    rows.push((
+        "pack",
+        if blobs.pack {
+            format!("{} blobs bound", blobs.bound)
+        } else {
+            "none".to_owned()
+        },
+    ));
+    rows.push((
+        "scan",
+        match (blobs.scan, scan) {
+            (Some(s), _) => format!(
+                "{} frames: {} chunks ({} orphans), {} indexes",
+                s.frames, s.chunks, s.orphan_chunks, s.indexes
+            ),
+            (None, Scan::Quick) => "skipped (--quick)".to_owned(),
+            (None, _) => "no pack".to_owned(),
+        },
+    ));
+    rows.push((
+        "rehashed",
+        match blobs.rehashed {
+            Some(n) => format!("{n} blobs"),
+            None => "skipped (--deep re-hashes every referenced blob)".to_owned(),
+        },
+    ));
     // -- end wiring --
     for (key, value) in rows {
         writeln!(out, "{key:<18}{value}")?;

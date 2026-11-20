@@ -1007,5 +1007,11 @@ mod sweep;
 use sweep::sweep_stale_files;
 //
 
+// -- wiring (9.5.3) --
+// The checksum scan `persia verify` runs over the pack (ROADMAP 9.5.3, ADR-0053).
+mod scan;
+pub use scan::PackScan;
+// -- end wiring --
+
 use mapped::Mapper;
 use recover::{check_scan, read_prefix, recover, scan_committed};

@@ -1,6 +1,6 @@
 //! Fuzz the blob pack reader (ROADMAP 9.2.5; SPEC §9.3, §17, ADR-0049): opening a pack file of arbitrary bytes and
 //! reading every blob it indexes never panics, a read-write open's recovery is idempotent, and a recovered pack takes
-//! a new blob and reads it back.
+//! a new blob and reads it back. The checksum scan `persia verify` runs over it (ROADMAP 9.5.3) never panics either.
 //!
 //! The first input byte picks the mode: 0, the rest is the whole file; otherwise the rest is a list of 3-byte edits
 //! (`offset u16`, `value u8`) applied to a valid two-blob pack, whose slot and frame CRCs are then recomputed when the
@@ -228,6 +228,8 @@ fuzz_target!(|data: &[u8]| {
     f.write_all_at(&file, 0).expect("write");
     if let Ok(store) = open(&fs, PackMode::ReadOnly) {
         read_every_blob(&store);
+        // The checksum scan `persia verify` runs (ROADMAP 9.5.3) reads every committed frame: it never panics.
+        let _ = store.scan_checksums();
         let _ = store.refresh();
     }
     let Ok(store) = open(&fs, PackMode::ReadWrite) else {
