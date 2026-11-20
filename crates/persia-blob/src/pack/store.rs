@@ -200,8 +200,9 @@ impl<F: ContainerFile + 'static> PackStore<F> {
     /// `log_end` and syncs it: nothing after `log_end` was ever acknowledged.
     ///
     /// Before it opens the file, a read-write open removes the stale temporary files of crashed pack creations and
-    /// rewrites beside it (`<pack>.tmp.<nonce>.<n>`, counted in [`PackRecovery::swept`]); one it cannot remove is
-    /// logged, not an error: it holds nothing the pack needs, and the next read-write open tries again (ROADMAP 9.2.6).
+    /// rewrites beside it (`<pack>.tmp.<nonce>.<n>`, counted in [`PackRecovery::swept`]). A removal or directory
+    /// sync that fails logs a `tracing::warn!` and the open continues: such a file holds nothing the pack needs, and
+    /// the next read-write open tries again (ROADMAP 9.2.6).
     ///
     /// # Errors
     /// [`Error::Corrupt`] for a damaged header, slot or committed frame, [`Error::PackUnsupported`] for a newer

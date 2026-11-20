@@ -21,9 +21,10 @@ use persia_storage::vfs::{FileType, Vfs};
 
 /// Removes the stale temporary files of the pack at `path` (see the module docs) and returns them, in name order.
 ///
-/// Errors do not fail the open: what is left holds no acknowledged data, the next read-write open sweeps it again,
-/// and refusing the writer for it would stop the database over a file it never needs. They are logged; a failed
-/// removal does not stop the others.
+/// Errors do not fail the open: a failed listing, removal or directory sync logs a `tracing::warn!` and the open
+/// continues (a failed removal does not stop the others). What is left holds no acknowledged data, the next
+/// read-write open sweeps it again, and refusing the writer for it would stop the database over a file it never
+/// needs.
 pub(super) fn sweep_stale_files<F: ContainerFile>(
     vfs: &dyn Vfs<File = F>,
     path: &Path,
