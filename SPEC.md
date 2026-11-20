@@ -2618,7 +2618,10 @@ error but happened, poisons the handle (§18.10 (b)).
 The pack is created **lazily**, by the first `put_blob` (ROADMAP 9.2.1): opening or creating a database creates no
 pack, a database that never stored a blob has none, and an open that finds none has no blobs (a document that
 references one is dangling, which `verify` reports, §9.5). A read-only database opens its pack read-only and never creates it: with
-no pack, a `get_blob` fails as not bound, and its refresh opens a pack the writer has created since (ROADMAP 9.4.5). Creating it is durable before the first blob is bound: the
+no pack, a `get_blob` fails as not bound, and its refresh opens a pack the writer has created since (ROADMAP 9.4.5). That refresh takes a newer read-only
+open of the documents, then refreshes the pack, in that order: a blob is bound before any document that references
+it is logged. The pack is found beside the container's canonical path, so a database opened through a symlink uses
+the pack beside the real file. Creating it is durable before the first blob is bound: the
 file with its header and superblock synced, then its directory synced (§4.5.2). A read-write open first removes the stale
 temporary files a crashed creation or pack rewrite left beside the pack (`<name>.persia.blobs.tmp.<nonce>.<n>`), then
 syncs the directory; only the container's writer opens the pack read-write, so none is in use. It proves it: a
@@ -2730,7 +2733,11 @@ in a segment or in a WAL record from `wal_start` on, whose `BlobRef` names a blo
 manifest, or no pack at all), or whose manifest does not match it (`check_ref`), is an error that names the
 collection, the document id and the `blob_id`, never a warning. By default `verify` also scans the pack: every frame's
 checksum and every chunk's CRC32C, orphans included; `--quick` skips that scan, and `--deep` also re-hashes every
-referenced blob against its `blob_id` (ADR-0053). It checks the local layout; the remote one is ROADMAP 13.2.6. The engine itself does not look a `BlobRef` up when
+referenced blob against its `blob_id` (ADR-0053). It checks the local layout; the remote one is ROADMAP 13.2.6. The references checked are those
+`ReadOnlyDatabase::blob_references` lists: each document of a committed segment that its committed tombstones leave
+live, and every put of the WAL chunks the read-only open replayed, replaced since or not (what GC's mark keeps). The
+scan reads only the committed frames `12288..log_end`; an orphan chunk is one no bound blob names, counted and never
+an error. The engine itself does not look a `BlobRef` up when
 it logs or commits a document (it does not depend on `persia-blob`); the public API is what keeps references bound
 (§9.6).
 

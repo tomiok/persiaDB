@@ -10,6 +10,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 <!-- -- wiring (blob/wiring: 9.2.7, 9.4.5, 9.4.6, 9.5.3, 9.5.6) -- -->
+- `persia` (internal API): `BlobDatabase::create` / `open` open a database with its blob pack `<name>.persia.blobs`,
+  read-write with the container's writer proof; the pack is still created by the first `put_blob` (ROADMAP 9.4.5;
+  ADR-0053). `ReadOnlyBlobDatabase` opens the pack read-only and never creates it; its `refresh` finds a pack the
+  writer created since.
+- `persia verify` checks blobs (ROADMAP 9.5.3, 9.5.6): a live document or WAL put whose blob is missing is an error
+  (exit 3) naming the collection, document id and `blob_id`. By default it scans every pack frame's checksum and every
+  chunk's CRC32C; `--quick` skips that scan, and `--deep` also re-hashes every referenced blob.
+- `persia-blob`: `PackStore::scan_checksums`; `persia-engine`: `ReadOnlyDatabase::blob_references`;
+  `persia-storage`: `WriterProof` and `Container::writer_proof` (ROADMAP 9.2.7, 9.5.3).
 <!-- -- end wiring -- -->
 <!-- -- resume (blob/resume: 9.3.4, 9.3.6, 9.5.9) -- -->
 <!-- -- end resume -- -->
@@ -161,6 +170,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- `persia-blob`: `PackStore::open` / `open_in` open the pack read-only and take a `db_uuid`; only `open_writer` /
+  `open_writer_in` open it read-write, with the container's `WriterProof` (ROADMAP 9.2.7, ADR-0053).
 - `persia` (internal API): `put_blob` rejects a `bind_budget` above `MAX_BIND_BUDGET` (1 h) with
   `Error::BindBudgetAboveMax`, before reading any byte. GC's grace period must be at least `2 * MAX_BIND_BUDGET`:
   an attempt started just before the deadline can land its `put_if_absent` after the budget ends, and `gc`
