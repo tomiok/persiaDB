@@ -11,6 +11,9 @@
 //!    the original, with the same id.
 //! 5. A conflicting staged chunk restarts under a new upload id: `restage` copies what was staged, the rest is staged
 //!    under the new id, and the blob binds and reads back; a chunk changed before the restage is `Corrupt`.
+//! 6. A listing in any order, with gaps or repeated entries, and a chunk gone or of another length between the
+//!    listing and its get, never put a chunk in the kept run that is not the real one at its index: the run is a
+//!    prefix of the real one, and the resumed upload binds the original blob.
 //!
 //! Seeds: proptest's default config; `PROPTEST_RNG_SEED` and `PROPTEST_CASES` override it.
 
@@ -440,4 +443,246 @@ fn stage_chunks_stages_each_from_its_first_index() {
             Err(Error::InvalidManifest { .. })
         ));
     }
+}
+
+// -- Listings a backend gets wrong, and chunks that change under the resume (SPEC §9.4, §10.1) --
+//
+// Invariant 6: whatever the listing says (any order, gaps, repeats) and whatever happens to a chunk between the
+// listing and its get (gone, another length), `resume` keeps only chunks it read back full at their own index, so its
+// kept run is a prefix of the real one and the resumed upload binds the original blob.
+
+type Reshape = Box<dyn Fn(&mut Vec<persia_storage::ObjectMeta>) + Send + Sync>;
+type AfterList<S> = std::sync::Mutex<Option<Box<dyn FnOnce(&S) + Send>>>;
+
+/// A backend whose `list` answers are reshaped by `reshape`, and that runs `after_list` once, right after the first
+/// listing of an upload prefix: as another process would act between the resume's listing and its gets.
+struct Listing<S> {
+    inner: S,
+    reshape: Reshape,
+    after_list: AfterList<S>,
+}
+
+impl<S: Storage> Listing<S> {
+    fn new(inner: S) -> Self {
+        Self {
+            inner,
+            reshape: Box::new(|_| {}),
+            after_list: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+impl<S: Storage> Storage for Listing<S> {
+    fn get_range(
+        &self,
+        key: &persia_storage::Key,
+        range: core::ops::Range<u64>,
+    ) -> persia_storage::Result<persia_format::ByteSource> {
+        self.inner.get_range(key, range)
+    }
+    fn get(&self, key: &persia_storage::Key) -> persia_storage::Result<Bytes> {
+        self.inner.get(key)
+    }
+    fn put(&self, key: &persia_storage::Key, data: Bytes) -> persia_storage::Result<()> {
+        self.inner.put(key, data)
+    }
+    fn put_if_absent(
+        &self,
+        key: &persia_storage::Key,
+        data: Bytes,
+    ) -> persia_storage::Result<persia_storage::PutOutcome> {
+        self.inner.put_if_absent(key, data)
+    }
+    fn list(
+        &self,
+        prefix: &persia_storage::KeyPrefix,
+    ) -> persia_storage::Result<Vec<persia_storage::ObjectMeta>> {
+        let mut listed = self.inner.list(prefix)?;
+        (self.reshape)(&mut listed);
+        if prefix.as_str().starts_with("blobs/uploads/") {
+            let hook = self.after_list.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook(&self.inner);
+            }
+        }
+        Ok(listed)
+    }
+    fn delete(&self, key: &persia_storage::Key) -> persia_storage::Result<()> {
+        self.inner.delete(key)
+    }
+    fn capabilities(&self) -> persia_storage::Capabilities {
+        self.inner.capabilities()
+    }
+}
+
+fn key(upload: u128, index: u32) -> persia_storage::Key {
+    persia_storage::Key::new(chunk_key(upload, index)).unwrap()
+}
+
+/// The length of the run of full chunks from 0 among `staged` (a staged short chunk is the blob's last).
+fn true_run(staged: &[bool], len: usize, chunk: usize) -> usize {
+    staged
+        .iter()
+        .enumerate()
+        .take_while(|&(i, &s)| s && (i + 1) * chunk <= len)
+        .count()
+}
+
+/// A deterministic permutation of `v` from `seed` (Fisher–Yates over xorshift).
+fn shuffle<T>(v: &mut [T], seed: u64) {
+    let mut x = seed | 1;
+    for i in (1..v.len()).rev() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        v.swap(i, (x % (i as u64 + 1)) as usize);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: if cfg!(feature = "slow") { 2048 } else { 128 },
+        rng_seed: proptest::test_runner::RngSeed::Fixed(0x7265_7375_6d65_0934),
+        ..ProptestConfig::default()
+    })]
+
+    /// Invariant 6 over listings in any order, with gaps and repeated entries, at any parallelism.
+    #[test]
+    fn a_listing_in_any_order_with_gaps_keeps_a_prefix_of_the_real_run(
+        len in 0_usize..60,
+        chunk in 1_u32..=7,
+        staged in prop::collection::vec(any::<bool>(), 0..=15),
+        order in any::<u64>(),
+        repeat in any::<bool>(),
+        parallelism in 1_usize..=4,
+        seed in any::<u8>(),
+    ) {
+        let data = data_of(len, seed);
+        let n = len.div_ceil(chunk as usize);
+        let staged: Vec<bool> = (0..n).map(|i| staged.get(i).copied().unwrap_or(false)).collect();
+        let mut storage = Listing::new(MemoryStorage::new());
+        storage.reshape = Box::new(move |listed| {
+            if repeat && let Some(first) = listed.first().cloned() {
+                listed.push(first);
+            }
+            shuffle(listed, order);
+        });
+        let store = RemoteBlobStore::new(storage).with_parallelism(par(parallelism));
+        let which: Vec<usize> = (0..n).filter(|&i| staged[i]).collect();
+        stage_some(&store, &data, chunk, 77, &which);
+
+        let resumed = store.resume(token(77, chunk)).unwrap();
+        let run = resumed.next_index() as usize;
+        prop_assert!(run <= true_run(&staged, len, chunk as usize), "kept {run} of {staged:?}");
+        let want = manifest_of(&data, chunk, 77);
+        prop_assert_eq!(resumed.chunk_crcs(), &want.chunk_crcs()[..run]);
+        prop_assert_eq!(resumed.offset(), (run * chunk as usize) as u64);
+        let mut listed = resumed.listed().to_vec();
+        listed.sort_unstable();
+        listed.dedup();
+        prop_assert_eq!(listed, which.iter().map(|&i| i as u32).collect::<Vec<_>>());
+
+        let m = put_resumable(&store, &data, token(77, chunk), UploadId::new(78));
+        prop_assert_eq!(m.blob_id(), want.blob_id());
+        prop_assert_eq!(m.chunk_crcs(), want.chunk_crcs());
+        prop_assert_eq!(store.bind(&m).unwrap(), BindOutcome::Bound);
+        prop_assert_eq!(read_range(&store, &blob_ref(&m), 0..m.size()).unwrap(), data);
+    }
+}
+
+#[test]
+fn a_listing_in_index_order_keeps_the_whole_run() {
+    // The control of the property above: the sorted listing a conforming backend returns (SPEC §10.1).
+    let data = data_of(26, 1);
+    let store = RemoteBlobStore::new(MemoryStorage::new());
+    stage_some(&store, &data, 4, 77, &[0, 1, 2, 3, 4, 5, 6]);
+    let resumed = store.resume(token(77, 4)).unwrap();
+    assert_eq!(resumed.next_index(), 6, "the short last chunk is not kept");
+    assert_eq!(resumed.listed(), [0, 1, 2, 3, 4, 5, 6]);
+    // Reversed, chunk 0 is not listed first: nothing is kept, and the indices are still all listed.
+    let mut storage = Listing::new(MemoryStorage::new());
+    storage.reshape = Box::new(|listed| listed.reverse());
+    let store = RemoteBlobStore::new(storage);
+    stage_some(&store, &data, 4, 77, &[0, 1, 2, 3, 4, 5, 6]);
+    let resumed = store.resume(token(77, 4)).unwrap();
+    assert_eq!(resumed.next_index(), 0);
+    assert_eq!(resumed.listed(), [6, 5, 4, 3, 2, 1, 0]);
+}
+
+#[test]
+fn a_chunk_gone_between_the_listing_and_its_get_ends_the_run_there() {
+    let data = data_of(26, 2);
+    for gone in 0..6_u32 {
+        for p in [1, 2, 4, 8] {
+            let storage = Listing::new(MemoryStorage::new());
+            *storage.after_list.lock().unwrap() = Some(Box::new(move |s: &MemoryStorage| {
+                s.delete(&key(77, gone)).unwrap();
+            }));
+            let store = RemoteBlobStore::new(storage).with_parallelism(par(p));
+            stage_some(&store, &data, 4, 77, &[0, 1, 2, 3, 4, 5, 6]);
+            let resumed = store.resume(token(77, 4)).unwrap();
+            assert_eq!(resumed.next_index(), gone, "gone {gone}, parallelism {p}");
+            assert_eq!(
+                resumed.chunk_crcs(),
+                &manifest_of(&data, 4, 77).chunk_crcs()[..gone as usize]
+            );
+            assert_eq!(resumed.listed(), [0, 1, 2, 3, 4, 5, 6], "as listed");
+            // The gone chunk is written again under the same upload: no conflict, the original blob binds.
+            let m = put_resumable(&store, &data, token(77, 4), UploadId::new(78));
+            assert_eq!(m, manifest_of(&data, 4, 77), "gone {gone}, parallelism {p}");
+            assert_eq!(store.bind(&m).unwrap(), BindOutcome::Bound);
+            assert_eq!(read_range(&store, &blob_ref(&m), 0..26).unwrap(), data);
+        }
+    }
+}
+
+#[test]
+fn a_chunk_of_another_length_read_back_ends_the_run_and_restarts_on_its_conflict() {
+    let data = data_of(26, 3);
+    // Listed full, read back one byte short, one byte long, or empty.
+    for (at, edit) in [(0_u32, -1_i8), (2, 1), (3, -4), (5, 1)] {
+        for p in [1, 3] {
+            let storage = Listing::new(MemoryStorage::new());
+            let replaced: Vec<u8> = {
+                let mut c = data[at as usize * 4..at as usize * 4 + 4].to_vec();
+                if edit < 0 {
+                    c.truncate(4 - edit.unsigned_abs() as usize);
+                } else {
+                    c.push(0xEE);
+                }
+                c
+            };
+            *storage.after_list.lock().unwrap() = Some(Box::new(move |s: &MemoryStorage| {
+                s.delete(&key(77, at)).unwrap();
+                s.put(&key(77, at), Bytes::from(replaced)).unwrap();
+            }));
+            let store = RemoteBlobStore::new(storage).with_parallelism(par(p));
+            stage_some(&store, &data, 4, 77, &[0, 1, 2, 3, 4, 5, 6]);
+            let resumed = store.resume(token(77, 4)).unwrap();
+            assert_eq!(
+                resumed.next_index(),
+                at,
+                "at {at} {edit:+}, parallelism {p}"
+            );
+            // Its true bytes then conflict with the other ones staged there: the upload restarts under 78 with
+            // the kept run copied, and binds the original blob.
+            let m = put_resumable(&store, &data, token(77, 4), UploadId::new(78));
+            assert_eq!(m.upload_id(), UploadId::new(78));
+            assert_eq!(m, manifest_of(&data, 4, 78));
+            assert_eq!(store.bind(&m).unwrap(), BindOutcome::Bound);
+            assert_eq!(read_range(&store, &blob_ref(&m), 0..26).unwrap(), data);
+        }
+    }
+}
+
+#[test]
+fn a_listing_that_reports_a_full_chunk_short_ends_the_run_before_reading_it() {
+    let mut storage = KeyFaults::new(MemoryStorage::new());
+    storage.list_size = Some(3);
+    let store = RemoteBlobStore::new(storage);
+    let data = data_of(12, 4);
+    stage_some(&store, &data, 4, 1, &[0, 1, 2]);
+    let resumed = store.resume(token(1, 4)).unwrap();
+    assert_eq!(resumed.next_index(), 0);
+    assert_eq!(resumed.listed(), [0, 1, 2]);
 }

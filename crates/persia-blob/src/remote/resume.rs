@@ -345,3 +345,165 @@ mod tests {
         assert_eq!(copied, [0, 1]);
     }
 }
+
+// Edges of `skip_kept` (SPEC §9.4: the resuming client passes the whole blob, and its kept bytes are checked against
+// the staged chunks' CRC32Cs, not uploaded again). Small chunks over a manual clock: Miri runs them.
+#[cfg(test)]
+mod skip_kept_edges {
+    use core::num::NonZeroUsize;
+    use std::io;
+    use std::sync::Arc;
+    use std::time::UNIX_EPOCH;
+
+    use persia_storage::MemoryStorage;
+    use persia_storage::retry::ManualClock;
+
+    use super::*;
+
+    const BLOB: &[u8] = b"abcdefghijkl";
+
+    /// `abcd efgh ijkl` fully staged at chunk size 4, plus `kept` chunks of it resumed: a run of `kept` chunks.
+    fn kept_run(kept: usize) -> ResumedUpload {
+        let clock = Arc::new(ManualClock::new(UNIX_EPOCH));
+        let store = RemoteBlobStore::new(MemoryStorage::with_clock(clock))
+            .with_parallelism(NonZeroUsize::MIN);
+        let token = ResumeToken {
+            upload_id: UploadId::new(9),
+            chunk_size: ChunkSize::from_encoding(4).unwrap(),
+        };
+        for (index, chunk) in (0..).zip(BLOB.chunks(4).take(kept)) {
+            store.stage_chunk(token.upload_id, index, chunk).unwrap();
+        }
+        let resumed = store.resume(token).unwrap();
+        assert_eq!(resumed.next_index() as usize, kept);
+        resumed
+    }
+
+    /// Yields its bytes one per `read` call, and `Interrupted` before each (which `read_to_end` retries).
+    struct Trickle<'a> {
+        data: &'a [u8],
+        interrupt: bool,
+    }
+
+    impl Read for Trickle<'_> {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            self.interrupt = !self.interrupt;
+            if self.interrupt {
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            let Some((&first, rest)) = self.data.split_first() else {
+                return Ok(0);
+            };
+            let Some(slot) = out.first_mut() else {
+                return Ok(0);
+            };
+            *slot = first;
+            self.data = rest;
+            Ok(1)
+        }
+    }
+
+    fn ends_inside(r: &Result<()>) -> bool {
+        matches!(r, Err(Error::InvalidResume { what }) if what.contains("ends inside"))
+    }
+
+    fn not_staged(r: &Result<()>) -> bool {
+        matches!(r, Err(Error::InvalidResume { what }) if what.contains("not the ones"))
+    }
+
+    #[test]
+    fn a_reader_that_ends_exactly_at_the_run_end_is_accepted() {
+        let resumed = kept_run(2);
+        let mut reader = &BLOB[..8];
+        resumed.skip_kept(&mut reader).unwrap();
+        assert_eq!(reader, b"");
+        // Then the chunker sees the end of the blob: an 8-byte blob of the two kept chunks.
+        let (mut chunker, crcs) = resumed.into_chunker(reader).unwrap();
+        assert!(chunker.next_chunk().unwrap().is_none());
+        assert_eq!(crcs.len(), 2);
+        assert_eq!(
+            chunker.summary().unwrap().blob_id,
+            crate::blob_id_of(&BLOB[..8])
+        );
+    }
+
+    #[test]
+    fn a_reader_one_byte_short_of_the_run_end_ends_inside_it() {
+        let resumed = kept_run(2);
+        assert!(ends_inside(&resumed.skip_kept(&mut &BLOB[..7])));
+        // Short inside the first chunk too, and inside a run of the whole blob.
+        assert!(ends_inside(&resumed.skip_kept(&mut &BLOB[..3])));
+        assert!(ends_inside(&kept_run(3).skip_kept(&mut &BLOB[..11])));
+    }
+
+    #[test]
+    fn a_reader_that_differs_in_the_last_or_first_byte_of_the_run_is_not_the_staged_blob() {
+        let resumed = kept_run(2);
+        for at in [0, 3, 4, 7] {
+            let mut other = BLOB.to_vec();
+            other[at] ^= 0x01;
+            assert!(not_staged(&resumed.skip_kept(&mut &other[..])), "at {at}");
+        }
+        // A byte past the run is not the run's: the resume checks only what it kept.
+        let mut after = BLOB.to_vec();
+        after[8] ^= 0x01;
+        resumed.skip_kept(&mut &after[..]).unwrap();
+    }
+
+    #[test]
+    fn an_empty_kept_run_reads_nothing_from_the_reader() {
+        let resumed = kept_run(0);
+        assert_eq!(resumed.offset(), 0);
+        let mut reader = BLOB;
+        resumed.skip_kept(&mut reader).unwrap();
+        assert_eq!(reader, BLOB);
+        resumed.skip_kept(&mut &b""[..]).unwrap();
+    }
+
+    #[test]
+    fn a_reader_of_one_byte_per_read_is_left_exactly_at_the_offset() {
+        for kept in 0..=3 {
+            let resumed = kept_run(kept);
+            let mut reader = Trickle {
+                data: BLOB,
+                interrupt: false,
+            };
+            resumed.skip_kept(&mut reader).unwrap();
+            assert_eq!(reader.data, &BLOB[kept * 4..], "kept {kept}");
+            assert_eq!(resumed.offset(), (kept * 4) as u64);
+        }
+        // One byte short, a byte at a time, still ends inside the run.
+        let mut reader = Trickle {
+            data: &BLOB[..7],
+            interrupt: false,
+        };
+        assert!(ends_inside(&kept_run(2).skip_kept(&mut reader)));
+    }
+
+    #[test]
+    fn a_reader_that_fails_inside_the_run_is_a_read_error() {
+        // Fails after the first chunk, then would yield the rest: the error is reported, not the short read.
+        struct FailOnce<'a> {
+            data: &'a [u8],
+            failed: bool,
+        }
+        impl Read for FailOnce<'_> {
+            fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+                if self.data.len() == 8 && !self.failed {
+                    self.failed = true;
+                    return Err(io::Error::other("the reader failed"));
+                }
+                self.data.read(out)
+            }
+        }
+        let mut reader = FailOnce {
+            data: BLOB,
+            failed: false,
+        };
+        // The first read takes 4 bytes (the `take` limit), leaving 8: the second fails.
+        assert!(matches!(
+            kept_run(2).skip_kept(&mut reader),
+            Err(Error::Read(e)) if e.to_string() == "the reader failed"
+        ));
+    }
+}
