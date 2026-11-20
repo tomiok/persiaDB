@@ -2668,8 +2668,14 @@ since, each checked against its CRC32C) under the new `upload_id` and continues 
 (`UploadInterrupted { token, source }`); its pins drop with the error, and the grace period keeps the upload
 resumable (§9.5). It passes the token as `PutBlobOptions::resume` with a reader of the whole blob, from its start:
 `put_blob` pins the old `upload_id` before listing, skips the bytes of the kept run without uploading them, pins the
-new `upload_id` before restaging, and rejects a token whose chunk size is below the floor (§9.2; ROADMAP 9.3.4). A
-resume that stages no new chunk restages the kept run under a new `upload_id` before binding, so its chunks are
+new `upload_id` before restaging, and rejects a token whose chunk size is below the floor (§9.2; ROADMAP 9.3.4). The token's chunk size is the blob's:
+`PutBlobOptions::chunk_size` is ignored on a resume. Each kept chunk the reader yields is checked against the staged
+chunk's CRC32C; a reader that ends inside the kept run or differs there is a caller's error (`InvalidResume`), never
+wrapped. `UploadInterrupted` wraps a reader error, or a staging, restaging or listing error of the store, after the
+upload staged chunks, and a bind's backend error whose outcome is known; never an unknown outcome, `BlobIdMismatch`, a
+caller's error or a small blob. A resume that fails again returns the token of the upload it was staging: after a
+restage that followed a conflict, the new one. A resume that writes no chunk its listing did not show (it may
+re-stage, with the same bytes, a chunk already there, which leaves its age unchanged) restages the kept run under a new `upload_id` before binding, so its chunks are
 young again: the sweep counts an upload's age from its newest chunk, and a binding after its manifest listing is not
 in its view (ROADMAP 9.3.6). Only the remote layout resumes; any other store fails with `ResumeUnsupported` before
 reading (ADR-0053). Chunk transfers, uploads and downloads, run with at most `parallelism` requests in flight (default 8).

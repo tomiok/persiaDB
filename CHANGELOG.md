@@ -12,6 +12,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 <!-- -- wiring (blob/wiring: 9.2.7, 9.4.5, 9.4.6, 9.5.3, 9.5.6) -- -->
 <!-- -- end wiring -- -->
 <!-- -- resume (blob/resume: 9.3.4, 9.3.6, 9.5.9) -- -->
+- `persia` (internal API): `put_blob` resumes an interrupted remote upload (ROADMAP 9.3.4; SPEC §9.4; ADR-0053): a
+  failure after staging returns `Error::UploadInterrupted { token, source }`, and `PutBlobOptions::resume = Some(token)`
+  with a reader of the whole blob stages only the chunks that are missing, each kept chunk checked against its CRC32C.
+  On a resume the token's chunk size wins over `chunk_size`.
+- `persia-blob`: `BlobStore::resumable`, `resume` and `restage`; by default they fail with `Error::ResumeUnsupported`,
+  and the remote layout implements them (ADR-0053).
+- `persia-blob`: a resume that writes no chunk its listing did not show moves its chunks to a fresh upload id before
+  binding, so GC cannot sweep them as old (ROADMAP 9.3.6).
 <!-- -- end resume -- -->
 - `persia` (internal API): blob GC, `BlobDatabase::gc(&GcOptions) -> GcReport` (ROADMAP 9.5.1, 9.5.2, 9.5.8; SPEC
   §9.3, §9.5; ADR-0052). It marks the blobs the database's documents (the writer's view: live state, snapshots and
@@ -161,6 +169,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- `persia-blob` / `persia`: on the remote layout, `put_blob` failures after staging come wrapped in
+  `Error::UploadInterrupted`, with the original error as `source` (ROADMAP 9.3.4).
 - `persia` (internal API): `put_blob` rejects a `bind_budget` above `MAX_BIND_BUDGET` (1 h) with
   `Error::BindBudgetAboveMax`, before reading any byte. GC's grace period must be at least `2 * MAX_BIND_BUDGET`:
   an attempt started just before the deadline can land its `put_if_absent` after the budget ends, and `gc`
