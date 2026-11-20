@@ -58,6 +58,10 @@ mod snapshot;
 mod verify;
 mod views;
 
+// -- gc (9.5) --
+// The blob references GC marks (ROADMAP 9.5.1): `Database` methods in `blob_refs`; its `pub use` lines go here.
+mod blob_refs;
+
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::Path;

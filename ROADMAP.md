@@ -615,17 +615,19 @@ Deps: M1, M2.
 - [x] 9.2.3 Read full / range via chunk index (mmap-backed)
 - [x] 9.2.4 Recovery: torn tail truncation, index rebuild by scan
 - [x] 9.2.5 Fuzz pack reader
-- [ ] 9.2.6 Sweep stale pack temporary files `<name>.persia.blobs.tmp.*` with the container's `sweep_stale_files` (SPEC §9.3; found in 9.2.2)
+- [x] 9.2.6 Sweep stale pack temporary files `<name>.persia.blobs.tmp.*` with the container's `sweep_stale_files` (SPEC §9.3; found in 9.2.2). Done as a sweep at each read-write open of the pack, by those rules but stricter (regular files, lowercase hex only, one directory sync); the container's own sweep listing these names is 9.2.10
 - [ ] 9.2.7 Enforce one pack writer: open the pack read-write only with a proof of the container's writer lock, so two read-write `PackStore`s of one file cannot exist (ADR-0049; found in the 9.2.1 review)
-- [ ] 9.2.8 Pack corruption errors carry the offset of the bad slot or frame (found in the 9.2.1 review)
-- [ ] 9.2.9 Pack read path: one read per chunk (the frame length from the manifest), one CRC pass instead of the frame's and the chunk's, and no zero-fill or copy; bench `pack` before and after (found in 9.2.3 and its review)
+- [x] 9.2.8 Pack corruption errors carry the offset of the bad slot or frame (found in the 9.2.1 review)
+- [x] 9.2.9 Pack read path: one read per chunk (the frame length from the manifest), one CRC pass instead of the frame's and the chunk's, and no zero-fill or copy; bench `pack` before and after (found in 9.2.3 and its review). Done as one read and one CRC pass per chunk and no copy (a 16 MiB read 27.7 → 5.1 ms, `pack` bench). The read buffer is still zero-filled, at most once per `get_blob` stream and once per `read_range` or `read_chunk_source` call; removing that zero-fill is 9.2.11
+- [ ] 9.2.10 (v1.0) `Container::side_files` and `persia container sweep` also list and remove the pack's stale `<name>.persia.blobs.tmp.*` files (SPEC §9.3; found in 9.2.6)
+- [ ] 9.2.11 (v1.0) `read_chunk_checked` over the pack in one CRC pass without costing other stores a copy; the `pack` bench gains a mapped-read case once a bench can make a `MapPermit` (found in 9.2.9)
 
 ## 9.3 Remote layout
 - [x] 9.3.1 Key layout via `Storage` (SPEC §9.4): blob manifests at `blobs/<xx>/<id>` (`put_if_absent`), staged chunks at `blobs/uploads/<upload_id>/<chunk_idx>` (`put_if_absent`, never overwritten); reads check the manifest against the `BlobRef` (`check_ref`)
 - [x] 9.3.2 Parallel chunk upload/download, resumable upload by chunk existence check (SPEC §9.4: the resume token is `upload_id` + `chunk_size`; a `Chunker` that starts at chunk k with a hasher fed the stored chunks; `AlreadyExists` on a chunk restarts under a new upload id)
 - [x] 9.3.3 Small-blob single-object optimization (threshold)
 - [ ] 9.3.4 `put_blob` resumes a remote upload: `PutBlobOptions::resume: Option<ResumeToken>` drives `RemoteBlobStore::resume`, `Chunker::resume` and `restage`, pinning the old upload id before listing and the new one before `restage`, and rejecting a token chunk size below the floor (SPEC §9.4, §9.5; found in 9.3.2)
-- [ ] 9.3.5 Seed the `blob_manifest` fuzz corpus with the `inline-*.blm` golden files (found in 9.3.3)
+- [x] 9.3.5 Seed the `blob_manifest` fuzz corpus with the `inline-*.blm` golden files (found in 9.3.3)
 
 ## 9.4 Integration with documents
 - [x] 9.4.1 `put(doc, blob)` ordering: blob durable → document commit (SPEC §9.5)
@@ -634,7 +636,7 @@ Deps: M1, M2.
 - [x] 9.4.4 Decide, before the blob manifest encoding is released (SPEC §15), whether `put_blob`'s chunk size has a floor or the blob manifest a size cap: `chunk_size` 1 lets a 4 GiB blob need a 16 GiB manifest (ADR-0035 Consequences)
 - [ ] 9.4.5 Wire `PackStore` into the database open: `<name>.persia.blobs` beside the container, created lazily by the first `put_blob` (SPEC §9.3), and `BlobDatabase` over `Database` plus the pack, passing the container's `db_uuid` (found in 9.4.1)
 - [ ] 9.4.6 [T] Crash-order test of `put(doc, blob)` through `SimFile` at every container write: needs a `persia` dev-dependency on `persia-storage` in `xtask` `ALLOWED` (found in 9.4.1)
-- [ ] 9.4.7 A store that refuses every write until reopened (the pack after a failed sync, `PackPoisoned`) ends `put_blob`'s bind retries at once instead of at the end of `bind_budget`: an `Error::is_store_poisoned` predicate in the contract (found in 9.4.1 review)
+- [x] 9.4.7 A store that refuses every write until reopened (the pack after a failed sync, `PackPoisoned`) ends `put_blob`'s bind retries at once instead of at the end of `bind_budget`: an `Error::is_store_poisoned` predicate in the contract (found in 9.4.1 review)
 
 ## 9.5 Garbage collection
 - [ ] 9.5.1 Mark (SPEC §9.5): referenced ids from all live manifests/snapshots and WAL records from `wal_start`, plus the writer's pin set (pinned blob ids and upload ids from `put_blob`), then the upload ids their blob manifests name

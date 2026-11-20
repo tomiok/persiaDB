@@ -20,7 +20,7 @@
 //!    `InvalidManifest`, and a blob of more than `u32::MAX` chunks with `InvalidChunking(TooManyChunks)`.
 //! 7. A header claiming up to `u32::MAX` chunks over a tiny body fails as `Corrupt`, quickly: the length is checked
 //!    before the CRC list is read. Unsafe is denied, so there is no allocator hook: this asserts the outcome.
-//! 8. `Error::is_corruption` is true for `Corrupt` only.
+//! 8. `Error::is_corruption` is true for `Corrupt` and the pack's located `CorruptAt` only.
 //! 9. A manifest checks against what it was looked up by (SPEC §9.4): another `blob_id`, or a `BlobRef` with another
 //!    id, size or chunk size, is `Corrupt`.
 //! 10. Inline manifests (flag bit 0, ROADMAP 9.3.3, ADR-0050): golden files `inline-one.blm` and `inline-max.blm`; any
@@ -1277,6 +1277,23 @@ fn is_corruption_is_true_for_corrupt_only() {
             }),
             false,
         ),
+        (
+            Error::BindBudgetAboveMax {
+                budget: std::time::Duration::from_secs(7200),
+                max: std::time::Duration::from_secs(3600),
+            },
+            false,
+        ),
+        // -- followups --
+        // One case per follow-up variant, here and only here.
+        (
+            Error::CorruptAt {
+                encoding: "x",
+                what: "x",
+                offset: 12288,
+            },
+            true,
+        ),
     ];
     for (e, corrupt) in &cases {
         assert_eq!(e.is_corruption(), *corrupt, "{e:?}");
@@ -1309,7 +1326,12 @@ fn is_corruption_is_true_for_corrupt_only() {
             //
             // -- documents (9.4) --
             // One arm for the documents variants, `=> "documents"`, here and only here.
-            Error::BlobIdMismatch { .. } | Error::InvalidBlobRef(_) => "documents",
+            Error::BlobIdMismatch { .. }
+            | Error::InvalidBlobRef(_)
+            | Error::BindBudgetAboveMax { .. } => "documents",
+            // -- followups --
+            // One arm for the follow-ups' variants, `=> "followups"`, here and only here.
+            Error::CorruptAt { .. } => "followups",
             Error::BlobNotFound { .. }
             | Error::RangeOutOfBounds { .. }
             | Error::StagedChunkConflict { .. }

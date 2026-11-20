@@ -71,7 +71,7 @@ fn open(fs: &SimFs, mode: PackMode) -> persia_blob::Result<PackStore<SimFsFile>>
 
 fn stage_all<F>(store: &PackStore<F>, m: &BlobManifest, data: &[u8]) -> persia_blob::Result<()>
 where
-    F: persia_storage::container::ContainerFile + 'static,
+    F: ContainerFile + 'static,
 {
     for (i, c) in data.chunks(m.chunk_size().get() as usize).enumerate() {
         store.stage_chunk(m.upload_id(), i as u32, c)?;
@@ -81,7 +81,7 @@ where
 
 fn store_blob<F>(store: &PackStore<F>, data: &[u8], chunk: u32, upload: u128) -> BlobManifest
 where
-    F: persia_storage::container::ContainerFile + 'static,
+    F: ContainerFile + 'static,
 {
     let m = manifest_of(data, chunk, upload);
     stage_all(store, &m, data).unwrap();
@@ -357,6 +357,7 @@ fn run_script(store: &PackStore<SimFsFile>, session: &mut Session) {
 /// After a crash: the pack opens, each blob of the script is wholly readable or absent, every `Bound` one is there.
 fn check_recovered(fs: &SimFs, session: &Session, what: &str) {
     let store = open(fs, PackMode::ReadWrite).unwrap_or_else(|e| panic!("{what}: reopen: {e}"));
+    assert!(temporaries(fs).is_empty(), "{what}: swept at the open");
     for (data, chunk, upload) in SCRIPT {
         let m = manifest_of(data, chunk, upload);
         match store.manifest(m.blob_id()).unwrap() {
@@ -538,7 +539,19 @@ fn a_failed_creation_leaves_no_temporary_file_and_can_be_retried() {
                     .all(|p| p == Path::new(PACK) || p.to_string_lossy().contains(".tmp.")),
                 "{what}: {names:?}"
             );
+            // ROADMAP 9.2.6: the read-write open sweeps what the crash left, durably.
+            let left = temporaries(&crashed);
             let reopened = open(&crashed, PackMode::ReadWrite).unwrap();
+            assert_eq!(
+                reopened.recovery().swept,
+                left.len() as u64,
+                "{what}: {left:?}"
+            );
+            assert!(temporaries(&crashed).is_empty(), "{what}");
+            assert!(
+                temporaries(&crashed.crash(CrashLoss::All)).is_empty(),
+                "{what}"
+            );
             let m = manifest_of(b"retry", 4, 2);
             stage_all(&reopened, &m, b"retry").unwrap();
             assert_eq!(reopened.bind(&m).unwrap(), BindOutcome::Bound, "{what}");
@@ -560,4 +573,396 @@ fn a_failed_link_removes_its_temporary_file_and_poisons() {
     let names: Vec<_> = fs.files().into_iter().map(|(p, _)| p).collect();
     assert_eq!(names, [Path::new(PACK)], "no temporary file left");
     assert!(open(&fs, PackMode::ReadWrite).unwrap().exists());
+}
+
+/// ROADMAP 9.4.7: after a failed slot sync the pack refuses every write until it is reopened, and says so through
+/// `Error::is_store_poisoned`, which `put_blob` reads to stop retrying at once. A bind of the id whose commit failed
+/// stays outcome-unknown; every other write is a plain refusal.
+#[test]
+fn a_pack_poisoned_by_a_failed_slot_sync_reads_as_a_poisoned_store() {
+    for apply in [false, true] {
+        let fs = sim();
+        let store = open(&fs, PackMode::ReadWrite).unwrap();
+        let data = b"a blob whose commit fails";
+        let m = manifest_of(data, 8, 1);
+        stage_all(&store, &m, data).unwrap();
+        // The bind's calls: index append, data sync, slot write, slot sync.
+        let k = fs.mutations() + 3;
+        fs.set_fault(Some(if apply {
+            SimFault::ApplyThenFail(k)
+        } else {
+            SimFault::FailAt(k)
+        }));
+        let first = store.bind(&m).unwrap_err();
+        assert!(first.is_bind_outcome_unknown(), "{first}");
+        assert!(
+            !first.is_store_poisoned(),
+            "the failure itself is the sync's: {first}"
+        );
+        fs.set_fault(None);
+        let again = store.bind(&m).unwrap_err();
+        assert!(
+            again.is_bind_outcome_unknown() && again.is_store_poisoned(),
+            "{again}"
+        );
+        let small = manifest_of(b"tiny", 8, 2);
+        for refused in [
+            store.bind_small(&small, b"tiny").unwrap_err(),
+            store.bind(&manifest_of(b"", 8, 3)).unwrap_err(),
+            store.stage_chunk(UploadId::new(4), 0, b"x").unwrap_err(),
+        ] {
+            assert!(refused.is_store_poisoned(), "{refused}");
+            assert!(!refused.is_bind_outcome_unknown(), "{refused}");
+        }
+    }
+}
+
+// --- Stale temporary files (ROADMAP 9.2.6) ---
+
+/// The pack's temporary names (`<pack>.tmp.*`) on `fs`, files only.
+fn temporaries(fs: &SimFs) -> Vec<std::path::PathBuf> {
+    let prefix = format!("{PACK}.tmp.");
+    fs.files()
+        .into_iter()
+        .map(|(p, _)| p)
+        .filter(|p| p.to_string_lossy().starts_with(&prefix))
+        .collect()
+}
+
+fn write_file(fs: &SimFs, path: &str) {
+    let file = fs.create_new(Path::new(path)).unwrap();
+    file.write_all_at(b"left by a crash", 0).unwrap();
+    file.sync_data().unwrap();
+}
+
+/// A read-write open removes exactly the names a pack creation or rewrite makes (`<pack>.tmp.<16 hex>.<n>`), with or
+/// without a pack, and syncs the directory; a read-only open removes nothing, and nothing else is touched.
+#[test]
+fn a_read_write_open_sweeps_the_stale_temporary_files_of_the_pack() {
+    let stale = [
+        format!("{PACK}.tmp.0123456789abcdef.0"),
+        format!("{PACK}.tmp.fedcba9876543210.17"),
+    ];
+    let kept = [
+        format!("{PACK}.tmp.0123456789ABCDEF.1"),
+        format!("{PACK}.tmp.0123456789abcdef"),
+        format!("{PACK}.compact.0123456789abcdef.1"),
+        "/db/app.persia.tmp.0123456789abcdef.1".to_owned(),
+        "/db/other.persia.blobs.tmp.0123456789abcdef.1".to_owned(),
+    ];
+    for with_pack in [false, true] {
+        let fs = sim();
+        if with_pack {
+            store_blob(&open(&fs, PackMode::ReadWrite).unwrap(), b"kept", 4, 1);
+        }
+        for name in stale.iter().chain(&kept) {
+            write_file(&fs, name);
+        }
+        // A directory with a temporary file's name is not one.
+        fs.create_dir(Path::new(&format!("{PACK}.tmp.aaaaaaaaaaaaaaaa.2")))
+            .unwrap();
+        fs.sync_dir(Path::new("/db")).unwrap();
+        let before = fs.files();
+
+        let reader = open(&fs, PackMode::ReadOnly).unwrap();
+        assert_eq!(reader.recovery().swept, 0);
+        assert_eq!(fs.files(), before, "a read-only open writes nothing");
+
+        let writer = open(&fs, PackMode::ReadWrite).unwrap();
+        assert_eq!(writer.recovery().swept, 2, "with a pack: {with_pack}");
+        assert_eq!(writer.exists(), with_pack);
+        let names: Vec<String> = fs
+            .files()
+            .into_iter()
+            .map(|(p, _)| p.to_string_lossy().into_owned())
+            .collect();
+        for name in &stale {
+            assert!(!names.contains(name), "{name} swept");
+        }
+        for name in &kept {
+            assert!(names.contains(name), "{name} kept");
+        }
+        // The removals are durable: the directory was synced.
+        let crashed = fs.crash(CrashLoss::All);
+        assert_eq!(temporaries(&crashed).len(), 2, "only the two look-alikes");
+        assert!(
+            crashed
+                .is_dir(Path::new(&format!("{PACK}.tmp.aaaaaaaaaaaaaaaa.2")))
+                .unwrap()
+        );
+        if with_pack {
+            let m = manifest_of(b"kept", 4, 1);
+            assert_eq!(read_all(&writer, &m).unwrap(), b"kept");
+        }
+        drop(writer);
+        assert_eq!(open(&fs, PackMode::ReadWrite).unwrap().recovery().swept, 0);
+    }
+}
+
+// --- A file system that counts reads and fails chosen calls (review of ROADMAP 9.2.6, 9.2.9) ---
+
+/// Which `Vfs` calls fail, once set.
+#[derive(Debug, Default)]
+struct VfsFaults {
+    remove: Option<std::path::PathBuf>,
+    sync_dir: bool,
+    read_dir: bool,
+    /// `remove_file` of a pack temporary name deletes it, then reports `NotFound`.
+    remove_not_found: bool,
+}
+
+/// `SimFs` with failures injected into chosen calls, and a count of `read_exact_at` calls on its files.
+#[derive(Debug, Clone)]
+struct Wrapped {
+    fs: SimFs,
+    faults: Arc<std::sync::Mutex<VfsFaults>>,
+    reads: Arc<std::sync::atomic::AtomicU64>,
+}
+
+#[derive(Debug)]
+struct CountedFile {
+    file: SimFsFile,
+    reads: Arc<std::sync::atomic::AtomicU64>,
+}
+
+use persia_storage::container::ContainerFile;
+use std::io;
+
+impl ContainerFile for CountedFile {
+    fn file_len(&self) -> io::Result<u64> {
+        self.file.file_len()
+    }
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.file.read_exact_at(buf, offset)
+    }
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+        self.file.write_all_at(buf, offset)
+    }
+    fn sync_data(&self) -> io::Result<()> {
+        self.file.sync_data()
+    }
+    fn sync_all(&self) -> io::Result<()> {
+        self.file.sync_all()
+    }
+    fn set_len(&self, len: u64) -> io::Result<()> {
+        self.file.set_len(len)
+    }
+    fn try_lock(&self) -> io::Result<bool> {
+        self.file.try_lock()
+    }
+    fn unlock(&self) -> io::Result<()> {
+        self.file.unlock()
+    }
+    fn locks_per_handle(&self) -> bool {
+        self.file.locks_per_handle()
+    }
+}
+
+impl Wrapped {
+    fn new(fs: &SimFs) -> Self {
+        Self {
+            fs: fs.clone(),
+            faults: Arc::default(),
+            reads: Arc::default(),
+        }
+    }
+    fn wrap(&self, file: SimFsFile) -> CountedFile {
+        CountedFile {
+            file,
+            reads: Arc::clone(&self.reads),
+        }
+    }
+    fn reads(&self) -> u64 {
+        self.reads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn faults(&self) -> std::sync::MutexGuard<'_, VfsFaults> {
+        self.faults.lock().unwrap()
+    }
+    fn open(&self, mode: PackMode) -> persia_blob::Result<PackStore<CountedFile>> {
+        PackStore::open_in(Arc::new(self.clone()), PACK, mode, [9; 16])
+    }
+}
+
+/// Sets one fault, given the path of the file whose removal fails.
+type Inject = fn(&mut VfsFaults, &str);
+
+fn injected(what: &str) -> io::Error {
+    io::Error::other(format!("injected {what} failure"))
+}
+
+impl Vfs for Wrapped {
+    type File = CountedFile;
+    fn open(&self, path: &Path, write: bool) -> io::Result<CountedFile> {
+        self.fs.open(path, write).map(|f| self.wrap(f))
+    }
+    fn create_new(&self, path: &Path) -> io::Result<CountedFile> {
+        self.fs.create_new(path).map(|f| self.wrap(f))
+    }
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        self.fs.create_dir(path)
+    }
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.fs.rename(from, to)
+    }
+    fn hard_link(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.fs.hard_link(from, to)
+    }
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        if self.faults().remove.as_deref() == Some(path) {
+            return Err(injected("remove"));
+        }
+        if self.faults().remove_not_found && path.to_string_lossy().contains(".persia.blobs.tmp.") {
+            // Already gone, as when another handle's sweep won the race after the link.
+            match self.fs.remove_file(path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "the temporary name was already gone",
+            ));
+        }
+        self.fs.remove_file(path)
+    }
+    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+        if self.faults().sync_dir {
+            return Err(injected("directory sync"));
+        }
+        self.fs.sync_dir(dir)
+    }
+    fn entry_kind(&self, path: &Path) -> io::Result<persia_storage::vfs::EntryKind> {
+        self.fs.entry_kind(path)
+    }
+    fn is_dir(&self, path: &Path) -> io::Result<bool> {
+        self.fs.is_dir(path)
+    }
+    fn read_dir(&self, dir: &Path) -> io::Result<Vec<persia_storage::vfs::DirEntry>> {
+        if self.faults().read_dir {
+            return Err(injected("listing"));
+        }
+        self.fs.read_dir(dir)
+    }
+    fn canonicalize(&self, path: &Path) -> io::Result<std::path::PathBuf> {
+        self.fs.canonicalize(path)
+    }
+    fn same_file(&self, file: &CountedFile, path: &Path) -> io::Result<bool> {
+        self.fs.same_file(&file.file, path)
+    }
+    fn lock_beside(&self, path: &Path) -> io::Result<Option<CountedFile>> {
+        self.fs.lock_beside(path).map(|f| f.map(|f| self.wrap(f)))
+    }
+}
+
+/// A creation whose temporary name is already gone after the link (`NotFound`, as when another handle's sweep
+/// removed it) still publishes the pack: the name being gone is what the removal wanted (ROADMAP 9.2.6, 9.2.7).
+#[test]
+fn a_temporary_name_already_gone_after_the_link_still_creates_the_pack() {
+    let fs = sim();
+    let vfs = Wrapped::new(&fs);
+    vfs.faults().remove_not_found = true;
+    let store = vfs.open(PackMode::ReadWrite).unwrap();
+    let m = store_blob(&store, b"kept", 4, 1);
+    assert_eq!(read_all(&store, &m).unwrap(), b"kept");
+    assert!(temporaries(&fs).is_empty(), "the temporary name is gone");
+    drop(store);
+    let store = open(&fs.crash(CrashLoss::All), PackMode::ReadOnly).unwrap();
+    assert_eq!(read_all(&store, &m).unwrap(), b"kept");
+}
+
+/// ROADMAP 9.2.6, the sweep's failure policy: a failed removal, directory sync or listing is logged and the read-write
+/// open goes on; `swept` counts only what was removed, and the next read-write open removes what is left.
+#[test]
+fn a_failed_sweep_step_does_not_fail_the_open_and_the_next_open_retries() {
+    let a = format!("{PACK}.tmp.0123456789abcdef.1");
+    let b = format!("{PACK}.tmp.fedcba9876543210.2");
+    let cases: [(&str, Inject, u64, usize); 3] = [
+        ("removal", |f, a| f.remove = Some(a.into()), 1, 1),
+        ("directory sync", |f, _| f.sync_dir = true, 2, 0),
+        ("listing", |f, _| f.read_dir = true, 0, 2),
+    ];
+    for (what, inject, swept, left) in cases {
+        for with_pack in [false, true] {
+            let fs = sim();
+            if with_pack {
+                store_blob(&open(&fs, PackMode::ReadWrite).unwrap(), b"kept", 4, 1);
+            }
+            write_file(&fs, &a);
+            write_file(&fs, &b);
+            fs.sync_dir(Path::new("/db")).unwrap();
+            let vfs = Wrapped::new(&fs);
+            inject(&mut vfs.faults(), &a);
+            let store = vfs
+                .open(PackMode::ReadWrite)
+                .unwrap_or_else(|e| panic!("{what}: the open fails: {e}"));
+            assert_eq!(store.recovery().swept, swept, "{what}");
+            assert_eq!(temporaries(&fs).len(), left, "{what}");
+            assert_eq!(store.exists(), with_pack, "{what}");
+            drop(store);
+            *vfs.faults() = VfsFaults::default();
+            let store = vfs.open(PackMode::ReadWrite).unwrap();
+            assert_eq!(store.recovery().swept, left as u64, "{what}: retried");
+            assert!(temporaries(&fs).is_empty(), "{what}");
+        }
+    }
+}
+
+/// ROADMAP 9.2.9: one read per chunk. Reading a whole blob, or a range across two chunks, by its manifest reads each
+/// chunk's frame once, with no separate read of its header.
+#[test]
+fn a_range_read_makes_one_read_per_chunk() {
+    let fs = sim();
+    let data: Vec<u8> = (0..100_u32).map(|i| i as u8).collect();
+    let m = store_blob(&open(&fs, PackMode::ReadWrite).unwrap(), &data, 16, 1);
+    let vfs = Wrapped::new(&fs);
+    let store = vfs.open(PackMode::ReadOnly).unwrap();
+    for (range, chunks) in [
+        (0..100, 7),
+        (10..40, 3),
+        (15..17, 2),
+        (16..32, 1),
+        (99..100, 1),
+    ] {
+        let want = &data[range.start as usize..range.end as usize];
+        let before = vfs.reads();
+        let got = persia_blob::read_manifest_range(&store, &m, range.clone()).unwrap();
+        assert_eq!(got, want);
+        assert_eq!(vfs.reads() - before, chunks, "{range:?}");
+        // `read_range` reads the manifest's index frame first: one more.
+        let before = vfs.reads();
+        assert_eq!(
+            read_range(&store, &reference(&m), range.clone()).unwrap(),
+            want
+        );
+        assert_eq!(vfs.reads() - before, chunks + 1, "{range:?}");
+    }
+    let before = vfs.reads();
+    store.read_chunk_source(&m, 3).unwrap();
+    assert_eq!(vfs.reads() - before, 1);
+}
+
+/// ROADMAP 9.2.6: a symbolic link named like a temporary file is not one of the pack's files: the sweep leaves the
+/// link, and the file it points to outside the directory is untouched.
+#[cfg(unix)]
+#[test]
+fn a_symlink_named_like_a_temporary_file_is_not_swept() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("precious");
+    std::fs::write(&target, b"not the pack's").unwrap();
+    let pack = persia_blob::pack_path(&dir.path().join("app.persia"));
+    let mut link = pack.as_os_str().to_owned();
+    link.push(".tmp.0123456789abcdef.1");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let store = PackStore::open(&pack, PackMode::ReadWrite, [1; 16]).unwrap();
+    assert_eq!(store.recovery().swept, 0);
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"not the pack's");
 }

@@ -270,4 +270,92 @@ mod tests {
         assert!(store.read_chunk(&wrong, 0).unwrap_err().is_corruption());
         assert!(store.read_chunk(&a, 3).unwrap_err().is_corruption());
     }
+
+    /// ROADMAP 9.2.9 over the mapping: a damaged byte anywhere in a committed chunk frame is `Corrupt`, at the open
+    /// (its header) or at the read from the window, as with `pread`.
+    #[test]
+    fn a_damaged_chunk_frame_read_from_the_window_is_corrupt() {
+        let (fs, store) = store();
+        let m = put(&store, b"0123456789ab", 8, 1);
+        drop(store);
+        let bytes = fs.read(std::path::Path::new("/p.blobs")).unwrap();
+        let frames =
+            crate::pack::layout::chunk_frame_len(8) + crate::pack::layout::chunk_frame_len(4);
+        let second = FIRST_FRAME_OFFSET + crate::pack::layout::chunk_frame_len(8);
+        for at in FIRST_FRAME_OFFSET..FIRST_FRAME_OFFSET + frames {
+            let frame = if at < second {
+                FIRST_FRAME_OFFSET
+            } else {
+                second
+            };
+            let mut damaged = bytes.clone();
+            damaged[at as usize] ^= 0xff;
+            let fs = SimFs::new();
+            let file = persia_storage::vfs::Vfs::create_new(&fs, std::path::Path::new("/p.blobs"))
+                .unwrap();
+            file.write_all_at(&damaged, 0).unwrap();
+            file.sync_data().unwrap();
+            let opened = PackStore::open_in(Arc::new(fs), "/p.blobs", PackMode::ReadOnly, [0; 16]);
+            let store = match opened {
+                Ok(store) => store,
+                Err(e) => {
+                    assert!(e.is_corruption(), "byte {at}: {e}");
+                    // A damaged header misaligns the walk: the error names this frame or a later one.
+                    assert!(
+                        e.corrupt_offset().is_some_and(|o| o >= frame),
+                        "byte {at}: {e}"
+                    );
+                    continue;
+                }
+            };
+            store.enable_copied_reads(Arc::new(AtomicBool::new(false)));
+            assert!(store.mapped_range().is_some());
+            let e = crate::read_range(
+                &store,
+                &crate::BlobRef::new(
+                    m.blob_id(),
+                    m.size(),
+                    "a/b",
+                    8,
+                    std::collections::BTreeMap::default(),
+                )
+                .unwrap(),
+                0..m.size(),
+            )
+            .unwrap_err();
+            assert!(e.is_corruption(), "byte {at}: {e}");
+            assert_eq!(e.corrupt_offset(), Some(frame), "byte {at}: {e}");
+        }
+    }
+
+    /// ROADMAP 9.2.9, no copy: with mapped reads on, what `read_chunk_source` returns and what `read_chunks_checked`
+    /// lends its sink lie inside the window's own buffer.
+    #[test]
+    fn chunks_read_from_the_window_are_slices_of_it() {
+        let (_fs, store) = store();
+        store.enable_copied_reads(Arc::new(AtomicBool::new(false)));
+        let m = put(&store, b"0123456789abcdef!", 8, 1);
+        let window = {
+            let inner = store.read();
+            let pack = inner.pack.as_ref().unwrap();
+            pack.window.as_ref().unwrap().as_slice().as_ptr_range()
+        };
+        let inside = |s: &[u8]| {
+            let r = s.as_ptr_range();
+            window.start <= r.start && r.end <= window.end
+        };
+        for index in 0..m.chunk_count() {
+            let chunk = store.read_chunk_source(&m, index).unwrap();
+            assert!(inside(chunk.as_slice()), "read_chunk_source {index}");
+        }
+        let mut seen = 0;
+        store
+            .read_chunks_checked(&m, 0..m.chunk_count(), &mut Vec::new(), &mut |_, bytes| {
+                assert!(inside(bytes), "read_chunks_checked");
+                seen += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(seen, 3);
+    }
 }

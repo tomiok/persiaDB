@@ -4,8 +4,8 @@
 use super::{
     Access, BLOB_PACK, BlobId, BlobManifest, ContainerFile, Entry, Error, FIRST_FRAME_OFFSET,
     FRAME_HEADER_LEN, FrameHeader, FrameKind, HashMap, MIN_FRAME_LEN, Pack, PackMode, PackRecovery,
-    Reader, Result, StreamScanner, commit_slot, corrupt, decode_frame, decode_index_payload,
-    decode_prefix, from_format, io, io_err, layout, u64_from_usize, usize_from_u32,
+    Reader, Result, StreamScanner, at, commit_slot, corrupt_at, decode_frame, decode_index_payload,
+    decode_prefix, from_format_at, io, io_err, layout, u64_from_usize, usize_from_u32,
 };
 
 /// The prefix of the pack in `file`: header and active slot.
@@ -24,7 +24,10 @@ pub(super) fn recover<F: ContainerFile>(
 ) -> Result<(Pack<F>, PackRecovery)> {
     let len = file.file_len().map_err(io_err("stat"))?;
     if len < FIRST_FRAME_OFFSET {
-        return Err(corrupt("a file shorter than a pack's header and slots"));
+        return Err(corrupt_at(
+            "a file shorter than a pack's header and slots",
+            0,
+        ));
     }
     let p = read_prefix(&file)?;
     if p.header.db_uuid != db_uuid {
@@ -38,7 +41,9 @@ pub(super) fn recover<F: ContainerFile>(
     }
     // Taken after reading the slots: a writer appends its frames before the slot that covers them.
     let file_len = file.file_len().map_err(io_err("stat"))?;
-    p.superblock.check_bounds(file_len)?;
+    p.superblock
+        .check_bounds(file_len)
+        .map_err(at(p.slot.offset()))?;
     let mut pack = Pack {
         file,
         header: p.header,
@@ -169,6 +174,8 @@ fn roll_forward<F: ContainerFile>(
 /// Checks what the scan found against the slot: `blob_count` index frames, the last one at `index_off`.
 pub(super) fn check_scan<F>(pack: &Pack<F>, last_index: Option<(u64, u64)>) -> Result<()> {
     let sb = &pack.sb;
+    // Found by comparing the frames with the slot: located at the slot.
+    let corrupt = |what| corrupt_at(what, pack.slot.offset());
     if u64_from_usize(pack.index.len()) != sb.blob_count {
         return Err(corrupt(
             "the committed frames hold another number of blobs than the slot",
@@ -202,22 +209,33 @@ pub(super) fn scan_committed<F: ContainerFile>(
     while pack.end < to {
         let offset = pack.end;
         if to.saturating_sub(offset) < u64_from_usize(MIN_FRAME_LEN) {
-            return Err(corrupt("the committed frames end inside a frame"));
+            return Err(corrupt_at(
+                "the committed frames end inside a frame",
+                offset,
+            ));
         }
         pack.file
             .read_exact_at(&mut head, offset)
             .map_err(io_err("read"))?;
         let header = FrameHeader::decode(&mut Reader::with_base_offset(&head, offset))
-            .map_err(from_format)?;
-        header.check_fits(to).map_err(from_format)?;
+            .map_err(|e| from_format_at(e, offset))?;
+        header
+            .check_fits(to)
+            .map_err(|e| from_format_at(e, offset))?;
         if header.frame_seq() != pack.next_frame_seq {
-            return Err(corrupt("a committed frame out of the frame_seq run"));
+            return Err(corrupt_at(
+                "a committed frame out of the frame_seq run",
+                offset,
+            ));
         }
         match header.kind() {
             FrameKind::BlobChunk => {
                 // A chunk frame holds its 32-byte head and at least one byte (SPEC §9.3).
                 if header.payload_len() <= u64_from_usize(layout::CHUNK_HEAD_LEN) {
-                    return Err(corrupt("a committed chunk frame shorter than a chunk"));
+                    return Err(corrupt_at(
+                        "a committed chunk frame shorter than a chunk",
+                        offset,
+                    ));
                 }
                 pack.chunk_frames.push(offset);
             }
@@ -227,7 +245,12 @@ pub(super) fn scan_committed<F: ContainerFile>(
             }
             // No pack writer emits another kind: a new one would come with a pack `incompat_flags` bit (SPEC §15), so
             // here it is a damaged kind byte, never a frame to skip (ADR-0049 item 9).
-            _ => return Err(corrupt("a committed frame of a kind no pack holds")),
+            _ => {
+                return Err(corrupt_at(
+                    "a committed frame of a kind no pack holds",
+                    offset,
+                ));
+            }
         }
         // `check_fits` bounded the frame by `to`.
         pack.end = offset.saturating_add(header.total_len());
@@ -245,13 +268,14 @@ fn index_frame<F: ContainerFile>(pack: &mut Pack<F>, offset: u64, len: u64) -> R
         .iter()
         .any(|o| pack.chunk_frames.binary_search(o).is_err())
     {
-        return Err(corrupt(
+        return Err(corrupt_at(
             "an index names a chunk frame the pack does not hold",
+            offset,
         ));
     }
     let blob_id = manifest.blob_id();
     if pack.index.contains_key(&blob_id) || pack.uploads.contains_key(&manifest.upload_id()) {
-        return Err(corrupt("a blob or an upload bound twice"));
+        return Err(corrupt_at("a blob or an upload bound twice", offset));
     }
     pack.uploads.insert(manifest.upload_id(), blob_id);
     pack.index.insert(

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use persia_blob::{
     BindOutcome, BlobId, BlobManifest, BlobRef, BlobStore, Chunk, ChunkSize, Error, Result,
-    SMALL_BLOB_MAX, UploadId, blob_id_of, read_manifest_range, read_range,
+    SMALL_BLOB_MAX, UploadId, blob_id_of, read_manifest_range_into, read_range,
 };
 use persia_engine::db::SegmentIds;
 
@@ -33,6 +33,12 @@ pub const WINDOW_MAX_CHUNKS: u32 = 64;
 /// How long `put_blob` keeps retrying a bind whose outcome is unknown, by default (SPEC §9.4, ADR-0051).
 pub const DEFAULT_BIND_BUDGET: Duration = Duration::from_secs(60);
 
+/// The longest `bind_budget` `put_blob` accepts (SPEC §9.4). A cap holds across restarts, where a recorded maximum
+/// would not. GC's grace period must be at least twice this, strictly above every budget: an attempt started just
+/// before the deadline can land its `put_if_absent` after the budget ends, and a grace of only this long could sweep
+/// those chunks while that write is still in flight. `gc` (ROADMAP 9.5.2, #108) rejects a shorter grace.
+pub const MAX_BIND_BUDGET: Duration = Duration::from_hours(1);
+
 /// What `put_blob` stores beside the bytes (SPEC §9.6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PutBlobOptions {
@@ -46,7 +52,8 @@ pub struct PutBlobOptions {
     /// duplicate keeps the bound blob's.
     pub chunk_size: ChunkSize,
     /// How long a bind whose outcome is unknown is retried, with backoff ([`super::retry::backoff`]), before
-    /// `put_blob` fails with the unknown outcome; at least one attempt is made. [`DEFAULT_BIND_BUDGET`] by default.
+    /// `put_blob` fails with the unknown outcome; at least one attempt is made. [`DEFAULT_BIND_BUDGET`] by default, at
+    /// most [`MAX_BIND_BUDGET`].
     pub bind_budget: Duration,
 }
 
@@ -130,11 +137,14 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     ///
     /// # Errors
     /// - [`Error::ChunkSizeBelowMin`] for a chunk size below [`ChunkSize::MIN`], however it was built, and
-    ///   [`Error::InvalidBlobRef`] for an invalid `mime` or `user_meta`, before any byte is read;
+    ///   [`Error::InvalidBlobRef`] for an invalid `mime` or `user_meta`, and [`Error::BindBudgetAboveMax`] for a
+    ///   `bind_budget` above [`MAX_BIND_BUDGET`], before any byte is read;
     /// - [`Error::Read`] when the reader fails, [`Error::InvalidChunking`] for a blob of more than `u32::MAX` chunks;
     /// - [`Error::BlobIdMismatch`] when the bytes do not hash to `expected_id` (nothing bound);
     /// - an error with [`Error::is_bind_outcome_unknown`] when the outcome stayed unknown for the whole `bind_budget`: the blob may be
-    ///   bound later, and nothing references it (its upload is left to GC);
+    ///   bound later, and nothing references it (its upload is left to GC). Also before the budget runs out when the
+    ///   store refuses every write until it is reopened: that error has [`Error::is_store_poisoned`] too, and only
+    ///   reopening the store tells whether the blob was bound (ROADMAP 9.4.7);
     /// - [`Error::Corrupt`] when the manifest bound under the id does not name it or another size;
     /// - the store's errors, after which nothing this call returned references the blob.
     pub fn put_blob(
@@ -147,6 +157,12 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
             return Err(Error::ChunkSizeBelowMin {
                 chunk_size: chunk_size.get(),
                 min: ChunkSize::MIN,
+            });
+        }
+        if options.bind_budget > MAX_BIND_BUDGET {
+            return Err(Error::BindBudgetAboveMax {
+                budget: options.bind_budget,
+                max: MAX_BIND_BUDGET,
             });
         }
         // The rules of `mime` and `user_meta` checked on an empty blob, so a bad option reads and stages nothing.
@@ -210,29 +226,38 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         Ok(Some(pins))
     }
 
-    /// Bytes `range` of the blob `blob_ref` refers to (SPEC §9.6), every chunk read checked ([`read_range`]).
+    /// Bytes `range` of the blob `blob_ref` refers to (SPEC §9.6), every chunk read checked ([`read_range`]). The
+    /// blob is pinned while it is read, so a GC sweep cannot take it halfway (SPEC §9.5).
     ///
     /// # Errors
     /// As [`read_range`]: [`Error::BlobNotFound`], [`Error::RangeOutOfBounds`], [`Error::Corrupt`], the store's.
     pub fn get_blob_range(&self, blob_ref: &BlobRef, range: Range<u64>) -> Result<Vec<u8>> {
+        // A blob pin alone protects its chunks too: the sweep keeps an upload a pinned blob's manifest names
+        // (ADR-0051 item 5).
+        let _pins = self.pins.pin([Pinned::Blob(blob_ref.blob_id())]);
         read_range(&*self.store, blob_ref, range)
     }
 
     /// A reader of the whole blob `blob_ref` refers to (SPEC §9.6 `get_blob`), which reads it a window of chunks at
     /// a time ([`WINDOW_BYTES`]), each checked, never the whole blob at once. The manifest is looked up and checked
-    /// once, here; every window reads by it ([`read_manifest_range`]).
+    /// once, here; every window reads by it ([`read_manifest_range_into`], with one window buffer
+    /// and one store scratch buffer for the whole stream). The reader pins the blob and its upload until
+    /// it is dropped, so a GC sweep never takes a blob mid-stream (SPEC §9.5).
     ///
     /// # Errors
     /// [`Error::BlobNotFound`] when the id is not bound, [`Error::Corrupt`] when its manifest does not match
     /// `blob_ref`, or the store's errors. Errors while reading come from [`Read::read`] as [`io::Error`]s whose
     /// inner error is the [`Error`].
     pub fn get_blob(&self, blob_ref: &BlobRef) -> Result<BlobReader<'_, S>> {
+        // Pinned before the lookup, and its upload after it, as `pin_contained` does (ADR-0051 item 5).
+        let mut pins = self.pins.pin([Pinned::Blob(blob_ref.blob_id())]);
         let Some(manifest) = self.store.manifest(blob_ref.blob_id())? else {
             return Err(Error::BlobNotFound {
                 blob_id: blob_ref.blob_id(),
             });
         };
         manifest.check_ref(blob_ref)?;
+        pins.add(Pinned::Upload(manifest.upload_id()));
         let chunk = u64::from(manifest.chunk_size().get());
         let window = chunk.saturating_mul(u64::from(window_chunk_count(manifest.chunk_size())));
         Ok(BlobReader {
@@ -243,6 +268,8 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
             offset: 0,
             buf: Vec::new(),
             pos: 0,
+            scratch: Vec::new(),
+            _pins: pins,
         })
     }
 
@@ -295,6 +322,8 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     /// unknown; after one, an error is no answer (the earlier write may still land), so the loop goes on. Attempts
     /// are spaced by [`backoff`]; no attempt starts at or after `options.bind_budget` past the first (a wait that
     /// would reach that deadline is not waited), and the unknown error is returned then. At least one attempt is made.
+    /// An unknown outcome from a store that refuses every write until reopened ([`Error::is_store_poisoned`]), or such
+    /// a store's error after an unknown outcome, ends the loop at once, still unknown ([`still_unknown`]).
     fn bind(
         &self,
         upload_id: UploadId,
@@ -320,6 +349,15 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         loop {
             match bind() {
                 Ok(outcome) => return (Ok(outcome), unknown.is_some()),
+                // A store that refuses every write until it is reopened (the pack after a failed sync, SPEC §4.5)
+                // answers nothing more on this handle: the outcome stays unknown, so the retry ends now instead of at
+                // the end of the budget (ROADMAP 9.4.7, ADR-0051 item 3). Only a reopen tells what was bound.
+                Err(e)
+                    if e.is_store_poisoned()
+                        && (unknown.is_some() || e.is_bind_outcome_unknown()) =>
+                {
+                    return (Err(still_unknown(e, unknown.as_ref())), true);
+                }
                 Err(e) if e.is_bind_outcome_unknown() => unknown = Some(e),
                 Err(e) if unknown.is_none() => return (Err(e), false),
                 // Still unknown: this answer says nothing of the earlier attempt's write.
@@ -384,6 +422,25 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     }
 }
 
+/// `poisoned` (an error with [`Error::is_store_poisoned`]) as an unknown outcome: itself when it already is one, or
+/// wrapped in [`Error::BindOutcomeUnknown`], so the caller learns both that nothing is known and that the store must
+/// be reopened. The earlier unknown outcome, if any, holds the root cause (the failed sync): it is logged, since the
+/// returned error must carry the poisoned refusal for [`Error::is_store_poisoned`] to hold.
+fn still_unknown(poisoned: Error, first: Option<&Error>) -> Error {
+    if let Some(first) = first {
+        tracing::warn!(
+            error = %first,
+            source = ?std::error::Error::source(first),
+            "a blob bind's outcome is unknown and its store refuses every write until reopened"
+        );
+    }
+    if poisoned.is_bind_outcome_unknown() {
+        poisoned
+    } else {
+        Error::BindOutcomeUnknown(Box::new(poisoned))
+    }
+}
+
 /// The CRC32C of each chunk of the blob `reader` yields, and its summary; `sink` gets each chunk in order.
 fn chunk_crcs(
     reader: impl Read,
@@ -440,6 +497,10 @@ pub struct BlobReader<'a, S: ?Sized> {
     offset: u64,
     buf: Vec<u8>,
     pos: usize,
+    /// The store's read buffer (`BlobStore::read_chunks_checked`), kept for the stream: at most one chunk frame.
+    scratch: Vec<u8>,
+    /// The blob and its upload, pinned while the stream lives (SPEC §9.5).
+    _pins: Pins,
 }
 
 impl<S: ?Sized> BlobReader<'_, S> {
@@ -457,8 +518,21 @@ impl<S: BlobStore + ?Sized> Read for BlobReader<'_, S> {
                 return Ok(0);
             }
             let end = self.offset.saturating_add(self.window).min(size);
-            self.buf = read_manifest_range(self.store, &self.manifest, self.offset..end)
-                .map_err(io::Error::other)?;
+            // The window buffer and the store's scratch are kept across windows: neither is allocated (nor, for a
+            // pack read with `pread`, zero-filled) again (ROADMAP 9.2.9).
+            self.buf.clear();
+            self.pos = 0;
+            read_manifest_range_into(
+                self.store,
+                &self.manifest,
+                self.offset..end,
+                &mut self.scratch,
+                &mut self.buf,
+            )
+            .map_err(|e| {
+                self.buf.clear();
+                io::Error::other(e)
+            })?;
             self.offset = end;
             self.pos = 0;
         }

@@ -2593,12 +2593,21 @@ lookups) only after its slot sync returns. Chunk frames no committed `BlobIndex`
 open rebuilds the index by scanning the frames of `12288..log_end`; a read-write open then commits the longest fully
 valid frame run after `log_end` that ends in a complete `BlobIndex` whose chunk frames match its manifest (a cut
 bind, or one whose newer slot was damaged) and truncates the rest. A read checks the manifest it found against the `BlobRef` it reads by (`check_ref`: id, size, chunk
-size), then each chunk's length and CRC32C. GC rewrites live blobs into a new pack (like container compaction).
+size), then each chunk's length and CRC32C. A pack reader reads each chunk's `BlobChunk` frame in one read sized by the
+manifest (`24 + pad8(32 + len) + 8`, bounded by the frames it knows; a frame that would run past them is corruption)
+and checks the frame (§4.4) and the chunk's CRC32C in one pass over its bytes (ROADMAP 9.2.9). A corruption error of
+the pack names the offset of the slot or frame it found damaged (the header: 0; ROADMAP 9.2.8). GC rewrites live blobs into a new pack (like container compaction).
 
 The pack is created **lazily**, by the first `put_blob` (ROADMAP 9.2.1): opening or creating a database creates no
 pack, a database that never stored a blob has none, and an open that finds none has no blobs (a document that
 references one is dangling, which `verify` reports, §9.5). Creating it is durable before the first blob is bound: the
-file with its header and superblock synced, then its directory synced (§4.5.2). A blob is durable per bind, before any
+file with its header and superblock synced, then its directory synced (§4.5.2). A read-write open first removes the stale
+temporary files a crashed creation or pack rewrite left beside the pack (`<name>.persia.blobs.tmp.<nonce>.<n>`), then
+syncs the directory; only the container's writer opens the pack read-write, so none is in use. That sweep relies on
+§18.10 (b): nothing is bound into the new pack until its directory sync succeeds, and writing stops if it fails, so a
+swept rewrite file holds no blob a reader can still name. A removal or directory sync that fails is logged and does
+not fail the open (ROADMAP 9.2.6). The next open does not retry that directory sync: a name the removal left, or that
+a crash brings back, is swept again. A blob is durable per bind, before any
 document that references it is logged (§18.9). A reader learns that the pack was replaced from its
 `(pack_id, generation)` (§18.10). A copy of the database takes both files (§4.8).
 
@@ -2613,11 +2622,17 @@ A key under `blobs/` that is not exactly of these forms (lowercase hex, `<xx>` t
 Binding: `Created` binds the id; `AlreadyExists` (resolved against the writer's own bytes, §10.1) means another upload
 bound it first, so this one is a duplicate (§9.2); an error leaves the outcome unknown: the writer retries the same
 `put_if_absent` (same bytes) until it gets an answer, with jittered exponential backoff (50 ms doubling to 5 s), for
-at most a time budget (`bind_budget`, default 60 s; ADR-0051); a plain error after an unknown outcome answers nothing
+at most a time budget (`bind_budget`, default 60 s, at most
+`MAX_BIND_BUDGET`, 1 h; ADR-0051). GC's grace period (§9.5) must be at least `2 * MAX_BIND_BUDGET`, strictly above
+every budget: an attempt started just before the deadline can land its `put_if_absent` after the budget ends, and a
+grace of only the budget could sweep those chunks while that write is still in flight. `gc` (ROADMAP 9.5.2, #108)
+rejects a shorter grace. A plain error after an unknown outcome answers nothing
 and is retried too. When the budget runs out, `put_blob` fails with the unknown outcome, returns no `BlobRef`, and
-the document is not logged. The writer never deletes the chunks of an upload whose binding outcome was once unknown
-(an S3 conditional write still in flight may land later), leaving them to GC, whose grace period (§9.5) must stay far
-above the budget. A backend without
+the document is not logged. A store that refuses every write until it is reopened (the pack after a failed sync, §4.5) ends
+the retries at once, still unknown: when it refuses after an unknown outcome, or its refusal is itself outcome-unknown;
+only a reopen tells what was bound (ROADMAP 9.4.7). The writer never deletes the chunks of an upload whose binding outcome was once unknown
+(an S3 conditional write still in flight may land later), leaving them to GC under that same grace floor.
+A backend without
 `conditional_put` cannot store blobs (`Unsupported`). A read gets the blob manifest, checks it against the `BlobRef`
 (`check_ref`; a manifest under the wrong key would otherwise serve another blob's bytes with every CRC valid), then
 gets whole chunks and checks each chunk's length and CRC32C against it (a mismatch is `Corrupt`).
@@ -2652,10 +2667,14 @@ the same process that runs `put_blob`, and keeps a **pin set** with it:
   and a poisoned writer keeps its pins until it is dropped: GC deletes less, never more. A duplicate, and a
   `put(doc, blob)` given a `BlobRef`, also pin the upload the bound manifest names, after reading it; the sweep does
   not delete an upload's chunks while a pinned blob's manifest names it (ADR-0051).
+  A read pins too: a `get_blob` stream pins its `blob_id` before it looks the manifest up and the upload the manifest
+  names right after, until the stream is dropped, and `get_blob_range` pins the `blob_id` for the call, so a sweep
+  never takes a blob mid-read (§18.10 (c)).
 - Mark: the `blob_id`s referenced by live manifests and snapshots and by WAL records from `wal_start` on (§8.2),
   pinned ids, then the upload ids their blob manifests name, and pinned upload ids.
 - Sweep: unmarked blob manifests, then staged chunks of uploads no marked manifest names, each only once older than a
-  grace period (default 24 h; for staged chunks counted from the upload's newest chunk, so an idle upload stays
+  grace period (default 24 h, and at least `2 * MAX_BIND_BUDGET`, §9.4; for staged chunks counted from the upload's
+  newest chunk, so an idle upload stays
   resumable that long). Ages are objects' `last_modified` (§10.1); an object whose age is unknown is never taken
   as older than the grace period. A blob manifest is deleted before its upload's chunks, so a crash mid-sweep leaves chunks
   without a manifest, never a manifest without chunks. Checking an object against the pin set and deleting it is one
@@ -3107,7 +3126,11 @@ Comparison against other engines is reported with methodology, never cherry-pick
     change; (b) blobs bound into the new pack before its directory sync:
     a crash that reverts the rename would lose them while the container may already reference them, so the proposal
     is that the writer binds nothing into the new pack until that sync succeeds, and stops writing if it fails, as
-    after a compaction (§4.6), to be confirmed by a crash test (ROADMAP 9.5.4); (c) whether a
-    `get_blob` stream that started on the old pack reads on from its open handle after the rename, as segments do
-    from the old container (§4.7), or must finish first. The mark already keeps every blob a live manifest, snapshot
-    or pin references (§9.5), so a rewrite never drops a blob a reader can still name.
+    after a compaction (§4.6), to be confirmed by a crash test (ROADMAP 9.5.4); (c) answered
+    (2026-11-19): a `get_blob` stream in the writer reads on, because the writer's handle swaps file and index at
+    once and looks every chunk up by id, and it pins its blob (§9.5), so the rewrite keeps it; a reader in another
+    process keeps reading the old file until its `refresh` reports `PackReplaced`.
+    The mark already keeps every blob a live manifest, snapshot or pin references (§9.5), so a rewrite never drops a
+    blob a reader in the writer process can still name. A reader in another process, or a remote reader lagging the
+    writer, is ROADMAP 13.2.4: readers pin old manifests while queries run, and GC respects reader leases and the
+    grace period.
