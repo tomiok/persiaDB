@@ -97,3 +97,11 @@ disk) keyed by object and block (SPEC §10.6).
 `replicate` mode keeps the local file as the primary and uploads committed manifests in order,
 without blocking local writes on the network (SPEC §10.5). Remote readers of that replica are
 eventually consistent; lag is a metric.
+
+## Blob pack
+
+Client bytes such as a PDF or an image are not a segment section. A local database keeps them in
+`<name>.persia.blobs` beside `<name>.persia`. The pack is a header with magic `PERSIAB\x01`, the same
+two superblock slots, and append-only `BlobChunk` and `BlobIndex` frames. It is created on the first
+blob write. [Blob storage](/guide/blobs/) is that file, the remote key layout, corruption checks, and
+garbage collection. `BlobId` and `BlobRef` are types in `persia-format`.

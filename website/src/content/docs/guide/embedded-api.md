@@ -44,8 +44,9 @@ The intended surface (SPEC §8, §9.6, ROADMAP 10.1):
 - Create, open, and drop a collection, and read its schema back.
 - `put`, `put_batch`, `delete`, `get`, `commit`, and `search`.
 - Documents as a dynamic map, or as a `serde` struct (`put_struct`).
-- `put_blob` / `get_blob` / ranged reads. A convenience `put` that takes a document and a blob writes
-  the blob first, then commits the document.
+- `put_blob` / `get_blob` / ranged reads, on this planned facade. The library code for those calls is
+  `persia::internal::blob::Blobs` and `BlobDatabase`. A `put` that takes a document and a blob writes
+  the blob first, then logs the document. [Blob storage](/guide/blobs/) is that code.
 - A stable error type. Library code returns `Result`; corrupted bytes are an error, never a panic.
 
 Handles are `Send` and `Sync`. Many readers share a snapshot. A second writer fails immediately.

@@ -71,8 +71,12 @@ test('the live tree matches the write path that is actually checked in', () => {
 	assert.equal(status.engineShort.includes('synonyms are not built'), false);
 	assert.equal(status.engineShort.includes('prefix are not built'), false);
 	assert.equal(status.engineShort.includes('are not built'), false);
-	assert.match(status.libraryNow, /content hashing, chunking, and blob manifests/);
+	assert.match(status.libraryNow, /local pack file/);
+	assert.match(status.libraryNow, /remote key layout/);
+	assert.match(status.libraryNow, /garbage collection/);
 	assert.equal(status.libraryNow.includes('exports no API'), false);
+	assert.equal(status.libraryNow.includes('are not written'), false);
+	assert.equal(status.libraryNow.includes('exports a public API'), false);
 	assert.match(status.relaxationNow, /Every cascade level builds a query/);
 	assert.match(status.relaxationNow, /L4 fuzzy reports a correction when that step found the hits/);
 	assert.match(status.relaxationNow, /L5 fallback flags its order/);
@@ -85,7 +89,13 @@ test('the live tree matches the write path that is actually checked in', () => {
 	assert.equal(status.relaxationNow.includes('Levels after exact do not build a query'), false);
 	assert.equal(status.relaxationNow.includes('A one-term typo still returns no hits'), false);
 	assert.equal(status.relaxationNow.includes('are not built'), false);
-	assert.match(status.blobNow, /The pack file, remote blobs, document integration, and garbage collection are not written/);
+	assert.match(status.blobNow, /local pack file/);
+	assert.match(status.blobNow, /remote key layout/);
+	assert.match(status.blobNow, /document ordering/);
+	assert.match(status.blobNow, /garbage collection/);
+	assert.match(status.blobNow, /put_blob and get_blob live in persia::internal/);
+	assert.match(status.blobNow, /The public Db facade is milestone M10/);
+	assert.equal(status.blobNow.includes('are not written'), false);
 	assert.match(status.queryPathNow, /filters, sorts, cursor pages, facets, deadlines, and explain/);
 	assert.equal(status.engineShort.includes('Open and recovery orchestration is only partly done'), false);
 	assert.match(status.engineNow, /Public modules: .*wal/);
@@ -94,6 +104,9 @@ test('the live tree matches the write path that is actually checked in', () => {
 	assert.equal(status.engineModules.split(', ').includes('stats'), true);
 	assert.match(status.engineCalls, /Database has open, create_collection, put, put_batch, delete, and commit/);
 	assert.match(status.engineCalls, /no persia::Db/);
+	assert.match(status.engineCalls, /put_blob and get_blob live in persia::internal/);
+	assert.equal(status.engineCalls.includes('no put_blob'), false);
+	assert.equal(status.engineCalls.includes('no get_blob'), false);
 	assert.match(status.engineCalls, /CollectionViews::search runs a ranked search over a collection snapshot/);
 	assert.match(status.engineCalls, /no search on the database handle/);
 	assert.match(status.writePathNow, /replays the WAL/);
@@ -126,7 +139,9 @@ test('the live tree matches the write path that is actually checked in', () => {
 	assert.equal(status.tokens['%%RELAXATION_CELL%%'].includes('A typo is not corrected'), false);
 	assert.match(status.tokens['%%RELAXATION_NOW%%'], /Every cascade level builds a query/);
 	assert.match(status.tokens['%%RELAXATION_NOW%%'], /Not every M8 leaf is done/);
-	assert.match(status.tokens['%%BLOB_CELL%%'], /The pack file is not written/);
+	assert.match(status.tokens['%%BLOB_CELL%%'], /local pack file/);
+	assert.match(status.tokens['%%BLOB_CELL%%'], /garbage collection/);
+	assert.equal(status.tokens['%%BLOB_CELL%%'].includes('not written'), false);
 	assert.match(status.tokens['%%STATE_M8%%'], /^In progress \(M8, \d+\/\d+\)\.$/);
 	assert.match(status.tokens['%%OPEN_CELL%%'], /Database opens a file and CollectionViews::search searches it/);
 	assert.match(status.tokens['%%STATE_M9%%'], /^In progress \(M9, \d+\/\d+\)\.$/);
@@ -135,6 +150,19 @@ test('the live tree matches the write path that is actually checked in', () => {
 	assert.equal(status.pillarCorrectness.includes('no document write path'), false);
 	assert.match(status.pillarCloud, /Object storage has not been started \(M12\)/);
 	assert.equal(status.writePathLead, 'Local write path, partly in the tree');
+});
+
+test('an unchecked pack leaf still says the pack file is not written', () => {
+	const live = parseRoadmapLeaves(readFileSync(path.join(root, 'ROADMAP.md'), 'utf8'));
+	live.set('9.2.1', false);
+	const input = currentInput(live);
+	input.blobExports = true;
+	const next = buildStatus(input);
+	assert.match(
+		next.blobNow,
+		/The pack file, remote blobs, document integration, and garbage collection are not written/,
+	);
+	assert.match(next.tokens['%%BLOB_CELL%%'], /The pack file is not written/);
 });
 
 test('an unchecked WAL leaf drops the full WAL claim', () => {
@@ -303,6 +331,10 @@ test('docs pages do not keep the stale inventory, and tokens expand', () => {
 		'Facets are not implemented',
 		'The blob store has not been started',
 		'persia-blob exports no API',
+		'The pack file is not written',
+		'planned content-addressed pack',
+		'persia-blob and persia-proto are module docs only',
+		'The persia crate exports a public API.',
 		'The cascade does not run',
 		'The cascade has not been started',
 		'Evaluating a filter against documents is ROADMAP 7.4.5 and has not been started',

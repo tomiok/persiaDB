@@ -58,6 +58,8 @@ assert_eq!(decoded.access(), Access::ReadWrite);
 
 Also implemented in that crate, and only as byte codecs: checksums, integer blocks, zstd block compression, block framing, the two superblock slots, frames (including the streaming encoder), the memory-map reader, and `BlobId` / `BlobRef`. The public module list is [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs). The [code](/guide/code/) page quotes exports from that file.
 
+`persia-blob` stores the bytes a document points at: a local `<name>.persia.blobs` pack, a remote key layout, and garbage collection. The calls are `persia::internal`, not `persia::Db`. [Blob storage](/guide/blobs/) is that API, the write order, and what is still planned.
+
 %%LIBRARY_NOW%%
 
 Those crates are in the same git repository and are unpublished the same way. Depending on them does not give you `Db::open`.

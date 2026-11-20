@@ -112,6 +112,7 @@ gate on the zero-result rate. %%RELAXATION_NOW%% Which levels build a query is [
 Depends on M1 and M2. An ADR for upload staging first (SPEC §18.8), then hashing and chunking,
 the local pack file, the remote key layout, ordering a blob write before the document commit, and
 garbage collection that never deletes a blob a live snapshot still references. %%BLOB_NOW%%
+The calls, the pack file, and the remote keys are [Blob storage](/guide/blobs/).
 
 ## M10 — Embedded API
 

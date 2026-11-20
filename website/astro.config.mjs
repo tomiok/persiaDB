@@ -173,6 +173,7 @@ export default defineConfig({
                         { label: 'Feature reference', slug: 'guide/features' },
                         { label: 'Crate architecture', slug: 'guide/architecture' },
                         { label: 'File format and storage', slug: 'guide/file-format' },
+                        { label: 'Blob storage', slug: 'guide/blobs' },
                         { label: 'Code', slug: 'guide/code' },
                         { label: 'Embedded API', slug: 'guide/embedded-api' },
                         { label: 'Embedded SDKs', slug: 'guide/sdks' },

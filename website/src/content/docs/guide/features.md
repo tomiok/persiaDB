@@ -169,14 +169,15 @@ The numbered steps above are the path in SPEC §8.2. %%WRITE_PATH_NOW%%
 
 The index stores a reference, never the file bytes (SPEC §9). A `blob_id` is the SHA-256 of the
 blob (ADR-0002). Persia hashes the bytes it receives; a caller-supplied id that does not match is
-an error. Chunks default to 4 MiB, each with a CRC32C, so uploads can resume and reads can be
-ranged. Blob bytes are stored as the client sent them (SPEC §9.2). The same content stored twice is one blob.
+an error. Chunks default to 4 MiB, each with a CRC32C. Reads can request a byte range.
+Blob bytes are stored as the client sent them (SPEC §9.2). The same content stored twice is one blob.
 
 Write order is deliberate: the blob is durable first, then the document that references it is
-committed (SPEC §9.5). A crash in between leaves an orphan, which is harmless. Garbage collection
-keeps anything a live manifest still references, and deletes orphans older than a grace period
-(default 24 hours). `verify` must fail if a referenced blob is missing.
+logged (SPEC §9.5). A crash in between leaves an orphan. Garbage collection keeps anything a live
+snapshot, the WAL, or a pin still references. Remote orphans wait out a grace period (default 24
+hours). The local pack is rewritten with no grace period once enough of it is unreferenced.
+The design says `verify` fails if a referenced blob is missing. That check is not in `persia verify` yet.
 
-%%BLOB_NOW%% The `BlobId` and `BlobRef` value types
-exist in `persia-format` (ROADMAP 1.10.1): limits and binary encoding are in SPEC §9.1 and ADR-0011.
-Upload staging is an ADR (ROADMAP 9.1.0). The pack file is not written.
+%%BLOB_NOW%% `BlobId` and `BlobRef` live in `persia-format` (ROADMAP 1.10.1): limits and binary encoding are in SPEC §9.1 and ADR-0011.
+[Blob storage](/guide/blobs/) is the pack file, the remote layout, write order, corruption checks, and garbage collection.
+`put_blob` does not take a resume token yet (ROADMAP 9.3.4). `persia verify` does not yet report a missing blob (ROADMAP 9.5.3).
