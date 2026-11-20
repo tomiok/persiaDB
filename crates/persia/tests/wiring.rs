@@ -1,0 +1,236 @@
+//! A database opened with its blob pack (SPEC §9.3; ROADMAP 9.2.7, 9.4.5; ADR-0053).
+//!
+//! Invariants:
+//! 1. Creating or opening a database creates no `<name>.persia.blobs`; the first `put_blob` creates it, with the
+//!    container's `db_uuid` in its header.
+//! 2. A reopened database reads the blobs its documents reference; a second writer fails on the container's lock, so
+//!    no second read-write pack exists.
+//! 3. A read-only database opens its pack read-only and never creates it: with no pack, `get_blob` fails as not
+//!    bound, and its refresh (a newer read-only open of the documents, then the pack) finds a pack created since.
+//! 4. The pack is found beside the container's canonical path, whatever name opened it.
+#![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)] // Tests: inputs are fixed.
+
+use std::io::Read;
+use std::path::Path;
+
+use persia::internal::blob::PutBlobOptions;
+use persia::internal::documents::{Blob, BlobDatabase, Error, ReadOnlyBlobDatabase};
+use persia_blob::{BlobStore, PackMode, PackStore, pack_path};
+use persia_engine::db::{Database, DatabaseError, DatabaseOptions, ReadOnlyDatabase};
+use persia_engine::document::Document;
+use persia_engine::schema::SchemaBuilder;
+use persia_engine::wal::Durability;
+use persia_storage::container::Error as ContainerError;
+
+fn create(path: &Path) -> BlobDatabase<PackStore> {
+    let mut db = BlobDatabase::create(path, DatabaseOptions::default()).unwrap();
+    db.log_mut()
+        .create_collection(SchemaBuilder::new("c").build().unwrap())
+        .unwrap();
+    db
+}
+
+fn read_all(db: &ReadOnlyBlobDatabase, blob: &persia_blob::BlobRef) -> Vec<u8> {
+    let mut out = Vec::new();
+    db.get_blob(blob).unwrap().read_to_end(&mut out).unwrap();
+    out
+}
+
+#[test]
+fn creating_or_opening_a_database_creates_no_pack() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let pack = pack_path(&path);
+    let db = create(&path);
+    assert_eq!(db.blobs().store().mode(), PackMode::ReadWrite);
+    assert!(!db.blobs().store().exists());
+    assert!(!pack.exists(), "a create makes no pack");
+    drop(db);
+    let db = BlobDatabase::open(&path, DatabaseOptions::default()).unwrap();
+    assert!(!pack.exists(), "an open makes no pack");
+
+    // The first put_blob creates it, with the container's id.
+    let (blob, _pins) = db
+        .put_blob(&b"first"[..], &PutBlobOptions::default())
+        .unwrap();
+    assert!(pack.exists());
+    let db_uuid = db.log().container().header().db_uuid;
+    assert_eq!(db.blobs().store().header().unwrap().db_uuid, db_uuid);
+    assert_eq!(db.get_blob_range(&blob, 0..5).unwrap(), b"first");
+    let names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert!(
+        names.iter().all(|n| !n.contains(".tmp.")),
+        "no temporary file left: {names:?}"
+    );
+}
+
+#[test]
+fn a_reopened_database_reads_its_documents_blobs_and_has_one_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let mut db = create(&path);
+    let blob = db
+        .put(
+            "c",
+            &Document::new("a"),
+            Blob::from_reader(&b"kept bytes"[..]),
+            Durability::Fsync,
+        )
+        .unwrap();
+    // A second writer fails on the container's lock: no second proof, no second read-write pack.
+    let second = BlobDatabase::open(&path, DatabaseOptions::default());
+    assert!(
+        matches!(
+            &second,
+            Err(Error::Database(e)) if matches!(**e, DatabaseError::Container(ContainerError::Locked))
+        ),
+        "{second:?}"
+    );
+    assert!(db.log().writer_proof().is_some());
+    drop(db);
+
+    let db = BlobDatabase::open(&path, DatabaseOptions::default()).unwrap();
+    let doc = db
+        .log()
+        .snapshot()
+        .collection("c")
+        .unwrap()
+        .get("a")
+        .unwrap()
+        .unwrap();
+    assert_eq!(doc.blob_ref(), Some(&blob));
+    assert_eq!(db.get_blob_range(&blob, 0..10).unwrap(), b"kept bytes");
+}
+
+#[test]
+fn a_read_only_database_never_creates_its_pack_and_its_refresh_finds_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let pack = pack_path(&path);
+    let options = DatabaseOptions::default();
+    let mut writer = create(&path);
+    let mut reader = ReadOnlyBlobDatabase::open(&path, &options).unwrap();
+    assert_eq!(reader.blobs().store().mode(), PackMode::ReadOnly);
+    assert!(reader.database().container().writer_proof().is_none());
+    assert!(!pack.exists(), "a read-only open makes no pack");
+    // Nothing new, and still no pack.
+    assert!(
+        !reader
+            .refresh(ReadOnlyDatabase::open(&path, &options.registry).unwrap())
+            .unwrap()
+    );
+    assert!(!pack.exists());
+
+    let blob = writer
+        .put(
+            "c",
+            &Document::new("a"),
+            Blob::from_reader(&b"made later"[..]),
+            Durability::Fsync,
+        )
+        .unwrap();
+    // The reader's pack had none: not bound.
+    assert!(matches!(
+        reader.get_blob(&blob),
+        Err(Error::Blob(persia_blob::Error::BlobNotFound { blob_id })) if blob_id == blob.blob_id()
+    ));
+    assert!(
+        reader
+            .blobs()
+            .store()
+            .manifest(blob.blob_id())
+            .unwrap()
+            .is_none()
+    );
+
+    // Refreshed: the newer documents, then the pack the writer created since.
+    assert!(
+        reader
+            .refresh(ReadOnlyDatabase::open(&path, &options.registry).unwrap())
+            .unwrap()
+    );
+    let doc = reader
+        .database()
+        .snapshot()
+        .collection("c")
+        .unwrap()
+        .get("a")
+        .unwrap()
+        .unwrap();
+    assert_eq!(doc.blob_ref(), Some(&blob));
+    assert_eq!(read_all(&reader, &blob), b"made later");
+    assert_eq!(reader.get_blob_range(&blob, 5..10).unwrap(), b"later");
+
+    // A reader that opens after the pack exists finds it at once.
+    let late = ReadOnlyBlobDatabase::open(&path, &options).unwrap();
+    assert_eq!(read_all(&late, &blob), b"made later");
+}
+
+#[test]
+fn a_refresh_with_another_database_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let other = dir.path().join("other.persia");
+    let options = DatabaseOptions::default();
+    drop(create(&path));
+    drop(Database::create(&other, DatabaseOptions::default()).unwrap());
+    let mut reader = ReadOnlyBlobDatabase::open(&path, &options).unwrap();
+    let before = reader.database().container().header().db_uuid;
+    let refreshed = reader.refresh(ReadOnlyDatabase::open(&other, &options.registry).unwrap());
+    assert!(matches!(
+        refreshed,
+        Err(Error::Blob(
+            persia_blob::Error::PackOfAnotherDatabase { .. }
+        ))
+    ));
+    assert_eq!(reader.database().container().header().db_uuid, before);
+}
+
+#[test]
+fn a_pack_of_another_database_fails_both_opens() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let other = dir.path().join("other.persia");
+    drop(create(&path));
+    let db = create(&other);
+    let (_, pins) = db
+        .put_blob(&b"foreign"[..], &PutBlobOptions::default())
+        .unwrap();
+    drop((pins, db));
+    // Only the other database's pack is copied beside this one (SPEC §4.8 copies both files, together).
+    std::fs::copy(pack_path(&other), pack_path(&path)).unwrap();
+    assert!(matches!(
+        BlobDatabase::open(&path, DatabaseOptions::default()),
+        Err(Error::Blob(
+            persia_blob::Error::PackOfAnotherDatabase { .. }
+        ))
+    ));
+    assert!(matches!(
+        ReadOnlyBlobDatabase::open(&path, &DatabaseOptions::default()),
+        Err(Error::Blob(
+            persia_blob::Error::PackOfAnotherDatabase { .. }
+        ))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_pack_is_found_beside_the_containers_canonical_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let link = dir.path().join("link.persia");
+    drop(create(&path));
+    std::os::unix::fs::symlink(&path, &link).unwrap();
+    let db = BlobDatabase::open(&link, DatabaseOptions::default()).unwrap();
+    let (blob, _pins) = db
+        .put_blob(&b"through a link"[..], &PutBlobOptions::default())
+        .unwrap();
+    drop(db);
+    assert!(pack_path(&path).exists());
+    assert!(!pack_path(&link).exists());
+    let reader = ReadOnlyBlobDatabase::open(&path, &DatabaseOptions::default()).unwrap();
+    assert_eq!(read_all(&reader, &blob), b"through a link");
+}

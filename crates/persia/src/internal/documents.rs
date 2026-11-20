@@ -6,14 +6,19 @@
 //! document is logged; one the store lacks is an error and logs nothing. The blob's pins are kept until the WAL
 //! record that references it is durable ([`DocumentLog::durable_mark`] reaches its [`DocumentLog::wal_mark`]): at
 //! once for `Fsync`, at the next commit or `Fsync` operation otherwise (SPEC §9.5).
+//!
+//! [`BlobDatabase::create`] and [`BlobDatabase::open`] open a database with its pack, `<name>.persia.blobs`, read-write
+//! with the database's writer proof (SPEC §9.3; ROADMAP 9.2.7, 9.4.5); [`ReadOnlyBlobDatabase`] opens both read-only.
 
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use persia_blob::{BlobId, BlobRef, BlobStore};
-use persia_engine::db::{Database, DatabaseError};
+use persia_blob::pack::{ContainerFile, Vfs};
+use persia_blob::{BlobId, BlobRef, BlobStore, PackStore, pack_path};
+use persia_engine::db::{Database, DatabaseError, DatabaseOptions, ReadOnlyDatabase};
 use persia_engine::document::Document;
 use persia_engine::wal::{Durability, WalMark};
 
@@ -118,7 +123,7 @@ pub trait DocumentLog {
     fn commit(&mut self) -> Result<u64, DatabaseError>;
 }
 
-impl DocumentLog for Database {
+impl<F: ContainerFile + Sync> DocumentLog for Database<F> {
     #[allow(clippy::result_large_err)] // As the trait.
     fn put(
         &mut self,
@@ -302,7 +307,214 @@ impl From<DatabaseError> for Error {
 }
 
 // -- wiring (9.4.5) --
-// blob/wiring: `BlobDatabase` opened over a `Database` and its pack (`<name>.persia.blobs`, the container's
-// `db_uuid`, the writer proof) goes here, and only here.
-//
+// `BlobDatabase` opened over a `Database` and its pack (`<name>.persia.blobs`, the container's `db_uuid`, the writer
+// proof), and its read-only counterpart (SPEC §9.3; ROADMAP 9.2.7, 9.4.5; ADR-0053).
+
+/// The pack beside `container`, the canonical path a container was opened at (so every process that opens the
+/// database, by any name, finds the same pack), or beside `given` for a container without one.
+fn pack_beside(container: Option<&Path>, given: &Path) -> PathBuf {
+    pack_path(container.unwrap_or(given))
+}
+
+impl BlobDatabase<PackStore> {
+    /// Creates a database in a new container file at `path` ([`Database::create`]) with its blob pack at
+    /// [`pack_path`] of it, `<name>.persia.blobs`, opened read-write with the database's writer proof, so the pack
+    /// carries the container's `db_uuid` (SPEC §9.3). The pack file is not created here: the first `put_blob` creates
+    /// it, and a database that never stores a blob has none.
+    ///
+    /// ```
+    /// use persia::internal::blob::PutBlobOptions;
+    /// use persia::internal::documents::BlobDatabase;
+    /// use persia_engine::db::DatabaseOptions;
+    ///
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// let path = dir.path().join("app.persia");
+    /// let db = BlobDatabase::create(&path, DatabaseOptions::default())?;
+    /// assert!(!dir.path().join("app.persia.blobs").exists()); // no blob yet, no pack
+    /// let (blob, _pins) = db.put_blob(&b"hello"[..], &PutBlobOptions::default())?;
+    /// assert!(dir.path().join("app.persia.blobs").exists());
+    /// let db_uuid = db.log().container().header().db_uuid;
+    /// assert_eq!(db.blobs().store().header().map(|h| h.db_uuid), Some(db_uuid));
+    /// drop(db);
+    ///
+    /// let db = BlobDatabase::open(&path, DatabaseOptions::default())?;
+    /// assert_eq!(db.get_blob_range(&blob, 0..5)?, b"hello");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// [`Error::Database`] as [`Database::create`]; [`Error::Blob`] as [`PackStore::open_writer`] (a pack already at
+    /// that path, of another database, fails with `PackOfAnotherDatabase`).
+    pub fn create(path: impl AsRef<Path>, options: DatabaseOptions) -> Result<Self, Error> {
+        let path = path.as_ref();
+        let db = Database::create(path, options)?;
+        let pack = pack_beside(db.container().path(), path);
+        Self::with_pack(db, pack)
+    }
+
+    /// Opens the database in the container file at `path` read-write ([`Database::open`]) with its blob pack, as
+    /// [`BlobDatabase::create`] does. A pack that does not exist yet is not created until the first `put_blob`.
+    ///
+    /// # Errors
+    /// [`Error::Database`] as [`Database::open`] (another writer holds the lock: no second pack writer can exist,
+    /// ROADMAP 9.2.7); [`Error::Blob`] as [`PackStore::open_writer`].
+    pub fn open(path: impl AsRef<Path>, options: DatabaseOptions) -> Result<Self, Error> {
+        let path = path.as_ref();
+        let db = Database::open(path, options)?;
+        let pack = pack_beside(db.container().path(), path);
+        Self::with_pack(db, pack)
+    }
+
+    /// `db` with the pack at `pack` (normally [`pack_path`] of its container's path), opened read-write with `db`'s
+    /// writer proof ([`PackStore::open_writer`]).
+    ///
+    /// # Errors
+    /// As [`PackStore::open_writer`]; [`persia_blob::Error::PackReadOnly`] if `db` mints no writer proof.
+    pub fn with_pack(db: Database, pack: impl AsRef<Path>) -> Result<Self, Error> {
+        let proof = db.writer_proof().ok_or(persia_blob::Error::PackReadOnly)?;
+        let store = PackStore::open_writer(pack, &proof)?;
+        Ok(Self::new(db, Blobs::new(Arc::new(store))))
+    }
+}
+
+impl<F: ContainerFile + Sync + 'static> BlobDatabase<PackStore<F>, Database<F>> {
+    /// [`BlobDatabase::with_pack`] with the pack on `vfs` (a simulated file system in crash tests).
+    ///
+    /// # Errors
+    /// As [`PackStore::open_writer_in`]; [`persia_blob::Error::PackReadOnly`] if `db` mints no writer proof.
+    pub fn with_pack_in(
+        db: Database<F>,
+        vfs: Arc<dyn Vfs<File = F>>,
+        pack: impl AsRef<Path>,
+    ) -> Result<Self, Error> {
+        let proof = db.writer_proof().ok_or(persia_blob::Error::PackReadOnly)?;
+        let store = PackStore::open_writer_in(vfs, pack, &proof)?;
+        Ok(Self::new(db, Blobs::new(Arc::new(store))))
+    }
+}
+
+/// A database opened read-only ([`ReadOnlyDatabase`], SPEC §8.4) with its blob pack opened read-only: it never
+/// writes, and never creates the pack (SPEC §9.3, ROADMAP 9.4.5). With no pack file, a `get_blob` fails as not bound
+/// ([`persia_blob::Error::BlobNotFound`]); [`ReadOnlyBlobDatabase::refresh`] finds a pack the writer has created since.
+///
+/// ```
+/// use persia::internal::blob::PutBlobOptions;
+/// use persia::internal::documents::{Blob, BlobDatabase, ReadOnlyBlobDatabase};
+/// use persia_engine::db::{DatabaseOptions, ReadOnlyDatabase};
+/// use persia_engine::document::Document;
+/// use persia_engine::schema::SchemaBuilder;
+/// use persia_engine::wal::Durability;
+///
+/// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+/// # let dir = tempfile::tempdir()?;
+/// let path = dir.path().join("app.persia");
+/// let options = DatabaseOptions::default();
+/// let mut writer = BlobDatabase::create(&path, DatabaseOptions::default())?;
+/// writer.log_mut().create_collection(SchemaBuilder::new("files").build()?)?;
+/// let mut reader = ReadOnlyBlobDatabase::open(&path, &options)?; // no pack yet: none is created
+///
+/// let blob = writer.put("files", &Document::new("a"), Blob::from_reader(&b"hi"[..]), Durability::Fsync)?;
+/// assert!(reader.get_blob_range(&blob, 0..2).is_err()); // the pack this reader opened had none
+/// // A newer read-only open of the documents, then the pack refreshed: every document it shows finds its blob.
+/// reader.refresh(ReadOnlyDatabase::open(&path, &options.registry)?)?;
+/// assert_eq!(reader.get_blob_range(&blob, 0..2)?, b"hi");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Debug)]
+pub struct ReadOnlyBlobDatabase<F: ContainerFile = File> {
+    /// Declared first, so the pack drops before the container (as in [`BlobDatabase`]).
+    blobs: Blobs<PackStore<F>>,
+    db: ReadOnlyDatabase<F>,
+}
+
+impl ReadOnlyBlobDatabase<File> {
+    /// Opens the database in the container file at `path` read-only ([`ReadOnlyDatabase::open`], analyzing replayed
+    /// `text` fields with `options.registry`) and its pack read-only, beside the container's canonical path (as
+    /// [`BlobDatabase::open`] finds it).
+    ///
+    /// # Errors
+    /// [`Error::Database`] as [`ReadOnlyDatabase::open`]; [`Error::Blob`] as [`PackStore::open`] (a damaged pack, or
+    /// one of another database).
+    pub fn open(path: impl AsRef<Path>, options: &DatabaseOptions) -> Result<Self, Error> {
+        let path = path.as_ref();
+        let db = ReadOnlyDatabase::open(path, &options.registry)?;
+        let pack = pack_beside(db.container().path(), path);
+        let store = PackStore::open(pack, db.container().header().db_uuid)?;
+        Ok(Self {
+            blobs: Blobs::new(Arc::new(store)),
+            db,
+        })
+    }
+}
+
+impl<F: ContainerFile + Sync + 'static> ReadOnlyBlobDatabase<F> {
+    /// `db` with the pack at `pack` on `vfs`, opened read-only with the `db_uuid` of `db`'s container
+    /// ([`PackStore::open_in`]).
+    ///
+    /// # Errors
+    /// As [`PackStore::open_in`].
+    pub fn with_pack_in(
+        db: ReadOnlyDatabase<F>,
+        vfs: Arc<dyn Vfs<File = F>>,
+        pack: impl AsRef<Path>,
+    ) -> Result<Self, Error> {
+        let store = PackStore::open_in(vfs, pack, db.container().header().db_uuid)?;
+        Ok(Self {
+            blobs: Blobs::new(Arc::new(store)),
+            db,
+        })
+    }
+
+    /// The read-only database.
+    pub fn database(&self) -> &ReadOnlyDatabase<F> {
+        &self.db
+    }
+
+    /// The read-only pack.
+    pub fn blobs(&self) -> &Blobs<PackStore<F>> {
+        &self.blobs
+    }
+
+    /// Catches up with the writer: `reopened`, a newer read-only open of the same database (the engine's read-only
+    /// open does not follow later commits, SPEC §8.4), replaces the documents, then the pack is refreshed
+    /// ([`PackStore::refresh`]), which opens a pack the writer has created since (SPEC §9.3). In that order: the writer
+    /// binds a blob before it logs a document that references it (SPEC §9.5), so every document `reopened` shows was
+    /// logged after its blob was bound, and the refresh that follows finds the blob. Returns whether the pack found
+    /// anything new.
+    ///
+    /// # Errors
+    /// [`persia_blob::Error::PackOfAnotherDatabase`] if `reopened` is another database (nothing changes); as
+    /// [`PackStore::refresh`] (the documents are replaced already; [`persia_blob::Error::PackReplaced`] asks for a
+    /// new open).
+    pub fn refresh(&mut self, reopened: ReadOnlyDatabase<F>) -> Result<bool, Error> {
+        let found = reopened.container().header().db_uuid;
+        if found != self.db.container().header().db_uuid {
+            return Err(persia_blob::Error::PackOfAnotherDatabase { found }.into());
+        }
+        self.db = reopened;
+        Ok(self.blobs.store().refresh()?)
+    }
+
+    /// A reader of the blob `blob_ref` refers to: as [`Blobs::get_blob`].
+    ///
+    /// # Errors
+    /// As [`Blobs::get_blob`]: [`persia_blob::Error::BlobNotFound`] when the pack has not bound it (or there is no
+    /// pack).
+    pub fn get_blob(&self, blob_ref: &BlobRef) -> Result<BlobReader<'_, PackStore<F>>, Error> {
+        Ok(self.blobs.get_blob(blob_ref)?)
+    }
+
+    /// Bytes `range` of the blob `blob_ref` refers to: as [`Blobs::get_blob_range`].
+    ///
+    /// # Errors
+    /// As [`Blobs::get_blob_range`].
+    pub fn get_blob_range(
+        &self,
+        blob_ref: &BlobRef,
+        range: core::ops::Range<u64>,
+    ) -> Result<Vec<u8>, Error> {
+        Ok(self.blobs.get_blob_range(blob_ref, range)?)
+    }
+}
 // -- end wiring --
