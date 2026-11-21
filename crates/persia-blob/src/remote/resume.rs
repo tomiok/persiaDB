@@ -20,6 +20,16 @@ use crate::manifest::UploadId;
 use crate::store::BlobStore;
 
 /// What a client keeps to resume an upload (SPEC §9.4): chunk objects do not record the chunk size.
+///
+/// A token is not checked against the store: it holds only the upload id and the chunk size, so a token of an unknown
+/// upload, or of another prefix or bucket, looks like an upload whose chunks are gone. The listing is then empty and
+/// the resume stages the whole blob under the token's upload id. Chunks already under that id are kept only when they
+/// are full chunks of the token's size from chunk 0, and then must hold the reader's bytes (else `InvalidResume`, and
+/// nothing is staged). Any other chunk there with other bytes at an index the resume writes conflicts, and the upload
+/// restarts under a new upload id ([`RemoteBlobStore::restage`]), leaving those chunks to GC. A token whose chunk size
+/// is not the one its upload was staged with is such a case: none of its chunks is of the token's length (unless the
+/// blob is that one chunk), so the run is empty and chunk 0 conflicts. The blob id is computed from the bytes bound
+/// either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ResumeToken {
     /// The upload the chunks were staged under.

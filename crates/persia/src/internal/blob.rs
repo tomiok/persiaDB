@@ -60,7 +60,9 @@ pub struct PutBlobOptions {
     pub bind_budget: Duration,
     /// The upload to resume (SPEC §9.4, ROADMAP 9.3.4, ADR-0053): the token of an [`Error::UploadInterrupted`], with
     /// a reader that yields the blob from its start. `None` (the default) starts a new upload. A store that cannot
-    /// resume (the pack) fails with [`Error::ResumeUnsupported`] before any byte is read.
+    /// resume (the pack) fails with [`Error::ResumeUnsupported`] before any byte is read. A token is not checked
+    /// against the store: one of an unknown upload, or of another prefix or bucket, stages the blob under its upload
+    /// id, or under a new one when chunks there conflict ([`ResumeToken`]).
     pub resume: Option<ResumeToken>,
 }
 
@@ -154,6 +156,13 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     /// A resume that fails again returns [`Error::UploadInterrupted`] with the upload it was staging then: after a
     /// conflict, the new upload, even when the copy was empty, since the token's upload holds other bytes there.
     ///
+    /// A token is not checked against the store ([`ResumeToken`]). Its upload listed empty (an unknown upload id, a
+    /// token of another prefix or bucket, an upload GC swept) starts the blob from chunk 0 under the token's upload
+    /// id. Chunks there that the resume does not keep but would write other bytes over (of another chunk size than the
+    /// token's, or a short chunk 0) conflict: the upload restarts under a new upload id, and the old chunks are left to
+    /// GC. Full chunks of the token's chunk size that are not the reader's bytes are [`Error::InvalidResume`], with
+    /// nothing staged: such a blob is stored by a new upload (`resume: None`).
+    ///
     /// The 9.3.6 restage has a cost: a resume of an upload whose chunks are all staged already (after a bind that
     /// failed with a known outcome, say) re-reads every chunk before its last window and uploads it again under the
     /// new id, besides the re-read every resume makes of its kept run. A resume with an empty kept run of a blob of at
@@ -168,9 +177,9 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     /// - [`Error::ResumeUnsupported`] for a `resume` on a store that cannot resume, before any byte is read;
     /// - [`Error::UploadInterrupted`], on a store that can resume, for a reader failure ([`Error::Read`]) or a store
     ///   error ([`Error::Storage`], [`Error::StagedChunkConflict`], [`Error::Corrupt`] while staging or restaging)
-    ///   after the upload staged chunks or while resuming, and for a bind that failed with a store error and a known
-    ///   outcome (nothing bound); never for a small blob, which stages nothing. The other errors below are never
-    ///   wrapped;
+    ///   once the upload attempted a chunk write, or while resuming, and for a bind that failed with a store error and
+    ///   a known outcome (nothing bound); never for a small blob, which stages nothing. The other errors below are
+    ///   never wrapped;
     /// - [`Error::Read`] when the reader fails, [`Error::InvalidChunking`] for a blob of more than `u32::MAX` chunks;
     /// - [`Error::InvalidResume`] when the reader of a resume ends inside the kept run or is not the blob the upload
     ///   staged there (nothing staged);
