@@ -2674,11 +2674,19 @@ returns; a repeated index whose listed lengths differ ends the kept run before i
 re-hashes their bytes and continues after them; hasher state is never persisted. Chunk writes are `put_if_absent`, so
 a chunk already there with other bytes (`AlreadyExists`, e.g. the short last chunk of an upload that was already
 bound) is never replaced: the resume restarts under a new `upload_id`. The id is computed from the stored bytes, so a
-resuming client should pass `expected_id` (§9.6). A chunk listed full but read back at another length, gone, or whose
+resuming client should pass `expected_id` (§9.6). A token is not checked against the store: it holds only the
+`upload_id` and the `chunk_size`, so a token of an unknown upload, or of another prefix or bucket, cannot be told from
+an upload whose chunks were swept. Its empty listing starts the blob from chunk 0 under the token's `upload_id` (an
+empty blob writes no chunk, so the ROADMAP 9.3.6 rule below binds it under a new one). A chunk under that id that the
+kept run does not include, and that a chunk write meets with other bytes (`AlreadyExists`), restarts the upload under
+a new `upload_id`, as below, and is left to GC. A token whose chunk size is not the one its upload was staged with is
+such a case: no staged chunk is of the token's length, so the kept run is empty and chunk 0 conflicts. Full chunks of
+the token's chunk size from chunk 0 that are not the reader's bytes are `InvalidResume`, and nothing is staged. A
+chunk listed full but read back at another length, gone, or whose
 read reports corruption, ends
 the kept run. After an `AlreadyExists` on a chunk, the writer copies the chunks it has (the kept run and those staged
 since, each checked against its CRC32C) under the new `upload_id` and continues there, so the client never rewinds
-(ADR-0050). A caller gets the token from the error of a `put_blob` that failed after staging
+(ADR-0050). A caller gets the token from the error of a `put_blob` that failed once it attempted a chunk write
 (`UploadInterrupted { token, source }`); its pins drop with the error, and the grace period keeps the upload
 resumable (§9.5). It passes the token as `PutBlobOptions::resume` with a reader of the whole blob, from its start:
 `put_blob` pins the old `upload_id` before listing, skips the bytes of the kept run without uploading them, pins the
@@ -2687,8 +2695,8 @@ new `upload_id` before restaging, and rejects a token whose chunk size is below 
 chunk's CRC32C; a reader that ends inside the kept run or differs there is a caller's error (`InvalidResume`), never
 wrapped. A staged chunk whose read reports corruption ends the kept run there, as a missing chunk does, so the resume
 does not fail with that corruption wrapped in the same token. The object stays: staging that index conflicts when the
-stored bytes differ, and the upload restarts under a new id. `UploadInterrupted` wraps a reader error, or a staging, restaging or listing error of the store, after the
-upload staged chunks, and a bind's backend error whose outcome is known; never an unknown outcome, `BlobIdMismatch`, a
+stored bytes differ, and the upload restarts under a new id. `UploadInterrupted` wraps a reader error, or a staging, restaging or listing error of the store, once the
+upload attempted a chunk write (it may have staged none), and a bind's backend error whose outcome is known; never an unknown outcome, `BlobIdMismatch`, a
 caller's error or a small blob. It is not itself corruption (`is_corruption` is false, and `corrupt_offset` is none)
 even when its source is: the upload can be resumed, and the source carries the cause. A resume that fails again returns the token of the upload it was staging: after a
 restage that followed a conflict, the new one. A resume that writes no chunk its listing did not show (it may

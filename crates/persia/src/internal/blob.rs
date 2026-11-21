@@ -158,7 +158,8 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     ///
     /// A token is not checked against the store ([`ResumeToken`]). Its upload listed empty (an unknown upload id, a
     /// token of another prefix or bucket, an upload GC swept) starts the blob from chunk 0 under the token's upload
-    /// id. Chunks there that the resume does not keep but would write other bytes over (of another chunk size than the
+    /// id (an empty blob writes no chunk, so the 9.3.6 restage binds it under a new upload id, with no chunk).
+    /// Chunks there that the resume does not keep but would write other bytes over (of another chunk size than the
     /// token's, or a short chunk 0) conflict: the upload restarts under a new upload id, and the old chunks are left to
     /// GC. Full chunks of the token's chunk size that are not the reader's bytes are [`Error::InvalidResume`], with
     /// nothing staged: such a blob is stored by a new upload (`resume: None`).

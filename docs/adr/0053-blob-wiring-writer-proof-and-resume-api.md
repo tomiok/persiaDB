@@ -82,7 +82,8 @@ error; `Unsupported` trait defaults; a restage that makes the chunks young.
    that wants to send only the rest needs an offset query, which M11 adds if it needs one.
    The token is not checked against the store (decided 2026-11-21: kept as is, documented). It holds only the upload
    id and the chunk size, so an unknown upload id and a token of another prefix or bucket are one case: an empty
-   listing starts the blob from chunk 0 under the token's id. Chunks there that the resume does not keep and would
+   listing starts the blob from chunk 0 under the token's id (an empty blob writes no chunk, so item 10 binds it under
+   a new id). Chunks there that the resume does not keep and would
    write other bytes over conflict, and the upload restarts under a new id; GC takes the old chunks. A token of
    another chunk size than its upload's is such a case: no staged chunk is of the token's length, so the kept run is
    empty and chunk 0 conflicts. Full chunks of the token's size that are not the reader's bytes are `InvalidResume`,

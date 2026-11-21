@@ -23,7 +23,8 @@ use crate::store::BlobStore;
 ///
 /// A token is not checked against the store: it holds only the upload id and the chunk size, so a token of an unknown
 /// upload, or of another prefix or bucket, looks like an upload whose chunks are gone. The listing is then empty and
-/// the resume stages the whole blob under the token's upload id. Chunks already under that id are kept only when they
+/// the resume stages the whole blob under the token's upload id (an empty blob stages nothing, so `put_blob`'s
+/// ROADMAP 9.3.6 restage binds it under a new upload id). Chunks already under that id are kept only when they
 /// are full chunks of the token's size from chunk 0, and then must hold the reader's bytes (else `InvalidResume`, and
 /// nothing is staged). Any other chunk there with other bytes at an index the resume writes conflicts, and the upload
 /// restarts under a new upload id ([`RemoteBlobStore::restage`]), leaving those chunks to GC. A token whose chunk size
