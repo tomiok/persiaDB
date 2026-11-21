@@ -2692,31 +2692,32 @@ empty blob writes no chunk, so the ROADMAP 9.3.6 rule below binds it under a new
 kept run does not include, and that a chunk write meets with other bytes (`AlreadyExists`), restarts the upload under
 a new `upload_id`, as below, and is left to GC. A token whose chunk size is not the one its upload was staged with is
 such a case: its chunk 0 is not of the token's length (unless the blob is that one, short chunk, which is then kept),
-so the kept run is empty and the first staged index the resume writes conflicts. Full chunks of
-the token's chunk size from chunk 0 that are not the reader's bytes are `InvalidResume`, and nothing is staged. A
-chunk listed full but read back at another length, gone, or whose
-read reports corruption, ends
-the kept run. After an `AlreadyExists` on a chunk, the writer copies the chunks it has (the kept run and those staged
-since, each checked against its CRC32C) under the new `upload_id` and continues there, so the client never rewinds
-(ADR-0050). A caller gets the token from the error of a `put_blob` that failed once it attempted a chunk write, or while resuming
-(`UploadInterrupted { token, source }`); its pins drop with the error, and the grace period keeps the upload
-resumable (§9.5). It passes the token as `PutBlobOptions::resume` with a reader of the whole blob, from its start:
-`put_blob` pins the old `upload_id` before listing, skips the bytes of the kept run without uploading them, pins the
-new `upload_id` before restaging, and rejects a token whose chunk size is below the floor (§9.2; ROADMAP 9.3.4). The token's chunk size is the blob's:
-`PutBlobOptions::chunk_size` is ignored on a resume. Each kept chunk the reader yields is checked against the staged
-chunk's CRC32C; a reader that ends inside the kept run or differs there is a caller's error (`InvalidResume`), never
-wrapped. A staged chunk whose read reports corruption ends the kept run there, as a missing chunk does, so the resume
-does not fail with that corruption wrapped in the same token. The object stays: staging that index conflicts when the
-stored bytes differ, and the upload restarts under a new id. `UploadInterrupted` wraps a reader error, or a staging, restaging or listing error of the store, once the
-upload attempted a chunk write (it may have staged none) or, on a resume, while listing and skipping the kept run, and a bind's backend error whose outcome is known; never an unknown outcome, `BlobIdMismatch`, a
-caller's error or a small blob. It is not itself corruption (`is_corruption` is false, and `corrupt_offset` is none)
-even when its source is: the upload can be resumed, and the source carries the cause. A resume that fails again returns the token of the upload it was staging: after a
-restage that followed a conflict, the new one. A resume that writes no chunk its listing did not show (it may
+so the kept run is empty and the first staged index the resume writes conflicts. Full chunks of the token's chunk size
+from chunk 0 that are not the reader's bytes are `InvalidResume`, and nothing is staged. A chunk listed full but read
+back at another length, gone, or whose read reports corruption, ends the kept run. After an `AlreadyExists` on a
+chunk, the writer copies the chunks it has (the kept run and those staged since, each checked against its CRC32C)
+under the new `upload_id` and continues there, so the client never rewinds (ADR-0050). A caller gets the token from
+the error of a `put_blob` that failed once it attempted a chunk write, or while resuming
+(`UploadInterrupted { token, source }`); its pins drop with the error, and the grace period keeps the upload resumable
+(§9.5). It passes the token as `PutBlobOptions::resume` with a reader of the whole blob, from its start: `put_blob`
+pins the old `upload_id` before listing, skips the bytes of the kept run without uploading them, pins the new
+`upload_id` before restaging, and rejects a token whose chunk size is below the floor (§9.2; ROADMAP 9.3.4). The
+token's chunk size is the blob's: `PutBlobOptions::chunk_size` is ignored on a resume. Each kept chunk the reader
+yields is checked against the staged chunk's CRC32C; a reader that ends inside the kept run or differs there is a
+caller's error (`InvalidResume`), never wrapped. A staged chunk whose read reports corruption ends the kept run there,
+as a missing chunk does, so the resume does not fail with that corruption wrapped in the same token. The object stays:
+staging that index conflicts when the stored bytes differ, and the upload restarts under a new id. `UploadInterrupted`
+wraps a reader error, or a staging, restaging or listing error of the store, once the upload attempted a chunk write
+(it may have staged none) or, on a resume, while listing and skipping the kept run, and a bind's backend error whose
+outcome is known; never an unknown outcome, `BlobIdMismatch`, a caller's error or a small blob. It is not itself
+corruption (`is_corruption` is false, and `corrupt_offset` is none) even when its source is: the upload can be
+resumed, and the source carries the cause. A resume that fails again returns the token of the upload it was staging:
+after a restage that followed a conflict, the new one. A resume that writes no chunk its listing did not show (it may
 re-stage, with the same bytes, a chunk already there, which leaves its age unchanged) copies every chunk before its
-last window to a new `upload_id` and stages that last window there before binding, so its chunks are
-young again: the sweep counts an upload's age from its newest chunk, and a binding after its manifest listing is not
-in its view (ROADMAP 9.3.6). Only the remote layout resumes; any other store fails with `ResumeUnsupported` before
-reading (ADR-0053). Chunk transfers, uploads and downloads, run with at most `parallelism` requests in flight (default 8).
+last window to a new `upload_id` and stages that last window there before binding, so its chunks are young again: the
+sweep counts an upload's age from its newest chunk, and a binding after its manifest listing is not in its view
+(ROADMAP 9.3.6). Only the remote layout resumes; any other store fails with `ResumeUnsupported` before reading
+(ADR-0053). Chunk transfers, uploads and downloads, run with at most `parallelism` requests in flight (default 8).
 **Small blobs** (ROADMAP 9.3.3). A blob of at most 64 KiB (the chunk size floor, §9.2) is buffered and hashed before
 any write and stored in its blob manifest (`INLINE`, §9.1.1) at `blobs/<xx>/<id>`: one `put_if_absent`, nothing
 staged, and a read is the one `get` of the manifest; the empty blob writes its plain manifest the same way. Its
