@@ -9,7 +9,8 @@
 //!    a chunk's bytes fails only the read of that chunk. Never a panic.
 //! 3. After a crash anywhere in a random session, the index the scan rebuilds holds every `Bound` blob, and nothing
 //!    but blobs whose bind was attempted, each wholly readable.
-//! 4. `refresh` finds what the writer committed since, and reports a replaced pack (another generation).
+//! 4. `refresh` finds what the writer committed since, and reports a replaced pack (another generation); `reopen`
+//!    opens the replacement at the same path with the same `db_uuid`, and refuses the pack of another database.
 //! 5. Every flipped bit of a committed chunk frame fails the open or the read with `Corrupt` (ROADMAP 9.2.9).
 //!
 //! Seeds: fixed (`RngSeed::Fixed`), printed by proptest on failure.
@@ -302,6 +303,58 @@ fn refresh_reports_a_replaced_pack() {
     assert_eq!(read_all(&reader, &a).unwrap(), b"0123456789abcdef");
     let reopened = open(&fs, PackMode::ReadOnly).unwrap();
     assert_eq!(reopened.superblock().unwrap().generation, 2);
+}
+
+/// Renames a file holding `bytes` over the pack, as a rewrite does.
+fn rename_over_pack(fs: &SimFs, bytes: &[u8]) {
+    let tmp = Path::new("/db/app.persia.blobs.compact");
+    let f = fs.create_new(tmp).unwrap();
+    f.write_all_at(bytes, 0).unwrap();
+    f.sync_data().unwrap();
+    fs.rename(tmp, Path::new(PACK)).unwrap();
+}
+
+/// Invariant 4: `reopen` opens the pack now at the handle's path, read-only, with the handle's `db_uuid`: the
+/// replacement a rewrite left, never the pack of another database. `refresh` itself stays on its file.
+#[test]
+fn reopen_opens_the_replacement_at_the_same_path_with_the_same_db_uuid() {
+    let (bytes, a, b) = two_blobs();
+    let fs = with_pack(&bytes);
+    let reader = open(&fs, PackMode::ReadOnly).unwrap();
+    let mut rewritten = bytes.clone();
+    let mut sb = decode_prefix(&bytes).unwrap().superblock;
+    sb.generation = 2;
+    rewritten[4096..8192].copy_from_slice(&sb.encode());
+    rewritten[8192..12288].copy_from_slice(&sb.encode());
+    rename_over_pack(&fs, &rewritten);
+    assert!(matches!(reader.refresh(), Err(Error::PackReplaced { .. })));
+    assert_eq!(reader.superblock().unwrap().generation, 1);
+
+    let reopened = reader.reopen().unwrap();
+    assert_eq!(reopened.mode(), PackMode::ReadOnly);
+    assert_eq!(reopened.superblock().unwrap().generation, 2);
+    assert_eq!(reopened.header().unwrap().db_uuid, [9; 16]);
+    assert_eq!(read_all(&reopened, &a).unwrap(), b"0123456789abcdef");
+    assert_eq!(read_all(&reopened, &b).unwrap(), b"second");
+    assert!(!reopened.refresh().unwrap());
+
+    // The pack of another database at the path: the reopen refuses it, and the handle reads on.
+    let other = sim();
+    let store =
+        pack_support::open_pack(Arc::new(other.clone()), PACK, PackMode::ReadWrite, [7; 16])
+            .unwrap();
+    put(&store, b"foreign", 4, 3);
+    drop(store);
+    rename_over_pack(&fs, &other.read(Path::new(PACK)).unwrap());
+    assert!(matches!(
+        reopened.refresh(),
+        Err(Error::PackReplaced { .. })
+    ));
+    assert!(matches!(
+        reopened.reopen(),
+        Err(Error::PackOfAnotherDatabase { found }) if found == [7; 16]
+    ));
+    assert_eq!(read_all(&reopened, &b).unwrap(), b"second");
 }
 
 #[test]

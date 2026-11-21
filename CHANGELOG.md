@@ -10,11 +10,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 - Roadmap: M35 Formal verification (v1.1), after M34. TLA+ for the remote commit (SPEC §10.4), the writer lease (SPEC §11.3), and blob GC (SPEC §9.5, ADR-0053); Kani on `MmapFile::map` and the M1 encodings; Loom on snapshot publish, pack reopen, and `PinSet`. M0–M15 stay the MVP. The progress percentage still counts only those leaves.
+- `persia-engine`: `ReadOnlyDatabase::wal_end`, the end of the last WAL chunk a read-only open replayed.
 - `persia` (internal API): `BlobDatabase::create` / `open` open a database with its blob pack `<name>.persia.blobs`,
   read-write with the container's writer proof; the pack is still created by the first `put_blob` (ROADMAP 9.4.5;
   ADR-0053). `ReadOnlyBlobDatabase` opens the pack read-only and never creates it; its `refresh` finds a pack the
-  writer created since, and reopens the pack when a GC rewrite replaced it. Any other pack error leaves the documents
-  as they were. A same-seq open with fewer replayed WAL records, or an earlier end of those frames, is refused.
+  writer created since, and reopens the pack when a GC rewrite replaced it. Any other pack error, and a failed reopen,
+  leaves the documents and the old pack as they were. Opens of one seq are ordered by replayed WAL records and
+  `ReadOnlyDatabase::wal_end` (so a commit in progress is taken): fewer of both is `RefreshedOlder`, and a mix is
+  `Error::RefreshDiverged` (another history of the file at that path, detected best-effort); both are refused and
+  change nothing. A blob GC swept after a document's delete reads as `BlobNotFound` until the reader's documents
+  catch up.
   `BlobDatabase::log_mut` checks in debug builds that the log still has the `db_uuid` the pack was opened with. If the pack fails
   to open after `create`, the new container is removed so a retry works.
 - `persia verify` checks blobs (ROADMAP 9.5.3, 9.5.6): a live document or WAL put whose blob is missing is an error
@@ -30,14 +35,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `BlobDatabase::create` refuses a leftover pack; `ReadOnlyBlobDatabase::refresh` refuses a copy at another path or an
   older open.
 - `persia` (internal API): `put_blob` resumes an interrupted remote upload (ROADMAP 9.3.4; SPEC §9.4; ADR-0053): a
-  failure after staging returns `Error::UploadInterrupted { token, source }`, and `PutBlobOptions::resume = Some(token)`
-  with a reader of the whole blob stages only the chunks that are missing, each kept chunk checked against its CRC32C.
-  On a resume the token's chunk size wins over `chunk_size`. The kept run is the full chunks from index 0 after the
-  listing is sorted by index; a repeated index whose lengths differ ends that run, and a chunk whose read reports
-  corruption ends it too (staging that index then conflicts, and the upload restarts under a new id).
+  failure once a chunk write was attempted returns `Error::UploadInterrupted { token, source }`, and
+  `PutBlobOptions::resume = Some(token)` with a reader of the whole blob stages only the chunks that are missing, each
+  kept chunk checked against its CRC32C. On a resume the token's chunk size wins over `chunk_size`, and a token chunk
+  size below the floor is rejected before anything is read, staged or pinned. The kept run is the full chunks from
+  index 0 after the listing is sorted by index; a repeated index whose lengths differ ends that run, and a chunk whose
+  read reports corruption ends it too (staging that index then conflicts, and the upload restarts under a new id). A
+  token is not checked against the store: one of an unknown upload, or of another prefix or bucket, stages the blob
+  under its upload id; chunks there that the resume would write other bytes over (as with a token of another chunk
+  size than its upload's) move the upload to a new id and are left to GC; full chunks of the token's size that are not
+  the reader's bytes are `InvalidResume`, with nothing staged.
 - `persia-blob`: `BlobStore::resumable`, `resume` and `restage`; by default they fail with `Error::ResumeUnsupported`,
-  and the remote layout implements them (ADR-0053). Only a store that cannot resume (the pack) returns
-  `ResumeUnsupported`.
+  and the remote layout implements them (ADR-0053). Only a store that cannot resume (the pack, the memory store)
+  returns `ResumeUnsupported`, before reading the blob.
 - `persia-blob`: a resume that writes no chunk its listing did not show copies every chunk before its last window to a
   fresh upload id and stages that last window there before binding, so GC cannot sweep them as old (ROADMAP 9.3.6).
 - `persia` (internal API): blob GC, `BlobDatabase::gc(&GcOptions) -> GcReport` (ROADMAP 9.5.1, 9.5.2, 9.5.8; SPEC

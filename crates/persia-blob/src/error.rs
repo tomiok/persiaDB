@@ -207,9 +207,9 @@ pub enum Error {
     #[error("the blob pack is locked by another writer")]
     PackLocked,
     //
-    /// A `put_blob` failed after its upload staged chunks that a later `put_blob` can resume with `token`
-    /// (`PutBlobOptions::resume`; SPEC §9.4, ROADMAP 9.3.4, ADR-0053). Its pins were dropped with the error: the
-    /// grace period keeps the upload resumable (SPEC §9.5). `source` is the failure.
+    /// A `put_blob` failed once its upload had attempted a chunk write (it may have staged chunks), and a later
+    /// `put_blob` can resume it with `token` (`PutBlobOptions::resume`; SPEC §9.4, ROADMAP 9.3.4, ADR-0053). Its pins
+    /// were dropped with the error: the grace period keeps the upload resumable (SPEC §9.5). `source` is the failure.
     #[error("the upload was interrupted and can be resumed")]
     UploadInterrupted {
         /// What a later `put_blob` resumes with.

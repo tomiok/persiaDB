@@ -2620,11 +2620,22 @@ pack, a database that never stored a blob has none, and an open that finds none 
 references one is dangling, which `verify` reports, §9.5). A read-only database opens its pack read-only and never creates it: with
 no pack, a `get_blob` fails as not bound, and its refresh opens a pack the writer has created since (ROADMAP 9.4.5). That refresh takes a newer read-only
 open of the documents, then refreshes the pack, in that order: a blob is bound before any document that references
-it is logged. The reopened documents must be this database (the same `db_uuid` and canonical path) and no older: a
-lower manifest `seq`, or the same `seq` with fewer replayed WAL records or an earlier end of the frames that open
-saw, is refused and nothing changes. If the pack refresh reports `PackReplaced`, the reader reopens the pack
-read-only at the same path with the same `db_uuid` (the refresh holds the reader mutably, so no stream still borrows
-the old pack). Any other pack error restores the previous documents, so the documents and the pack stay paired.
+it is logged. The reopened documents must be this database (the same `db_uuid` and canonical path) and no older. A lower manifest
+`seq` is older. Within one `seq` the WAL only grows, so the replayed WAL records and the end of the last WAL chunk
+replayed (`ReadOnlyDatabase::wal_end`; not the container's end, which also counts the segment and Manifest frames of a
+commit in progress) move together: more of both, or both the same, is taken; fewer of both is older
+(`RefreshedOlder`); any other combination is another history of the file at that path, such as a copy or a restore
+put there (`RefreshDiverged`). Both are refused and nothing changes. Detection is best-effort: another history with
+a higher `seq`, or with the same `seq`, records and end, is taken; do not rely on `RefreshDiverged` to catch a copy
+or a restore. An open in the same state is taken, and the
+refresh's return value reports only whether the pack found anything new. If the pack refresh reports `PackReplaced`,
+the reader reopens the pack read-only at the same path with the same `db_uuid` (the refresh holds the reader
+mutably, so no stream still borrows the old pack). Any other pack error, and a reopen that fails (a damaged
+replacement, or the pack of another database), restores the previous documents and keeps the old pack handle, so the
+documents and the pack stay paired. The pack may be newer than the reopened documents: if the writer deletes a
+document and GC sweeps its blob between the documents' open and the refresh, the reader shows the document and
+`get_blob` fails with `BlobNotFound` for its blob, while every other blob reads on; a local reader lease (ROADMAP
+9.2.16) will close this window.
 `PackStore::refresh` itself does not reopen or remap (ROADMAP 9.2.13). The pack is found beside the container's canonical path, so a database opened through a symlink uses
 the pack beside the real file. Creating it is durable before the first blob is bound: the
 file with its header and superblock synced, then its directory synced (§4.5.2). A read-write open first removes the stale
@@ -2674,29 +2685,39 @@ returns; a repeated index whose listed lengths differ ends the kept run before i
 re-hashes their bytes and continues after them; hasher state is never persisted. Chunk writes are `put_if_absent`, so
 a chunk already there with other bytes (`AlreadyExists`, e.g. the short last chunk of an upload that was already
 bound) is never replaced: the resume restarts under a new `upload_id`. The id is computed from the stored bytes, so a
-resuming client should pass `expected_id` (§9.6). A chunk listed full but read back at another length, gone, or whose
-read reports corruption, ends
-the kept run. After an `AlreadyExists` on a chunk, the writer copies the chunks it has (the kept run and those staged
-since, each checked against its CRC32C) under the new `upload_id` and continues there, so the client never rewinds
-(ADR-0050). A caller gets the token from the error of a `put_blob` that failed after staging
-(`UploadInterrupted { token, source }`); its pins drop with the error, and the grace period keeps the upload
-resumable (§9.5). It passes the token as `PutBlobOptions::resume` with a reader of the whole blob, from its start:
-`put_blob` pins the old `upload_id` before listing, skips the bytes of the kept run without uploading them, pins the
-new `upload_id` before restaging, and rejects a token whose chunk size is below the floor (§9.2; ROADMAP 9.3.4). The token's chunk size is the blob's:
-`PutBlobOptions::chunk_size` is ignored on a resume. Each kept chunk the reader yields is checked against the staged
-chunk's CRC32C; a reader that ends inside the kept run or differs there is a caller's error (`InvalidResume`), never
-wrapped. A staged chunk whose read reports corruption ends the kept run there, as a missing chunk does, so the resume
-does not fail with that corruption wrapped in the same token. The object stays: staging that index conflicts when the
-stored bytes differ, and the upload restarts under a new id. `UploadInterrupted` wraps a reader error, or a staging, restaging or listing error of the store, after the
-upload staged chunks, and a bind's backend error whose outcome is known; never an unknown outcome, `BlobIdMismatch`, a
-caller's error or a small blob. It is not itself corruption (`is_corruption` is false, and `corrupt_offset` is none)
-even when its source is: the upload can be resumed, and the source carries the cause. A resume that fails again returns the token of the upload it was staging: after a
-restage that followed a conflict, the new one. A resume that writes no chunk its listing did not show (it may
+resuming client should pass `expected_id` (§9.6). A token is not checked against the store: it holds only the
+`upload_id` and the `chunk_size`, so a token of an unknown upload, or of another prefix or bucket, cannot be told from
+an upload whose chunks were swept. Its empty listing starts the blob from chunk 0 under the token's `upload_id` (an
+empty blob writes no chunk, so the ROADMAP 9.3.6 rule below binds it under a new one). A chunk under that id that the
+kept run does not include, and that a chunk write meets with other bytes (`AlreadyExists`), restarts the upload under
+a new `upload_id`, as below, and is left to GC. A token whose chunk size is not the one its upload was staged with is
+such a case: its chunk 0 is not of the token's length (unless the blob is that one, short chunk, which is then kept),
+so the kept run is empty and the first staged index the resume writes conflicts. Full chunks of the token's chunk size
+from chunk 0 that are not the reader's bytes are `InvalidResume`, and nothing is staged. A chunk listed full but read
+back at another length, gone, or whose read reports corruption, ends the kept run. After an `AlreadyExists` on a
+chunk, the writer copies the chunks it has (the kept run and those staged since, each checked against its CRC32C)
+under the new `upload_id` and continues there, so the client never rewinds (ADR-0050). A caller gets the token from
+the error of a `put_blob` that failed once it attempted a chunk write, or while resuming
+(`UploadInterrupted { token, source }`); its pins drop with the error, and the grace period keeps the upload resumable
+(§9.5). It passes the token as `PutBlobOptions::resume` with a reader of the whole blob, from its start: `put_blob`
+pins the old `upload_id` before listing, skips the bytes of the kept run without uploading them, pins the new
+`upload_id` before restaging, and rejects a token whose chunk size is below the floor (§9.2; ROADMAP 9.3.4). The
+token's chunk size is the blob's: `PutBlobOptions::chunk_size` is ignored on a resume. Each kept chunk the reader
+yields is checked against the staged chunk's CRC32C; a reader that ends inside the kept run or differs there is a
+caller's error (`InvalidResume`), never wrapped. A staged chunk whose read reports corruption ends the kept run there,
+as a missing chunk does, so the resume does not fail with that corruption wrapped in the same token. The object stays:
+staging that index conflicts when the stored bytes differ, and the upload restarts under a new id. `UploadInterrupted`
+wraps a reader error, or a staging, restaging or listing error of the store, once the upload attempted a chunk write
+(it may have staged none) or, on a resume, while listing and skipping the kept run, and a bind's backend error whose
+outcome is known; never an unknown outcome, `BlobIdMismatch`, a caller's error or a small blob. It is not itself
+corruption (`is_corruption` is false, and `corrupt_offset` is none) even when its source is: the upload can be
+resumed, and the source carries the cause. A resume that fails again returns the token of the upload it was staging:
+after a restage that followed a conflict, the new one. A resume that writes no chunk its listing did not show (it may
 re-stage, with the same bytes, a chunk already there, which leaves its age unchanged) copies every chunk before its
-last window to a new `upload_id` and stages that last window there before binding, so its chunks are
-young again: the sweep counts an upload's age from its newest chunk, and a binding after its manifest listing is not
-in its view (ROADMAP 9.3.6). Only the remote layout resumes; any other store fails with `ResumeUnsupported` before
-reading (ADR-0053). Chunk transfers, uploads and downloads, run with at most `parallelism` requests in flight (default 8).
+last window to a new `upload_id` and stages that last window there before binding, so its chunks are young again: the
+sweep counts an upload's age from its newest chunk, and a binding after its manifest listing is not in its view
+(ROADMAP 9.3.6). Only the remote layout resumes; any other store fails with `ResumeUnsupported` before reading
+(ADR-0053). Chunk transfers, uploads and downloads, run with at most `parallelism` requests in flight (default 8).
 **Small blobs** (ROADMAP 9.3.3). A blob of at most 64 KiB (the chunk size floor, §9.2) is buffered and hashed before
 any write and stored in its blob manifest (`INLINE`, §9.1.1) at `blobs/<xx>/<id>`: one `put_if_absent`, nothing
 staged, and a read is the one `get` of the manifest; the empty blob writes its plain manifest the same way. Its
@@ -2751,7 +2772,9 @@ the same process that runs `put_blob`, and keeps a **pin set** with it:
   Readers in other processes are not in the writer's view. `PackStore::refresh` keeps the pack file it opened, and
   the bytes it mapped, only until it returns `PackReplaced`; it does not reopen or remap (ROADMAP 9.2.13).
   `ReadOnlyBlobDatabase::refresh` reopens a read-only pack at the same path on that error, and on any other pack
-  error restores the documents it had, so a long-lived reader stays paired after a GC rewrite. Remotely one that lags may find the blob of a document the writer deleted gone after the grace
+  error restores the documents it had, so a long-lived reader stays paired after a GC rewrite. A reader in another process is not in the mark: documents it
+  opened before a delete whose blob the sweep then collected show a blob that is gone (`BlobNotFound`) once its refresh
+  reopens the rewritten pack, until a local reader lease (ROADMAP 9.2.16). Remotely one that lags may find the blob of a document the writer deleted gone after the grace
   period (ROADMAP 13.2.5, which extends 13.2.4).
 The grace period covers a crashed or replaced writer's uploads; the pins are what keeps a blob that a not-yet-committed
 document references. A referenced blob must never be missing. `verify` (ROADMAP 9.5.3) **fails** on one: a live document,
