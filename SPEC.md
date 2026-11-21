@@ -2620,11 +2620,22 @@ pack, a database that never stored a blob has none, and an open that finds none 
 references one is dangling, which `verify` reports, §9.5). A read-only database opens its pack read-only and never creates it: with
 no pack, a `get_blob` fails as not bound, and its refresh opens a pack the writer has created since (ROADMAP 9.4.5). That refresh takes a newer read-only
 open of the documents, then refreshes the pack, in that order: a blob is bound before any document that references
-it is logged. The reopened documents must be this database (the same `db_uuid` and canonical path) and no older: a
-lower manifest `seq`, or the same `seq` with fewer replayed WAL records or an earlier end of the frames that open
-saw, is refused and nothing changes. If the pack refresh reports `PackReplaced`, the reader reopens the pack
-read-only at the same path with the same `db_uuid` (the refresh holds the reader mutably, so no stream still borrows
-the old pack). Any other pack error restores the previous documents, so the documents and the pack stay paired.
+it is logged. The reopened documents must be this database (the same `db_uuid` and canonical path) and no older. A lower manifest
+`seq` is older. Within one `seq` the WAL only grows, so the replayed WAL records and the end of the last WAL chunk
+replayed (`ReadOnlyDatabase::wal_end`; not the container's end, which also counts the segment and Manifest frames of a
+commit in progress) move together: more of both, or both the same, is taken; fewer of both is older
+(`RefreshedOlder`); any other combination is another history of the file at that path, such as a copy or a restore
+put there (`RefreshDiverged`). Both are refused and nothing changes. Detection is best-effort: another history with
+a higher `seq`, or with the same `seq`, records and end, is taken; do not rely on `RefreshDiverged` to catch a copy
+or a restore. An open in the same state is taken, and the
+refresh's return value reports only whether the pack found anything new. If the pack refresh reports `PackReplaced`,
+the reader reopens the pack read-only at the same path with the same `db_uuid` (the refresh holds the reader
+mutably, so no stream still borrows the old pack). Any other pack error, and a reopen that fails (a damaged
+replacement, or the pack of another database), restores the previous documents and keeps the old pack handle, so the
+documents and the pack stay paired. The pack may be newer than the reopened documents: if the writer deletes a
+document and GC sweeps its blob between the documents' open and the refresh, the reader shows the document and
+`get_blob` fails with `BlobNotFound` for its blob, while every other blob reads on; a local reader lease (ROADMAP
+9.2.16) will close this window.
 `PackStore::refresh` itself does not reopen or remap (ROADMAP 9.2.13). The pack is found beside the container's canonical path, so a database opened through a symlink uses
 the pack beside the real file. Creating it is durable before the first blob is bound: the
 file with its header and superblock synced, then its directory synced (§4.5.2). A read-write open first removes the stale
@@ -2760,7 +2771,9 @@ the same process that runs `put_blob`, and keeps a **pin set** with it:
   Readers in other processes are not in the writer's view. `PackStore::refresh` keeps the pack file it opened, and
   the bytes it mapped, only until it returns `PackReplaced`; it does not reopen or remap (ROADMAP 9.2.13).
   `ReadOnlyBlobDatabase::refresh` reopens a read-only pack at the same path on that error, and on any other pack
-  error restores the documents it had, so a long-lived reader stays paired after a GC rewrite. Remotely one that lags may find the blob of a document the writer deleted gone after the grace
+  error restores the documents it had, so a long-lived reader stays paired after a GC rewrite. A reader in another process is not in the mark: documents it
+  opened before a delete whose blob the sweep then collected show a blob that is gone (`BlobNotFound`) once its refresh
+  reopens the rewritten pack, until a local reader lease (ROADMAP 9.2.16). Remotely one that lags may find the blob of a document the writer deleted gone after the grace
   period (ROADMAP 13.2.5, which extends 13.2.4).
 The grace period covers a crashed or replaced writer's uploads; the pins are what keeps a blob that a not-yet-committed
 document references. A referenced blob must never be missing. `verify` (ROADMAP 9.5.3) **fails** on one: a live document,

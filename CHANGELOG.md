@@ -9,11 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: `ReadOnlyDatabase::wal_end`, the end of the last WAL chunk a read-only open replayed.
 - `persia` (internal API): `BlobDatabase::create` / `open` open a database with its blob pack `<name>.persia.blobs`,
   read-write with the container's writer proof; the pack is still created by the first `put_blob` (ROADMAP 9.4.5;
   ADR-0053). `ReadOnlyBlobDatabase` opens the pack read-only and never creates it; its `refresh` finds a pack the
-  writer created since, and reopens the pack when a GC rewrite replaced it. Any other pack error leaves the documents
-  as they were. A same-seq open with fewer replayed WAL records, or an earlier end of those frames, is refused.
+  writer created since, and reopens the pack when a GC rewrite replaced it. Any other pack error, and a failed reopen,
+  leaves the documents and the old pack as they were. Opens of one seq are ordered by replayed WAL records and
+  `ReadOnlyDatabase::wal_end` (so a commit in progress is taken): fewer of both is `RefreshedOlder`, and a mix is
+  `Error::RefreshDiverged` (another history of the file at that path, detected best-effort); both are refused and
+  change nothing. A blob GC swept after a document's delete reads as `BlobNotFound` until the reader's documents
+  catch up.
   `BlobDatabase::log_mut` checks in debug builds that the log still has the `db_uuid` the pack was opened with. If the pack fails
   to open after `create`, the new container is removed so a retry works.
 - `persia verify` checks blobs (ROADMAP 9.5.3, 9.5.6): a live document or WAL put whose blob is missing is an error
