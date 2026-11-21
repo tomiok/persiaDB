@@ -14,7 +14,13 @@
 //! 5. Replayed records stay needed until a flush covers them: a commit after the open that flushes nothing (a
 //!    collection create) keeps `wal_start` before them, with or without flushes during the replay (6.6.5).
 //! 6. A read-only open's `wal_end` is the end of the last WAL chunk it replayed: it moves with `replayed`, never with
-//!    frames that are not WAL (the segment frames a commit writes before its Manifest), which `Container::end` counts.
+//!    frames that are not WAL (the segment frames a commit writes before its Manifest), which `Container::end` counts,
+//!    nor with the WAL after a Manifest committed during the scan. With no WAL to replay it is the committed
+//!    `wal_start`. Under one `seq` it grows exactly when `replayed` does, across async and synced writes, batches,
+//!    deletes, read-write reopens and commits that flush nothing. A torn or corrupt WAL tail yields the end of the
+//!    last whole chunk before it, never past it; damage before `log_end` fails the open as corruption, never a panic.
+//!
+//! Seeds: fixed (`RngSeed::Fixed`), printed by proptest on failure.
 
 #![allow(
     clippy::unwrap_used,
@@ -44,7 +50,9 @@ use persia_engine::schema::{CollectionSchema, FieldKind, SchemaBuilder, TextOpti
 use persia_engine::view::SearchView;
 use persia_engine::wal::Durability;
 use persia_storage::container::sim::{CrashLoss, SimFault, SimFile};
-use persia_storage::container::{ContainerFile, Error as ContainerError, ReadOnlyReason};
+use persia_storage::container::{ContainerFile, Error as ContainerError, FrameRef, ReadOnlyReason};
+use proptest::prelude::*;
+use proptest::test_runner::{Config, RngSeed};
 
 type Docs = BTreeMap<String, BTreeMap<String, String>>;
 
@@ -273,6 +281,16 @@ fn a_read_only_open_stops_before_a_collection_created_during_its_scan() {
             .any(|f| f.kind == FrameKind::WalChunk && f.offset >= manifest.end()),
         "the put logged after that Manifest was scanned: {uncommitted:?}"
     );
+    // Invariant 6: `wal_end` is the end of the last chunk replayed, the one before that Manifest, not the end of the
+    // last WAL chunk the scan saw (the next snapshot's).
+    let replayed_chunk = reader
+        .container()
+        .frames()
+        .iter()
+        .rfind(|f| f.kind == FrameKind::WalChunk && f.offset < manifest.offset)
+        .unwrap();
+    assert_eq!(reader.wal_end(), replayed_chunk.end());
+    assert!(reader.wal_end() <= manifest.offset);
     reader.verify().unwrap();
 
     // Opened again, against the superblock the create published: both collections.
@@ -624,4 +642,338 @@ fn wal_end_moves_with_the_replayed_records_only() {
     );
     assert!(later.container().end() > reader.container().end());
     assert_eq!(later.wal_end(), reader.wal_end());
+}
+
+/// The `WalChunk` frames `reader`'s container holds, from `wal_start` on.
+fn wal_frames<F: ContainerFile + Sync>(reader: &ReadOnlyDatabase<F>) -> Vec<FrameRef> {
+    reader
+        .container()
+        .frames()
+        .iter()
+        .filter(|f| f.kind == FrameKind::WalChunk)
+        .copied()
+        .collect()
+}
+
+/// Invariant 6: with no WAL to replay, `wal_end` is the committed `wal_start`: on a created database, and after a
+/// commit that flushed the WAL and moved `wal_start` past it. The WAL after that commit counts from the new
+/// `wal_start`; a commit that flushes nothing keeps `wal_start` and the replayed WAL before its Manifest.
+#[test]
+fn wal_end_is_wal_start_without_a_wal_and_counts_from_it() {
+    let registry = AnalyzerRegistry::builtin();
+    let file = SimFile::new();
+    let mut db = Database::create_on(file.clone(), [3; 16], options(BIG)).unwrap();
+    let open = || ReadOnlyDatabase::open_on(file.clone(), &registry).unwrap();
+    let created = open();
+    assert_eq!(created.replayed(), 0);
+    assert_eq!(wal_frames(&created), []);
+    assert_eq!(
+        created.wal_end(),
+        created.container().superblock().wal_start
+    );
+
+    db.create_collection(schema("a")).unwrap();
+    for i in 0..3 {
+        db.put("a", &doc(&format!("a{i}"), "before"), Durability::Fsync)
+            .unwrap();
+    }
+    let logged = open();
+    assert_eq!(logged.replayed(), 3);
+    assert_eq!(logged.wal_end(), wal_frames(&logged).last().unwrap().end());
+
+    // A commit that flushes them: nothing left to replay, and `wal_end` is the new `wal_start`, past the old WAL.
+    db.commit().unwrap();
+    let flushed = open();
+    let wal_start = flushed.container().superblock().wal_start;
+    assert!(flushed.seq() > logged.seq());
+    assert_eq!(flushed.replayed(), 0);
+    assert_eq!(wal_frames(&flushed), []);
+    assert_eq!(flushed.wal_end(), wal_start);
+    assert!(wal_start > logged.wal_end());
+
+    // The WAL after it: only its chunk counts.
+    db.put("a", &doc("a3", "after"), Durability::Fsync).unwrap();
+    let after = open();
+    assert_eq!((after.seq(), after.replayed()), (flushed.seq(), 1));
+    let chunks = wal_frames(&after);
+    assert_eq!(chunks.len(), 1);
+    assert!(chunks[0].offset >= wal_start);
+    assert_eq!(after.wal_end(), chunks[0].end());
+
+    // A commit that flushes nothing moves `wal_start` only up to that record's chunk, the first still needed (invariant
+    // 5): the next `seq` replays it and its WAL ends where it did, before the commit's Manifest.
+    db.create_collection(schema("b")).unwrap();
+    let kept = open();
+    let sb = kept.container().superblock();
+    assert!(kept.seq() > after.seq());
+    assert_eq!(sb.wal_start, chunks[0].offset);
+    assert_eq!((kept.replayed(), kept.wal_end()), (1, after.wal_end()));
+    assert!(kept.wal_end() < sb.log_end && sb.log_end <= kept.container().end());
+}
+
+/// A database whose WAL lies on both sides of `log_end`: puts of `a`, then a commit that flushes nothing (a
+/// collection create), then more puts; one synced put per chunk. Returns its bytes and the ids in log order.
+fn wal_across_log_end() -> (Vec<u8>, Vec<String>) {
+    let file = SimFile::new();
+    let mut db = Database::create_on(file.clone(), [3; 16], options(BIG)).unwrap();
+    db.create_collection(schema("a")).unwrap();
+    let mut ids = Vec::new();
+    for i in 0..5 {
+        if i == 2 {
+            db.create_collection(schema("b")).unwrap();
+        }
+        let id = format!("a{i}");
+        db.put("a", &doc(&id, &format!("wal {id}")), Durability::Fsync)
+            .unwrap();
+        ids.push(id);
+    }
+    drop(db);
+    (file.bytes(), ids)
+}
+
+/// What a read-only open shows after replaying the first `k` of `ids` (from [`wal_across_log_end`]).
+fn replayed_prefix(ids: &[String], k: usize) -> Docs {
+    let a = ids[..k]
+        .iter()
+        .map(|id| (id.clone(), format!("wal {id}")))
+        .collect();
+    Docs::from([("a".to_owned(), a), ("b".to_owned(), BTreeMap::new())])
+}
+
+/// The reader of `bytes`, its WAL chunks, and how many of them lie before `log_end`, for a clean file.
+fn clean_wal(bytes: &[u8], ids: &[String]) -> (ReadOnlyDatabase<SimFile>, Vec<FrameRef>, usize) {
+    let clean = ReadOnlyDatabase::open_on(
+        SimFile::from_bytes(bytes.to_vec()),
+        &AnalyzerRegistry::builtin(),
+    )
+    .unwrap();
+    let chunks = wal_frames(&clean);
+    assert_eq!(chunks.len(), ids.len(), "one chunk per put");
+    assert_eq!(clean.replayed(), ids.len() as u64);
+    assert_eq!(clean.wal_end(), chunks.last().unwrap().end());
+    let log_end = clean.container().superblock().log_end;
+    let committed = chunks.iter().filter(|c| c.end() <= log_end).count();
+    assert!(
+        committed > 0 && committed < chunks.len(),
+        "chunks on both sides of log_end {log_end}: {chunks:?}"
+    );
+    (clean, chunks, committed)
+}
+
+/// Invariant 6: a WAL tail torn at any byte from `log_end` on (cut short, or zeros from there) is read up to the last
+/// whole chunk: `replayed` counts the whole chunks and `wal_end` is the end of the last of them, never past the
+/// first damaged byte. Zeros over a frame's padding, already zero, damage nothing.
+#[test]
+fn a_torn_wal_tail_ends_wal_end_at_the_last_whole_chunk() {
+    let registry = AnalyzerRegistry::builtin();
+    let (bytes, ids) = wal_across_log_end();
+    let (clean, chunks, committed) = clean_wal(&bytes, &ids);
+    let log_end = clean.container().superblock().log_end;
+    let end_of = |k: usize| chunks[k - 1].end();
+    for len in log_end..=bytes.len() as u64 {
+        let cut = usize::try_from(len).unwrap();
+        for zeroed in [false, true] {
+            let ctx = format!("torn at {len}, zeroed {zeroed}");
+            let mut torn = bytes.clone();
+            // The first byte the tear changed.
+            let damage = if zeroed {
+                torn[cut..].fill(0);
+                bytes[cut..]
+                    .iter()
+                    .position(|&b| b != 0)
+                    .map_or(bytes.len() as u64, |i| len + i as u64)
+            } else {
+                torn.truncate(cut);
+                len
+            };
+            let whole = chunks.iter().filter(|c| c.end() <= damage).count();
+            assert!(whole >= committed, "{ctx}");
+            let reader = ReadOnlyDatabase::open_on(SimFile::from_bytes(torn), &registry)
+                .unwrap_or_else(|e| panic!("{ctx}: {e}"));
+            assert_eq!(
+                (reader.seq(), reader.replayed(), reader.wal_end()),
+                (clean.seq(), whole as u64, end_of(whole)),
+                "{ctx}"
+            );
+            assert!(reader.wal_end() <= damage, "{ctx}");
+            assert_eq!(
+                observed(&reader.snapshot()),
+                replayed_prefix(&ids, whole),
+                "{ctx}"
+            );
+        }
+    }
+}
+
+/// Invariant 6: every single-bit flip from `wal_start` to the end either fails the open as corruption or is read
+/// as a torn tail at the damaged chunk: never a panic, never a `wal_end` past the replayed records, never a dropped
+/// record from before `log_end` (those are committed: damage there fails the open).
+#[test]
+fn a_flipped_bit_in_the_wal_fails_as_corruption_or_ends_before_the_damaged_chunk() {
+    let registry = AnalyzerRegistry::builtin();
+    let (bytes, ids) = wal_across_log_end();
+    let (clean, chunks, committed) = clean_wal(&bytes, &ids);
+    let sb = *clean.container().superblock();
+    let end_of = |k: usize| {
+        if k == 0 {
+            sb.wal_start
+        } else {
+            chunks[k - 1].end()
+        }
+    };
+    let (mut failed, mut torn) = (0, 0);
+    for offset in sb.wal_start..bytes.len() as u64 {
+        let at = usize::try_from(offset).unwrap();
+        // The chunk the flipped byte is in, if any.
+        let hit = chunks
+            .iter()
+            .position(|c| c.offset <= offset && offset < c.end());
+        for bit in 0..8 {
+            let ctx = format!("bit {bit} of byte {offset} (chunk {hit:?})");
+            let mut flipped = bytes.clone();
+            flipped[at] ^= 1 << bit;
+            match ReadOnlyDatabase::open_on(SimFile::from_bytes(flipped), &registry) {
+                Err(e) => {
+                    assert!(e.is_corruption(), "{ctx}: {e:?}");
+                    failed += 1;
+                }
+                Ok(reader) => {
+                    let k = usize::try_from(reader.replayed()).unwrap();
+                    assert!(
+                        offset >= sb.log_end,
+                        "{ctx}: damage before log_end was read"
+                    );
+                    assert!(k >= committed, "{ctx}: a committed record was dropped");
+                    assert_eq!(hit, Some(k), "{ctx}: not cut at the damaged chunk");
+                    assert_eq!(reader.wal_end(), end_of(k), "{ctx}");
+                    assert!(reader.wal_end() <= offset, "{ctx}");
+                    assert_eq!(reader.seq(), clean.seq(), "{ctx}");
+                    assert_eq!(
+                        observed(&reader.snapshot()),
+                        replayed_prefix(&ids, k),
+                        "{ctx}"
+                    );
+                    torn += 1;
+                }
+            }
+        }
+    }
+    assert!(failed > 0 && torn > 0, "{failed} failed, {torn} torn");
+}
+
+/// One step of a writer under [`wal_end_grows_exactly_with_replayed_under_one_seq`].
+#[derive(Debug, Clone)]
+enum WalStep {
+    /// A put of `d{id}` with a body of `words` words, synced or async.
+    Put { id: u8, words: usize, sync: bool },
+    /// A delete of `d{id}`, which is logged whether or not the id exists.
+    Delete { id: u8, sync: bool },
+    /// A batch of puts, one sync for all of them.
+    Batch { ids: Vec<u8>, sync: bool },
+    /// A collection create: a commit that flushes nothing, so `wal_start` stays.
+    CreateCollection,
+    /// A commit, which flushes every memtable.
+    Commit,
+    /// The writer closes and opens read-write again: replay commits nothing.
+    Reopen,
+}
+
+fn wal_step() -> impl Strategy<Value = WalStep> {
+    let durability = any::<bool>();
+    prop_oneof![
+        6 => (0u8..8, 0usize..40, durability)
+            .prop_map(|(id, words, sync)| WalStep::Put { id, words, sync }),
+        2 => (0u8..8, durability).prop_map(|(id, sync)| WalStep::Delete { id, sync }),
+        2 => (prop::collection::vec(0u8..8, 2..5), durability)
+            .prop_map(|(ids, sync)| WalStep::Batch { ids, sync }),
+        1 => Just(WalStep::CreateCollection),
+        1 => Just(WalStep::Commit),
+        1 => Just(WalStep::Reopen),
+    ]
+}
+
+fn wal_cases() -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(if cfg!(feature = "slow") { 512 } else { 48 })
+}
+
+proptest! {
+    #![proptest_config(Config {
+        cases: wal_cases(),
+        rng_seed: RngSeed::Fixed(0x6_6_e),
+        failure_persistence: None,
+        ..Config::default()
+    })]
+
+    /// Invariant 6: after every step a read-only open replays exactly the records logged since the last flushing
+    /// commit, its `wal_end` is the end of the last WAL chunk (or `wal_start`), and under one `seq` `replayed` and
+    /// `wal_end` move together: both grow, or neither does (what `ReadOnlyBlobDatabase::refresh` relies on).
+    #[test]
+    fn wal_end_grows_exactly_with_replayed_under_one_seq(
+        steps in prop::collection::vec(wal_step(), 1..24),
+    ) {
+        use std::cmp::Ordering::{Equal, Greater};
+        let registry = AnalyzerRegistry::builtin();
+        let file = SimFile::new();
+        let mut db = Database::create_on(file.clone(), [3; 16], options(BIG)).unwrap();
+        db.create_collection(schema("a")).unwrap();
+        let durability = |sync| if sync { Durability::Fsync } else { Durability::Async };
+        let body = |words: usize| "word ".repeat(words);
+        let mut logged = 0u64;
+        let mut collections = 0;
+        let mut previous: Option<(u64, u64, u64)> = None;
+        for (i, step) in steps.iter().enumerate() {
+            match step {
+                WalStep::Put { id, words, sync } => {
+                    db.put("a", &doc(&format!("d{id}"), &body(*words)), durability(*sync)).unwrap();
+                    logged += 1;
+                }
+                WalStep::Delete { id, sync } => {
+                    db.delete("a", &format!("d{id}"), durability(*sync)).unwrap();
+                    logged += 1;
+                }
+                WalStep::Batch { ids, sync } => {
+                    let docs: Vec<_> = ids.iter().map(|id| doc(&format!("d{id}"), "batched")).collect();
+                    db.put_batch("a", &docs, durability(*sync)).unwrap();
+                    logged += ids.len() as u64;
+                }
+                WalStep::CreateCollection => {
+                    collections += 1;
+                    db.create_collection(schema(&format!("c{collections}"))).unwrap();
+                }
+                WalStep::Commit => {
+                    db.commit().unwrap();
+                    logged = 0;
+                }
+                WalStep::Reopen => {
+                    drop(db);
+                    db = Database::open_on(file.clone(), options(BIG)).unwrap();
+                }
+            }
+            let reader = ReadOnlyDatabase::open_on(file.clone(), &registry).unwrap();
+            let sb = *reader.container().superblock();
+            let (seq, replayed, end) = (reader.seq(), reader.replayed(), reader.wal_end());
+            prop_assert_eq!(replayed, logged, "step {}: {:?}", i, step);
+            prop_assert_eq!(
+                end,
+                wal_frames(&reader).last().map_or(sb.wal_start, FrameRef::end),
+                "step {}: {:?}", i, step
+            );
+            prop_assert!(sb.wal_start <= end && end <= reader.container().end(), "step {}", i);
+            if let Some((p_seq, p_replayed, p_end)) = previous {
+                prop_assert!(seq >= p_seq, "step {}: seq {} after {}", i, seq, p_seq);
+                if seq == p_seq {
+                    let order = (replayed.cmp(&p_replayed), end.cmp(&p_end));
+                    prop_assert!(
+                        matches!(order, (Greater, Greater) | (Equal, Equal)),
+                        "step {} {:?} at seq {}: replayed {} -> {}, wal_end {} -> {}",
+                        i, step, seq, p_replayed, replayed, p_end, end
+                    );
+                }
+            }
+            previous = Some((seq, replayed, end));
+        }
+    }
 }
