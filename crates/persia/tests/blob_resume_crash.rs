@@ -9,13 +9,13 @@
 //!    blob's manifest, all of one upload, the token's. A new process over the crashed file system, given only the token
 //!    and the whole blob, binds the `BlobRef` an uninterrupted `put_blob` binds. It binds under the token's upload
 //!    unless every chunk was staged already, when it moves to a new one (ROADMAP 9.3.6). The bound upload holds
-//!    exactly the blob's chunks, the blob reads back, and the completion only adds objects: it deletes or rewrites none.
+//!    exactly the blob's chunks, the blob reads back, and the completion only adds objects: it deletes none.
 //! 2. A fault in the bind is an unknown outcome, never `UploadInterrupted`. After the crash the blob is bound and reads
 //!    back, or a new `put_blob` binds it. A `put_blob` that returned is durable: a crash right after it, losing
 //!    whatever was not synced, keeps its blob.
 //! 3. Faults in the staging come before faults in the bind, and some crash leaves chunks the resume keeps.
 //! 4. The same holds for a resume cut by a crash at any of its calls (the restage copy of ROADMAP 9.3.6 among them),
-//!    from every distinct state a first crash leaves: a third process completes the blob from what the resume
+//!    from every distinct listing a first crash leaves: a third process completes the blob from what the resume
 //!    returned. Some such crash interrupts the resume after it moved to a new upload, and some before.
 //!
 //! Seeds: [`base_seed`] (`PERSIA_TEST_SEED`, default fixed) is printed and picks the seeded losses and the data; every
@@ -243,13 +243,14 @@ enum Phase {
 }
 
 /// Runs `op` in a process (upload ids from `ids`) over a copy of `fs`, with each fault at each of its mutating calls
-/// in turn until neither fires, and hands `on_crash` each run whose fault fired, with the file system it left; then
+/// in turn until neither fires, and hands `on_crash` each run whose fault fired, with the call's index and the file
+/// system it left; then
 /// the first run whose fault never fired, crashed after `op` returned, whose blob is acknowledged.
 fn every_fault(
     fs: &SimFs,
     ids: u64,
     op: &dyn Fn(&Blobs<Local>) -> Put,
-    on_crash: &mut dyn FnMut(String, &SimFs, &Put),
+    on_crash: &mut dyn FnMut(u64, String, &SimFs, &Put),
 ) {
     let mut acked = false;
     for k in 0_u64.. {
@@ -269,12 +270,12 @@ fn every_fault(
                 assert!(result.is_ok(), "call {k}: {result:?}");
                 if !acked {
                     acked = true;
-                    on_crash(format!("after the last call ({k})"), &run, &result);
+                    on_crash(k, format!("after the last call ({k})"), &run, &result);
                 }
                 continue;
             }
             fired = true;
-            on_crash(format!("call {k}, {:?}", fault(k)), &run, &result);
+            on_crash(k, format!("call {k}, {:?}", fault(k)), &run, &result);
         }
         if !fired {
             break;
@@ -346,11 +347,13 @@ fn recover(
     phase
 }
 
-/// Where the faults fell, over every call of a `put_blob` (or of a resume).
-#[derive(Debug, Default)]
+/// Where the faults fell, over every call of a `put_blob` (or of a resume). `staging` and `bind` are the distinct
+/// calls (a sweep, and the call's index in it) whose fault fell in that phase, however many faults and losses each
+/// got.
+#[derive(Default)]
 struct Tally {
-    staging: usize,
-    bind: usize,
+    staging: BTreeSet<(usize, u64)>,
+    bind: BTreeSet<(usize, u64)>,
     acked: usize,
     /// Crashes after which the resume found chunks already staged.
     kept: usize,
@@ -358,22 +361,37 @@ struct Tally {
     moved: usize,
     /// Second crashes whose interrupted resume names the token it resumed.
     stayed: usize,
-    /// Distinct states a first crash left that a second sweep started from.
-    states: usize,
+    /// Distinct listings a first crash left that a second sweep started from.
+    listings: usize,
+}
+
+/// Counts, not the call sets: a failure message stays short.
+impl std::fmt::Debug for Tally {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tally")
+            .field("staging_calls", &self.staging.len())
+            .field("bind_calls", &self.bind.len())
+            .field("acked", &self.acked)
+            .field("kept", &self.kept)
+            .field("moved", &self.moved)
+            .field("stayed", &self.stayed)
+            .field("listings", &self.listings)
+            .finish()
+    }
 }
 
 impl Tally {
     /// Counts `phase`, checking the staging faults of one sweep come before its bind faults (invariant 3).
-    fn count(&mut self, phase: Phase, bind_started: &mut bool, what: &str) {
+    fn count(&mut self, phase: Phase, call: (usize, u64), bind_started: &mut bool, what: &str) {
         match phase {
             Phase::Acked => self.acked += 1,
             Phase::Staging => {
                 assert!(!*bind_started, "{what}: a staging fault after a bind fault");
-                self.staging += 1;
+                self.staging.insert(call);
             }
             Phase::Bind => {
                 *bind_started = true;
-                self.bind += 1;
+                self.bind.insert(call);
             }
         }
     }
@@ -386,7 +404,7 @@ fn crash_anywhere(seed: u64, seeded_losses: usize) -> Tally {
     let mut tally = Tally::default();
     let mut bind_started = false;
     let put = |blobs: &Blobs<Local>| blobs.put_blob(&data[..], &options());
-    every_fault(&SimFs::new(), seed, &put, &mut |at, fs, result| {
+    every_fault(&SimFs::new(), seed, &put, &mut |k, at, fs, result| {
         for loss in rng.losses(seeded_losses) {
             let what = format!("seed {seed}, {at}, {loss:?}");
             // A new process: other upload ids than the crashed one's.
@@ -406,38 +424,39 @@ fn crash_anywhere(seed: u64, seeded_losses: usize) -> Tally {
                 }
             }
             let phase = recover(&after, result, &data, &reference, &what);
-            tally.count(phase, &mut bind_started, &what);
+            tally.count(phase, (0, k), &mut bind_started, &what);
         }
     });
     tally
 }
 
-/// Invariant 4: from each distinct state a first crash in the staging leaves, a resume cut at every call, then a third
-/// process. With `every_loss`, the first crash also loses a seeded subset (which may list other states) and each
+/// Invariant 4: from each distinct listing a first crash in the staging leaves, a resume cut at every call, then a third
+/// process. With `every_loss`, the first crash also loses a seeded subset (which may list other chunks) and each
 /// point of the resume is crashed every way, not one seeded way.
 fn crash_anywhere_twice(seed: u64, every_loss: bool) -> Tally {
     let mut rng = Rng(seed ^ 0x7769_6365);
     let data = data(seed);
     let reference = uninterrupted(&data);
     let mut tally = Tally::default();
-    let mut states: BTreeSet<Vec<u32>> = BTreeSet::new();
+    let mut listings: BTreeSet<Vec<u32>> = BTreeSet::new();
     let put = |blobs: &Blobs<Local>| blobs.put_blob(&data[..], &options());
-    every_fault(&SimFs::new(), seed, &put, &mut |at, fs, first| {
+    every_fault(&SimFs::new(), seed, &put, &mut |_, at, fs, first| {
         let Err(Error::UploadInterrupted { token, .. }) = first else {
             return;
         };
         let token = *token;
         for loss in rng.losses(usize::from(every_loss)) {
             let crashed = fs.crash(loss);
-            let state = listed(&process(&crashed, !seed), token.upload_id);
-            if !states.insert(state.clone()) {
+            let listing = listed(&process(&crashed, !seed), token.upload_id);
+            if !listings.insert(listing.clone()) {
                 continue;
             }
-            tally.states += 1;
-            let first_what = format!("seed {seed}, first {at}, {loss:?}, listed {state:?}");
+            let sweep = tally.listings;
+            tally.listings += 1;
+            let first_what = format!("seed {seed}, first {at}, {loss:?}, listed {listing:?}");
             let mut bind_started = false;
             let resumed = |blobs: &Blobs<Local>| blobs.put_blob(&data[..], &resume(token));
-            every_fault(&crashed, !seed, &resumed, &mut |at, fs, second| {
+            every_fault(&crashed, !seed, &resumed, &mut |k, at, fs, second| {
                 let losses = if every_loss {
                     rng.losses(2)
                 } else {
@@ -454,7 +473,7 @@ fn crash_anywhere_twice(seed: u64, every_loss: bool) -> Tally {
                         }
                     }
                     let phase = recover(&after, second, &data, &reference, &what);
-                    tally.count(phase, &mut bind_started, &what);
+                    tally.count(phase, (sweep, k), &mut bind_started, &what);
                 }
             });
         }
@@ -465,8 +484,8 @@ fn crash_anywhere_twice(seed: u64, every_loss: bool) -> Tally {
 fn check_tally(tally: &Tally) {
     eprintln!("blob_resume_crash: {tally:?}");
     // Each chunk write is several calls (SPEC §10.1.1: a temporary file, synced, then linked), and so is the bind.
-    assert!(tally.staging >= 4 * CHUNKS as usize, "{tally:?}");
-    assert!(tally.bind >= 2, "{tally:?}");
+    assert!(tally.staging.len() >= 4 * CHUNKS as usize, "{tally:?}");
+    assert!(tally.bind.len() >= 2, "{tally:?}");
     assert!(
         tally.acked > 0,
         "no crash after an acknowledged put_blob: {tally:?}"
@@ -480,8 +499,8 @@ fn check_tally(tally: &Tally) {
 fn check_twice_tally(tally: &Tally) {
     eprintln!("blob_resume_crash (twice): {tally:?}");
     // From no chunk staged up to every chunk staged (the 9.3.6 restage).
-    assert!(tally.states > CHUNKS as usize, "{tally:?}");
-    assert!(tally.bind >= 2, "{tally:?}");
+    assert!(tally.listings > CHUNKS as usize, "{tally:?}");
+    assert!(tally.bind.len() >= 2, "{tally:?}");
     assert!(
         tally.acked > 0,
         "no crash after an acknowledged put_blob: {tally:?}"

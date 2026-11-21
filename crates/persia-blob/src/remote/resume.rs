@@ -28,9 +28,9 @@ use crate::store::BlobStore;
 /// are full chunks of the token's size from chunk 0, and then must hold the reader's bytes (else `InvalidResume`, and
 /// nothing is staged). Any other chunk there with other bytes at an index the resume writes conflicts, and the upload
 /// restarts under a new upload id ([`RemoteBlobStore::restage`]), leaving those chunks to GC. A token whose chunk size
-/// is not the one its upload was staged with is such a case: none of its chunks is of the token's length (unless the
-/// blob is that one chunk), so the run is empty and chunk 0 conflicts. The blob id is computed from the bytes bound
-/// either way.
+/// is not the one its upload was staged with is such a case: its chunk 0 is not of the token's length (unless the
+/// blob is that one short chunk, which is then kept), so the run is empty and the first staged index the resume
+/// writes conflicts (chunk 0 itself may have been swept). The blob id is computed from the bytes bound either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ResumeToken {
     /// The upload the chunks were staged under.

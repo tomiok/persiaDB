@@ -3,28 +3,31 @@
 //!
 //! Invariants:
 //! 1. A remote upload whose reader failed after a window was staged, resumed with the token and the whole blob, binds
-//!    the `BlobRef` an uninterrupted `put_blob` binds under the token's upload; the kept chunks are not written again
-//!    (their `last_modified` is unchanged), and `blobs/` holds exactly the manifest and the upload's chunks.
-//! 2. A resume on the pack is `ResumeUnsupported`: nothing is read from the reader, nothing is pinned, and the pack
+//!    the `BlobRef` an uninterrupted `put_blob` binds under the token's upload; no `put_if_absent` reaches a kept
+//!    chunk (each chunk after the run, and the manifest, gets exactly one), and `blobs/` holds exactly the manifest
+//!    and the upload's chunks.
+//! 2. A resume on the pack is `ResumeUnsupported`: nothing is read from the reader, no pin remains, and the pack
 //!    file is unchanged (absent before the first blob, the same bytes after it).
 //! 3. A token holds only an upload id and a chunk size, so an unknown upload id and a token of another prefix or
 //!    bucket are one case. An empty listing starts a fresh upload under the token's id (a blob of at most 64 KiB is
 //!    stored chunked, not inline). Chunks under that id holding other bytes at an index the resume writes, with none
 //!    it keeps, conflict: the upload moves to a new id and leaves them as they were. Full chunks of the token's size
 //!    that are not the reader's bytes are `InvalidResume`, and nothing is staged.
-//! 4. A token chunk size below the floor fails before anything is read, staged or pinned.
-//! 5. A token whose chunk size is not the one the upload was staged with keeps no chunk (none is of the token's
-//!    length), conflicts at chunk 0 and binds the reader's blob, at the token's chunk size, under a new upload id;
-//!    GC past the grace period then takes the old chunks.
+//! 4. A token chunk size below the floor fails before anything is read or staged, and leaves no pin.
+//! 5. A token whose chunk size is not the one the upload was staged with keeps no chunk: its chunk 0 is not of the
+//!    token's length unless the blob is that one short chunk (which is then kept, invariant 7). The first staged
+//!    index the resume writes conflicts (chunk 0 here; it may have been swept), and the reader's blob binds at the
+//!    token's chunk size under a new upload id; GC past the grace period then takes the old chunks.
 //! 6. After failed resumes (one that stages nothing, one that fails after a conflict restage, and a replayed stale
 //!    token that restages again) and the resume that binds, a GC within the grace period deletes nothing, and one
 //!    past it leaves exactly the bound blob's manifest and its chunks under `blobs/`.
 //! 7. Pinned edges: a token of another store binds under its id there and still resumes at home; an unknown id with
 //!    an empty blob binds it chunked under a new id (nothing new to write, ROADMAP 9.3.6); every kept chunk is
 //!    checked against the reader (`InvalidResume`, which leaves the token usable), and a reader ending where the kept
-//!    run ends binds that prefix; a one-chunk upload keeps its short chunk for a token of that length; a token below
-//!    the floor on the pack is `ChunkSizeBelowMin`, not `ResumeUnsupported`; a stale token replayed after GC
-//!    restages under its id, which the next GC takes.
+//!    run ends binds that shorter blob (without `expected_id`, nothing tells it from a truncated reader); a one-chunk
+//!    upload keeps its short chunk for a token of that length; a token below the floor on the pack is
+//!    `ChunkSizeBelowMin`, not `ResumeUnsupported`; a stale token replayed after GC restages under its id, which the
+//!    next GC takes.
 //!
 //! Deterministic: fixed data, seeded upload ids, a manual clock, no sleeps.
 #![allow(
@@ -36,7 +39,7 @@
     clippy::assert_is_empty
 )] // Tests: inputs are fixed; `assert!(a == b)` keeps megabytes of blob bytes out of a failure message.
 
-use core::num::NonZeroUsize;
+use core::num::{NonZeroU64, NonZeroUsize};
 use core::ops::Range;
 use std::collections::BTreeSet;
 use std::io::{self, Read};
@@ -54,8 +57,9 @@ use persia_engine::db::{Database, DatabaseOptions, SegmentIds};
 use persia_engine::document::Document;
 use persia_engine::schema::SchemaBuilder;
 use persia_engine::wal::Durability;
+use persia_storage::faulty::{Fault, FaultyStorage, RandomFaults};
 use persia_storage::retry::{Clock, ManualClock};
-use persia_storage::{KeyPrefix, MemoryStorage, Storage};
+use persia_storage::{KeyPrefix, MemoryStorage, Op, Storage};
 
 const CHUNK: u32 = ChunkSize::MIN;
 const CHUNK_LEN: usize = CHUNK as usize;
@@ -135,7 +139,7 @@ fn interruption(e: Error) -> (ResumeToken, Error) {
 }
 
 /// Every key under `blobs/`.
-fn keys(store: &Remote) -> BTreeSet<String> {
+fn keys<S: Storage>(store: &RemoteBlobStore<S>) -> BTreeSet<String> {
     store
         .storage()
         .list(&KeyPrefix::new("blobs/").unwrap())
@@ -166,7 +170,7 @@ fn chunk_keys(upload_id: UploadId, indices: Range<u32>) -> BTreeSet<String> {
 }
 
 /// The upload the blob `r` is bound to, and its keys: the manifest (plain, not inline) and every chunk.
-fn bound_keys(store: &Remote, r: &BlobRef) -> (UploadId, BTreeSet<String>) {
+fn bound_keys<S: Storage>(store: &RemoteBlobStore<S>, r: &BlobRef) -> (UploadId, BTreeSet<String>) {
     let m = store.manifest(r.blob_id()).unwrap().unwrap();
     assert!(!m.is_inline(), "a resume stores its blob chunked");
     let mut keys = chunk_keys(m.upload_id(), 0..m.chunk_count());
@@ -227,10 +231,30 @@ impl Read for Counting<'_> {
 
 // -- 1. a successful remote resume --
 
+/// The `put_if_absent` calls `storage` received since `from` (an index into its log), as keys in call order. Every
+/// call is logged: the only fault armed is a zero `Latency`, which changes nothing.
+fn put_if_absent_keys(storage: &FaultyStorage<MemoryStorage>, from: usize) -> Vec<String> {
+    storage.injected()[from..]
+        .iter()
+        .filter(|i| i.op == Op::PutIfAbsent)
+        .map(|i| i.target.clone())
+        .collect()
+}
+
 #[test]
 fn an_interrupted_remote_upload_resumes_through_put_blob_without_rewriting_its_kept_chunks() {
-    let (clock, blobs) = remote(1);
-    let store = blobs.store();
+    // A wrapper that logs every call with its key: `MemoryStorage` answers a same-bytes `put_if_absent` `Created`
+    // without touching the object, so only a count of calls shows the kept run is never written again.
+    let clock = Arc::new(ManualClock::new(UNIX_EPOCH + Duration::from_hours(1_000)));
+    let memory = MemoryStorage::with_clock(Arc::clone(&clock) as Arc<dyn Clock>);
+    let storage = FaultyStorage::new(memory, 1).with_clock(ManualClock::new(UNIX_EPOCH));
+    storage.set_random(Some(RandomFaults {
+        one_in: NonZeroU64::MIN,
+        faults: vec![Fault::Latency(Duration::ZERO)],
+    }));
+    let store = Arc::new(RemoteBlobStore::new(storage).with_parallelism(NonZeroUsize::MIN));
+    let blobs = Blobs::with_upload_ids(Arc::clone(&store), SegmentIds::seeded(1))
+        .with_retry_clock(Arc::new(ManualRetryClock::new()));
     let data = bytes((WINDOW + 5) * CHUNK_LEN + 100, 1);
     let (token, source) = interruption(
         blobs
@@ -239,37 +263,38 @@ fn an_interrupted_remote_upload_resumes_through_put_blob_without_rewriting_its_k
     );
     assert!(matches!(source, Error::Read(_)), "{source:?}");
     assert_eq!(token.chunk_size, size(CHUNK));
+    let kept = chunk_keys(token.upload_id, 0..WINDOW as u32);
     assert_eq!(
-        keys(store),
-        chunk_keys(token.upload_id, 0..WINDOW as u32),
+        keys(&store),
+        kept,
         "the first window, staged before the reader failed"
     );
+    assert_eq!(
+        put_if_absent_keys(store.storage(), 0).len(),
+        WINDOW,
+        "one write per staged chunk"
+    );
     assert!(blobs.pin_set().pinned().is_empty());
-    let staged_at = clock.now();
-    clock.advance(Duration::from_secs(60));
 
+    let before = store.storage().injected().len();
     let (r, pins) = blobs.put_blob(&data[..], &resume(token)).unwrap();
     assert_eq!(r, uninterrupted(&data, CHUNK));
-    let (upload, expected) = bound_keys(store, &r);
+    let (upload, expected) = bound_keys(&store, &r);
     assert_eq!(upload, token.upload_id, "bound under the token's upload");
     assert_eq!(expected.len(), WINDOW + 6 + 1);
-    assert_eq!(keys(store), expected);
-    // The kept run was read from the caller and checked, not written again: only the chunks after it are new.
-    for meta in store
-        .storage()
-        .list(&KeyPrefix::new("blobs/uploads/").unwrap())
-        .unwrap()
-    {
-        let Some(RemoteKey::Chunk { index, .. }) = RemoteKey::parse(&meta.key) else {
-            panic!("not a chunk: {}", meta.key);
-        };
-        let written = if (index as usize) < WINDOW {
-            staged_at
-        } else {
-            clock.now()
-        };
-        assert_eq!(meta.last_modified, Some(written), "chunk {index}");
-    }
+    assert_eq!(keys(&store), expected);
+    // The kept run was read from the caller and checked, not written again: one `put_if_absent` for each chunk after
+    // it, then one for the manifest.
+    let mut written: Vec<String> = chunk_keys(token.upload_id, WINDOW as u32..WINDOW as u32 + 6)
+        .into_iter()
+        .collect();
+    written.push(manifest_key(r.blob_id()));
+    let calls = put_if_absent_keys(store.storage(), before);
+    assert_eq!(calls, written);
+    assert!(
+        calls.iter().all(|key| !kept.contains(key)),
+        "a kept chunk was written"
+    );
     read_back(&blobs, &r, &data);
     drop(pins);
     assert!(blobs.pin_set().pinned().is_empty());
@@ -293,7 +318,8 @@ fn a_resume_on_the_pack_reads_nothing_and_writes_nothing() {
         let e = blobs.put_blob(&mut reader, &resume(t)).unwrap_err();
         assert!(matches!(e, Error::ResumeUnsupported), "{e:?}");
         assert_eq!(reader.reads, 0, "the reader was read");
-        assert!(blobs.pin_set().pinned().is_empty());
+        // `put_blob` pins the token's upload before asking the store, and drops the pin with the error.
+        assert!(blobs.pin_set().pinned().is_empty(), "a pin remains");
     };
 
     // Before the first blob there is no pack, and a resume does not create one.
@@ -451,7 +477,9 @@ fn a_token_whose_id_holds_full_chunks_of_another_blob_is_a_callers_error() {
 // -- 4. a token chunk size below the floor --
 
 #[test]
-fn a_token_chunk_size_below_the_floor_reads_stages_and_pins_nothing() {
+fn a_token_chunk_size_below_the_floor_reads_and_stages_nothing_and_leaves_no_pin() {
+    // The floor is checked before `put_blob` pins anything or calls the store, so no call of either could observe a
+    // pin: what is checked is that none remains.
     let (_, blobs) = remote(6);
     let store = blobs.store();
     let data = bytes(2 * CHUNK_LEN, 8);
@@ -476,7 +504,10 @@ fn a_token_chunk_size_below_the_floor_reads_stages_and_pins_nothing() {
         );
         assert_eq!(reader.reads, 0, "{below}: the reader was read");
         assert_eq!(keys(store), before, "{below}");
-        assert!(blobs.pin_set().pinned().is_empty(), "{below}");
+        assert!(
+            blobs.pin_set().pinned().is_empty(),
+            "{below}: a pin remains"
+        );
     }
 }
 
@@ -723,22 +754,25 @@ fn a_kept_run_the_reader_does_not_match_is_invalid_resume_whichever_kept_chunk_d
 
 #[test]
 fn a_reader_that_ends_where_the_kept_run_ends_binds_that_prefix_under_a_new_upload() {
-    // Not inside the run, so not `InvalidResume`: the blob is the bytes read. Every chunk it stages was listed, so
-    // the upload moves to a young one (ROADMAP 9.3.6) and the token's chunks are left to GC.
+    // Not inside the run, so not `InvalidResume`: the blob is the bytes read. Without `expected_id` nothing tells a
+    // reader truncated at the end of the kept run from the whole blob, so a shorter blob binds. Every chunk it stages
+    // was listed, so the upload moves to a young one (ROADMAP 9.3.6) and the token's chunks are left to GC.
     let (_, blobs) = remote(18);
     let store = blobs.store();
-    let data = bytes(3 * CHUNK_LEN, 18);
+    let data = bytes(5 * CHUNK_LEN, 18);
+    let prefix = &data[..3 * CHUNK_LEN];
     let t = token(0x00e2_d5a7, CHUNK);
-    for (index, chunk) in (0..).zip(data.chunks(CHUNK_LEN)) {
+    for (index, chunk) in (0..).zip(data.chunks(CHUNK_LEN).take(3)) {
         store.stage_chunk(t.upload_id, index, chunk).unwrap();
     }
     let theirs = keys(store);
-    let (r, _pins) = blobs.put_blob(&data[..], &resume(t)).unwrap();
-    assert_eq!(r, uninterrupted(&data, CHUNK));
+    let (r, _pins) = blobs.put_blob(prefix, &resume(t)).unwrap();
+    assert_eq!(r, uninterrupted(prefix, CHUNK));
+    assert_eq!(r.size(), 3 * u64::from(CHUNK), "the prefix, not the blob");
     let (upload, bound) = bound_keys(store, &r);
     assert_ne!(upload, t.upload_id);
     assert_eq!(keys(store), bound.union(&theirs).cloned().collect());
-    read_back(&blobs, &r, &data);
+    read_back(&blobs, &r, prefix);
 }
 
 #[test]
@@ -813,7 +847,7 @@ fn a_token_chunk_size_below_the_floor_on_the_pack_is_below_the_floor_not_unsuppo
     );
     assert_eq!(reader.reads, 0);
     assert!(!pack.exists());
-    assert!(blobs.pin_set().pinned().is_empty());
+    assert!(blobs.pin_set().pinned().is_empty(), "a pin remains");
 }
 
 #[test]

@@ -85,9 +85,10 @@ error; `Unsupported` trait defaults; a restage that makes the chunks young.
    listing starts the blob from chunk 0 under the token's id (an empty blob writes no chunk, so item 10 binds it under
    a new id). Chunks there that the resume does not keep and would
    write other bytes over conflict, and the upload restarts under a new id; GC takes the old chunks. A token of
-   another chunk size than its upload's is such a case: no staged chunk is of the token's length, so the kept run is
-   empty and chunk 0 conflicts. Full chunks of the token's size that are not the reader's bytes are `InvalidResume`,
-   with nothing staged. The blob id is always computed from the bytes bound.
+   another chunk size than its upload's is such a case: its chunk 0 is not of the token's length (unless the blob
+   is that one short chunk, which is then kept), so the kept run is empty and the first staged index the resume
+   writes conflicts (chunk 0 itself may have been swept). Full chunks of the token's size that are not the reader's
+   bytes are `InvalidResume`, with nothing staged. The blob id is always computed from the bytes bound.
 9. **Stores that cannot resume.** `BlobStore::resumable`, `resume` and `restage` default to `false` and
    `ResumeUnsupported`; only `RemoteBlobStore` overrides them (SPEC §9.3: local uploads are not resumable). A resume on
    such a store fails before reading, and such a store never returns `UploadInterrupted`.
