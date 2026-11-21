@@ -17,6 +17,9 @@
 //!    upload to a new upload id before binding: a sweep that listed the manifests and uploads before the bind, and
 //!    checks the old upload once the resume's pins dropped, deletes the old upload and keeps the blob (ROADMAP 9.3.6).
 //! 8. A resume that writes a new chunk before the sweep lists the uploads keeps its upload: it is young.
+//! 9. A resume that pins, lists, stages a new chunk under an old upload, binds and drops its pins between the sweep's
+//!    listing of the uploads and its locked check keeps its upload, and so does one whose new chunks a listing
+//!    without `strong_list` missed: the blob is referenced later by its `BlobRef` and reads back (ROADMAP 9.5.10).
 #![allow(
     clippy::unwrap_used,
     clippy::panic,
@@ -35,15 +38,18 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
 use persia::internal::blob::{Blobs, PutBlobOptions};
-use persia::internal::documents::BlobDatabase;
+use persia::internal::documents::{Blob, BlobDatabase};
 use persia::internal::gc::DEFAULT_GRACE;
 use persia::internal::pins::{PinSet, Pinned};
 use persia::internal::retry::ManualRetryClock;
 use persia_blob::gc::{GcObject, PinCheck, PinGate, Sweep, SweepOptions};
 use persia_blob::remote::{RemoteBlobStore, RemoteKey};
-use persia_blob::testing::{CorruptGet, ListOrder, MisorderedList};
+use persia_blob::testing::{CorruptGet, LaggingList, ListOrder, MisorderedList};
 use persia_blob::{BlobRef, BlobStore, ChunkSize, Error, MemoryBlobStore, ResumeToken, UploadId};
 use persia_engine::db::{Database, DatabaseOptions, SegmentIds};
+use persia_engine::document::Document;
+use persia_engine::schema::SchemaBuilder;
+use persia_engine::wal::Durability;
 use persia_storage::MemoryStorage;
 use persia_storage::retry::{Clock, ManualClock};
 use remote::{Event, Fault, Watched};
@@ -475,8 +481,15 @@ impl PinGate for Hooked<'_> {
 
 fn database(dir: &std::path::Path) -> (Arc<Watched>, BlobDatabase<Watched>) {
     let (store, blobs) = remote();
-    let log = Database::create(dir.join("app.persia"), DatabaseOptions::default()).unwrap();
-    (store, BlobDatabase::new(log, blobs))
+    (store, BlobDatabase::new(log_with_collection(dir), blobs))
+}
+
+/// A new document log at `dir` with collection `c`.
+fn log_with_collection(dir: &std::path::Path) -> Database {
+    let mut log = Database::create(dir.join("app.persia"), DatabaseOptions::default()).unwrap();
+    log.create_collection(SchemaBuilder::new("c").build().unwrap())
+        .unwrap();
+    log
 }
 
 /// Runs a sweep of `db`'s store whose first pin check first resumes `token` with `data` and drops its pins; returns
@@ -778,4 +791,174 @@ fn a_corrupt_kept_chunk_resumes_without_the_same_token_forever() {
         .unwrap()
         .upload_id();
     assert_ne!(upload, token.upload_id, "the corrupt upload was not reused");
+}
+
+// -- 9.5.10: a resume that stages a new chunk under an old upload, across the sweep's locked check --
+
+fn sweep_options(now: std::time::SystemTime) -> SweepOptions {
+    SweepOptions {
+        grace: DEFAULT_GRACE,
+        now,
+        rewrite_ratio: 0.5,
+    }
+}
+
+/// Logs a document referencing `r` by its `BlobRef`, then, past the grace period, sweeps `sweeper` (the store under
+/// `db`) with `db`'s mark and pins: the blob reads back whole through `get_blob`.
+fn referenced_later<S: BlobStore + ?Sized, W: Sweep>(
+    sweeper: &W,
+    clock: &ManualClock,
+    db: &mut BlobDatabase<S>,
+    r: &BlobRef,
+    data: &[u8],
+) {
+    db.put(
+        "c",
+        &Document::new("d"),
+        Blob::Stored(r.clone()),
+        Durability::Fsync,
+    )
+    .unwrap();
+    db.release_durable();
+    clock.advance(DEFAULT_GRACE + Duration::from_hours(1));
+    let mark = db.mark().unwrap();
+    let report = sweeper
+        .sweep(&mark, &**db.blobs().pin_set(), &sweep_options(clock.now()))
+        .unwrap();
+    assert_eq!(report.uploads_deleted, 0, "{report:?}");
+    let mut read = Vec::new();
+    db.get_blob(r).unwrap().read_to_end(&mut read).unwrap();
+    assert_eq!(read, data);
+}
+
+/// The sweep lists the uploads (the token's: chunks 0 and 1, older than the grace period), then the resume pins it,
+/// lists it, stages chunks 2..=5 under it, binds and drops its pins, then the sweep takes the pin set's lock to delete
+/// the token's upload: its re-list there shows chunks the first listing did not, so the upload stays.
+#[test]
+fn a_resume_that_stages_and_binds_between_the_upload_listing_and_its_check_keeps_the_upload() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, mut db) = database(dir.path());
+    let data = bytes(5 * CHUNK_LEN + 100, 14);
+    store.fail_when(once(Fault::Fail, stage_of(2)));
+    let (token, _) = interruption(db.blobs().put_blob(&data[..], &options()).unwrap_err());
+    store.heal();
+    assert_eq!(store.chunks(token.upload_id), [0, 1]);
+    store
+        .clock()
+        .advance(DEFAULT_GRACE + Duration::from_hours(1));
+
+    // No manifest is listed, so the sweep's first pin check is the token's upload, after its listing.
+    let (r, report) = sweep_across_resume(&store, &db, token, &data);
+    assert_eq!(
+        upload_of(db.blobs(), &r),
+        token.upload_id,
+        "it staged new chunks: no restage"
+    );
+    assert_eq!(
+        (
+            report.uploads_deleted,
+            report.chunks_deleted,
+            report.changed
+        ),
+        (0, 0, 1),
+        "{report:?}"
+    );
+    assert_eq!(store.chunks(token.upload_id), (0..=5).collect::<Vec<_>>());
+    assert_eq!(r, uninterrupted(&data));
+    referenced_later(store.inner(), store.clock(), &mut db, &r, &data);
+}
+
+/// [`Hooked`], whose backend catches up (`LaggingList::catch_up`) before the sweep's check of an upload.
+struct CatchUp<'a> {
+    hooked: Hooked<'a>,
+    storage: &'a LaggingList<MemoryStorage>,
+}
+
+impl PinGate for CatchUp<'_> {
+    fn pinned(&self) -> Vec<GcObject> {
+        self.hooked.pinned()
+    }
+
+    fn unless_pinned<T>(
+        &self,
+        object: GcObject,
+        delete: impl FnOnce(&dyn PinCheck) -> T,
+    ) -> Option<T> {
+        if matches!(object, GcObject::Upload(_)) {
+            self.storage.catch_up();
+        }
+        self.hooked.unless_pinned(object, delete)
+    }
+}
+
+/// Without `strong_list` the sweep's first listing can miss a fresh chunk (SPEC §10.1): the resume stages chunks
+/// 2..=5 under the old upload and binds before the sweep lists the uploads, the listing misses them (and the new
+/// manifest), so the upload looks expired from chunks 0 and 1. The locked re-list shows them, and the upload stays.
+#[test]
+fn a_resume_whose_new_chunks_the_upload_listing_misses_keeps_the_upload() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new(UNIX_EPOCH + remote::START));
+    let storage = LaggingList::new(
+        MemoryStorage::with_clock(Arc::clone(&clock) as Arc<dyn Clock>),
+        clock.now(),
+    );
+    let store = Arc::new(RemoteBlobStore::new(storage).with_parallelism(NonZeroUsize::MIN));
+    let blobs = Blobs::with_upload_ids(Arc::clone(&store), SegmentIds::seeded(5))
+        .with_retry_clock(Arc::new(ManualRetryClock::new()));
+    let mut db = BlobDatabase::new(log_with_collection(dir.path()), blobs);
+    let data = bytes(5 * CHUNK_LEN + 100, 15);
+    // A writer staged chunks 0 and 1 and died; this is the token it recorded.
+    let token = ResumeToken {
+        upload_id: UploadId::new(78),
+        chunk_size: ChunkSize::new(CHUNK).unwrap(),
+    };
+    for (i, chunk) in (0_u32..).zip(data.chunks(CHUNK_LEN).take(2)) {
+        store.stage_chunk(token.upload_id, i, chunk).unwrap();
+    }
+    // An orphan small blob whose expired manifest is the sweep's first check, before it lists the uploads.
+    let (decoy, pins) = db.put_blob(&b"decoy"[..], &options()).unwrap();
+    drop(pins);
+    clock.advance(DEFAULT_GRACE + Duration::from_hours(1));
+
+    let mark = db.mark().unwrap();
+    let resumed = Mutex::new(None);
+    let gate = CatchUp {
+        hooked: Hooked {
+            set: db.blobs().pin_set(),
+            hook: Mutex::new(Some(Box::new(|| {
+                let (r, pins) = db.put_blob(&data[..], &resume(token)).unwrap();
+                drop(pins);
+                *resumed.lock().unwrap() = Some(r);
+            }))),
+        },
+        storage: store.storage(),
+    };
+    let report = store
+        .sweep(&mark, &gate, &sweep_options(clock.now()))
+        .unwrap();
+    drop(gate);
+    let r = resumed
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the decoy was checked");
+    assert!(
+        store.storage().hidden() > 0,
+        "the first listing missed them"
+    );
+    let upload = store.manifest(r.blob_id()).unwrap().unwrap().upload_id();
+    assert_eq!(upload, token.upload_id, "it staged new chunks: no restage");
+    assert_eq!(report.blobs_deleted, 1, "the decoy: {report:?}");
+    assert!(!db.blobs().store().contains(&decoy).unwrap());
+    assert_eq!(
+        (
+            report.uploads_deleted,
+            report.chunks_deleted,
+            report.changed
+        ),
+        (0, 0, 1),
+        "{report:?}"
+    );
+    assert_eq!(r, uninterrupted(&data));
+    referenced_later(&*store, &clock, &mut db, &r, &data);
 }

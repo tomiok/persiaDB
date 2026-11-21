@@ -142,10 +142,11 @@ impl<S: BlobStore + ?Sized, L: DocumentLog + BlobReferences> BlobDatabase<S, L> 
 impl<S: BlobStore + Sweep + ?Sized, L: DocumentLog + BlobReferences> BlobDatabase<S, L> {
     /// Collects the blob store's garbage (SPEC §9.5; ROADMAP 9.5.1, 9.5.2): [`BlobDatabase::mark`], then the store's
     /// [`Sweep`] with the pin set. Remotely, an unmarked blob manifest older than [`GcOptions::grace`] is deleted,
-    /// then the staged chunks of every upload no kept manifest names, aged from its newest chunk; an object of unknown
-    /// age is kept and counted. Locally the pack is rewritten without what nothing keeps, when that is at least
-    /// [`GcOptions::rewrite_ratio`] of it. Every pin check and delete is one step under the pin set's lock, so a
-    /// `put_blob` or a read that starts meanwhile keeps what it pins.
+    /// then the staged chunks of every upload no kept manifest names, aged from its newest chunk and listed again under
+    /// the pin set's lock before its chunks go (a change since the first listing keeps it this round, ROADMAP 9.5.10); an
+    /// object of unknown age is kept and counted. Locally the pack is rewritten without what nothing keeps, when that is
+    /// at least [`GcOptions::rewrite_ratio`] of it. Every pin check and delete is one step under the pin set's lock, so
+    /// a `put_blob` or a read that starts meanwhile keeps what it pins.
     ///
     /// Only the writer calls it, never in the background: it borrows the database shared, so it runs between writes,
     /// while `put_blob` and reads may go on in other threads (a `put_blob` into the pack waits for a rewrite). Two

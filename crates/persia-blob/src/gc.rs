@@ -53,6 +53,10 @@ pub struct SweepReport {
     /// Unmarked remote objects kept because the backend cannot tell their age (`last_modified` is `None`, SPEC
     /// §10.1): never taken for expired (an upload counts once).
     pub unknown_age: u64,
+    /// Expired remote uploads kept because their listing under the pin set's lock differs from the sweep's listing
+    /// of `blobs/uploads/`: a chunk added, gone, or of another size or age (ROADMAP 9.5.10). The next sweep decides
+    /// again.
+    pub changed: u64,
     /// Remote manifests that could not be read, the mark's and those a kept manifest's read failed on (never both for
     /// the same blob: the listing skips blobs the mark already resolved): the upload each names is unknown.
     pub unreadable: u64,

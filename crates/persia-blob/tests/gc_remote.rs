@@ -542,8 +542,183 @@ fn an_uploads_chunks_stay_while_a_pinned_blobs_manifest_names_it() {
     }
 }
 
+/// ROADMAP 9.5.10: the sweep ages an upload from its listing of `blobs/uploads/`, then deletes its chunks under the
+/// pin set's lock. A resume that pins the upload, stages a new chunk under it, binds and drops its pins in between
+/// leaves a bound blob the listing never saw: the locked re-list finds the new chunk, and the upload stays.
 #[test]
-fn manifests_are_listed_per_prefix_and_uploads_once() {
+fn an_upload_that_grows_and_is_bound_between_its_listing_and_its_check_is_kept() {
+    let clock = Arc::new(ManualClock::new(at(0)));
+    let store = Arc::new(RemoteBlobStore::new(MemoryStorage::with_clock(
+        Arc::clone(&clock) as Arc<dyn Clock>,
+    )));
+    let data = b"0123456789ab";
+    let m = manifest_of(data, 4, 1);
+    // An interrupted upload: its first two chunks, staged long ago.
+    for (i, c) in data[..8].chunks(4).enumerate() {
+        store.stage_chunk(m.upload_id(), i as u32, c).unwrap();
+    }
+    clock.set(at(100));
+    let pins = Pins::default();
+    let hooked = Arc::clone(&store);
+    let late = m.clone();
+    let mut done = false;
+    // At the upload's check (the first: nothing else is listed), as the resume would have done just before it took
+    // the lock: chunk 2 staged, the blob bound, every pin dropped.
+    pins.on_check(move |_| {
+        if std::mem::replace(&mut done, true) {
+            return;
+        }
+        hooked.stage_chunk(late.upload_id(), 2, &data[8..]).unwrap();
+        assert_eq!(hooked.bind(&late).unwrap(), BindOutcome::Bound);
+    });
+    let report = store
+        .sweep(&Mark::default(), &pins, &options(at(100)))
+        .unwrap();
+    assert_eq!(
+        (
+            report.uploads_deleted,
+            report.chunks_deleted,
+            report.changed
+        ),
+        (0, 0, 1),
+        "{report:?}"
+    );
+    assert_eq!(read_all(&*store, &m).unwrap(), data);
+    // The next sweep decides again: it lists the manifest, young, which keeps the upload.
+    let report = store
+        .sweep(&Mark::default(), &Pins::default(), &options(at(101)))
+        .unwrap();
+    assert_eq!((report.young, report.uploads_deleted), (1, 0), "{report:?}");
+    assert_eq!(read_all(&*store, &m).unwrap(), data);
+}
+
+/// ROADMAP 9.5.10, decided: when the locked re-list differs from the first listing in any way (a chunk added, a chunk
+/// gone, a chunk whose age is unknown) the upload is kept this round, with no retry; the next sweep decides again.
+#[test]
+fn an_upload_whose_locked_relisting_differs_from_its_listing_is_kept_this_round() {
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Change {
+        Added,
+        Gone,
+        AgeUnknown,
+    }
+    for change in [Change::Added, Change::Gone, Change::AgeUnknown] {
+        let clock = Arc::new(ManualClock::new(at(0)));
+        let store = Arc::new(RemoteBlobStore::new(UnknownOnRelist {
+            inner: MemoryStorage::with_clock(Arc::clone(&clock) as Arc<dyn Clock>),
+            on: change == Change::AgeUnknown,
+        }));
+        let staged = stage(&*store, b"an unbound upload", 4, 1);
+        let upload = staged.upload_id();
+        clock.set(at(100));
+        let pins = Pins::default();
+        let hooked = Arc::clone(&store);
+        let mut done = false;
+        pins.on_check(move |_| {
+            if std::mem::replace(&mut done, true) {
+                return;
+            }
+            match change {
+                Change::Added => hooked.stage_chunk(upload, 9, b"late").unwrap(),
+                Change::Gone => {
+                    let key = RemoteKey::Chunk {
+                        upload_id: upload,
+                        index: 1,
+                    }
+                    .key()
+                    .unwrap();
+                    hooked.storage().delete(&key).unwrap();
+                }
+                Change::AgeUnknown => {}
+            }
+        });
+        let report = store
+            .sweep(&Mark::default(), &pins, &options(at(100)))
+            .unwrap();
+        assert_eq!(
+            (
+                report.uploads_deleted,
+                report.chunks_deleted,
+                report.changed
+            ),
+            (0, 0, 1),
+            "{change:?}: {report:?}"
+        );
+        let left = match change {
+            Change::Added => 6,
+            Change::Gone => 4,
+            Change::AgeUnknown => 5,
+        };
+        assert_eq!(
+            store.staged_chunks(upload).unwrap().len(),
+            left,
+            "{change:?}"
+        );
+        // The next sweep, once the upload is old again and both listings agree, deletes it.
+        let report = store
+            .sweep(&Mark::default(), &Pins::default(), &options(at(200)))
+            .unwrap();
+        if change == Change::AgeUnknown {
+            assert_eq!(
+                (report.uploads_deleted, report.changed),
+                (0, 1),
+                "{report:?}"
+            );
+        } else {
+            assert_eq!(
+                (report.uploads_deleted, report.chunks_deleted),
+                (1, left as u64),
+                "{change:?}: {report:?}"
+            );
+            assert!(store.staged_chunks(upload).unwrap().is_empty());
+        }
+    }
+}
+
+/// The storage itself, except that when `on`, a listing of one upload's chunks (`blobs/uploads/<id>/`, the sweep's
+/// locked re-list) reports every age unknown.
+struct UnknownOnRelist<S> {
+    inner: S,
+    on: bool,
+}
+
+impl<S: Storage> Storage for UnknownOnRelist<S> {
+    fn get_range(
+        &self,
+        key: &Key,
+        range: core::ops::Range<u64>,
+    ) -> persia_storage::Result<ByteSource> {
+        self.inner.get_range(key, range)
+    }
+    fn get(&self, key: &Key) -> persia_storage::Result<Bytes> {
+        self.inner.get(key)
+    }
+    fn put(&self, key: &Key, data: Bytes) -> persia_storage::Result<()> {
+        self.inner.put(key, data)
+    }
+    fn put_if_absent(&self, key: &Key, data: Bytes) -> persia_storage::Result<PutOutcome> {
+        self.inner.put_if_absent(key, data)
+    }
+    fn list(&self, prefix: &KeyPrefix) -> persia_storage::Result<Vec<ObjectMeta>> {
+        let mut listed = self.inner.list(prefix)?;
+        let all = persia_blob::remote::keys::uploads_prefix().unwrap();
+        if self.on && prefix.as_str().starts_with(all.as_str()) && prefix != &all {
+            for meta in &mut listed {
+                meta.last_modified = None;
+            }
+        }
+        Ok(listed)
+    }
+    fn delete(&self, key: &Key) -> persia_storage::Result<()> {
+        self.inner.delete(key)
+    }
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+}
+
+#[test]
+fn manifests_are_listed_per_prefix_uploads_once_and_each_expired_upload_again() {
     let clock = Arc::new(ManualClock::new(at(0)));
     let counting = Counting::new(MemoryStorage::with_clock(
         Arc::clone(&clock) as Arc<dyn Clock>
@@ -554,10 +729,14 @@ fn manifests_are_listed_per_prefix_and_uploads_once() {
         .sweep(&Mark::default(), &Pins::default(), &options(at(100)))
         .unwrap();
     let lists = store.storage().lists.lock().unwrap().clone();
-    assert_eq!(lists.len(), 257, "{lists:?}");
+    // The upload of the swept blob is expired: it is listed again under the pin set's lock (ROADMAP 9.5.10).
+    assert_eq!(lists.len(), 258, "{lists:?}");
     let expected: Vec<String> = (0..=255_u8)
         .map(|b| format!("blobs/{b:02x}/"))
-        .chain(["blobs/uploads/".to_owned()])
+        .chain([
+            "blobs/uploads/".to_owned(),
+            format!("blobs/uploads/{:032x}/", 1),
+        ])
         .collect();
     assert_eq!(lists, expected);
 }
