@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use persia_analysis::AnalyzerRegistry;
-use persia_storage::container::{Container, ContainerFile, FrameRef, Mode};
+use persia_storage::container::{Container, ContainerFile, Mode};
 
 use super::recovery::{for_each_record, load, wal_chunks};
 use super::{ContainerObjects, DatabaseError, Snapshot, snapshot_of};
@@ -58,6 +58,8 @@ pub struct ReadOnlyDatabase<F = File> {
     /// The positions of the WAL chunks the open replayed, in order: what `verify` reads the WAL's blob references
     /// from (SPEC §9.5, ROADMAP 9.5.3).
     wal_chunks: Vec<u64>,
+    /// The end of the last of those chunks, the committed `wal_start` if none ([`ReadOnlyDatabase::wal_end`]).
+    wal_end: u64,
 }
 
 impl ReadOnlyDatabase<File> {
@@ -98,6 +100,7 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
     ) -> Result<Self, DatabaseError> {
         let (manifest, mut collections) = load(&container, |s| Memtable::new(s, registry))?;
         let mut replayed = 0u64;
+        let mut wal_end = container.superblock().wal_start;
         // Stop at a Manifest a fresh superblock read shows committed during this scan (SPEC §8.6).
         let chunks = wal_chunks(&container, manifest.seq(), false)?;
         for &chunk in &chunks {
@@ -117,6 +120,8 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
                 Ok(apply(&mut c.memtable, chunk, offset, record)?)
             })?;
             replayed = replayed.saturating_add(applied);
+            // Taken from the frame just read: no later lookup that could miss.
+            wal_end = frame.frame.end();
         }
         let snapshot = Arc::new(snapshot_of(&Arc::new(manifest), &collections));
         Ok(Self {
@@ -124,6 +129,7 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
             snapshot,
             replayed,
             wal_chunks: chunks,
+            wal_end,
         })
     }
 
@@ -158,15 +164,7 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
     /// a refresh compares two opens of the same `seq` by. [`Container::end`] does not: it also counts frames that are
     /// not WAL, such as the segment frames a commit writes before its Manifest (SPEC §8.6).
     pub fn wal_end(&self) -> u64 {
-        let frames = self.container.frames();
-        self.wal_chunks
-            .last()
-            .and_then(|&chunk| {
-                // The chunks were taken from these frames, in order: the lookup finds the frame.
-                let i = frames.partition_point(|f| f.offset < chunk);
-                frames.get(i).filter(|f| f.offset == chunk)
-            })
-            .map_or(self.container.superblock().wal_start, FrameRef::end)
+        self.wal_end
     }
 
     /// The positions of the WAL chunks the open replayed, in order.

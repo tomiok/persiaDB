@@ -90,7 +90,9 @@ pub enum Error {
     /// WAL end ([`ReadOnlyDatabase::wal_end`]) disagree with the current one's: the same count at another end, or
     /// more records at an end not past the current one, or fewer at an end not before it. Within one `seq` the WAL
     /// only grows, every record past the end of the last, so the file at the path now holds another history (a copy
-    /// or a restore was put there): neither open is older. Nothing changed; open the reader again.
+    /// or a restore was put there): neither open is older. Nothing changed; open the reader again. Detection is
+    /// best-effort: another history with a higher `seq`, or with the same `seq`, records and WAL end but other
+    /// records, is taken. Do not rely on this error to catch a copy or a restore.
     #[error(
         "the reopened database diverged from the current one at seq {current} ({reopened_replayed} replayed WAL records ending at {reopened_end}; current {current_replayed} ending at {current_end})"
     )]
@@ -663,6 +665,8 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyBlobDatabase<F> {
     /// | lower | any | older: [`Error::RefreshedOlder`] |
     ///
     /// The WAL end, not the container's end, because a commit in progress appends segment frames that are not WAL.
+    /// The check is best-effort: another history with a higher `seq`, or with the same `seq`, records and WAL end but
+    /// other records, is taken (SPEC §9.3). Do not rely on [`Error::RefreshDiverged`] to catch a copy or a restore.
     ///
     /// Returns whether the pack found anything new: `true` when it opened a pack that did not exist before, read
     /// frames committed since the last open or refresh, or reopened a pack a rewrite replaced; `false` when the pack
@@ -724,21 +728,21 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyBlobDatabase<F> {
     fn check_not_older(&self, reopened: &ReadOnlyDatabase<F>) -> Result<(), Error> {
         use std::cmp::Ordering::{Equal, Greater, Less};
         let current = &self.db;
-        let older = match reopened.seq().cmp(&current.seq()) {
+        let (current_seq, reopened_seq) = (current.seq(), reopened.seq());
+        let (current_replayed, reopened_replayed) = (current.replayed(), reopened.replayed());
+        let (current_end, reopened_end) = (current.wal_end(), reopened.wal_end());
+        let older = match reopened_seq.cmp(&current_seq) {
             Greater => return Ok(()),
             Less => true,
             Equal => match (
-                reopened.replayed().cmp(&current.replayed()),
-                reopened.wal_end().cmp(&current.wal_end()),
+                reopened_replayed.cmp(&current_replayed),
+                reopened_end.cmp(&current_end),
             ) {
                 (Greater, Greater) | (Equal, Equal) => return Ok(()),
                 (Less, Less) => true,
                 _ => false,
             },
         };
-        let (current_seq, reopened_seq) = (current.seq(), reopened.seq());
-        let (current_replayed, reopened_replayed) = (current.replayed(), reopened.replayed());
-        let (current_end, reopened_end) = (current.wal_end(), reopened.wal_end());
         Err(if older {
             Error::RefreshedOlder {
                 current: current_seq,

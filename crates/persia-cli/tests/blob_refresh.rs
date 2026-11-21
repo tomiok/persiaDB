@@ -28,7 +28,8 @@
 //!    shows, with no blob missing.
 //!
 //! Invariant 4's window is also driven step by step (a writer that runs one command per stdin line), so a default
-//! run always reaches it: the free-running schedule reaches it only at some interleavings.
+//! run always reaches it: the free-running schedule reaches it only at some interleavings. A default free-running run
+//! (no override) also checks that it reached a `RefreshedOlder` refusal and a pack rewrite.
 //!
 //! Seeds: `PERSIA_TEST_SEED` (printed) sets the schedules; `PERSIA_TEST_FILES`, `PERSIA_TEST_KILLS` and
 //! `PERSIA_TEST_OPS` override the files, the kills per file and the operations per writer; `PERSIA_TEST_TRACE` prints
@@ -492,6 +493,8 @@ struct Stats {
     opens: u64,
     taken: u64,
     refused_older: u64,
+    /// Pack rewrites the writers reported, summed across files.
+    rewrites: u64,
     taken_from_older: u64,
     found_new: u64,
     missing_window: u64,
@@ -813,6 +816,7 @@ fn run_file(seed: u64, kills: u64, ops: u64, stats: &mut Stats) {
         "seed {seed}: a live document's blob was not found"
     );
     reader.io.finish();
+    stats.rewrites += model.rewrites;
     eprintln!(
         "seed {seed}: {} documents live at the end, {} puts, {} deletes, {} commits, {} GCs ({} rewrites, {} blobs swept) in {:.1?}",
         ids.len(),
@@ -844,13 +848,14 @@ fn a_reader_refreshes_beside_a_gc_writer_that_is_killed_and_recovers() {
     stats.refresh_us.sort_unstable();
     eprintln!(
         "{} opens, {} refreshes taken ({} from an older open in the same state, {} found new blobs), {} refused as older, \
-         {} blobs in the GC window, {} kills, {} MiB read; refresh p50 {} us, p99 {} us, max {} us; {:.1?}",
+         {} blobs in the GC window, {} rewrites, {} kills, {} MiB read; refresh p50 {} us, p99 {} us, max {} us; {:.1?}",
         stats.opens,
         stats.taken,
         stats.taken_from_older,
         stats.found_new,
         stats.refused_older,
         stats.missing_window,
+        stats.rewrites,
         stats.kills,
         stats.bytes_read >> 20,
         percentile(&stats.refresh_us, 50),
@@ -859,6 +864,24 @@ fn a_reader_refreshes_beside_a_gc_writer_that_is_killed_and_recovers() {
         started.elapsed()
     );
     assert!(stats.taken > 0 && stats.kills == files * kills);
+    // The default schedules reach a refusal and a rewrite; an override may not (the stepped test below is what
+    // guarantees the GC window and a refresh taken after a kill whatever the seed).
+    let overridden = [
+        "PERSIA_TEST_SEED",
+        "PERSIA_TEST_FILES",
+        "PERSIA_TEST_KILLS",
+        "PERSIA_TEST_OPS",
+    ]
+    .iter()
+    .any(|var| std::env::var_os(var).is_some());
+    if !overridden {
+        assert!(
+            stats.refused_older > 0 && stats.rewrites > 0,
+            "seed {seed}: the default run reached {} RefreshedOlder refusals and {} pack rewrites",
+            stats.refused_older,
+            stats.rewrites
+        );
+    }
 }
 
 /// Invariant 4's window, step by step across processes: the reader holds an open that shows `gone` and `kept`; the

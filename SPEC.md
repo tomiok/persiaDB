@@ -2625,7 +2625,9 @@ it is logged. The reopened documents must be this database (the same `db_uuid` a
 replayed (`ReadOnlyDatabase::wal_end`; not the container's end, which also counts the segment and Manifest frames of a
 commit in progress) move together: more of both, or both the same, is taken; fewer of both is older
 (`RefreshedOlder`); any other combination is another history of the file at that path, such as a copy or a restore
-put there (`RefreshDiverged`). Both are refused and nothing changes. An open in the same state is taken, and the
+put there (`RefreshDiverged`). Both are refused and nothing changes. Detection is best-effort: another history with
+a higher `seq`, or with the same `seq`, records and end, is taken; do not rely on `RefreshDiverged` to catch a copy
+or a restore. An open in the same state is taken, and the
 refresh's return value reports only whether the pack found anything new. If the pack refresh reports `PackReplaced`,
 the reader reopens the pack read-only at the same path with the same `db_uuid` (the refresh holds the reader
 mutably, so no stream still borrows the old pack). Any other pack error, and a reopen that fails (a damaged
