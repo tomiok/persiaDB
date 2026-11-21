@@ -28,8 +28,9 @@
 //!    shows, with no blob missing.
 //!
 //! Invariant 4's window is also driven step by step (a writer that runs one command per stdin line), so a default
-//! run always reaches it: the free-running schedule reaches it only at some interleavings. A default free-running run
-//! (no override) also checks that it reached a `RefreshedOlder` refusal and a pack rewrite.
+//! run always reaches it: the free-running schedule reaches it only at some interleavings. That stepped run also
+//! forces a pack rewrite and a `RefreshedOlder` refusal. Whether the seeded schedule reaches either is printed and
+//! does not fail the test.
 //!
 //! Seeds: `PERSIA_TEST_SEED` (printed) sets the schedules; `PERSIA_TEST_FILES`, `PERSIA_TEST_KILLS` and
 //! `PERSIA_TEST_OPS` override the files, the kills per file and the operations per writer; `PERSIA_TEST_TRACE` prints
@@ -864,30 +865,19 @@ fn a_reader_refreshes_beside_a_gc_writer_that_is_killed_and_recovers() {
         started.elapsed()
     );
     assert!(stats.taken > 0 && stats.kills == files * kills);
-    // The default schedules reach a refusal and a rewrite; an override may not (the stepped test below is what
-    // guarantees the GC window and a refresh taken after a kill whatever the seed).
-    let overridden = [
-        "PERSIA_TEST_SEED",
-        "PERSIA_TEST_FILES",
-        "PERSIA_TEST_KILLS",
-        "PERSIA_TEST_OPS",
-    ]
-    .iter()
-    .any(|var| std::env::var_os(var).is_some());
-    if !overridden {
-        assert!(
-            stats.refused_older > 0 && stats.rewrites > 0,
-            "seed {seed}: the default run reached {} RefreshedOlder refusals and {} pack rewrites",
-            stats.refused_older,
-            stats.rewrites
-        );
-    }
+    // A seed may rewrite no pack and refuse no older open. Those two are forced by the stepped test below; the
+    // counts here are an observation.
+    eprintln!(
+        "seed {seed}: schedule observation, {} RefreshedOlder refusals and {} pack rewrites",
+        stats.refused_older, stats.rewrites
+    );
 }
 
 /// Invariant 4's window, step by step across processes: the reader holds an open that shows `gone` and `kept`; the
 /// writer deletes `gone`, commits and rewrites the pack (GC sweeps `gone`'s blob); the refresh with the held open is
 /// taken and shows `gone` with `BlobNotFound` while `kept` reads. The next open no longer shows `gone`, and nothing
-/// is missing. Then the writer is killed (SIGKILL) between a put and its commit, and the reader's refresh is taken.
+/// is missing. An open held across the next commit is then `RefreshedOlder`. Then the writer is killed (SIGKILL)
+/// between a put and its commit, and the reader's refresh is taken.
 #[test]
 fn a_held_open_refreshed_after_a_gc_rewrite_misses_only_the_deleted_blob() {
     if child_env().is_some() {
@@ -940,12 +930,30 @@ fn a_held_open_refreshed_after_a_gc_rewrite_misses_only_the_deleted_blob() {
     assert_eq!(reader.last_ids, BTreeSet::from(["kept".to_owned()]));
     assert!(reader.missing.is_empty());
 
+    // The free-running schedule may never refuse an older open or rewrite the pack. This does both: the `gc` above
+    // reported a rewrite, and this open was taken before `newer` was committed, so catching up refuses it.
+    reader.open(&model, &mut stats, "held before the later commit");
+    for line in ["put newer", "commit"] {
+        step(&mut writer, &mut model, line);
+    }
+    let refused_before = stats.refused_older;
+    reader.catch_up(&mut model, &mut stats, "after the later commit");
+    assert_eq!(
+        stats.refused_older,
+        refused_before + 1,
+        "the open held before the commit was not refused as older"
+    );
+    assert_eq!(
+        reader.last_ids,
+        BTreeSet::from(["kept".to_owned(), "newer".to_owned()])
+    );
+
     step(&mut writer, &mut model, "put after");
     drop(writer.kill());
     reader.catch_up(&mut model, &mut stats, "after the kill");
     assert_eq!(
         reader.last_ids,
-        BTreeSet::from(["after".to_owned(), "kept".to_owned()])
+        BTreeSet::from(["after".to_owned(), "kept".to_owned(), "newer".to_owned()])
     );
     reader.settle(&model);
     assert!(reader.missing.is_empty());

@@ -68,7 +68,8 @@ pub enum Error {
     },
     /// [`ReadOnlyBlobDatabase::refresh`] was given an open older than the current one: nothing changed. Older is a
     /// lower manifest `seq`, or the same `seq` with both fewer replayed WAL records and an earlier WAL end
-    /// ([`ReadOnlyDatabase::wal_end`]).
+    /// ([`ReadOnlyDatabase::wal_end`]). After a crash that lost `Async` data the reader stayed ahead, so open the
+    /// reader again.
     #[error(
         "the reopened database is older than the current one (seq {reopened}, {reopened_replayed} replayed WAL records ending at {reopened_end}; current seq {current}, {current_replayed} replayed ending at {current_end})"
     )]
