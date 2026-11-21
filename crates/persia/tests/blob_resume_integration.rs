@@ -124,9 +124,11 @@ fn options() -> PutBlobOptions {
     }
 }
 
-fn resume(token: ResumeToken) -> PutBlobOptions {
+/// A resume of `token` checked by the whole blob's size (ROADMAP 9.3.7: a resume needs that or `expected_id`).
+fn resume(token: ResumeToken, blob: &[u8]) -> PutBlobOptions {
     PutBlobOptions {
         resume: Some(token),
+        expected_size: Some(blob.len() as u64),
         ..options()
     }
 }
@@ -451,7 +453,7 @@ fn reader_failure_resumes<S: Storage>(make: &dyn Fn() -> S, seed: u64) {
         assert!(db.blobs().pin_set().pinned().is_empty());
         store.take_staged();
 
-        let (r, pins) = db.put_blob(&data[..], &resume(token)).unwrap();
+        let (r, pins) = db.put_blob(&data[..], &resume(token, &data)).unwrap();
         let written: Vec<(UploadId, u32)> = (run..CHUNKS).map(|c| (token.upload_id, c)).collect();
         assert_eq!(
             store.take_staged(),
@@ -587,7 +589,7 @@ fn resume_killed(root: &Path, seed: u64, killed: &Killed, data: &[u8]) -> (BlobR
     let dir = tempfile::tempdir().unwrap();
     // Upload ids of a seed the child did not use, so a restage never lands on the child's id.
     let db = database(dir.path(), Probe::new(local(root)), !seed);
-    let (r, pins) = db.put_blob(data, &resume(killed.token)).unwrap();
+    let (r, pins) = db.put_blob(data, &resume(killed.token, data)).unwrap();
     let upload = db.blobs().store().manifest_of(&r).upload_id();
     check_bound(&db, &r, data, upload);
     let staged = db.blobs().store().take_staged();
@@ -691,7 +693,7 @@ fn gc_then_resume<S: Storage>(storage: S, seed: u64) {
         (0..2 * WINDOW).collect::<Vec<_>>()
     );
     store.take_staged();
-    let (ra, pins_a) = db.put_blob(&a[..], &resume(token)).unwrap();
+    let (ra, pins_a) = db.put_blob(&a[..], &resume(token, &a)).unwrap();
     let written: Vec<(UploadId, u32)> =
         (2 * WINDOW..CHUNKS).map(|c| (token.upload_id, c)).collect();
     assert_eq!(store.take_staged(), written);
@@ -712,7 +714,7 @@ fn gc_then_resume<S: Storage>(storage: S, seed: u64) {
     assert!(store.chunks(token.upload_id).is_empty());
     check_bound(&db, &ra, &a, token_a.upload_id);
     store.take_staged();
-    let (rb, pins_b) = db.put_blob(&b[..], &resume(token)).unwrap();
+    let (rb, pins_b) = db.put_blob(&b[..], &resume(token, &b)).unwrap();
     let written: Vec<(UploadId, u32)> = (0..CHUNKS).map(|c| (token.upload_id, c)).collect();
     assert_eq!(store.take_staged(), written, "restarted from chunk 0");
     assert!(store.take_restaged().is_empty());
@@ -762,7 +764,7 @@ fn an_expired_fully_staged_upload_resumed_by_a_document_survives_a_later_gc() {
         .put(
             "c",
             &Document::new("d"),
-            Blob::from_reader(&data[..]).with_options(resume(token)),
+            Blob::from_reader(&data[..]).with_options(resume(token, &data)),
             Durability::Fsync,
         )
         .unwrap();

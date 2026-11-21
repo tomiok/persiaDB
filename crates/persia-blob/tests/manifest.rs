@@ -1302,6 +1302,15 @@ fn is_corruption_is_true_for_corrupt_only() {
             false,
         ),
         (Error::ResumeUnsupported, false),
+        // -- resume checks (9.3.7) --
+        (Error::ResumeUnchecked, false),
+        (
+            Error::BlobSizeMismatch {
+                expected: 2,
+                actual: 1,
+            },
+            false,
+        ),
     ];
     for (e, corrupt) in &cases {
         assert_eq!(e.is_corruption(), *corrupt, "{e:?}");
@@ -1338,6 +1347,8 @@ fn is_corruption_is_true_for_corrupt_only() {
             Error::CorruptAt { .. } => "followups",
             Error::PackLocked => "wiring",
             Error::UploadInterrupted { .. } | Error::ResumeUnsupported => "resume",
+            // -- resume checks (9.3.7) --
+            Error::ResumeUnchecked | Error::BlobSizeMismatch { .. } => "resume checks",
             Error::BlobNotFound { .. }
             | Error::RangeOutOfBounds { .. }
             | Error::StagedChunkConflict { .. }

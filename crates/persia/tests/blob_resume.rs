@@ -70,9 +70,11 @@ fn options() -> PutBlobOptions {
     }
 }
 
-fn resume(token: ResumeToken) -> PutBlobOptions {
+/// A resume of `token` checked by the whole blob's id (ROADMAP 9.3.7: a resume needs that or `expected_size`).
+fn resume(token: ResumeToken, blob: &[u8]) -> PutBlobOptions {
     PutBlobOptions {
         resume: Some(token),
+        expected_id: Some(persia_blob::blob_id_of(blob)),
         ..options()
     }
 }
@@ -195,7 +197,7 @@ fn an_interrupted_upload_resumes_to_the_blob_an_uninterrupted_one_binds() {
         );
 
         store.clear();
-        let (r, pins) = blobs.put_blob(&data[..], &resume(token)).unwrap();
+        let (r, pins) = blobs.put_blob(&data[..], &resume(token, &data)).unwrap();
         assert_eq!(r, uninterrupted(&data), "cut at chunk {fail_at}");
         assert_eq!(blobs.get_blob_range(&r, 0..r.size()).unwrap(), data);
         let events = store.events();
@@ -242,7 +244,7 @@ fn a_reader_that_fails_after_a_window_was_staged_interrupts_the_upload() {
     assert_eq!(store.chunks(token.upload_id).len(), 64);
 
     store.clear();
-    let (r, _pins) = blobs.put_blob(&data[..], &resume(token)).unwrap();
+    let (r, _pins) = blobs.put_blob(&data[..], &resume(token, &data)).unwrap();
     assert_eq!(r, uninterrupted(&data));
     assert_eq!(stages(&store.events()), [(token.upload_id, 64)]);
     assert_eq!(blobs.get_blob_range(&r, 0..r.size()).unwrap(), data);
@@ -292,7 +294,7 @@ fn a_bind_that_failed_with_a_known_outcome_resumes() {
     let (token, source) = interruption(blobs.put_blob(&data[..], &options()).unwrap_err());
     assert!(matches!(source, Error::Storage(_)), "{source:?}");
     assert_eq!(store.chunks(token.upload_id), [0, 1, 2, 3]);
-    let (r, _pins) = blobs.put_blob(&data[..], &resume(token)).unwrap();
+    let (r, _pins) = blobs.put_blob(&data[..], &resume(token, &data)).unwrap();
     assert_eq!(r, uninterrupted(&data));
     assert_eq!(blobs.get_blob_range(&r, 0..r.size()).unwrap(), data);
 }
@@ -314,7 +316,7 @@ fn a_conflicting_chunk_restarts_under_a_new_upload_pinned_before_the_copy() {
     let (store, blobs) = remote();
     let data = bytes(5 * CHUNK_LEN + 100, 4);
     let token = conflicted(&store, &blobs, &data);
-    let (r, pins) = blobs.put_blob(&data[..], &resume(token)).unwrap();
+    let (r, pins) = blobs.put_blob(&data[..], &resume(token, &data)).unwrap();
     assert_eq!(r, uninterrupted(&data));
     assert_eq!(blobs.get_blob_range(&r, 0..r.size()).unwrap(), data);
     let moved = upload_of(&blobs, &r);
@@ -361,7 +363,11 @@ fn a_resume_that_fails_again_returns_the_upload_it_was_staging() {
         Fault::Fail,
         move |e| matches!(e, Event::Stage { upload, index: 4, .. } if *upload != first),
     ));
-    let (again, source) = interruption(blobs.put_blob(&data[..], &resume(token)).unwrap_err());
+    let (again, source) = interruption(
+        blobs
+            .put_blob(&data[..], &resume(token, &data))
+            .unwrap_err(),
+    );
     assert!(matches!(source, Error::Storage(_)), "{source:?}");
     assert_ne!(again.upload_id, token.upload_id);
     assert_eq!(again.chunk_size, token.chunk_size);
@@ -369,7 +375,7 @@ fn a_resume_that_fails_again_returns_the_upload_it_was_staging() {
     assert!(blobs.pin_set().pinned().is_empty());
 
     store.clear();
-    let (r, _pins) = blobs.put_blob(&data[..], &resume(again)).unwrap();
+    let (r, _pins) = blobs.put_blob(&data[..], &resume(again, &data)).unwrap();
     assert_eq!(r, uninterrupted(&data));
     assert_eq!(upload_of(&blobs, &r), again.upload_id);
     assert_eq!(
@@ -388,13 +394,13 @@ fn a_reader_that_is_not_the_staged_blob_is_a_callers_error() {
     let mut other = data.clone();
     other[CHUNK_LEN + 7] ^= 1;
     for reader in [&other[..], &data[..2 * CHUNK_LEN + 3]] {
-        let err = blobs.put_blob(reader, &resume(token)).unwrap_err();
+        let err = blobs.put_blob(reader, &resume(token, &data)).unwrap_err();
         assert!(matches!(err, Error::InvalidResume { .. }), "{err:?}");
         assert!(blobs.pin_set().pinned().is_empty());
     }
     assert!(stages(&store.events()).is_empty(), "nothing is staged");
     // The token still resumes with the blob.
-    let (r, _pins) = blobs.put_blob(&data[..], &resume(token)).unwrap();
+    let (r, _pins) = blobs.put_blob(&data[..], &resume(token, &data)).unwrap();
     assert_eq!(r, uninterrupted(&data));
 }
 
@@ -405,7 +411,7 @@ fn a_token_chunk_size_below_the_floor_fails_before_reading() {
         upload_id: UploadId::new(1),
         chunk_size: ChunkSize::from_encoding(4096).unwrap(),
     };
-    let err = blobs.put_blob(Unread, &resume(token)).unwrap_err();
+    let err = blobs.put_blob(Unread, &resume(token, &[])).unwrap_err();
     assert!(
         matches!(
             err,
@@ -430,7 +436,7 @@ fn the_tokens_chunk_size_wins_over_the_options() {
     for chunk_size in [ChunkSize::DEFAULT, ChunkSize::from_encoding(1).unwrap()] {
         let theirs = PutBlobOptions {
             chunk_size,
-            ..resume(token)
+            ..resume(token, &data)
         };
         let (r, _pins) = blobs.put_blob(&data[..], &theirs).unwrap();
         assert_eq!(r.chunk_size(), CHUNK);
@@ -446,7 +452,7 @@ fn a_store_that_cannot_resume_fails_a_resume_before_reading() {
         upload_id: UploadId::new(1),
         chunk_size: ChunkSize::new(CHUNK).unwrap(),
     };
-    let err = blobs.put_blob(Unread, &resume(token)).unwrap_err();
+    let err = blobs.put_blob(Unread, &resume(token, &[])).unwrap_err();
     assert!(matches!(err, Error::ResumeUnsupported), "{err:?}");
     assert!(blobs.pin_set().pinned().is_empty());
     assert!(store.bound_ids().is_empty());
@@ -516,7 +522,7 @@ fn sweep_across_resume_on<S: BlobStore + ?Sized, W: Sweep>(
     let hooked = Hooked {
         set: db.blobs().pin_set(),
         hook: Mutex::new(Some(Box::new(|| {
-            let (r, pins) = db.put_blob(data, &resume(token)).unwrap();
+            let (r, pins) = db.put_blob(data, &resume(token, data)).unwrap();
             // Nothing references it but its pins (no document is logged during a GC): once they drop, only the
             // store's own state keeps it.
             drop(pins);
@@ -620,7 +626,7 @@ fn a_resume_that_wrote_a_new_chunk_in_an_earlier_window_keeps_its_upload() {
         .stage_chunk(token.upload_id, 66, &data[66 * CHUNK_LEN..])
         .unwrap();
     store.clear();
-    let (r, _pins) = blobs.put_blob(&data[..], &resume(token)).unwrap();
+    let (r, _pins) = blobs.put_blob(&data[..], &resume(token, &data)).unwrap();
     assert_eq!(r, uninterrupted(&data));
     assert_eq!(upload_of(&blobs, &r), token.upload_id, "no restage");
     assert!(
@@ -711,7 +717,7 @@ fn a_resume_never_discards_the_tokens_upload_which_may_be_bound() {
     let (store, blobs, token, rx, x, z) = replayed();
     let mismatch = PutBlobOptions {
         expected_id: Some(persia_blob::blob_id_of(b"another blob")),
-        ..resume(token)
+        ..resume(token, &z)
     };
     let err = blobs.put_blob(&z[..], &mismatch).unwrap_err();
     assert!(matches!(err, Error::BlobIdMismatch { .. }), "{err:?}");
@@ -719,7 +725,7 @@ fn a_resume_never_discards_the_tokens_upload_which_may_be_bound() {
     assert_eq!(blobs.get_blob_range(&rx, 0..rx.size()).unwrap(), x);
 
     let (store, blobs, token, rx, x, z) = replayed();
-    let (rz, _pins) = blobs.put_blob(&z[..], &resume(token)).unwrap();
+    let (rz, _pins) = blobs.put_blob(&z[..], &resume(token, &z)).unwrap();
     assert_eq!(rz, uninterrupted(&z));
     assert_ne!(
         upload_of(&blobs, &rz),
@@ -765,7 +771,7 @@ fn a_corrupt_kept_chunk_resumes_without_the_same_token_forever() {
 
     let blobs = Blobs::with_upload_ids(Arc::clone(&store), SegmentIds::seeded(9))
         .with_retry_clock(Arc::new(ManualRetryClock::new()));
-    let mut options = resume(token);
+    let mut options = resume(token, &data);
     let mut previous = token;
     let mut attempts = 0_u32;
     let bound = loop {
@@ -776,7 +782,7 @@ fn a_corrupt_kept_chunk_resumes_without_the_same_token_forever() {
                 assert!(attempts < 3, "still failing after {attempts} resumes");
                 assert_ne!(next, previous, "the same token came back");
                 previous = next;
-                options = resume(next);
+                options = resume(next, &data);
             }
             Err(e) => panic!("not a resume: {e:?}"),
         }
@@ -926,7 +932,7 @@ fn a_resume_whose_new_chunks_the_upload_listing_misses_keeps_the_upload() {
         hooked: Hooked {
             set: db.blobs().pin_set(),
             hook: Mutex::new(Some(Box::new(|| {
-                let (r, pins) = db.put_blob(&data[..], &resume(token)).unwrap();
+                let (r, pins) = db.put_blob(&data[..], &resume(token, &data)).unwrap();
                 drop(pins);
                 *resumed.lock().unwrap() = Some(r);
             }))),

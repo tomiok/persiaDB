@@ -223,6 +223,21 @@ pub enum Error {
     #[error("this blob store cannot resume an upload")]
     ResumeUnsupported,
     //
+    // -- resume checks (9.3.7) --
+    /// A resume (`PutBlobOptions::resume`) given neither an `expected_id` nor an `expected_size` (SPEC §9.4, §9.6;
+    /// ROADMAP 9.3.7): a reader that ends where the kept run ends would bind that shorter blob unnoticed. A caller's
+    /// error, found before any byte is read or written.
+    #[error("a resume needs an expected id or an expected size")]
+    ResumeUnchecked,
+    /// The blob's bytes are not `expected_size` long (SPEC §9.6, ROADMAP 9.3.7): a caller's error, not corruption,
+    /// found when the reader ends. Nothing was bound.
+    #[error("the blob is {actual} bytes long, not the expected {expected}")]
+    BlobSizeMismatch {
+        /// The size the caller expected.
+        expected: u64,
+        /// The bytes read.
+        actual: u64,
+    },
 }
 
 impl Error {
