@@ -67,7 +67,9 @@ pub enum Error {
         reopened: Option<PathBuf>,
     },
     /// [`ReadOnlyBlobDatabase::refresh`] was given an open older than the current one: nothing changed. Older is a
-    /// lower manifest `seq`, or the same `seq` with fewer replayed WAL records or an earlier end of those frames.
+    /// lower manifest `seq`, or the same `seq` with both fewer replayed WAL records and an earlier WAL end
+    /// ([`ReadOnlyDatabase::wal_end`]). After a crash that lost `Async` data the reader stayed ahead, so open the
+    /// reader again.
     #[error(
         "the reopened database is older than the current one (seq {reopened}, {reopened_replayed} replayed WAL records ending at {reopened_end}; current seq {current}, {current_replayed} replayed ending at {current_end})"
     )]
@@ -80,9 +82,33 @@ pub enum Error {
         current_replayed: u64,
         /// WAL records the reopened one replayed.
         reopened_replayed: u64,
-        /// End of the valid frames the current open saw ([`persia_storage::container::Container::end`]).
+        /// End of the WAL the current open replayed ([`ReadOnlyDatabase::wal_end`]).
         current_end: u64,
-        /// End of the valid frames the reopened one saw.
+        /// End of the WAL the reopened one replayed.
+        reopened_end: u64,
+    },
+    /// [`ReadOnlyBlobDatabase::refresh`] was given an open of the same manifest `seq` whose replayed WAL records and
+    /// WAL end ([`ReadOnlyDatabase::wal_end`]) disagree with the current one's: the same count at another end, or
+    /// more records at an end not past the current one, or fewer at an end not before it. Within one `seq` the WAL
+    /// only grows, every record past the end of the last, so the file at the path now holds another history (a copy
+    /// or a restore was put there): neither open is older. Nothing changed; open the reader again. Detection is
+    /// best-effort: another history with a higher `seq`, or with the same `seq`, records and WAL end but other
+    /// records, is taken. Do not rely on this error to catch a copy or a restore.
+    #[error(
+        "the reopened database diverged from the current one at seq {current} ({reopened_replayed} replayed WAL records ending at {reopened_end}; current {current_replayed} ending at {current_end})"
+    )]
+    RefreshDiverged {
+        /// The current manifest `seq`.
+        current: u64,
+        /// The reopened one's (the same).
+        reopened: u64,
+        /// WAL records the current open replayed.
+        current_replayed: u64,
+        /// WAL records the reopened one replayed.
+        reopened_replayed: u64,
+        /// End of the WAL the current open replayed ([`ReadOnlyDatabase::wal_end`]).
+        current_end: u64,
+        /// End of the WAL the reopened one replayed.
         reopened_end: u64,
     },
 }
@@ -627,22 +653,44 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyBlobDatabase<F> {
     /// `reopened` shows was logged after its blob was bound, and the refresh finds the blob.
     ///
     /// `reopened` must be this database, opened again: the same `db_uuid`, at the same canonical path (a copy
-    /// elsewhere has the `db_uuid` but not this pack), and no older than the current open. Older is a lower manifest
-    /// `seq`, or the same `seq` with fewer replayed WAL records or an earlier end of the frames that open saw (an
-    /// older open would show fewer documents than the pack's blobs were bound for).
+    /// elsewhere has the `db_uuid` but not this pack), and not older than the current open. Its manifest `seq` is
+    /// compared first; within one `seq` the WAL only grows, so the replayed WAL records
+    /// ([`ReadOnlyDatabase::replayed`]) and the WAL end ([`ReadOnlyDatabase::wal_end`]) must move the same way:
+    ///
+    /// | seq | replayed records, WAL end | the reopened open is |
+    /// |---|---|---|
+    /// | higher | any | newer: taken |
+    /// | the same | both more, or both equal | newer, or the same state: taken |
+    /// | the same | both fewer | older: [`Error::RefreshedOlder`] |
+    /// | the same | they disagree | another history: [`Error::RefreshDiverged`] |
+    /// | lower | any | older: [`Error::RefreshedOlder`] |
+    ///
+    /// The WAL end, not the container's end, because a commit in progress appends segment frames that are not WAL.
+    /// The check is best-effort: another history with a higher `seq`, or with the same `seq`, records and WAL end but
+    /// other records, is taken (SPEC §9.3). Do not rely on [`Error::RefreshDiverged`] to catch a copy or a restore.
     ///
     /// Returns whether the pack found anything new: `true` when it opened a pack that did not exist before, read
     /// frames committed since the last open or refresh, or reopened a pack a rewrite replaced; `false` when the pack
-    /// is as it was. The documents are replaced only when the pack refresh succeeds, or when a replaced pack is
-    /// reopened.
+    /// is as it was. The return value says nothing of the documents: an open in the same state as the current one is
+    /// taken (the documents are replaced by the same state) and returns `false` when the pack is unchanged too. The
+    /// documents are replaced only when the pack refresh succeeds, or when a replaced pack is reopened.
+    ///
+    /// The pack may be newer than `reopened`: one taken before the writer deleted a document and GC swept its blob
+    /// (SPEC §9.5) still shows that document, and [`ReadOnlyBlobDatabase::get_blob`] then fails with
+    /// [`persia_blob::Error::BlobNotFound`] for its blob, while every other blob reads on. Open `reopened` just
+    /// before the refresh to keep that window short; a local reader lease that GC respects will close it (ROADMAP
+    /// 9.2.16).
     ///
     /// # Errors
     /// Nothing changes on these: [`persia_blob::Error::PackOfAnotherDatabase`] if `reopened` is another database,
-    /// [`Error::RefreshedElsewhere`] if it was opened at another path, [`Error::RefreshedOlder`] if it is older.
+    /// [`Error::RefreshedElsewhere`] if it was opened at another path, [`Error::RefreshedOlder`] if it is older,
+    /// [`Error::RefreshDiverged`] if it holds another history.
     /// Then as [`PackStore::refresh`]. [`persia_blob::Error::PackReplaced`] (a GC rewrite, SPEC §18.10) reopens the
-    /// pack read-only at the same path with the same `db_uuid`: this method holds `&mut self`, so no stream still
-    /// borrows the old pack. Any other pack error, and a reopen that itself fails, restores the previous documents,
-    /// so the documents and the pack stay paired. [`PackStore::refresh`] itself does not reopen (ROADMAP 9.2.13).
+    /// pack read-only at the same path with the same `db_uuid` ([`PackStore::reopen`]): this method holds `&mut self`,
+    /// so no stream still borrows the old pack. Any other pack error, and a reopen that itself fails (a damaged
+    /// replacement, or the pack of another database: [`persia_blob::Error::PackOfAnotherDatabase`]), restores the
+    /// previous documents and keeps the pack handle this reader had, so the documents and the pack stay paired.
+    /// [`PackStore::refresh`] itself does not reopen (ROADMAP 9.2.13).
     pub fn refresh(&mut self, reopened: ReadOnlyDatabase<F>) -> Result<bool, Error> {
         let found = reopened.container().header().db_uuid;
         if found != self.db.container().header().db_uuid {
@@ -655,20 +703,7 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyBlobDatabase<F> {
                 reopened: other.map(Path::to_path_buf),
             });
         }
-        let same_seq = reopened.seq() == self.db.seq();
-        if reopened.seq() < self.db.seq()
-            || (same_seq && reopened.replayed() < self.db.replayed())
-            || (same_seq && reopened.container().end() < self.db.container().end())
-        {
-            return Err(Error::RefreshedOlder {
-                current: self.db.seq(),
-                reopened: reopened.seq(),
-                current_replayed: self.db.replayed(),
-                reopened_replayed: reopened.replayed(),
-                current_end: self.db.container().end(),
-                reopened_end: reopened.container().end(),
-            });
-        }
+        self.check_not_older(&reopened)?;
         let previous = std::mem::replace(&mut self.db, reopened);
         match self.blobs.store().refresh() {
             Ok(found) => Ok(found),
@@ -688,6 +723,46 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyBlobDatabase<F> {
                 Err(error.into())
             }
         }
+    }
+
+    /// [`ReadOnlyBlobDatabase::refresh`]'s order check (the table there).
+    fn check_not_older(&self, reopened: &ReadOnlyDatabase<F>) -> Result<(), Error> {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        let current = &self.db;
+        let (current_seq, reopened_seq) = (current.seq(), reopened.seq());
+        let (current_replayed, reopened_replayed) = (current.replayed(), reopened.replayed());
+        let (current_end, reopened_end) = (current.wal_end(), reopened.wal_end());
+        let older = match reopened_seq.cmp(&current_seq) {
+            Greater => return Ok(()),
+            Less => true,
+            Equal => match (
+                reopened_replayed.cmp(&current_replayed),
+                reopened_end.cmp(&current_end),
+            ) {
+                (Greater, Greater) | (Equal, Equal) => return Ok(()),
+                (Less, Less) => true,
+                _ => false,
+            },
+        };
+        Err(if older {
+            Error::RefreshedOlder {
+                current: current_seq,
+                reopened: reopened_seq,
+                current_replayed,
+                reopened_replayed,
+                current_end,
+                reopened_end,
+            }
+        } else {
+            Error::RefreshDiverged {
+                current: current_seq,
+                reopened: reopened_seq,
+                current_replayed,
+                reopened_replayed,
+                current_end,
+                reopened_end,
+            }
+        })
     }
 
     /// A reader of the blob `blob_ref` refers to: as [`Blobs::get_blob`].
@@ -723,7 +798,8 @@ impl Error {
             | Self::BlobNotStored { .. }
             | Self::PackExists { .. }
             | Self::RefreshedElsewhere { .. }
-            | Self::RefreshedOlder { .. } => false,
+            | Self::RefreshedOlder { .. }
+            | Self::RefreshDiverged { .. } => false,
         }
     }
 }
