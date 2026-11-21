@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use persia_analysis::AnalyzerRegistry;
-use persia_storage::container::{Container, ContainerFile, Mode};
+use persia_storage::container::{Container, ContainerFile, FrameRef, Mode};
 
 use super::recovery::{for_each_record, load, wal_chunks};
 use super::{ContainerObjects, DatabaseError, Snapshot, snapshot_of};
@@ -150,6 +150,23 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
     /// The WAL records the open replayed.
     pub fn replayed(&self) -> u64 {
         self.replayed
+    }
+
+    /// The offset just past the last WAL chunk the open replayed, or the committed `wal_start` when it replayed none.
+    ///
+    /// Within one manifest `seq` the WAL only grows, so this and [`ReadOnlyDatabase::replayed`] grow together: what
+    /// a refresh compares two opens of the same `seq` by. [`Container::end`] does not: it also counts frames that are
+    /// not WAL, such as the segment frames a commit writes before its Manifest (SPEC §8.6).
+    pub fn wal_end(&self) -> u64 {
+        let frames = self.container.frames();
+        self.wal_chunks
+            .last()
+            .and_then(|&chunk| {
+                // The chunks were taken from these frames, in order: the lookup finds the frame.
+                let i = frames.partition_point(|f| f.offset < chunk);
+                frames.get(i).filter(|f| f.offset == chunk)
+            })
+            .map_or(self.container.superblock().wal_start, FrameRef::end)
     }
 
     /// The positions of the WAL chunks the open replayed, in order.

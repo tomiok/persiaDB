@@ -13,6 +13,8 @@
 //!    crash at any write of such an open, losing any unsynced part, reopens to the same documents (6.6.5).
 //! 5. Replayed records stay needed until a flush covers them: a commit after the open that flushes nothing (a
 //!    collection create) keeps `wal_start` before them, with or without flushes during the replay (6.6.5).
+//! 6. A read-only open's `wal_end` is the end of the last WAL chunk it replayed: it moves with `replayed`, never with
+//!    frames that are not WAL (the segment frames a commit writes before its Manifest), which `Container::end` counts.
 
 #![allow(
     clippy::unwrap_used,
@@ -27,6 +29,7 @@ use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use persia_format::block::Compression;
 use persia_format::frame::FrameKind;
 
 use persia_analysis::AnalyzerRegistry;
@@ -572,4 +575,53 @@ fn verify_reports_clean_after_a_read_write_open_quarantined_the_tail() {
     let report = reader.verify().unwrap();
     assert_eq!(report.tail, Tail::Clean);
     assert_eq!(observed(&reader.snapshot())["notes"]["n1"], "hello");
+}
+
+/// Invariant 6: `wal_end` moves with the replayed records only. A refresh compares two opens of one `seq` by it
+/// (`persia`'s `ReadOnlyBlobDatabase::refresh`), so a commit in progress must not look like another WAL.
+#[test]
+fn wal_end_moves_with_the_replayed_records_only() {
+    use persia_storage::container::{Container, Mode};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let registry = AnalyzerRegistry::builtin();
+    let mut db = Database::create(&path, options(BIG)).unwrap();
+    db.create_collection(schema("a")).unwrap();
+    let empty = ReadOnlyDatabase::open(&path, &registry).unwrap();
+    assert_eq!(empty.replayed(), 0);
+    assert_eq!(empty.wal_end(), empty.container().superblock().wal_start);
+
+    db.put("a", &doc("a1", "one"), Durability::Fsync).unwrap();
+    db.put("a", &doc("a2", "two"), Durability::Fsync).unwrap();
+    drop(db);
+    let reader = ReadOnlyDatabase::open(&path, &registry).unwrap();
+    assert_eq!((reader.seq(), reader.replayed()), (empty.seq(), 2));
+    let last = reader
+        .container()
+        .frames()
+        .iter()
+        .rfind(|f| f.kind == FrameKind::WalChunk)
+        .unwrap();
+    assert_eq!(reader.wal_end(), last.end());
+    assert!(reader.wal_end() > empty.wal_end());
+
+    // A segment frame after them, not committed: what a commit in progress leaves before its Manifest.
+    let mut container = Container::open(&path, Mode::ReadWrite).unwrap();
+    container
+        .append(
+            FrameKind::Segment,
+            b"a commit in progress",
+            Compression::None,
+        )
+        .unwrap();
+    container.sync().unwrap();
+    drop(container);
+    let later = ReadOnlyDatabase::open(&path, &registry).unwrap();
+    assert_eq!(
+        (later.seq(), later.replayed()),
+        (reader.seq(), reader.replayed())
+    );
+    assert!(later.container().end() > reader.container().end());
+    assert_eq!(later.wal_end(), reader.wal_end());
 }
