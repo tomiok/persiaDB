@@ -9,6 +9,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- Roadmap: M35 Formal verification (v1.1), after M34. TLA+ for the remote commit (SPEC §10.4), the writer lease (SPEC §11.3), and blob GC (SPEC §9.5, ADR-0053); Kani on `MmapFile::map` and the M1 encodings; Loom on snapshot publish, pack reopen, and `PinSet`. M0–M15 stay the MVP. The progress percentage still counts only those leaves.
 - `persia` (internal API): `BlobDatabase::create` / `open` open a database with its blob pack `<name>.persia.blobs`,
   read-write with the container's writer proof; the pack is still created by the first `put_blob` (ROADMAP 9.4.5;
   ADR-0053). `ReadOnlyBlobDatabase` opens the pack read-only and never creates it; its `refresh` finds a pack the

@@ -921,7 +921,7 @@ M0–M15 above are the MVP. Nothing in them is renumbered. A later milestone sti
 | Target | Milestones |
 |---|---|
 | v1.0 | M0–M15, the MVP |
-| v1.1 | M16 Embedded SDKs, M17 Highlighting and snippets, M18 Autocomplete, M19 Import, M31 Persia Studio, M32 Ranking rules, M33 Search features |
+| v1.1 | M16 Embedded SDKs, M17 Highlighting and snippets, M18 Autocomplete, M19 Import, M31 Persia Studio, M32 Ranking rules, M33 Search features, M35 Formal verification |
 | v1.2 | M20 Encryption at rest, M21 Python SDK, M34 Backup, export, and query analytics |
 | v2.0 | M22 Multi-tenant, M23 Persia Cloud, M24 CDC connectors, M25 Web dashboard |
 | v2.1 | M26 UI components |
@@ -1409,4 +1409,37 @@ User-facing operations for one database. Tenant backups on object storage stay 2
 
 ## 34.2 Zero-result analytics
 - [ ] 34.2.1 (v1.2) Analytics of zero-result queries: record queries that stayed empty, including after relaxation (SPEC §7.6). This is the record; the v2.0 dashboard list remains 25.4, and the metric histogram remains 8.3.3. [T] A query that is still empty after relaxation is recorded. A query that matched is not
+
+---
+
+# M35 — Formal verification (target: v1.1)
+Deps: M1.
+
+The SPEC §10.4 and §11.3 specs are best written before M12 and M13 implement them, and can be pulled earlier. They do not wait on those milestones.
+
+Machine-checked arguments for the protocols and the parsers. TLC specs live under `formal/tla/`. Kani and Loom harnesses compile only under `cfg(kani)` and `cfg(loom)`, so neither tool is a normal dependency (ADR-0001). The jobs are optional and slow, off the PR suite in `.github/workflows/ci.yml`, the way `.github/workflows/nightly.yml` keeps `slow-tests` off it.
+
+## 35.1 Protocol specs in TLA+
+Checked with TLC, specs under `formal/tla/`, run as an optional slow CI job.
+
+- [ ] 35.1.1 (v1.1) Remote commit (SPEC §10.4, ROADMAP 12.3): the commit is `put_if_absent(manifests/<seq+1>.mf)`. `Created` commits, `AlreadyExists` means another writer won, and an error leaves the outcome unknown, so the writer keeps its uploads and reads `manifests/<seq+1>.mf` before it retries or aborts. Safety: no lost commit and no duplicated commit, and the manifest chain advances linearizably under concurrent writers and crashes. Best written before M12 implements 12.3, and can be pulled earlier.
+- [ ] 35.1.2 (v1.1) Writer lease and fencing (SPEC §11.3, ROADMAP 13.1): `LEASE` is `{holder_id, fence_token, expires_at}`, renewed by a conditional update, and every manifest embeds `fence_token`. Safety: at most one effective writer, and a stale writer's writes are rejected (readers reject a regressed token, and a stale writer cannot win `put_if_absent` once a newer seq exists). A lapsed lease stops that writer. Best written before M13 implements 13.1, and can be pulled earlier.
+- [ ] 35.1.3 (v1.1) Blob GC against put and resume (SPEC §9.5, ADR-0053): no referenced blob or chunk is deleted. The model includes the grace period (default 24 h, at least `2 * MAX_BIND_BUDGET`, §9.4; an object whose age is unknown is never expired) and the 9.5.10 resume race: a resume that stages a new chunk under an old upload, binds, and drops its pins between the sweep's listing of `blobs/uploads/` and the check under the pin set's lock.
+
+## 35.2 Bounded model checking with Kani
+Proof harnesses behind `cfg(kani)`. A CI job, optional like the nightly slow suite.
+
+- [ ] 35.2.1 (v1.1) The mmap reader, `MmapFile::map` in `crates/persia-format/src/mmap.rs` (ADR-0010), whose `unsafe` block is the one that calls memmap2: for any offset and length, a range that is inverted, longer than `isize::MAX`, or ends past the file is an error and is not mapped, and a map that succeeds covers exactly that range, so the slice never runs past the file length it checked. The harness proves that check. The `mmap` call stays outside it. A fault on a mapped page still ends the process (ADR-0010).
+- [ ] 35.2.2 (v1.1) M1 integer encodings and the compression wrapper, at bounded sizes: `decode(encode(x)) == x`, and decode of arbitrary bytes returns a value or an error and never panics. Encodings: LEB128 (`varint`), zigzag (`Reader::read_varint_i32` / `read_varint_i64`), delta (`delta::encode_in_place` / `decode_in_place`), bit-packing (`Writer::write_packed_block` / `Reader::read_packed_block`), postings blocks (`write_postings_block` / `read_postings_block`, `write_postings_tail` / `read_postings_tail`), and frame-of-reference (`for_codec`). Codecs: `compress::compress_block` / `decompress_block` (`Codec::None` and `Codec::Zstd`), with the caller's max uncompressed length, so a bomb is `Error::Corrupt` and the wrapper does not allocate past that limit (SPEC §5.2, §17, ADR-0004, ADR-0005). The zstd C library stays outside the harness; hostile zstd frames stay on the 1.4.3 fuzz target.
+- [ ] 35.2.3 (v1.1) Block framing and the superblock: `BlockHeader::decode`, `BlockTable::open`, `BlockTable::decode_block`, `BlockReader::open`, `Header::decode`, `Superblock::decode`, and `pick_active` (SPEC §5.2, §4.2–§4.3). Corrupt input is an error (`Error::Corrupt` or `Error::CorruptBlock`), never a panic, and a declared length cannot allocate past the bomb limit.
+
+## 35.3 Concurrency checking with Loom
+Models behind `cfg(loom)`, dev-only (ADR-0001).
+
+- [ ] 35.3.1 (v1.1) Reader refresh against writer commit, and a pack reopen on `PackReplaced`. `Database::publish` swaps `published: Arc<ArcSwap<Snapshot>>` (`crates/persia-engine/src/db.rs`). `ReadOnlyBlobDatabase::refresh` (`crates/persia/src/internal/documents.rs`) installs the reopened `ReadOnlyDatabase` together with the pack: `PackStore::refresh` returns `PackReplaced` and leaves the file it opened (ROADMAP 9.2.13); `refresh` then calls `PackStore::reopen`, and any other pack error restores the previous documents (SPEC §9.5, §18.10, ADR-0053).
+- [ ] 35.3.2 (v1.1) `PinSet` (`persia::internal::pins`, a `Mutex`) against `get_blob` and `put_blob` (SPEC §9.5). `put_blob` pins its `upload_id` before the first chunk write (on resume, before listing) and the `blob_id` before it binds. `get_blob` pins the `blob_id` before the manifest lookup and the upload that manifest names right after. `PinSet::unless_pinned` checks and deletes as one step under the lock, so a pin taken after the mark still protects the object. A referenced blob or chunk is not deleted.
+- [ ] 35.3.3 (v1.1) The other lock-free and atomic structures: search `Thresholds` (`store_max` raises an `AtomicU64` with `fetch_max`, `crates/persia-engine/src/db/exec.rs`) and `CancelToken` (`Arc<AtomicBool>`); merge cancel (`Arc<AtomicBool>` in `crates/persia-engine/src/merge/scheduler.rs`); `Jitter::next_u64` (`AtomicU64` `fetch_add`, `crates/persia-storage/src/retry.rs`); and `run` in `crates/persia-blob/src/remote/parallel.rs` (`AtomicUsize` index, `AtomicBool` failure flag: the error is the lowest failing index, and a recorded failure starts no further index).
+
+## 35.4 Docs
+- [ ] 35.4.1 (v1.1) An ADR in `docs/adr/`: what 35.1–35.3 verify, what is out of scope (full functional verification with Verus or Creusot, rejected as cost-prohibitive), and how to run TLC, Kani, and Loom. Append a pointer from SPEC §16.1. Do not rewrite that section.
 
