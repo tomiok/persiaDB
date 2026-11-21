@@ -19,6 +19,12 @@
 //! 6. After failed resumes (one that stages nothing, one that fails after a conflict restage, and a replayed stale
 //!    token that restages again) and the resume that binds, a GC within the grace period deletes nothing, and one
 //!    past it leaves exactly the bound blob's manifest and its chunks under `blobs/`.
+//! 7. Pinned edges: a token of another store binds under its id there and still resumes at home; an unknown id with
+//!    an empty blob binds it chunked under a new id (nothing new to write, ROADMAP 9.3.6); every kept chunk is
+//!    checked against the reader (`InvalidResume`, which leaves the token usable), and a reader ending where the kept
+//!    run ends binds that prefix; a one-chunk upload keeps its short chunk for a token of that length; a token below
+//!    the floor on the pack is `ChunkSizeBelowMin`, not `ResumeUnsupported`; a stale token replayed after GC
+//!    restages under its id, which the next GC takes.
 //!
 //! Deterministic: fixed data, seeded upload ids, a manual clock, no sleeps.
 #![allow(
@@ -599,6 +605,277 @@ fn failed_resumes_leave_nothing_after_gc_but_the_bound_blob() {
     clock.advance(DEFAULT_GRACE + Duration::from_hours(1));
     let report = gc_at(&db, &clock);
     assert_eq!(report.sweep.uploads_deleted, 2, "{report:?}");
+    assert_eq!(report.sweep.blobs_deleted, 0, "{report:?}");
+    assert_eq!(keys(store), bound, "only the bound blob is left");
+    read_back(db.blobs(), &r, &data);
+}
+
+// -- 7. tightened cases (the audit's follow-up) --
+
+/// `InvalidResume`'s `what`, or a panic naming `e`.
+fn invalid_resume(e: &Error) -> &'static str {
+    match e {
+        Error::InvalidResume { what } => what,
+        other => panic!("not InvalidResume: {other:?}"),
+    }
+}
+
+#[test]
+fn a_token_of_another_store_stages_the_whole_blob_under_its_id_and_still_resumes_at_home() {
+    // Invariant 3: a token holds no bucket or prefix, so another store's token lists empty here.
+    let data = bytes((WINDOW + 3) * CHUNK_LEN + 100, 14);
+    let (_, home) = remote(14);
+    let (t, _) = interruption(
+        home.put_blob(fail_in(&data, WINDOW + 1), &options(CHUNK))
+            .unwrap_err(),
+    );
+    let home_keys = keys(home.store());
+    assert_eq!(home_keys, chunk_keys(t.upload_id, 0..WINDOW as u32));
+
+    let (_, other) = remote(15);
+    let (r, pins) = other.put_blob(&data[..], &resume(t)).unwrap();
+    assert_eq!(r, uninterrupted(&data, CHUNK));
+    let (upload, expected) = bound_keys(other.store(), &r);
+    assert_eq!(upload, t.upload_id, "under the token's id, not a new one");
+    assert_eq!(keys(other.store()), expected);
+    read_back(&other, &r, &data);
+    drop(pins);
+    assert!(other.pin_set().pinned().is_empty());
+    assert_eq!(keys(home.store()), home_keys, "the token's own store");
+
+    // At home the token keeps its window and binds the same reference under the same id.
+    let (again, _pins) = home.put_blob(&data[..], &resume(t)).unwrap();
+    assert_eq!(again, r);
+    let (upload, expected) = bound_keys(home.store(), &again);
+    assert_eq!(upload, t.upload_id);
+    assert_eq!(keys(home.store()), expected);
+}
+
+#[test]
+fn an_unknown_upload_id_and_an_empty_blob_binds_the_empty_blob_chunked_under_a_new_id() {
+    // The edge of invariant 3: no chunk to stage at all. The reference is the one a new upload binds, but stored
+    // chunked (a resume never takes the small path), with no chunk. The resume writes no chunk the listing did not
+    // show (vacuously), so ROADMAP 9.3.6 moves it to a new upload id, not the token's: the one case where an empty
+    // listing does not bind under the token's id.
+    let (_, blobs) = remote(16);
+    let t = token(0xe0e0, CHUNK);
+    let (r, pins) = blobs.put_blob(&[][..], &resume(t)).unwrap();
+    assert_eq!(r, uninterrupted(&[], CHUNK));
+    assert_eq!(r.size(), 0);
+    let m = blobs.store().manifest(r.blob_id()).unwrap().unwrap();
+    assert!(!m.is_inline());
+    assert_eq!(m.chunk_count(), 0);
+    assert_ne!(m.upload_id(), t.upload_id);
+    assert_eq!(
+        keys(blobs.store()),
+        BTreeSet::from([manifest_key(r.blob_id())]),
+        "only the manifest"
+    );
+    read_back(&blobs, &r, &[]);
+    drop(pins);
+    assert!(blobs.pin_set().pinned().is_empty());
+}
+
+#[test]
+fn a_kept_run_the_reader_does_not_match_is_invalid_resume_whichever_kept_chunk_differs() {
+    // Invariant 3: full chunks of the token's size are the kept run, and every one is checked, not only the first.
+    let data = bytes(5 * CHUNK_LEN + 100, 17);
+    let t = token(0x0c4e_c4ed, CHUNK);
+    let flipped = |at: usize| {
+        let mut other = data.clone();
+        other[at] ^= 0x80;
+        other
+    };
+    let cases: [(&str, Vec<u8>, &str); 5] = [
+        ("chunk 0 differs", flipped(3), "not the ones"),
+        ("chunk 1 differs", flipped(CHUNK_LEN + 7), "not the ones"),
+        (
+            "the last kept chunk's last byte differs",
+            flipped(3 * CHUNK_LEN - 1),
+            "not the ones",
+        ),
+        (
+            "ends inside the run",
+            data[..2 * CHUNK_LEN + 9].to_vec(),
+            "ends inside",
+        ),
+        ("empty", Vec::new(), "ends inside"),
+    ];
+    for (what, reader, kind) in cases {
+        let (_, blobs) = remote(17);
+        let store = blobs.store();
+        for (index, chunk) in (0..).zip(data.chunks(CHUNK_LEN).take(3)) {
+            store.stage_chunk(t.upload_id, index, chunk).unwrap();
+        }
+        let before = keys(store);
+        let e = blobs.put_blob(&reader[..], &resume(t)).unwrap_err();
+        assert!(invalid_resume(&e).contains(kind), "{what}: {e:?}");
+        assert_eq!(keys(store), before, "{what}: nothing is staged");
+        assert!(blobs.pin_set().pinned().is_empty(), "{what}");
+        // A caller's error leaves the token as good as it was.
+        let (r, _pins) = blobs.put_blob(&data[..], &resume(t)).unwrap();
+        assert_eq!(r, uninterrupted(&data, CHUNK), "{what}");
+        let (upload, expected) = bound_keys(store, &r);
+        assert_eq!(upload, t.upload_id, "{what}");
+        assert_eq!(keys(store), expected, "{what}");
+    }
+}
+
+#[test]
+fn a_reader_that_ends_where_the_kept_run_ends_binds_that_prefix_under_a_new_upload() {
+    // Not inside the run, so not `InvalidResume`: the blob is the bytes read. Every chunk it stages was listed, so
+    // the upload moves to a young one (ROADMAP 9.3.6) and the token's chunks are left to GC.
+    let (_, blobs) = remote(18);
+    let store = blobs.store();
+    let data = bytes(3 * CHUNK_LEN, 18);
+    let t = token(0x00e2_d5a7, CHUNK);
+    for (index, chunk) in (0..).zip(data.chunks(CHUNK_LEN)) {
+        store.stage_chunk(t.upload_id, index, chunk).unwrap();
+    }
+    let theirs = keys(store);
+    let (r, _pins) = blobs.put_blob(&data[..], &resume(t)).unwrap();
+    assert_eq!(r, uninterrupted(&data, CHUNK));
+    let (upload, bound) = bound_keys(store, &r);
+    assert_ne!(upload, t.upload_id);
+    assert_eq!(keys(store), bound.union(&theirs).cloned().collect());
+    read_back(&blobs, &r, &data);
+}
+
+#[test]
+fn a_one_chunk_upload_resumed_at_its_short_chunks_length_keeps_that_chunk() {
+    // The exception of invariant 5: an upload staged at 4 × the floor of a blob of 2 × the floor is one short
+    // chunk 0, which is a full chunk of a token at 2 × the floor. The token at the upload's own size keeps nothing,
+    // and its chunk 0 is the same bytes, which is no conflict either.
+    let data = bytes(2 * CHUNK_LEN, 19);
+    let other = bytes(2 * CHUNK_LEN, 20);
+    let old = UploadId::new(0x0001_c4a2);
+    for (what, staged, token_at) in [
+        ("kept at the short chunk's length", &data, 2 * CHUNK),
+        ("the same bytes at the upload's size", &data, 4 * CHUNK),
+    ] {
+        let (_, blobs) = remote(19);
+        let store = blobs.store();
+        store.stage_chunk(old, 0, staged).unwrap();
+        let theirs = keys(store);
+        let t = ResumeToken {
+            upload_id: old,
+            chunk_size: size(token_at),
+        };
+        let (r, _pins) = blobs.put_blob(&data[..], &resume(t)).unwrap();
+        assert_eq!(r, uninterrupted(&data, token_at), "{what}");
+        assert_eq!(r.chunk_size(), token_at, "{what}");
+        let (upload, bound) = bound_keys(store, &r);
+        // Nothing new to write: the chunk moves to a young upload (ROADMAP 9.3.6).
+        assert_ne!(upload, old, "{what}");
+        assert_eq!(
+            keys(store),
+            bound.union(&theirs).cloned().collect(),
+            "{what}"
+        );
+        read_back(&blobs, &r, &data);
+    }
+    // Other bytes in that chunk, at its length: a kept chunk the reader does not match.
+    let (_, blobs) = remote(20);
+    let store = blobs.store();
+    store.stage_chunk(old, 0, &other).unwrap();
+    let before = keys(store);
+    let t = ResumeToken {
+        upload_id: old,
+        chunk_size: size(2 * CHUNK),
+    };
+    let e = blobs.put_blob(&data[..], &resume(t)).unwrap_err();
+    assert!(invalid_resume(&e).contains("not the ones"), "{e:?}");
+    assert_eq!(keys(store), before);
+    assert!(blobs.pin_set().pinned().is_empty());
+}
+
+#[test]
+fn a_token_chunk_size_below_the_floor_on_the_pack_is_below_the_floor_not_unsupported() {
+    // Invariant 4 comes before invariant 2: the chunk size is checked before the store is asked to resume.
+    let dir = tempfile::tempdir().unwrap();
+    let db =
+        BlobDatabase::create(dir.path().join("app.persia"), DatabaseOptions::default()).unwrap();
+    let pack = dir.path().join("app.persia.blobs");
+    let blobs = db.blobs();
+    let data = bytes(2 * CHUNK_LEN, 21);
+    let t = ResumeToken {
+        upload_id: UploadId::new(7),
+        chunk_size: ChunkSize::from_encoding(CHUNK - 1).unwrap(),
+    };
+    let mut reader = Counting {
+        data: &data,
+        reads: 0,
+    };
+    let e = blobs.put_blob(&mut reader, &resume(t)).unwrap_err();
+    assert!(
+        matches!(e, Error::ChunkSizeBelowMin { chunk_size, min: CHUNK } if chunk_size == CHUNK - 1),
+        "{e:?}"
+    );
+    assert_eq!(reader.reads, 0);
+    assert!(!pack.exists());
+    assert!(blobs.pin_set().pinned().is_empty());
+}
+
+#[test]
+fn stale_tokens_replayed_after_gc_restage_and_the_next_gc_takes_them() {
+    // Invariant 6 continued: a token whose upload GC swept lists empty, so it stages the whole blob under its id
+    // again; the blob is bound already and a resume never discards the token's upload (ADR-0053 item 11), so the
+    // next GC past the grace period takes those chunks. The bound upload's own token restages (ROADMAP 9.3.6) and
+    // discards its duplicate at once.
+    let dir = tempfile::tempdir().unwrap();
+    let (clock, mut db) = database(dir.path(), 22);
+    let data = bytes((WINDOW + 3) * CHUNK_LEN + 100, 22);
+    let (t0, _) = interruption(
+        db.blobs()
+            .put_blob(fail_in(&data, WINDOW + 1), &options(CHUNK))
+            .unwrap_err(),
+    );
+    // Other bytes at chunk `WINDOW + 1`, so the resume restages to a new upload, which it binds.
+    db.blobs()
+        .store()
+        .stage_chunk(t0.upload_id, WINDOW as u32 + 1, &bytes(100, 23))
+        .unwrap();
+    let blob = Blob::from_reader(&data[..]).with_options(resume(t0));
+    let r = db
+        .put("c", &Document::new("d"), blob, Durability::Fsync)
+        .unwrap();
+    db.release_durable();
+    let store = db.blobs().store();
+    let (t1, bound) = bound_keys(store, &r);
+    assert_ne!(t1, t0.upload_id);
+    let chunks = store.manifest(r.blob_id()).unwrap().unwrap().chunk_count();
+    clock.advance(DEFAULT_GRACE + Duration::from_hours(1));
+    let report = gc_at(&db, &clock);
+    assert_eq!(report.sweep.uploads_deleted, 1, "{report:?}");
+    assert_eq!(keys(store), bound);
+
+    let (again, pins) = db.blobs().put_blob(&data[..], &resume(t0)).unwrap();
+    assert_eq!(again, r, "a duplicate of the bound blob");
+    drop(pins);
+    let mut expected = bound.clone();
+    expected.extend(chunk_keys(t0.upload_id, 0..chunks));
+    assert_eq!(
+        keys(store),
+        expected,
+        "the swept token's upload, staged again"
+    );
+
+    let own = ResumeToken {
+        upload_id: t1,
+        chunk_size: size(CHUNK),
+    };
+    let (again, pins) = db.blobs().put_blob(&data[..], &resume(own)).unwrap();
+    assert_eq!(again, r);
+    drop(pins);
+    assert_eq!(keys(store), expected, "the restaged duplicate is discarded");
+    assert!(db.blobs().pin_set().pinned().is_empty());
+
+    let report = gc_at(&db, &clock);
+    assert_eq!(report.sweep.uploads_deleted, 0, "young: {report:?}");
+    assert_eq!(keys(store), expected);
+    clock.advance(DEFAULT_GRACE + Duration::from_hours(1));
+    let report = gc_at(&db, &clock);
+    assert_eq!(report.sweep.uploads_deleted, 1, "{report:?}");
     assert_eq!(report.sweep.blobs_deleted, 0, "{report:?}");
     assert_eq!(keys(store), bound, "only the bound blob is left");
     read_back(db.blobs(), &r, &data);
