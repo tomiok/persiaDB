@@ -133,6 +133,9 @@ named by the slot, a WAL range, frames after `log_end` that may hold acknowledge
     others are read with `pread`. A failed remap keeps the previous mapping. Tests and benches cannot create a permit
     outside xtask's `UNSAFE_ALLOWED` files, so the real mapping is covered by a doctest and the window logic by unit
     tests over a copying stand-in.
+    Amended (ROADMAP 9.2.11): `crates/persia-blob/benches/pack.rs` is in `UNSAFE_ALLOWED`; its mapped cases create a
+    permit over a pack the bench owns and writes nothing to while it is mapped, as `persia-storage`'s `container_read`
+    bench does (ADR-0017).
 
 ## Consequences
 
