@@ -241,9 +241,10 @@ mod tests {
         "crates/persia-storage/tests/container_mapped.rs", // ADR-0017: maps containers it owns (unsafe enable_mapped_reads)
         "crates/persia-storage/tests/container_process.rs", // ADR-0017: maps containers it owns
         "crates/persia-storage/benches/container_read.rs", // ADR-0017: maps a container it owns
-        "crates/persia-storage/src/sys.rs",                // ADR-0021
-        "crates/persia-analysis/tests/allocations.rs",     // ADR-0026: counting allocator
-        "crates/persia-engine/tests/flush_memory.rs",      // ADR-0026: counting allocator
+        "crates/persia-blob/benches/pack.rs", // ADR-0049 item 12: maps a pack it owns (unsafe MapPermit::new)
+        "crates/persia-storage/src/sys.rs",   // ADR-0021
+        "crates/persia-analysis/tests/allocations.rs", // ADR-0026: counting allocator
+        "crates/persia-engine/tests/flush_memory.rs", // ADR-0026: counting allocator
     ];
 
     #[test]

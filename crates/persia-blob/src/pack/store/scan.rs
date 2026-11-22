@@ -7,7 +7,7 @@ use persia_format::checksum::crc32c;
 use super::{
     BlobManifest, ChunkHead, ContainerFile, FIRST_FRAME_OFFSET, FRAME_HEADER_LEN, FrameHeader,
     FrameKind, PackStore, Result, at, corrupt_at, decode_chunk_payload, decode_frame,
-    decode_index_payload, expected_chunk, from_format_at, layout, u64_from_usize,
+    decode_index_payload, expected_chunk, from_format_at, longest_frame, u64_from_usize,
 };
 
 /// What [`PackStore::scan_checksums`] checked: every committed frame of the pack.
@@ -96,15 +96,11 @@ impl<F: ContainerFile + 'static> PackStore<F> {
                 .check_fits(log_end)
                 .map_err(|e| from_format_at(e, offset))?;
             let total = header.total_len();
-            let longest = match header.kind() {
-                FrameKind::BlobChunk => layout::chunk_frame_len(layout::MAX_CHUNK_LEN),
-                FrameKind::BlobIndex => max_index_frame_len(u64_from_usize(heads.len())),
-                _ => {
-                    return Err(corrupt_at(
-                        "a committed frame of a kind no pack holds",
-                        offset,
-                    ));
-                }
+            let Some(longest) = longest_frame(header.kind(), heads.len()) else {
+                return Err(corrupt_at(
+                    "a committed frame of a kind no pack holds",
+                    offset,
+                ));
             };
             // Before the read: a damaged length must not size an allocation.
             if total > longest {
@@ -164,26 +160,10 @@ fn index_matches(heads: &[(u64, ChunkHead)], manifest: &BlobManifest, chunks: &[
     })
 }
 
-/// The longest `BlobIndex` frame that can name at most `chunks` chunk frames (SPEC §9.3): an 8-byte head, the
-/// largest manifest of that many chunks (`76 + 4·n`, or for one chunk an inline manifest of `80 + 64 MiB`, SPEC
-/// §9.1.1) padded to 8, and 8 bytes per offset. An index names distinct chunk frames before it, so `chunks` is the
-/// number of chunk frames scanned so far. Saturates: a bound that large is never reached by a frame within the file.
-fn max_index_frame_len(chunks: u64) -> u64 {
-    let plain = chunks.saturating_mul(4).saturating_add(76);
-    let inline = if chunks >= 1 {
-        u64::from(layout::MAX_CHUNK_LEN).saturating_add(80)
-    } else {
-        0
-    };
-    let manifest = plain.max(inline).saturating_add(7) & !7;
-    let payload = u64_from_usize(layout::INDEX_HEAD_LEN)
-        .saturating_add(manifest)
-        .saturating_add(chunks.saturating_mul(8));
-    persia_format::frame::frame_len(payload).unwrap_or(u64::MAX)
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::layout;
+    use super::super::recover::max_index_frame_len;
     use super::*;
 
     #[test]

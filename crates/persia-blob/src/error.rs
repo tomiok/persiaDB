@@ -203,7 +203,9 @@ pub enum Error {
     },
 
     /// Another read-write handle, in this process or another, holds the pack's writer lock: one pack writer at a
-    /// time (SPEC §9.3, ROADMAP 9.2.7, ADR-0053). Nothing was opened or swept.
+    /// time (SPEC §9.3, ROADMAP 9.2.7, 9.2.15, ADR-0053). Nothing was opened or swept. Also returned for a moment
+    /// while `Container::side_files` or `sweep_stale_files` probes that lock: retry the open then
+    /// (`BlobDatabase::create` removes the container it made on this error, so a retry can create it again).
     #[error("the blob pack is locked by another writer")]
     PackLocked,
     //

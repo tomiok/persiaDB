@@ -121,6 +121,59 @@ impl PackStore<File> {
     /// assert_eq!(&*store.read_chunk_source(&m, 0)?, b"mapped");
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
+    ///
+    /// A GC rewrite (ROADMAP 9.5.2) swaps in a new file and maps it again at once (ROADMAP 9.2.12): the mapping then
+    /// covers the new file's `12288..log_end`, and the kept blobs are read from it at their new offsets. If that remap
+    /// fails, nothing is mapped (never the old file) and every read is a `pread` until the next bind maps again.
+    ///
+    /// ```
+    /// use std::time::{Duration, SystemTime};
+    ///
+    /// use persia_blob::gc::{GcObject, Mark, PinCheck, PinGate, Rewrite, Sweep, SweepOptions};
+    /// use persia_blob::pack::{PackStore, pack_path};
+    /// use persia_blob::{BlobManifest, BlobStore, ChunkSize, UploadId, blob_id_of};
+    /// use persia_format::checksum::crc32c;
+    /// use persia_storage::container::{Container, MapPermit};
+    ///
+    /// /// No pins: the mark alone decides what the rewrite keeps.
+    /// struct NoPins;
+    /// impl PinCheck for NoPins {
+    ///     fn is_pinned(&self, _: GcObject) -> bool { false }
+    ///     fn pinned_blobs(&self) -> Vec<persia_format::BlobId> { Vec::new() }
+    /// }
+    /// impl PinGate for NoPins {
+    ///     fn pinned(&self) -> Vec<GcObject> { Vec::new() }
+    ///     fn unless_pinned<T>(&self, _: GcObject, delete: impl FnOnce(&dyn PinCheck) -> T) -> Option<T> {
+    ///         Some(delete(self))
+    ///     }
+    /// }
+    ///
+    /// # if cfg!(miri) { return Ok(()); } // a real mapped file: Miri has neither a filesystem nor file-backed mmap
+    /// # let dir = tempfile::tempdir()?;
+    /// let container = Container::create(dir.path().join("app.persia"))?;
+    /// let proof = container.writer_proof().ok_or("read-only")?;
+    /// let store = PackStore::open_writer(pack_path(&dir.path().join("app.persia")), &proof)?;
+    /// // SAFETY: nothing but this store writes the pack while it is mapped (MapPermit::new's contract).
+    /// store.enable_mapped_reads(unsafe { MapPermit::new() });
+    /// let put = |data: &[u8], upload| -> Result<BlobManifest, persia_blob::Error> {
+    ///     let m = BlobManifest::new(blob_id_of(data), data.len() as u64, ChunkSize::new(ChunkSize::MIN)?,
+    ///         UploadId::new(upload), vec![crc32c(data)])?;
+    ///     store.stage_chunk(m.upload_id(), 0, data)?;
+    ///     store.bind(&m)?;
+    ///     Ok(m)
+    /// };
+    /// put(b"dropped by the rewrite", 1)?;
+    /// let kept = put(b"kept", 2)?;
+    /// let options = SweepOptions { grace: Duration::ZERO, now: SystemTime::now(), rewrite_ratio: 0.0 };
+    /// let report = store.sweep(&Mark::new([kept.blob_id()], []), &NoPins, &options)?;
+    /// assert!(matches!(report.rewrite, Some(Rewrite::Done { .. })));
+    /// let log_end = store.superblock().ok_or("a pack")?.log_end;
+    /// assert_eq!(store.mapped_range(), Some(12288..log_end));
+    /// let chunk = store.read_chunk_source(&kept, 0)?; // from the new file's mapping
+    /// assert_eq!(&*chunk, b"kept");
+    /// assert_eq!(chunk.base_offset(), 12288 + 56); // in the new file's first frame, after its frame and chunk heads
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn enable_mapped_reads(&self, permit: MapPermit) {
         self.enable_mapper(Box::new(move |file: &File, range: Range<u64>| {
             permit.map(file, range)
@@ -326,6 +379,11 @@ mod tests {
             .unwrap_err();
             assert!(e.is_corruption(), "byte {at}: {e}");
             assert_eq!(e.corrupt_offset(), Some(frame), "byte {at}: {e}");
+            // ROADMAP 9.2.11: `read_chunk_checked` checks through the frame's one CRC pass, and names the frame.
+            let index = u32::from(frame != FIRST_FRAME_OFFSET);
+            let e = read_chunk_checked(&store, &m, index).unwrap_err();
+            assert!(e.is_corruption(), "byte {at}: {e}");
+            assert_eq!(e.corrupt_offset(), Some(frame), "byte {at}: {e}");
         }
     }
 
@@ -358,5 +416,163 @@ mod tests {
             })
             .unwrap();
         assert_eq!(seen, 3);
+    }
+
+    // --- A pack rewrite with mapped reads on (ROADMAP 9.2.12) ---
+
+    /// No pin at all: the mark alone decides what a rewrite keeps.
+    struct NoPins;
+
+    impl crate::gc::PinCheck for NoPins {
+        fn is_pinned(&self, _: crate::gc::GcObject) -> bool {
+            false
+        }
+        fn pinned_blobs(&self) -> Vec<persia_format::BlobId> {
+            Vec::new()
+        }
+    }
+
+    impl crate::gc::PinGate for NoPins {
+        fn pinned(&self) -> Vec<crate::gc::GcObject> {
+            Vec::new()
+        }
+        fn unless_pinned<T>(
+            &self,
+            _: crate::gc::GcObject,
+            delete: impl FnOnce(&dyn crate::gc::PinCheck) -> T,
+        ) -> Option<T> {
+            Some(delete(self))
+        }
+    }
+
+    /// A pack of a blob the rewrite drops, then one it keeps, with mapped reads on (the copying stand-in, `fail` to
+    /// make its remaps fail), forced through a rewrite: the kept blob, and the window before the rewrite.
+    fn rewritten(
+        fail: &Arc<AtomicBool>,
+        fail_remap: bool,
+    ) -> (SimFs, PackStore<SimFsFile>, BlobManifest, Range<u64>) {
+        let (fs, store) = store();
+        store.enable_copied_reads(Arc::clone(fail));
+        let dropped = put(&store, b"dropped by the rewrite", 4, 1);
+        let kept = put(&store, b"kept by the mark", 4, 2);
+        let before = store.mapped_range().unwrap();
+        assert_eq!(before.end, store.superblock().unwrap().log_end);
+        fail.store(fail_remap, Ordering::Relaxed);
+        let report = store
+            .rewrite(&crate::gc::Mark::new([kept.blob_id()], []), &NoPins, 0.0)
+            .unwrap();
+        assert!(
+            matches!(report.rewrite, Some(crate::gc::Rewrite::Done { .. })),
+            "{report:?}"
+        );
+        assert_eq!(store.manifest(dropped.blob_id()).unwrap(), None);
+        (fs, store, kept, before)
+    }
+
+    /// ROADMAP 9.2.12: after the swap the window is mapped again over the new file (`12288..` its `log_end`), holds
+    /// that file's bytes, and the kept blob's chunks are slices of it at their new offsets: nothing is read from the
+    /// old file's window.
+    #[test]
+    fn a_rewrite_maps_the_new_file_and_reads_come_from_it() {
+        let fail = Arc::new(AtomicBool::new(false));
+        let (fs, store, kept, before) = rewritten(&fail, false);
+        let log_end = store.superblock().unwrap().log_end;
+        assert!(log_end < before.end, "the rewrite dropped frames");
+        assert_eq!(store.mapped_range(), Some(FIRST_FRAME_OFFSET..log_end));
+        assert_eq!(store.mapping_failures(), 0);
+        let file = fs.read(std::path::Path::new("/p.blobs")).unwrap();
+        let window = {
+            let inner = store.read();
+            let window = inner.pack.as_ref().unwrap().window.clone().unwrap();
+            assert_eq!(
+                window.as_slice(),
+                &file[FIRST_FRAME_OFFSET as usize..log_end as usize],
+                "the window holds the new file"
+            );
+            window.as_slice().as_ptr_range()
+        };
+        // The kept blob is the first in the new file: its first chunk frame is the first frame.
+        let mut offset = FIRST_FRAME_OFFSET;
+        for index in 0..kept.chunk_count() {
+            let chunk = store.read_chunk_source(&kept, index).unwrap();
+            let range = chunk.as_slice().as_ptr_range();
+            assert!(
+                window.start <= range.start && range.end <= window.end,
+                "chunk {index} from the window"
+            );
+            assert_eq!(
+                chunk.base_offset(),
+                offset + crate::pack::layout::CHUNK_BYTES_OFFSET as u64,
+                "chunk {index} at its new offset"
+            );
+            offset += crate::pack::layout::chunk_frame_len(chunk.as_slice().len() as u32);
+        }
+        let all = crate::read_manifest_range(&store, &kept, 0..kept.size()).unwrap();
+        assert_eq!(all, b"kept by the mark");
+        // Binds after the rewrite move the window on, over the same new file.
+        let next = put(&store, b"after the rewrite", 4, 3);
+        assert_eq!(
+            store.mapped_range().unwrap().end,
+            store.superblock().unwrap().log_end
+        );
+        assert_eq!(read_chunk_checked(&store, &next, 0).unwrap(), b"afte");
+    }
+
+    /// A remap that fails after the swap leaves no window at all, never the old file's: every read is a `pread` of the
+    /// new file, and the failure is counted. The next bind maps again.
+    #[test]
+    fn a_rewrite_whose_remap_fails_reads_the_new_file_with_pread() {
+        let fail = Arc::new(AtomicBool::new(false));
+        let (_fs, store, kept, _) = rewritten(&fail, true);
+        assert_eq!(
+            store.mapped_range(),
+            None,
+            "the old file's window is dropped"
+        );
+        assert_eq!(store.mapping_failures(), 1);
+        let all = crate::read_manifest_range(&store, &kept, 0..kept.size()).unwrap();
+        assert_eq!(all, b"kept by the mark");
+        fail.store(false, Ordering::Relaxed);
+        put(&store, b"after the rewrite", 4, 3);
+        assert_eq!(
+            store.mapped_range(),
+            Some(FIRST_FRAME_OFFSET..store.superblock().unwrap().log_end)
+        );
+        assert_eq!(read_chunk_checked(&store, &kept, 1).unwrap(), b" by ");
+    }
+
+    /// ROADMAP 9.2.13: a read-only handle stays on the file it opened, and on its mapping, when `refresh` reports a
+    /// replaced pack; `reopen` opens the replacement with mapped reads off, as any open.
+    #[test]
+    fn a_replaced_pack_keeps_the_readers_mapping_and_a_reopen_starts_unmapped() {
+        let fail = Arc::new(AtomicBool::new(false));
+        let (fs, writer) = store();
+        let kept = put(&writer, b"kept by the mark", 4, 1);
+        put(&writer, b"dropped by the rewrite", 4, 2);
+        let reader = PackStore::open_in(Arc::new(fs.clone()), "/p.blobs", [0; 16]).unwrap();
+        reader.enable_copied_reads(Arc::clone(&fail));
+        let mapped = reader.mapped_range().unwrap();
+        writer
+            .rewrite(&crate::gc::Mark::new([kept.blob_id()], []), &NoPins, 0.0)
+            .unwrap();
+        assert!(matches!(
+            reader.refresh(),
+            Err(crate::Error::PackReplaced { .. })
+        ));
+        assert_eq!(
+            reader.mapped_range(),
+            Some(mapped),
+            "the old file's mapping stays"
+        );
+        assert_eq!(read_chunk_checked(&reader, &kept, 0).unwrap(), b"kept");
+        let reopened = reader.reopen().unwrap();
+        assert_eq!(reopened.mapped_range(), None);
+        assert_eq!(read_chunk_checked(&reopened, &kept, 0).unwrap(), b"kept");
+        assert!(
+            reopened
+                .manifest(blob_id_of(b"dropped by the rewrite"))
+                .unwrap()
+                .is_none()
+        );
     }
 }

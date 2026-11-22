@@ -3,9 +3,12 @@
 //! a new blob and reads it back. The checksum scan `persia verify` runs over it (ROADMAP 9.5.3) never panics, its counts
 //! agree with the index, and a recovered pack scans the same after another open.
 //!
-//! The first input byte picks the mode: 0, the rest is the whole file; otherwise the rest is a list of 3-byte edits
-//! (`offset u16`, `value u8`) applied to a valid two-blob pack, whose slot and frame CRCs are then recomputed when the
-//! mode is even, so mutations reach the field rules instead of stopping at a checksum.
+//! The first input byte picks the mode: 0, the rest is the whole file; with bit 4 set, the rest is the frames after a
+//! valid pack prefix, each frame found renumbered and resealed, committed by the slot (bit 1) or left as the tail a
+//! read-write open rolls forward, so arbitrary frames reach the open's scan and recovery (ROADMAP 9.2.14); otherwise
+//! the rest is a list of 3-byte edits (`offset u16`, `value u8`) applied to a valid two-blob pack, whose slot and frame
+//! CRCs are then recomputed when the mode is even, so mutations reach the field rules instead of stopping at a
+//! checksum.
 #![no_main]
 
 use std::collections::BTreeMap;
@@ -14,12 +17,14 @@ use std::sync::{Arc, OnceLock};
 
 use libfuzzer_sys::fuzz_target;
 use persia_blob::pack::PackScan;
+use persia_blob::pack::layout::{PackSuperblock, new_pack_prefix};
 use persia_blob::{
     BindOutcome, BlobManifest, BlobStore, ChunkSize, Error, PackMode, PackStore, UploadId,
     blob_id_of, read_range,
 };
 use persia_format::BlobRef;
 use persia_format::checksum::crc32c;
+use persia_format::frame::FRAME_MAGIC;
 use persia_storage::container::sim::{CrashLoss, SimFault, SimFile};
 use persia_storage::container::{Container, ContainerFile};
 use persia_storage::vfs::Vfs;
@@ -80,11 +85,16 @@ fn frames_of(bytes: &[u8]) -> Vec<(usize, usize)> {
     let mut frames = Vec::new();
     let mut at = 12288;
     while at + 24 <= bytes.len() {
-        let len = u64::from_le_bytes(bytes[at + 8..at + 16].try_into().expect("8 bytes")) as usize;
-        let total = 24 + len.div_ceil(8) * 8 + 8;
-        if at + total > bytes.len() {
+        let len = u64::from_le_bytes(bytes[at + 8..at + 16].try_into().expect("8 bytes"));
+        // A length no frame in the file can have ends the walk (no overflow on an arbitrary one).
+        let Some(total) = usize::try_from(len)
+            .ok()
+            .and_then(|len| len.checked_next_multiple_of(8))
+            .and_then(|len| len.checked_add(32))
+            .filter(|&total| total <= bytes.len() - at)
+        else {
             break;
-        }
+        };
         frames.push((at, total));
         at += total;
     }
@@ -143,6 +153,40 @@ fn cut_template() -> &'static Template {
         let frames = frames_of(&bytes);
         (bytes, frames)
     })
+}
+
+/// A new pack's header and slots, then `frames` padded to 8 (mode bit 4, ROADMAP 9.2.14): every frame found by its
+/// length gets the frame magic, `frame_seq` 1, 2, ... and a valid CRC, so arbitrary kinds, lengths and payloads reach
+/// the open's frame rules. With `committed`, slot A commits them when the last one ends the file (`blob_count` the
+/// frames of kind `BlobIndex`), so the open scans them; otherwise a read-write open's roll-forward reads them.
+fn arbitrary_frames(frames: &[u8], committed: bool) -> Vec<u8> {
+    let mut bytes = new_pack_prefix([1; 16], 7).expect("a new pack's prefix");
+    bytes.extend_from_slice(frames);
+    bytes.resize(bytes.len().next_multiple_of(8), 0);
+    // The walk reads only the lengths, which neither the magic nor the numbering changes.
+    let found = frames_of(&bytes);
+    for (seq, &(at, _)) in (1_u64..).zip(&found) {
+        bytes[at..at + 4].copy_from_slice(&FRAME_MAGIC);
+        bytes[at + 16..at + 24].copy_from_slice(&seq.to_le_bytes());
+    }
+    reseal(&mut bytes, &found);
+    if committed
+        && let Some(&(last, total)) = found.last()
+        && last + total == bytes.len()
+    {
+        let indexes = found.iter().filter(|&&(at, _)| bytes[at + 4] == 7).count();
+        let sb = PackSuperblock {
+            seq: 1,
+            index_off: last as u64,
+            index_len: total as u64,
+            log_end: bytes.len() as u64,
+            blob_count: indexes as u64,
+            next_frame_seq: found.len() as u64 + 1,
+            ..PackSuperblock::new_pack(7)
+        };
+        bytes[4096..8192].copy_from_slice(&sb.encode());
+    }
+    bytes
 }
 
 /// Recomputes both slots' and every template frame's CRC32C.
@@ -219,10 +263,14 @@ fuzz_target!(|data: &[u8]| {
     let Some((&mode, rest)) = data.split_first() else {
         return;
     };
-    // mode 0: the rest is the whole file. Otherwise bit 0 clear reseals the CRCs, bit 1 picks the template with a cut
-    // bind after log_end, bit 2 resizes the file by the first two bytes of the rest (append or truncate).
+    // mode 0: the rest is the whole file. Bit 4: the rest is frames after a valid prefix, committed if bit 1 is set.
+    // Otherwise bit 0 clear reseals the CRCs, bit 1 picks the template with a cut bind after log_end, bit 2 resizes the
+    // file by the first two bytes of the rest (append or truncate). Bit 3 is not a mode bit: the committed seeds of the
+    // edit mode use 8 and 10 for an even, nonzero mode.
     let file = if mode == 0 {
         rest.to_vec()
+    } else if mode & 0x10 != 0 {
+        arbitrary_frames(rest, mode & 2 != 0)
     } else {
         let (template, frames) = if mode & 2 == 0 {
             template()

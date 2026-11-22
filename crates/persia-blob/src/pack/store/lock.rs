@@ -1,127 +1,103 @@
-//! The pack's writer lock (SPEC §9.3; ROADMAP 9.2.7; ADR-0053): what makes one read-write handle per pack a fact, not
-//! a contract. The writer proof is the API gate; this lock is the enforcement.
+//! The pack's writer lock (SPEC §9.3; ROADMAP 9.2.7, 9.2.15; ADR-0053): what makes one read-write handle per pack a
+//! fact, not a contract. The writer proof is the API gate; this lock is the enforcement.
 //!
-//! The primitive is the container's (SPEC §4.5.1): [`ContainerFile::try_lock`] on the pack file itself (`flock` on
-//! Unix, a per-handle lock on a `SimFs`), or on Windows, where a file lock is mandatory and would keep readers out,
-//! the locked `<name>.persia.blobs.lock` file beside the pack ([`Vfs::lock_beside`]).
+//! One mechanism on every platform: the locked file `<name>.persia.blobs.lock` beside the pack ([`lock_path`]). On
+//! Windows it is what [`Vfs::lock_beside`] takes (a mandatory lock on the pack itself would keep readers out); where
+//! that returns `None` (Unix, a `SimFs`), the pack opens or creates the same file itself and takes the container's
+//! primitive on it, [`ContainerFile::try_lock`] (`flock` on Unix, a per-handle lock on a `SimFs`; SPEC §4.5.1).
 //!
-//! - A read-write open takes the lock beside the pack, or the lock on an existing pack file, before it sweeps or
-//!   recovers anything; a pack opened just as a rewrite renamed a new file over it is reopened (the lock must be on
-//!   the file the path names).
-//! - The creation of the pack and its rewrite lock their new file before writing it, so the path never names an
-//!   unlocked pack while the writer lives; the old file's lock is released only when the handle drops it, after the
-//!   rename (ADR-0052). The lock beside the pack names no file the rewrite replaces.
-//! - A creation or rewrite that fails after its new file may name the path keeps that file locked for the handle's life
-//!   (the handle is poisoned and writes nothing more), so the path never names a pack a second writer could lock.
-//! - The lock is held until the handle (and its file) is dropped, however long other owners keep the handle alive.
-//! - Before the pack file exists (Unix) there is nothing to lock: two read-write handles opened then can both exist,
-//!   and the one whose creation loses the race to link its file fails at its first write, poisoned.
+//! - A read-write open takes it before it sweeps, recovers or creates anything, so a second read-write handle fails
+//!   with [`Error::PackLocked`] even while no pack file exists yet.
+//! - It names no file a creation links or a rewrite renames, so neither has to lock its new file: the pack's path can
+//!   name any file while the writer lives, and the lock stays where it is.
+//! - It is held until the handle is dropped, however long other owners (an `Arc` clone that outlives the container)
+//!   keep the handle alive, and released before the close (a forked copy of the descriptor would keep it otherwise).
+//! - A symbolic link at that name is followed (the lock is its target's); one to nothing is an error. The listing
+//!   and sweep of the container's side files never open such a link, and keep the pack's temporary files.
+//! - The file is created if missing and never removed by Persia: removing it would let a second writer lock a new file
+//!   of that name while the first holds the old one. It holds no data, so its creation is not synced: a crash that
+//!   loses it loses no lock (locks do not survive the process).
 
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
-use persia_storage::vfs::Vfs;
+use persia_storage::vfs::{EntryKind, Vfs};
 
 use super::{ContainerFile, Error, Result, io, io_err};
 
-/// How often a read-write open retries a pack a rewrite renamed over the path while it was taking the lock.
+/// How often the open retries a lock file found and then gone before it could be opened (someone removed it).
 const OPEN_ATTEMPTS: u32 = 8;
 
-/// A locked file whose lock is released when dropped: the lock file beside the pack (Windows), or a new pack file a
-/// rewrite may have renamed over the path when its rename reported an error (kept locked for the handle's life).
+/// A locked file whose lock is released when dropped: the lock file beside the pack.
 #[derive(Debug)]
-pub(super) struct Held<F: ContainerFile>(pub(super) F);
+pub(super) struct Held<F: ContainerFile>(F);
 
 impl<F: ContainerFile> Drop for Held<F> {
     fn drop(&mut self) {
-        release(&self.0);
+        if let Err(error) = self.0.unlock() {
+            // `Drop` cannot return it; closing the descriptor next releases the lock anyway while no duplicate remains.
+            tracing::warn!(%error, "releasing the blob pack's writer lock failed");
+        }
     }
 }
 
-/// Releases `file`'s lock, logging a failure: [`Drop`] cannot return it, and closing the descriptor next releases the
-/// lock anyway while no duplicate remains.
-pub(super) fn release<F: ContainerFile>(file: &F) {
-    if let Err(error) = file.unlock() {
-        tracing::warn!(%error, "releasing the blob pack's writer lock failed");
-    }
+/// `<pack>.lock`: the writer lock file beside the pack at `pack`.
+pub(super) fn lock_path(pack: &Path) -> PathBuf {
+    let mut name = OsString::from(pack.as_os_str());
+    name.push(".lock");
+    PathBuf::from(name)
 }
 
-/// The lock beside the pack at `path`, where the platform uses one (`None`: the pack file itself is locked).
+/// Takes the writer lock beside the pack at `path` without waiting, creating the lock file if missing.
 ///
 /// # Errors
 /// [`Error::PackLocked`] if another handle holds it, or [`Error::PackIo`].
 pub(super) fn lock_beside<F: ContainerFile>(
     vfs: &dyn Vfs<File = F>,
     path: &Path,
-) -> Result<Option<Held<F>>> {
+) -> Result<Held<F>> {
     match vfs.lock_beside(path) {
-        Ok(file) => Ok(file.map(Held)),
-        Err(e) if e.kind() == io::ErrorKind::WouldBlock => Err(Error::PackLocked),
-        Err(e) => Err(io_err("lock")(e)),
+        Ok(Some(file)) => return Ok(Held(file)),
+        Ok(None) => {}
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Err(Error::PackLocked),
+        Err(e) => return Err(io_err("lock")(e)),
     }
-}
-
-/// Takes the writer lock on `file` without waiting.
-///
-/// # Errors
-/// [`Error::PackLocked`] if another handle holds it, or [`Error::PackIo`].
-pub(super) fn lock<F: ContainerFile>(file: &F) -> Result<()> {
+    let file = open_or_create(vfs, &lock_path(path))?;
     match file.try_lock() {
-        Ok(true) => Ok(()),
+        Ok(true) => Ok(Held(file)),
         Ok(false) => Err(Error::PackLocked),
         Err(e) => Err(io_err("lock")(e)),
     }
 }
 
-/// Opens the pack at `path` read-write and locks it; `None` when there is no pack file. The lock is taken on the file
-/// the path still names after locking: one a rewrite renamed away meanwhile is unlocked and the path opened again.
-///
-/// # Errors
-/// [`Error::PackLocked`] if another handle holds the lock (or the path kept changing under it), or [`Error::PackIo`].
-pub(super) fn open_locked<F: ContainerFile>(
-    vfs: &dyn Vfs<File = F>,
-    path: &Path,
-) -> Result<Option<F>> {
+/// The lock file at `path`, opened read-write, created if missing.
+fn open_or_create<F: ContainerFile>(vfs: &dyn Vfs<File = F>, path: &Path) -> Result<F> {
     for _ in 0..OPEN_ATTEMPTS {
-        let file = match vfs.open(path, true) {
-            Ok(file) => file,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(io_err("open")(e)),
-        };
-        lock(&file)?;
-        match vfs.same_file(&file, path) {
-            Ok(true) => return Ok(Some(file)),
-            Ok(false) => release(&file),
-            Err(e) => {
-                release(&file);
-                return Err(io_err("stat")(e));
+        match vfs.create_new(path) {
+            Ok(file) => return Ok(file),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(io_err("create the lock file")(e)),
+        }
+        match vfs.open(path, true) {
+            Ok(file) => return Ok(file),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                // The name exists (the create said so) but opens to nothing: a symbolic link to nothing, which the
+                // create will never replace. Anything else was removed between the two calls: create it again.
+                if matches!(vfs.entry_kind(path), Ok(EntryKind::Other)) {
+                    return Err(Error::PackIo {
+                        op: "open the lock file",
+                        source: io::Error::new(
+                            io::ErrorKind::NotFound,
+                            format!("{} is a symbolic link to nothing", path.display()),
+                        ),
+                    });
+                }
             }
+            Err(e) => return Err(io_err("open the lock file")(e)),
         }
     }
-    // The path changed under every attempt: a writer is busy rewriting it (as the container's open, SPEC §4.5.1).
-    Err(Error::PackLocked)
-}
-
-/// `error`, after releasing `file`'s lock if `locked`: a failed open must unlock, not only close, since a forked
-/// copy of the descriptor keeps the lock after the close (SPEC §4.5.1).
-pub(super) fn unlock_after<F: ContainerFile>(file: &F, locked: bool, error: Error) -> Error {
-    if locked {
-        release(file);
-    }
-    error
-}
-
-/// Unlocks `file` on drop while [`locked`](Self::locked). A failed create or rewrite must unlock, not only close
-/// (SPEC §4.5.1): a forked copy of the descriptor keeps the lock after the close. Clear `locked` to keep the lock
-/// (the caller takes the file).
-pub(super) struct UnlockOnDrop<'a, F: ContainerFile> {
-    pub(super) file: &'a F,
-    pub(super) locked: bool,
-}
-
-impl<F: ContainerFile> Drop for UnlockOnDrop<'_, F> {
-    fn drop(&mut self) {
-        if self.locked {
-            release(self.file);
-        }
-    }
+    Err(Error::PackIo {
+        op: "open the lock file",
+        source: io::Error::other("the lock file kept disappearing"),
+    })
 }

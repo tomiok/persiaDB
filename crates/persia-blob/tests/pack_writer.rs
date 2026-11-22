@@ -8,11 +8,14 @@
 //! 3. A pack opened without a proof is read-only: it refuses every write and never creates the file.
 //! 4. Two writers are impossible: a second read-write open of the container fails on its lock, so no second proof (and
 //!    no second read-write pack) exists until the first container is closed.
+//! 5. The pack's own writer lock, `<name>.persia.blobs.lock` beside it on every platform, allows one read-write
+//!    handle whatever the proof, from the open (with or without a pack file) until the handle is dropped (ROADMAP
+//!    9.2.15).
 #![allow(clippy::unwrap_used, clippy::panic, missing_docs)] // Tests: inputs are fixed.
 
 mod pack_support;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use persia_blob::{
@@ -21,7 +24,7 @@ use persia_blob::{
 };
 use persia_format::checksum::crc32c;
 use persia_storage::container::sim::SimFile;
-use persia_storage::container::{Container, Error as ContainerError, Mode};
+use persia_storage::container::{Container, ContainerFile, Error as ContainerError, Mode};
 use persia_storage::vfs::Vfs;
 use persia_storage::vfs::sim::{SimFs, SimFsFile};
 
@@ -193,7 +196,8 @@ fn the_pack_lock_allows_one_writer_whatever_the_proof() {
     assert_eq!(store.blob_ids(), [blob_id_of(b"locked")]);
 }
 
-/// The same on the operating system's file system: `flock` on Unix, `<name>.persia.blobs.lock` on Windows.
+/// The same on the operating system's file system: `<name>.persia.blobs.lock`, locked with `flock` on Unix and
+/// `LockFileEx` on Windows (ROADMAP 9.2.15).
 #[test]
 fn the_pack_lock_allows_one_writer_on_a_real_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -218,4 +222,171 @@ fn the_pack_lock_allows_one_writer_on_a_real_file() {
     drop(first);
     let again = PackStore::open_writer(pack_path(&db), &proof).unwrap();
     assert_eq!(again.blob_ids(), [m.blob_id()]);
+}
+
+const LOCK: &str = "/db/app.persia.blobs.lock";
+
+/// ROADMAP 9.2.15: the lock is beside the pack, so it exists before the pack does. A second read-write handle opened
+/// while there is no pack file fails with `PackLocked`, and the first creates the pack and binds as usual; the lock is
+/// released when that handle is dropped, never before, and the lock file stays.
+#[test]
+fn a_second_writer_fails_on_the_pack_lock_before_the_pack_exists() {
+    let fs = fs();
+    let path = pack_path(Path::new(DB));
+    let container = Container::create_in(vfs(&fs), DB).unwrap();
+    let proof = container.writer_proof().unwrap();
+    let first = PackStore::open_writer_in(vfs(&fs), &path, &proof).unwrap();
+    assert!(!first.exists());
+    assert!(fs.read(&path).is_none(), "no pack file yet");
+    assert!(fs.read(Path::new(LOCK)).is_some(), "the lock file exists");
+    assert!(matches!(
+        PackStore::open_writer_in(vfs(&fs), &path, &proof),
+        Err(Error::PackLocked)
+    ));
+    // The lock is the file's, whoever asks for it.
+    let other = fs.open(Path::new(LOCK), true).unwrap();
+    assert!(!other.try_lock().unwrap(), "held by the first writer");
+    store_blob(&first, b"first writer", 1);
+    assert!(matches!(
+        PackStore::open_writer_in(vfs(&fs), &path, &proof),
+        Err(Error::PackLocked)
+    ));
+    drop(first);
+    assert!(
+        fs.read(Path::new(LOCK)).is_some(),
+        "the lock file is never removed"
+    );
+    assert!(other.try_lock().unwrap(), "released on drop");
+    other.unlock().unwrap();
+    let again = PackStore::open_writer_in(vfs(&fs), &path, &proof).unwrap();
+    assert_eq!(again.blob_ids(), [blob_id_of(b"first writer")]);
+}
+
+/// A failed read-write open releases the lock at once: a pack of another database, or a damaged one, leaves no lock
+/// behind for the next writer.
+#[test]
+fn a_failed_writer_open_releases_the_pack_lock() {
+    let fs = fs();
+    let path = pack_path(Path::new(DB));
+    let container = Container::create_in(vfs(&fs), DB).unwrap();
+    let proof = container.writer_proof().unwrap();
+    let f = fs.create_new(&path).unwrap();
+    f.write_all_at(&[0xaa; 12288], 0).unwrap();
+    assert!(
+        PackStore::open_writer_in(vfs(&fs), &path, &proof)
+            .unwrap_err()
+            .is_corruption()
+    );
+    let lock = fs.open(Path::new(LOCK), true).unwrap();
+    assert!(lock.try_lock().unwrap(), "released after the failed open");
+}
+
+/// A read-only open neither takes nor creates the lock.
+#[test]
+fn a_reader_takes_no_pack_lock() {
+    let fs = fs();
+    let path = pack_path(Path::new(DB));
+    let reader = PackStore::open_in(vfs(&fs), &path, [5; 16]).unwrap();
+    assert!(fs.read(Path::new(LOCK)).is_none());
+    drop(reader);
+    let container = Container::create_in(vfs(&fs), DB).unwrap();
+    let writer = PackStore::open_writer_in(vfs(&fs), &path, &container.writer_proof().unwrap());
+    let _reader = PackStore::open_in(vfs(&fs), &path, container.header().db_uuid).unwrap();
+    assert!(writer.is_ok());
+}
+
+/// ROADMAP 9.2.15 with an `Arc` of the store that outlives its container, before any pack file exists: a new
+/// read-write container of the same file mints a proof, and its pack open still fails until the old store is dropped.
+#[test]
+fn an_arc_of_the_store_keeps_the_lock_after_its_container_closes_with_no_pack() {
+    let fs = fs();
+    let path = pack_path(Path::new(DB));
+    let container = Container::create_in(vfs(&fs), DB).unwrap();
+    let first = Arc::new(
+        PackStore::open_writer_in(vfs(&fs), &path, &container.writer_proof().unwrap()).unwrap(),
+    );
+    let kept = Arc::clone(&first);
+    drop((first, container));
+    let next = Container::open_in(vfs(&fs), DB, Mode::ReadWrite).unwrap();
+    assert!(matches!(
+        PackStore::open_writer_in(vfs(&fs), &path, &next.writer_proof().unwrap()),
+        Err(Error::PackLocked)
+    ));
+    assert!(!kept.exists(), "still no pack file");
+    drop(kept);
+    let store = PackStore::open_writer_in(vfs(&fs), &path, &next.writer_proof().unwrap()).unwrap();
+    store_blob(&store, b"after the arc", 1);
+}
+
+/// The same on the operating system's file system, with no pack file: two writers cannot both live, and the lock file
+/// is `<name>.persia.blobs.lock` beside the pack.
+#[test]
+fn two_writers_with_no_pack_file_on_a_real_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("app.persia");
+    let container = Container::create(&db).unwrap();
+    let proof = container.writer_proof().unwrap();
+    let first = PackStore::open_writer(pack_path(&db), &proof).unwrap();
+    assert!(!first.exists());
+    assert!(dir.path().join("app.persia.blobs.lock").is_file());
+    assert!(matches!(
+        PackStore::open_writer(pack_path(&db), &proof),
+        Err(Error::PackLocked)
+    ));
+    drop(first);
+    assert!(PackStore::open_writer(pack_path(&db), &proof).is_ok());
+}
+
+/// ROADMAP 9.2.10 with a real pack writer: the container's sweep sees the lock a live pack handle holds (one an `Arc`
+/// kept after its container closed) and keeps the pack's temporary files; once the handle drops, it removes them.
+#[test]
+fn the_container_sweep_keeps_the_packs_temporary_files_while_its_writer_lives() {
+    let fs = fs();
+    let path = pack_path(Path::new(DB));
+    let container = Container::create_in(vfs(&fs), DB).unwrap();
+    let store = Arc::new(
+        PackStore::open_writer_in(vfs(&fs), &path, &container.writer_proof().unwrap()).unwrap(),
+    );
+    let stale = "/db/app.persia.blobs.tmp.0123456789abcdef.3";
+    fs.create_new(Path::new(stale)).unwrap();
+    let kept = Arc::clone(&store);
+    drop((store, container));
+    let next = Container::open_in(vfs(&fs), DB, Mode::ReadWrite).unwrap();
+    assert_eq!(next.sweep_stale_files().unwrap(), Vec::<PathBuf>::new());
+    assert!(fs.read(Path::new(stale)).is_some());
+    drop(kept);
+    assert_eq!(next.sweep_stale_files().unwrap(), [PathBuf::from(stale)]);
+}
+
+/// ROADMAP 9.2.15: a symbolic link at `<name>.persia.blobs.lock` is followed, so the lock is its target's and still
+/// allows one writer; a link to nothing fails the open with a clear I/O error, not a retry loop.
+#[cfg(unix)]
+#[test]
+fn a_lock_link_is_followed_and_a_link_to_nothing_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let db = dir.path().join("app.persia");
+    let container = Container::create(&db).unwrap();
+    let proof = container.writer_proof().unwrap();
+    let lock = dir.path().join("app.persia.blobs.lock");
+    let target = outside.path().join("lock");
+    std::fs::write(&target, b"").unwrap();
+    std::os::unix::fs::symlink(&target, &lock).unwrap();
+    let first = PackStore::open_writer(pack_path(&db), &proof).unwrap();
+    assert!(matches!(
+        PackStore::open_writer(pack_path(&db), &proof),
+        Err(Error::PackLocked)
+    ));
+    let other = std::fs::File::open(&target).unwrap();
+    assert!(other.try_lock().is_err(), "the target holds the lock");
+    drop((first, other));
+
+    std::fs::remove_file(&target).unwrap();
+    let err = PackStore::open_writer(pack_path(&db), &proof).unwrap_err();
+    assert!(
+        matches!(&err, Error::PackIo { op: "open the lock file", source }
+            if source.kind() == std::io::ErrorKind::NotFound
+                && source.to_string().contains("symbolic link to nothing")),
+        "{err:?}"
+    );
 }
