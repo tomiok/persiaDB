@@ -159,8 +159,13 @@ mod tests {
                 matches!(err, Error::InvalidResume { what: "ten" }),
                 "{p}: {err:?}"
             );
-            // At most `p` jobs were in flight when the failure was seen.
-            assert!(started.load(Ordering::Relaxed) <= 11 + p, "{p}");
+            // `run`: once a thread sees a failure it starts no new index, though a thread that
+            // checked just before the failure was recorded may start one more. Indices above the
+            // lowest failure (10) may already have been claimed before that store, so the started
+            // count is at most `count`, not the failing index plus the parallelism. Every index
+            // below the failure was started before it, and the failing index itself ran.
+            let n = started.load(Ordering::Relaxed);
+            assert!((11..=1000).contains(&n), "{p}: {n}");
         }
     }
 

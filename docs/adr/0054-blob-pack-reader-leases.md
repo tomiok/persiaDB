@@ -1,6 +1,6 @@
 # ADR-0054: Reader leases on the local blob pack
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-11-21
 - Related: SPEC §4.6, §4.8, §8.4, §8.6, §9.3, §9.5, §9.6, §18.10; ROADMAP 9.2.13, 9.2.15, 9.2.16, 13.2.4,
   13.2.5; ADR-0016, ADR-0019, ADR-0021, ADR-0049, ADR-0052, ADR-0053
