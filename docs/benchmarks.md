@@ -665,6 +665,26 @@ step, `w12` expanded beside `w` exact, finds nothing. `l3/two_letters` is new: `
 `l3/two_letters` builds the same step on both; its 2.6% is within the drift earlier rows show on code a change does
 not touch.
 
+With L1's alternatives cached per set of default fields (ROADMAP 8.1.16, ADR-0058), default build, 2026-11-22, rustc
+1.99.0, AMD Ryzen 5 3600, Linux. Before is the branch at f3bccd2 (8.1.20, which does not touch compilation) with the
+new cases added, run in the same worktree just before the change. `compile/plain` and `compile/synonyms` compile
+`w3 w40 w7 w120 nosuch` without synonyms and with the 2 002 groups of the bench's `synonym_compiler` (`w3` has 50
+alternatives, `nosuch` 2). `search_relaxed/l0/compiled` and `l0/compiled_synonyms` are new: `w3 w40` compiled each
+iteration (with the same two compilers), then searched relaxed with the collection's levels over the 4-segment
+collection; L0 has `min_results` hits, so no later level is built, and the alternatives of `w3` go unused. Command:
+`cargo bench -p persia-engine --bench search -- 'compile/|search_relaxed/(l0|l0/compiled|l0/compiled_synonyms|l1)$'`.
+
+| Recorded | `compile/plain` | `compile/synonyms` | `l0` | `l0/compiled` | `l0/compiled_synonyms` | `l1` |
+|---|--:|--:|--:|--:|--:|--:|
+| 8.1.20 (f3bccd2) | 2.40 µs | 37.7 µs | 475 µs | 469 µs | 516 µs | 890 µs |
+| ROADMAP 8.1.16 | 2.37 µs | 19.4 µs | 459 µs | 476 µs | 498 µs | 902 µs |
+
+The synonyms' share of a compilation drops from 35.3 µs to 17.0 µs, and of the L0 search compiled each time from 47 µs
+to 22 µs. Of the 17 µs left, about 5.5 µs is the scan for runs over the groups (measured by returning no alternative,
+a local change), and the rest is per alternative: a clone of the cached query and the check against the run's earlier
+ones. `l0` and `l1` compile once, outside the loop, so the cache does not change their work; they moved by −3% and
++1%, the drift of unchanged code.
+
 ## `persia-engine` relevance
 
 `cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2, 7.8.4): 18 user-text queries with graded judgments over

@@ -21,7 +21,7 @@ use super::limits::{QueryLimits, Usage};
 mod synonyms;
 
 pub use synonyms::CompiledSynonym;
-use synonyms::{Captured, Scan};
+use synonyms::{AlternativeCache, Captured, Scan};
 
 /// The `text` fields plain words and phrases search, with their BM25F weights (the `fields` of SPEC §7.1).
 ///
@@ -529,6 +529,9 @@ pub struct QueryCompiler {
     /// By field id: the collection's synonym groups analyzed by the field's query-time analysis (SPEC §6.3.2), built
     /// the first time a query searches the field by default. Unused for fields that are not `text`.
     synonyms: Vec<OnceLock<SynonymMap>>,
+    /// The synonym terms compiled as alternatives over the default fields runs were last compiled over, each once
+    /// (ROADMAP 8.1.16, ADR-0058).
+    alternatives: AlternativeCache,
 }
 
 impl std::fmt::Debug for QueryCompiler {
@@ -551,7 +554,8 @@ struct Clause<'t> {
 impl QueryCompiler {
     /// A compiler for `schema`, analyzing `text` fields with the analyzers `registry` has for them. Build one per
     /// schema and reuse it: the first compilation that searches a field by default analyzes the collection's synonym
-    /// groups for it (SPEC §6.3.2), up to 1 MiB of terms, and later ones reuse them.
+    /// groups for it (SPEC §6.3.2), up to 1 MiB of terms, and later ones reuse them. So do the alternatives a run
+    /// compiles to (ROADMAP 8.1.16), over each of the last 4 sets of default fields they were compiled over.
     ///
     /// # Errors
     /// [`QueryError::UnknownAnalyzer`] if `registry` lacks the analyzer (name and version) of a `text` field.
@@ -573,6 +577,7 @@ impl QueryCompiler {
         Ok(Self {
             schema: schema.clone(),
             synonyms: analyzers.iter().map(|_| OnceLock::new()).collect(),
+            alternatives: AlternativeCache::default(),
             analyzers,
         })
     }

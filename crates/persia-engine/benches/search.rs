@@ -1173,6 +1173,42 @@ fn compile(c: &mut Criterion) {
     group.finish();
 }
 
+/// A request's user text compiled, then searched relaxed with the collection's levels, each iteration, in the
+/// `search_relaxed` group (ROADMAP 8.1.16): `w3 w40` over the 4-segment collection, whose L0 has `min_results` hits,
+/// so no later level is built. `l0/compiled` compiles without synonyms; `l0/compiled_synonyms` with the groups of
+/// [`synonym_compiler`], where `w3` has 50 alternatives that L1 would OR it with, had L0 found too few.
+fn relaxed_compiled(c: &mut Criterion) {
+    let (db, _) = collection(4, false);
+    let snapshot = db.snapshot();
+    let coll = snapshot.collection("bench").unwrap();
+    let memtable = coll.memtable();
+    let schema = coll.schema();
+    let views = coll.views(&memtable).unwrap();
+    let request = SearchRequest {
+        limit: 10,
+        ..SearchRequest::default()
+    };
+    let exec = Execution::default().threads(Threads::Current);
+    let relax = RelaxPlan::new(schema.relaxation(), &RelaxOptions::default()).unwrap();
+    let plain = QueryCompiler::new(schema, &AnalyzerRegistry::builtin()).unwrap();
+    let synonyms = synonym_compiler(schema);
+    let fields = DefaultFields::all(schema);
+    let mut group = c.benchmark_group("search_relaxed");
+    for (name, compiler) in [("l0/compiled", &plain), ("l0/compiled_synonyms", &synonyms)] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let text = compiler.compile("w3 w40", &fields, &QueryLimits::default());
+                let out = views
+                    .search_relaxed(&text, &request, &relax, &exec)
+                    .unwrap();
+                assert_eq!(out.relaxation.level, RelaxLevel::Exact);
+                black_box(out)
+            });
+        });
+    }
+    group.finish();
+}
+
 /// A compiler for `schema` with 2 002 synonym groups: `nosuch` (in no document) with `w40` and `w120`, `w3` with 50
 /// words in none, and 2 000 pairs of words in none.
 fn synonym_compiler(schema: &CollectionSchema) -> QueryCompiler {
@@ -1207,6 +1243,7 @@ criterion_group!(
     relaxed_tiers,
     relaxed_two_letters,
     relaxed_filters,
+    relaxed_compiled,
     compile
 );
 criterion_main!(benches);
