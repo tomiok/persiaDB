@@ -101,8 +101,11 @@ impl<F: ContainerFile + 'static> PackStore<F> {
     /// A new read-only open of the pack now at this handle's path, with this handle's `db_uuid`: the pack of another
     /// database there fails with [`Error::PackOfAnotherDatabase`], and this handle is left as it was.
     ///
-    /// [`PackStore::refresh`] returns [`Error::PackReplaced`] and stays on the file it opened (ROADMAP 9.2.13). A
-    /// caller that holds `&mut` to its reader, so nothing still borrows this handle, opens the replacement with this.
+    /// [`PackStore::refresh`] returns [`Error::PackReplaced`] and stays on the file it opened (ROADMAP 9.2.13): that file,
+    /// and what this handle mapped of it, stay valid until the handle drops, so nothing in the handle has to be reopened
+    /// or remapped. A caller that holds `&mut` to its reader, so nothing still borrows this handle, opens the
+    /// replacement with this. The new handle starts with mapped reads off, as any open: turn them on again with
+    /// [`PackStore::enable_mapped_reads`].
     ///
     /// # Errors
     /// As [`PackStore::open_in`].

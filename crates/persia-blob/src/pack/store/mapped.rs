@@ -540,4 +540,39 @@ mod tests {
         );
         assert_eq!(read_chunk_checked(&store, &kept, 1).unwrap(), b" by ");
     }
+
+    /// ROADMAP 9.2.13: a read-only handle stays on the file it opened, and on its mapping, when `refresh` reports a
+    /// replaced pack; `reopen` opens the replacement with mapped reads off, as any open.
+    #[test]
+    fn a_replaced_pack_keeps_the_readers_mapping_and_a_reopen_starts_unmapped() {
+        let fail = Arc::new(AtomicBool::new(false));
+        let (fs, writer) = store();
+        let kept = put(&writer, b"kept by the mark", 4, 1);
+        put(&writer, b"dropped by the rewrite", 4, 2);
+        let reader = PackStore::open_in(Arc::new(fs.clone()), "/p.blobs", [0; 16]).unwrap();
+        reader.enable_copied_reads(Arc::clone(&fail));
+        let mapped = reader.mapped_range().unwrap();
+        writer
+            .rewrite(&crate::gc::Mark::new([kept.blob_id()], []), &NoPins, 0.0)
+            .unwrap();
+        assert!(matches!(
+            reader.refresh(),
+            Err(crate::Error::PackReplaced { .. })
+        ));
+        assert_eq!(
+            reader.mapped_range(),
+            Some(mapped),
+            "the old file's mapping stays"
+        );
+        assert_eq!(read_chunk_checked(&reader, &kept, 0).unwrap(), b"kept");
+        let reopened = reader.reopen().unwrap();
+        assert_eq!(reopened.mapped_range(), None);
+        assert_eq!(read_chunk_checked(&reopened, &kept, 0).unwrap(), b"kept");
+        assert!(
+            reopened
+                .manifest(blob_id_of(b"dropped by the rewrite"))
+                .unwrap()
+                .is_none()
+        );
+    }
 }
