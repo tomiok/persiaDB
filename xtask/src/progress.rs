@@ -137,8 +137,9 @@ fn is_later_version(label: &str) -> bool {
 
 /// Whether a leaf's text carries a later version label: `(v1.1) Text`, or `Text (v1.1)` before an optional
 /// ` Done as: ...` remark (appended when the leaf is ticked, so ticking it must not move it into the MVP); a `.` or
-/// `;` after the label is allowed. A later label anywhere else (mid-text, after `[T]`, followed by another remark)
-/// is an error: classifying such a leaf as MVP would change the counts silently.
+/// `;` after the label is allowed. A later label anywhere else before the remark (mid-text, after `[T]`, followed by
+/// another remark, or opening a compound parenthesis such as `(v1.1, found in 6.1)`) is an error: classifying such a
+/// leaf as MVP would change the counts silently. The "Done as:" remark itself may name later work freely.
 fn later_label(text: &str) -> Result<bool, String> {
     fn label_of(s: &str) -> Option<&str> {
         s.strip_prefix('(')?.strip_suffix(')')
@@ -155,9 +156,10 @@ fn later_label(text: &str) -> Result<bool, String> {
     if label_of(leading).is_some_and(is_later_version) || trailing.is_some_and(is_later_version) {
         return Ok(true);
     }
-    let misplaced = text.match_indices('(').find_map(|(i, _)| {
-        let rest = text.get(i + 1..)?;
-        let label = rest.get(..rest.find(')')?)?;
+    let misplaced = body.match_indices('(').find_map(|(i, _)| {
+        let rest = body.get(i + 1..)?;
+        let inside = rest.get(..rest.find(')')?)?;
+        let label = inside.split([',', ';']).next()?.trim();
         is_later_version(label).then_some(label)
     });
     match misplaced {
@@ -1316,7 +1318,7 @@ Deps: M0–M1
             "(v1.0) A leaf",
             "A leaf (v1.0)",
             "(v1.0) [T] A leaf (found in 6.1)",
-            "A leaf (v1.1, found in 6.1)",
+            "An MVP leaf. Done as: the rest moved to 6.5.6 (v1.1).",
             "A leaf named after v1.1 (found in 6.1)",
             "A leaf (post-v) with a malformed label",
         ] {
@@ -1327,6 +1329,8 @@ Deps: M0–M1
             "A (v1.1) label in the middle of the text",
             "A leaf (v1.1) and more text",
             "A leaf (v1.1) (found in 6.1)",
+            "A leaf (v1.1, found in 6.1)",
+            "A leaf (found in 6.1; v1.1) (post-v1; see 8.2.11) more",
             "[T] (v1.1) A label after the test mark",
             "A leaf (post-v1) Done later. Done as: x.",
         ] {
