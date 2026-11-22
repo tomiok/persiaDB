@@ -176,6 +176,7 @@ pub(super) fn load<F: ContainerFile + Sync>(
                 segments,
                 first_write: None,
                 last_write: None,
+                relaxation: Arc::default(),
             };
             collections.insert(name.to_owned(), collection);
         }
