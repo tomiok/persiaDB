@@ -3,7 +3,7 @@
 
 **401/601 leaves done (67%)** · 0 in progress · `████████████████████░░░░░░░░░░` · last snapshot: 2026-11-22
 
-MVP (M0–M15): the counts above. Post-MVP: **0/190 leaves done (0%)** · 0 in progress. Those leaves are not part of the percentage, the graph, the ready-next list, or the burn-up. In-progress ones are listed under Post-MVP.
+MVP (M0–M15): the counts above. Post-MVP: **0/193 leaves done (0%)** · 0 in progress. Those leaves are not part of the percentage, the graph, the ready-next list, or the burn-up. In-progress ones are listed under Post-MVP.
 
 Status lives in [`ROADMAP.md`](./ROADMAP.md) checkboxes (`[ ]` todo · `[~]` in progress · `[x]` done).
 After changing one, run `cargo xtask progress --record`.
@@ -83,7 +83,7 @@ Not included in the headline, the graph, the ready-next list, or the burn-up. In
 
 | Milestone | State | Progress | Done | Doing | Leaves | Deps |
 |---|---|---|--:|--:|--:|---|
-| **M16** Embedded SDKs (v1.1) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 20 | M15 |
+| **M16** Embedded SDKs (v1.1) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 21 | M15 |
 | **M17** Highlighting and snippets (v1.1) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 8 | M7, M15 |
 | **M18** Autocomplete (v1.1) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 8 | M4, M8, M10, M15 |
 | **M19** Import (v1.1) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 11 | M10, M15 |
@@ -98,7 +98,7 @@ Not included in the headline, the graph, the ready-next list, or the burn-up. In
 | **M28** On-device (v2.3) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 9 | M2, M16 |
 | **M29** Geo filters and sorting (v3.0) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 7 | M7, M15 |
 | **M30** Enterprise (v3.0) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 10 | M13, M20, M22, M25 |
-| **M31** Persia Studio (v1.1) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 13 | M16 |
+| **M31** Persia Studio (v1.1) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 15 | M16 |
 | **M32** Ranking rules (v1.1) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 5 | M7, M8, M15 |
 | **M33** Search features (v1.1) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 6 | M4, M6, M7, M15 |
 | **M34** Backup, export, and query analytics (v1.2) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 2 | M8, M10, M15 |

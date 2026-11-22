@@ -984,6 +984,7 @@ The design is ADR-0018 and `docs/sdk/` (C ABI, Go, TypeScript, distribution). Th
 
 ## 16.6 Read-only WASM build (v1.1)
 - [ ] 16.6.1 (v1.1) Read-only WASM build of the core for Persia Studio (M31). It does not wait on the M28.2 package or the 28.1 portable backend. It does not fsync and it does not claim the local commit protocol (SPEC §4.5, ADR-0018). [T] The M31 fixture directory opens and a query returns the same ids as the native engine; a write API is absent
+- [ ] 16.6.2 (v1.1) The read-only WASM build also reads blobs from the sidecar pack `<name>.persia.blobs` (SPEC §9.3): it verifies chunk/frame checksums and the blob's SHA-256 id as the native reader does, with no write, no fsync and no lock (SPEC §4.5, ADR-0018). A database without a pack works unchanged. [T] A fixture with blobs: `get_blob` in WASM returns the same bytes as the native engine; a corrupted chunk is `Error::Corrupt`, not wrong bytes
 
 ---
 
@@ -1345,6 +1346,7 @@ A browser client that inspects a Persia database. It lives entirely in the brows
 - [ ] 31.1.2 The user picks the `database.persia/` directory with the File System Access API. The page reads the files and passes the bytes to the core. It does not compile the mmap container to WASM (ADR-0018, ADR-0010, SPEC §4.7). Firefox and Safari have no directory picker; the page says so
 - [ ] 31.1.3 The adapter is read-only. It does not fsync and it does not claim the local commit protocol (SPEC §4.5). Cancelling the picker leaves the page idle
 - [ ] 31.1.4 [T] A fixture directory is opened through a stand-in for the picker. The listed objects match the directory, and no file in it changes. A cancelled picker renders no database
+- [ ] 31.1.5 (v1.1) A local database is the `<name>.persia` file plus an optional `<name>.persia.blobs` pack (SPEC §4), not a `database.persia/` directory. The page picks those files (file picker, or the directory that contains them) and passes their bytes to the core
 
 ## 31.2 Inspect
 - [ ] 31.2.1 Segments and the manifest: segment ids, document counts, deletions, and the commit `seq` (SPEC §5, §8.7). A corrupt segment is an error on that row (SPEC §17), not an empty database
@@ -1352,6 +1354,7 @@ A browser client that inspects a Persia database. It lives entirely in the brows
 - [ ] 31.2.3 Tombstones for a segment: the sidecar version and the deleted ids (SPEC §8.3). A segment with no sidecar shows none
 - [ ] 31.2.4 WAL state: `wal_start`, the frames still needed, and whether they would replay (SPEC §8.2, §8.6). The page does not append a record
 - [ ] 31.2.5 [T] On a fixture directory, the segment list, one document, one tombstone, and the WAL range match the engine reading the same bytes
+- [ ] 31.2.6 (v1.1) Studio can view a document's blobs via the read-only WASM reader (16.6.2). The page shows the bytes `get_blob` returns. A database without a pack shows none
 
 ## 31.3 Query
 - [ ] 31.3.1 Run a query and list the hits. Ranking and the relaxation object come from the core (SPEC §7.2, §7.6)
