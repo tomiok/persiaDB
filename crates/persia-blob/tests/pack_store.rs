@@ -981,6 +981,13 @@ fn a_range_read_makes_one_read_per_chunk() {
     let before = vfs.reads();
     store.read_chunk_source(&m, 3).unwrap();
     assert_eq!(vfs.reads() - before, 1);
+    // ROADMAP 9.2.11: `read_chunk_checked` too, checked in that read's one CRC pass.
+    let before = vfs.reads();
+    assert_eq!(
+        persia_blob::read_chunk_checked(&store, &m, 3).unwrap(),
+        &data[48..64]
+    );
+    assert_eq!(vfs.reads() - before, 1);
 }
 
 // --- Frame lengths bounded before the open reads them (ROADMAP 9.2.14) ---

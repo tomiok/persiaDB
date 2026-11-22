@@ -379,6 +379,11 @@ mod tests {
             .unwrap_err();
             assert!(e.is_corruption(), "byte {at}: {e}");
             assert_eq!(e.corrupt_offset(), Some(frame), "byte {at}: {e}");
+            // ROADMAP 9.2.11: `read_chunk_checked` checks through the frame's one CRC pass, and names the frame.
+            let index = u32::from(frame != FIRST_FRAME_OFFSET);
+            let e = read_chunk_checked(&store, &m, index).unwrap_err();
+            assert!(e.is_corruption(), "byte {at}: {e}");
+            assert_eq!(e.corrupt_offset(), Some(frame), "byte {at}: {e}");
         }
     }
 

@@ -131,6 +131,23 @@ pub trait BlobStore: Send + Sync {
     /// [`Error::Corrupt`] when the chunk is missing or damaged, or the store's errors.
     fn read_chunk(&self, manifest: &BlobManifest, index: u32) -> Result<Vec<u8>>;
 
+    /// Chunk `index` of the blob `manifest` describes, checked against it (its length and its CRC32C): what
+    /// [`read_chunk_checked`] returns, which calls it.
+    ///
+    /// The default reads the chunk with [`BlobStore::read_chunk`] and checks it, adding no copy. A store that checks
+    /// its stored chunks as it reads them may override it to read and check each byte once (the pack, ROADMAP
+    /// 9.2.11). An override must return only bytes whose length and CRC32C it checked against `manifest`
+    /// ([`read_chunk_checked`] also refuses bytes of another length, as `Corrupt`).
+    ///
+    /// # Errors
+    /// As [`read_chunk_checked`].
+    fn read_chunk_checked(&self, manifest: &BlobManifest, index: u32) -> Result<Vec<u8>> {
+        expected_chunk(manifest, index)?;
+        let bytes = self.read_chunk(manifest, index)?;
+        check_chunk(manifest, index, &bytes)?;
+        Ok(bytes)
+    }
+
     /// The raw bytes of chunks `indices` of the blob `manifest` describes, in index order, as
     /// [`BlobStore::read_chunk`] reads each. A store may read them in parallel (ROADMAP 9.3.2). [`read_range`]
     /// calls it once per range and checks every chunk.
@@ -244,18 +261,24 @@ pub trait BlobStore: Send + Sync {
 pub const SMALL_BLOB_MAX: u64 = 64 << 10;
 
 /// Chunk `index` of the blob `manifest` describes, checked against it: its length against the chunking rules and its
-/// CRC32C against the manifest's (SPEC §9.3, §9.4: a mismatch is corruption).
+/// CRC32C against the manifest's (SPEC §9.3, §9.4: a mismatch is corruption). Reads through
+/// [`BlobStore::read_chunk_checked`], so a store that checks as it reads (the pack) makes one CRC pass (ROADMAP
+/// 9.2.11).
 ///
 /// # Errors
-/// [`Error::Corrupt`] when `index` is past the last chunk or the bytes do not match, or the store's errors.
+/// [`Error::Corrupt`] (or, from the pack, [`Error::CorruptAt`] naming the chunk's frame) when `index` is past the
+/// last chunk or the bytes do not match, or the store's errors.
 pub fn read_chunk_checked<S: BlobStore + ?Sized>(
     store: &S,
     manifest: &BlobManifest,
     index: u32,
 ) -> Result<Vec<u8>> {
-    expected_chunk(manifest, index)?;
-    let bytes = store.read_chunk(manifest, index)?;
-    check_chunk(manifest, index, &bytes)?;
+    let (range, _) = expected_chunk(manifest, index)?;
+    let bytes = BlobStore::read_chunk_checked(store, manifest, index)?;
+    // An override's contract, enforced where it is cheap: the CRC32C is the store's to check.
+    if range.end.checked_sub(range.start) != Some(u64_from_usize(bytes.len())) {
+        return Err(corrupt("a chunk's length differs from its manifest's"));
+    }
     Ok(bytes)
 }
 
@@ -683,6 +706,16 @@ mod tests {
         fn read_chunk(&self, manifest: &BlobManifest, index: u32) -> Result<Vec<u8>> {
             self.inner.read_chunk(manifest, index)
         }
+        // `how` 4 and 5 break `read_chunk_checked`'s length contract too.
+        fn read_chunk_checked(&self, manifest: &BlobManifest, index: u32) -> Result<Vec<u8>> {
+            let mut bytes = read_chunk_checked(&self.inner, manifest, index)?;
+            match self.how {
+                4 => drop(bytes.pop()),
+                5 => bytes.push(0),
+                _ => {}
+            }
+            Ok(bytes)
+        }
         fn discard_upload(&self, upload_id: UploadId) -> Result<()> {
             self.inner.discard_upload(upload_id)
         }
@@ -727,6 +760,26 @@ mod tests {
             let got = read_range(&store, &reference(&m), 0..12);
             if how == 0 {
                 assert_eq!(got.unwrap(), data);
+            } else {
+                assert!(got.unwrap_err().is_corruption(), "how {how}");
+            }
+        }
+    }
+
+    /// ROADMAP 9.2.11: `read_chunk_checked` enforces the length half of `BlobStore::read_chunk_checked`'s contract on
+    /// any override: a chunk of another length than its manifest's is `Corrupt`, never returned.
+    #[test]
+    fn a_store_whose_checked_chunk_has_another_length_is_corrupt() {
+        let data = b"0123456789ab";
+        for how in [0, 4, 5] {
+            let store = Misbehaving {
+                inner: MemoryBlobStore::new(),
+                how,
+            };
+            let m = stored(&store.inner, data, 4, 1);
+            let got = read_chunk_checked(&store, &m, 1);
+            if how == 0 {
+                assert_eq!(got.unwrap(), b"4567");
             } else {
                 assert!(got.unwrap_err().is_corruption(), "how {how}");
             }

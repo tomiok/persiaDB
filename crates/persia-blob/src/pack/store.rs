@@ -772,6 +772,14 @@ impl<F: ContainerFile + 'static> BlobStore for PackStore<F> {
             .map(|bytes| bytes.as_slice().to_vec())
     }
 
+    /// [`PackStore::read_chunk_source`]: one read of the chunk's frame and one CRC pass over its bytes, which checks
+    /// both the frame's CRC and the manifest's ([`layout::check_chunk_frame`], ROADMAP 9.2.11), then the one copy
+    /// out of the mapping or the read buffer that owned bytes need.
+    fn read_chunk_checked(&self, manifest: &BlobManifest, index: u32) -> Result<Vec<u8>> {
+        self.read_chunk_source(manifest, index)
+            .map(|bytes| bytes.as_slice().to_vec())
+    }
+
     /// Each chunk in one read of its frame, sized by the manifest, and one CRC pass over its bytes that checks both
     /// the frame's CRC and the manifest's ([`layout::check_chunk_frame`], ROADMAP 9.2.9); `sink` gets a slice of the
     /// mapping, or of the caller's `scratch`, reused for every chunk read with `pread`, never a copy.
