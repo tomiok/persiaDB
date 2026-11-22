@@ -48,6 +48,8 @@ use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed};
 
 const PACK: &str = "/db/app.persia.blobs";
+/// The pack's writer lock file beside it (ROADMAP 9.2.15), created by the first read-write open.
+const LOCK: &str = "/db/app.persia.blobs.lock";
 
 fn sim() -> SimFs {
     let fs = SimFs::new();
@@ -77,10 +79,10 @@ fn sweep(
     store.sweep(mark, pins, &options(ratio))
 }
 
-/// Only the pack is left in its directory (no temporary file).
+/// Only the pack and its lock file are left in its directory (no temporary file).
 fn only_the_pack(fs: &SimFs) {
     let names: Vec<PathBuf> = fs.files().into_iter().map(|(p, _)| p).collect();
-    assert_eq!(names, [PathBuf::from(PACK)]);
+    assert_eq!(names, [PathBuf::from(PACK), PathBuf::from(LOCK)]);
 }
 
 /// One blob of a generated pack.
@@ -886,8 +888,8 @@ fn a_crash_at_any_call_of_a_rewrite_keeping_pinned_blobs_reopens_a_whole_pack_ma
     crash_during_pinned_rewrite(64);
 }
 
-/// A rewrite holds the writer lock throughout (ROADMAP 9.2.7, ADR-0052, ADR-0053): just before its rename the old pack
-/// and the new file are both locked, and after it the file the path names is.
+/// A rewrite holds the writer lock throughout (ROADMAP 9.2.7, 9.2.15, ADR-0052, ADR-0053): just before its rename, and
+/// after it, the lock file beside the pack is held and a second writer fails; the new file needs no lock of its own.
 #[test]
 fn a_rewrite_keeps_the_writer_lock_through_the_swap() {
     let fs = sim();
@@ -907,12 +909,8 @@ fn a_rewrite_keeps_the_writer_lock_through_the_swap() {
                 .map(|(p, _)| p)
                 .filter(|p| p.to_string_lossy().contains(".tmp."))
                 .collect();
-            let temp_locked = temps
-                .iter()
-                .all(|t| !fs.open(t, true).unwrap().try_lock().unwrap());
-            seen.lock()
-                .unwrap()
-                .push((second, temps.len(), temp_locked));
+            let lock_held = !fs.open(Path::new(LOCK), true).unwrap().try_lock().unwrap();
+            seen.lock().unwrap().push((second, temps.len(), lock_held));
         });
     }
     let mark = Mark::new([kept.blob_id()], persia_blob::PinGate::pinned(&pins));

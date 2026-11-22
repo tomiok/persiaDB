@@ -639,12 +639,14 @@ fn a_symlinked_container_finds_its_pack_beside_the_real_file() {
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
     // The reader leases directory, beside the real pack, is empty once every reader has gone (SPEC §9.3).
+    // The pack's writer lock file is beside the real pack too (ROADMAP 9.2.15).
     assert_eq!(
         names,
         BTreeSet::from([
             "app.persia".to_owned(),
             "app.persia.blobs".to_owned(),
-            "app.persia.blobs.leases".to_owned()
+            "app.persia.blobs.lock".to_owned(),
+            "app.persia.blobs.leases".to_owned(),
         ])
     );
     assert_eq!(

@@ -16,6 +16,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   and whether they held the sweep back.
 - `persia` (internal API): `PutBlobOptions::expected_size`, which bounds the reader one byte past it
   (`Error::BlobSizeMismatch`, binds nothing; ROADMAP 9.3.7).
+- `persia-storage` (breaking: `SideFileKind` gains `Lock` and `Leases` and is now `#[non_exhaustive]`) / `persia container
+  files`, `sweep`: the blob pack's stale temporary files are listed and removed
+  (only while the pack's writer lock is free), and its lock file and lease directory are listed, never removed
+  (`SideFileKind::Lock`, `SideFileKind::Leases`; ROADMAP 9.2.10).
 - Roadmap: the read-only WASM build reads the blob pack (16.6.2, v1.1). It verifies chunk and frame checksums and the blob's SHA-256 id as the native reader does, with no write, no fsync and no lock (SPEC §9.3, §4.5, ADR-0018). A database without a pack works unchanged. Studio picks the `<name>.persia` file and an optional `<name>.persia.blobs` pack (31.1.5, SPEC §4) and can view a document's blobs (31.2.6). M0–M15 stay the MVP. The progress percentage still counts only those leaves.
 - Roadmap: M35 Formal verification (v1.1), after M34. TLA+ for the remote commit (SPEC §10.4), the writer lease (SPEC §11.3), and blob GC (SPEC §9.5, ADR-0053); Kani on `MmapFile::map` and the M1 encodings; Loom on snapshot publish, pack reopen, and `PinSet`. M0–M15 stay the MVP. The progress percentage still counts only those leaves.
 - `persia-engine`: `ReadOnlyDatabase::wal_end`, the end of the last WAL chunk a read-only open replayed.
@@ -214,6 +218,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `persia_blob::Error` gains `Container`, and `Error::is_corruption` is no longer `const`. `GcReport` is `#[non_exhaustive]`;
   `BlobReferences` gains `committed_seq` (ROADMAP 9.2.16).
 - `persia verify` takes a reader lease before it opens the documents (ROADMAP 9.2.16).
+- `persia-blob`: the blob pack's writer lock is `<name>.persia.blobs.lock` beside the pack on every platform, held from
+  the first read-write open, so a second writer fails with `PackLocked` even before any blob is stored (ROADMAP
+  9.2.15).
+- `persia-blob`: `BlobStore::read_chunk_checked` is a provided trait method; the pack overrides it with one CRC pass
+  (ROADMAP 9.2.11).
 - `persia-blob` / `persia`: on the remote layout, `put_blob` failures after staging come wrapped in
   `Error::UploadInterrupted`, with the original error as `source` (ROADMAP 9.3.4). `Error::is_corruption` and
   `Error::corrupt_offset` are false / `None` for that wrapper, even when the source is corruption: the upload can be
@@ -430,6 +439,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   listing differs from the first (a resume that staged and bound meanwhile, or a listing without `strong_list` that
   missed a fresh chunk); counted in `SweepReport::changed` (breaking: a new field; `SweepReport` is now
   `#[non_exhaustive]`; ROADMAP 9.5.10).
+- `persia-storage`: `Container::side_files` no longer creates `<name>.persia.blobs.lock` when that file is absent. On
+  Windows the pack lock is taken with `Vfs::lock_beside`, which creates the file; a listing now skips that call unless
+  a regular lock file is already there. `sweep_stale_files` still creates it (ROADMAP 9.2.10, 9.2.15).
+- `persia-blob`: a crafted pack can no longer make its open allocate up to the file's length: the open bounds each
+  frame by its kind before reading it (ROADMAP 9.2.14).
 - `persia-engine` (breaking: a new `DatabaseError` variant): a `put_batch` (or `put`) that ends early (a rejected
   document or record, or a flush that fails without poisoning) and whose sync of the documents before it then fails too
   reports the first failure with the sync failure added (`DatabaseError::ThenFailed`, its `source` and

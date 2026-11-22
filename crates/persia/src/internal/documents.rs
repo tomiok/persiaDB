@@ -493,7 +493,8 @@ impl BlobDatabase<PackStore> {
     /// Creates a database in a new container file at `path` ([`Database::create`]) with its blob pack at
     /// [`pack_path`] of it, `<name>.persia.blobs`, opened read-write with the database's writer proof, so the pack
     /// carries the container's `db_uuid` (SPEC §9.3). The pack file is not created here: the first `put_blob` creates
-    /// it, and a database that never stores a blob has none.
+    /// it, and a database that never stores a blob has none. Its writer lock file, `<name>.persia.blobs.lock`, is created
+    /// here and never removed (ROADMAP 9.2.15).
     ///
     /// ```
     /// use persia::internal::blob::PutBlobOptions;
@@ -672,7 +673,8 @@ impl ReadOnlyBlobDatabase<File> {
     /// `db`, opened read-only from the container at `path` after `lease` was taken ([`ReaderLease::take_beside`]),
     /// with its pack opened read-only beside the container's canonical path. The CLI's `verify` takes the lease, opens
     /// and verifies the documents ([`ReadOnlyDatabase::verify`]), then calls this, so a document error is reported
-    /// before the pack is opened. The pack scan's length bound applies after that open (ROADMAP 9.2.14).
+    /// before the pack is opened. The pack open bounds each frame's length by its kind before reading it, as the scan
+    /// does (ROADMAP 9.2.14).
     ///
     /// # Errors
     /// [`Error::OpenedBeforeLease`] when `db` is older than the lease's taken seq; [`Error::LeaseElsewhere`] when the

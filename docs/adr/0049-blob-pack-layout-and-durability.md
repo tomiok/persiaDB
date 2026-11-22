@@ -90,6 +90,8 @@ named by the slot, a WAL range, frames after `log_end` that may hold acknowledge
    Windows, `<name>.lock`), opens it read-write (SPEC §9.5: GC and `put_blob` run in that process). Opening the pack
    read-write without holding the container's lock is outside the contract: a second writer would truncate the
    first one's staged tail. Nothing enforces it yet (a proof-of-lock argument from the container is an open question).
+   Amended: ADR-0053 item 1 enforces it (the container's `WriterProof` and the pack's own lock), and since ROADMAP
+   9.2.15 that lock is `<name>.persia.blobs.lock` beside the pack on every platform, held before the pack exists.
 9. **Open and recovery: the index is rebuilt by a scan.** An open validates the header, picks the active slot,
    checks it against a file length taken after reading the slots, then walks the frames of `12288..log_end` by
    their headers: each frame must have the magic, a length that fits before `log_end`, and the next `frame_seq` of
@@ -133,6 +135,9 @@ named by the slot, a WAL range, frames after `log_end` that may hold acknowledge
     others are read with `pread`. A failed remap keeps the previous mapping. Tests and benches cannot create a permit
     outside xtask's `UNSAFE_ALLOWED` files, so the real mapping is covered by a doctest and the window logic by unit
     tests over a copying stand-in.
+    Amended (ROADMAP 9.2.11): `crates/persia-blob/benches/pack.rs` is in `UNSAFE_ALLOWED`; its mapped cases create a
+    permit over a pack the bench owns and writes nothing to while it is mapped, as `persia-storage`'s `container_read`
+    bench does (ADR-0017).
 
 ## Consequences
 

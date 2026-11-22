@@ -53,10 +53,9 @@ impl MapPermit {
     /// mapping, or a `ByteSource` taken from one, is alive:
     /// - nothing but Persia writes, truncates or hole-punches the pack below the end of the mapped range: not other
     ///   programs, not other handles of the file in this process;
-    /// - at most one read-write `PackStore` of the pack is open at a time, anywhere (in this process or another):
-    ///   the pack takes no lock of its own (ADR-0049 item 8), and a second writer's open truncates or appends over
-    ///   frames this one mapped. Until the pack enforces a single writer, the embedder does, e.g. by opening the pack
-    ///   read-write only while it holds the container's writer lock.
+    /// - at most one read-write `PackStore` of the pack is open at a time, anywhere (in this process or another): a
+    ///   second writer's open would truncate or append over frames this one mapped. The pack enforces it with its
+    ///   writer lock, `<name>.persia.blobs.lock` (ROADMAP 9.2.15, ADR-0053); nothing else may write the pack.
     ///
     /// The permit is given only to Persia code that maps committed frames: bytes a Persia writer never writes again
     /// (SPEC §4.7).

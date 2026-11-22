@@ -241,6 +241,11 @@ impl ChildIo {
         }
     }
 
+    /// The child's process id (to `SIGSTOP` it).
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// The child's next report, or `None` once its stdout closed (it exited or was killed).
     pub fn recv(&self) -> Option<String> {
         self.rx.recv().ok()

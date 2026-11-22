@@ -6,23 +6,24 @@
 //! empty pack or a second name of the pack (removing a name never touches the file's data), and a rewrite's file is
 //! renamed over the pack only once complete. Removing a rewrite's file relies on SPEC §18.10 (b): nothing is bound
 //! into the new pack until its directory sync succeeds, and writing stops if that sync fails, so the file holds no
-//! blob a reader can still name. The container's `sweep_stale_files` (SPEC §4.5.1) matches only the
-//! container's own names, so the pack sweeps its own, with rules like the container's but stricter: only regular
-//! files named exactly as [`temp_path`](super::temp_path) names them (lowercase hex only, where the container
-//! accepts either case), and one directory sync after the removals.
+//! blob a reader can still name. The pack sweeps its own names at each read-write open, with rules like the
+//! container's but stricter: only regular files named exactly as [`temp_path`](super::temp_path) names them
+//! (lowercase hex only, where the container accepts either case), and one directory sync after the removals. The
+//! container's `side_files` and `sweep_stale_files` (SPEC §4.5.1) list and remove the same names by the same rules,
+//! the sweep only while it holds the pack's writer lock (ROADMAP 9.2.10).
 //!
 //! Only the container's writer opens the pack read-write (ADR-0049 item 8), and it creates or rewrites the pack only
 //! through that handle, after the open: when the sweep runs, no creation or rewrite of this pack is in flight, so no
 //! temporary file can be in use. That is why the pack needs no lock on its temporary files, unlike the container's
 //! (whose creates take their own lock, SPEC §4.5.1).
 //!
-//! The pack's writer lock enforces that (ROADMAP 9.2.7): a read-write open takes it before it sweeps, on the pack file
-//! or beside it. Before the pack exists there is no file to lock on Unix, so two handles of a pack not yet created
-//! can both sweep; that case still fails safe: a temporary name the sweep removes before the other handle links (a
-//! creation) or renames (a rewrite) makes that step fail, so it reports an error and publishes nothing. A creation
-//! whose link already succeeded treats the missing temporary name as removed (`NotFound` is success) and goes on to
-//! its directory sync.
-//! Either way it never leaves a half-made pack at the pack's name.
+//! The pack's writer lock enforces that (ROADMAP 9.2.7, 9.2.15): a read-write open takes `<name>.persia.blobs.lock`
+//! beside the pack before it sweeps, whether or not the pack exists, so two handles never sweep at once. The
+//! container's `sweep_stale_files` takes that lock too before it removes these names (ROADMAP 9.2.10). Were a
+//! temporary name still removed under a live creation or rewrite, the step that needs it (the link, the rename) fails,
+//! so it reports an error and publishes nothing; a creation whose link already succeeded treats the missing name as
+//! removed (`NotFound` is success) and goes on to its directory sync. Either way it never leaves a half-made pack at
+//! the pack's name.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
