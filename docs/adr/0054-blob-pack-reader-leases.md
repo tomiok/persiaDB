@@ -91,10 +91,11 @@ text, its own magic and version, this ADR, and golden files (item 17).
      documents are dropped, never before: until then the handle still holds the older documents, and the older seq is
      what protects them. A refresh that fails keeps the record. The reader lease is the handle's, not the pack
      handle's: a `PackReplaced` reopen (`PackStore::reopen`) keeps it.
-     **Open (A):** a `Snapshot` taken from `database()` is an `Arc` that can outlive the `ReadOnlyDatabase` a refresh
-     replaced, so the handle may still serve documents older than the record says. Tracking such snapshots with weak
-     references (as the writer does, ADR-0052 item 2) or documenting the caveat is a pending decision; this ADR does
-     neither yet.
+     **Not protected: a snapshot kept across a refresh** (decided 2026-11-21). A `Snapshot` taken from `database()`
+     is an `Arc` that can outlive the `ReadOnlyDatabase` a refresh replaced, and the record then names the newer
+     documents only. A GC may then sweep a blob only such a snapshot still shows: reading it fails with
+     `BlobNotFound`; it never returns other bytes. The handle does not track those snapshots (no weak references, as
+     the writer keeps, ADR-0052 item 2); a follow-up leaf may.
    - *Drop*: the reader lease is declared after the documents and the pack, so it drops last. It removes its
      name(s), then releases the lock explicitly (`ContainerFile::unlock`, not only `close`: a forked child's copy of
      the descriptor would keep a `flock`, SPEC §4.5.1). A failed removal is logged; the unlocked file left is stale
@@ -144,19 +145,22 @@ text, its own magic and version, this ADR, and golden files (item 17).
    database shared, so nothing is committed while it runs, ADR-0052 item 1). A live reader lease **lets the sweep run
    only if it is open and its `manifest_seq` equals the mark's seq**. It holds GC back when it is opening (whatever
    the mark's seq, 0 included: compared by state, not by seq), unreadable, behind (`manifest_seq` below the mark's),
-   or ahead (above it: not this writer's history, a restored or copied database, so not trusted). When any live
-   reader lease holds GC back, the sweep does not run: no pack rewrite, nothing dropped. The report says so: `GcReport`
-   (made `#[non_exhaustive]`) gains the reader lease counts (live, opening, behind, ahead, unreadable, stale removed,
-   the oldest `manifest_seq`), and the rewrite is reported as held back by readers. The next `gc` decides again.
+   or ahead (above it: not this writer's history, a restored or copied database, so not trusted; logged with the
+   lease's path, `tracing::warn`). When any live reader lease holds GC back, the sweep does not run: no pack
+   rewrite, nothing dropped. The report says so: `GcReport` (made `#[non_exhaustive]`) gains the reader lease
+   counts (live, opening, behind, ahead, unreadable, stale removed, the oldest `manifest_seq`), and the rewrite is
+   reported as held back by readers. The next `gc` decides again.
    **Why one seq is enough**: a reader whose documents are at the writer's committed seq shows only documents the
    mark keeps (the segments and tombstones of that seq, and WAL records from its `wal_start`, which the mark keeps
    whole, SPEC §9.5); a document committed later can only reference a blob bound or pinned after that GC.
    **Why the lease must exist before the documents are opened**: if the scan does not list a reader lease, it was
    created after the listing, so its documents are opened after it, while the log is frozen, at the mark's seq.
-   **Open (B):** right after any commit every read-only handle in another process is behind until it refreshes, so a
-   writer that runs delete, commit, `gc` never sweeps while such a reader lives, and container compaction, which
-   commits a new seq without dropping a document (SPEC §4.6 step 3; also at merge steps when automatic), adds more of
-   these stalls. A rule over two GC rounds kept in memory is a possible follow-up; this ADR keeps the rule above.
+   **GC does not sweep while any reader lease is behind the committed seq** (decided 2026-11-21). Every commit puts
+   every read-only handle in another process behind until it refreshes, and so does a container compaction, which
+   commits a new seq without dropping a document (SPEC §4.6 step 3; also at merge steps when automatic). A writer that
+   runs delete, commit, `gc` therefore does not sweep while such a reader lives and has not refreshed; `GcReport`
+   says the sweep was held back by reader leases. A sweep over two GC rounds (remembering what the first round would
+   drop) is a follow-up leaf.
 10. **The pin set and the mark are unchanged.** A reader lease is not a pin: it holds back the whole sweep, not one
     blob. In-process readers stay in the mark (ADR-0052 item 2); a read-only handle in the writer's process takes a
     reader lease like any other (on a local disk `flock` excludes another open file description of the same process).
@@ -169,9 +173,9 @@ text, its own magic and version, this ADR, and golden files (item 17).
     `None`). Such a handle has today's risk (SPEC §9.5): a document it shows whose blob a writer elsewhere has
     collected reads as `BlobNotFound`, never as other bytes. Any other error taking the reader lease, including a
     `PermissionDenied` from the lock's sidecar (item 12), is not this case: it retries or fails the open.
-    **Open (C):** opening without a lease, versus failing the open, is a pending decision; the text above is the
-    proposal. The `persia` facade does not exist yet (M10; the crate exposes only its hidden `internal` module), so
-    `lease()` reaches no public API today; M10 must expose it.
+    Decided 2026-11-21: the handle opens without a reader lease and logs a `tracing` warning that names the path and
+    says that GC may sweep blobs this reader still references. The `persia` facade does not exist yet (M10; the
+    crate exposes only its hidden `internal` module), so `lease()` reaches no public API today; M10 must expose it.
 12. **Windows.** As item 5: the record is never locked, the lock is the sidecar; a process that exits loses its
     locks. On the pinned toolchain (1.99.0) `std::fs::remove_file` calls `DeleteFileW`, and only when that fails with
     `ERROR_ACCESS_DENIED` retries with POSIX delete semantics on a handle opened for `DELETE`. The standard library
@@ -241,7 +245,7 @@ text, its own magic and version, this ADR, and golden files (item 17).
   database that never stores a blob (a reader lease must predate the documents, and the pack may be created later),
   and a 64-byte file while it lives. An engine read-only open still writes nothing.
 - A reader that never refreshes holds GC back for as long as it lives, once the writer has committed past it, and so
-  does every reader right after a commit or a compaction until it refreshes (Open (B)). That is the decided trade-off:
+  does every reader right after a commit or a compaction until it refreshes (item 9). That is the decided trade-off:
   no per-blob delete-seq bookkeeping.
 - A GC that is held back deletes nothing locally that round; the pack keeps growing until readers catch up.
 - On file systems where locks cannot be judged (item 13: Docker overlayfs, WSL2 `/mnt/c`, network and FUSE file
@@ -272,7 +276,7 @@ text, its own magic and version, this ADR, and golden files (item 17).
   over handles; one per handle is local and simpler.
 - **A flags bit for the opening state** instead of the zero `db_uuid`: equivalent; the zero `db_uuid` keeps every
   flag unassigned and makes a record that claims a database also name it.
-- **An error when the reader lease cannot be created** (item 11, Open (C)): stricter, but read-only media and
+- **An error when the reader lease cannot be created** (item 11): stricter, but read-only media and
   read-only mounts could no longer be read, for a risk that only shows as `BlobNotFound`.
 - **Byte-range locks past the record on Windows** (mandatory locks cover only their range): needs `LockFileEx`
   through FFI (ADR-0016); the sidecar needs neither.
