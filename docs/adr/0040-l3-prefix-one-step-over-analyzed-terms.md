@@ -1,7 +1,8 @@
 # ADR-0040: L3 `prefix`: one step over the analyzed terms, the last one always, stacking fields exact
 
 - Status: accepted (amended by ADR-0046: a tier step `prefix:last` before it when it expands a term besides the
-  last, unless L2's last rung was built and not skipped, ADR-0046 item 3)
+  last, unless L2's last rung was built and not skipped, ADR-0046 item 3; amended by ADR-0057: the last term is
+  expanded from 2 characters)
 - Date: 2026-11-12
 - Related: SPEC §6.3.1, §6.3.4, §7.1, §7.1.1, §7.1.3, §7.6; ROADMAP 7.4.12, 8.1.8, 8.1.14, 8.2.2.4, 8.2.3, 8.2.7;
   ADR-0037, ADR-0038, ADR-0039
@@ -74,7 +75,7 @@ L3 only has to build the `prefix` queries. Several things were still open:
   5 is tested by giving a collection's memtable such an analyzer directly.
 - The last term expands at any length, so a one- or two-character last word makes each segment's FST range scan
   walk every term starting with it before the 50 kept by `df` are chosen: about 23 ms in `search_relaxed/l3` against
-  about 1.4 ms for an L2 step. ROADMAP 8.1.20 is to bound it.
+  about 1.4 ms for an L2 step. ROADMAP 8.1.20 is to bound it: since ADR-0057 the last term needs 2 characters.
 - Bench `search_relaxed/l3` measures the step: L0, then a two-word query whose last word is a prefix.
 
 ## Alternatives considered

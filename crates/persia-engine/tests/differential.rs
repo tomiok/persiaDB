@@ -21,7 +21,7 @@
 //! 5. Relaxed with the collection's levels, a search returns what the reference cascade returns (SPEC §7.6, ROADMAP
 //!    8.1.2, 8.2.2, 8.2.5, 8.2.6, 8.1.15, 8.1.18, 8.1.19, 8.1.21): L0, then L1 `synonyms` for user text (below), then
 //!    L2 `drop_terms`' `minimum_should_match` ladder over a root `bool`'s `must` clauses beside its `must_not` and
-//!    `filter`, then L3 `prefix` (the last term and every other
+//!    `filter`, then L3 `prefix` (the last term of 2 characters or more and every other
 //!    of 3 characters or more as a `prefix` of 50 expansions, after the tier step `prefix:last` unless L2's last rung
 //!    came first), then L4 `fuzzy` (each term of 4 characters or more as a `fuzzy` of 50 expansions at 1 edit, 2
 //!    from 8 characters, after the tier step `fuzzy:1` when a term takes 2), then L5 `fallback` (every live document
@@ -2760,6 +2760,8 @@ type Leaf<'l> = dyn Fn(usize, &str, bool) -> Option<RefQuery> + 'l;
 
 /// The fewest characters of a term L3 expands when it is not the last (SPEC §7.6).
 const PREFIX_LEN: usize = 3;
+/// The fewest characters of the last term L3 expands (SPEC §7.6, ROADMAP 8.1.20).
+const LAST_PREFIX_LEN: usize = 2;
 
 impl Reference<'_> {
     /// SPEC §7.6's cascade for `root` (of user `text`, or programmatic): L0, then the plan's `words` levels in cascade
@@ -2896,7 +2898,8 @@ impl Reference<'_> {
                     weight: self.params[field].0,
                 };
                 let every = |f: usize, t: &str, last: bool| {
-                    (last || t.chars().count() >= PREFIX_LEN).then(|| prefix(f, t))
+                    let len = t.chars().count();
+                    (last && len >= LAST_PREFIX_LEN || len >= PREFIX_LEN).then(|| prefix(f, t))
                 };
                 let Some(full) = self.rewrite_root(root, text, &every) else {
                     return Vec::new();
@@ -2906,7 +2909,9 @@ impl Reference<'_> {
                     .iter()
                     .rfind(|s| s.level == RelaxLevel::DropTerms)
                     .is_some_and(|s| s.matches.is_some());
-                let last = |f: usize, t: &str, last: bool| last.then(|| prefix(f, t));
+                let last = |f: usize, t: &str, last: bool| {
+                    (last && t.chars().count() >= LAST_PREFIX_LEN).then(|| prefix(f, t))
+                };
                 let mut out = Vec::new();
                 if !dropped
                     && let Some(tier) = self.rewrite_root(root, text, &last)

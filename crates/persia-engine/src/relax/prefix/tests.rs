@@ -1,8 +1,8 @@
 //! L3's step (SPEC §7.6, ROADMAP 8.2.3), as built from a query: which terms it expands and how.
 //!
 //! Invariants:
-//! 1. The last term is expanded whatever its length; every other term only from [`MIN_LEN`] characters, counted on
-//!    the analyzed term.
+//! 1. The last term is expanded from [`LAST_MIN_LEN`] characters (ROADMAP 8.1.20); every other term only from
+//!    [`MIN_LEN`] characters, both counted on the analyzed term.
 //! 2. Excluded clauses, phrases, `field:` clauses, filters and the terms of fields `expands` rejects (not `text`, or
 //!    stacking tokens) stay exact; a step that expands nothing is not built.
 //! 3. An expanded `combined` matches its exact fields or a prefix per expanded field, boosted by the field's weight;
@@ -132,7 +132,7 @@ fn must(query: &Query) -> &[Query] {
 }
 
 #[test]
-fn the_last_term_is_expanded_whatever_its_length_and_the_others_from_three_characters() {
+fn the_last_term_is_expanded_from_two_characters_and_the_others_from_three() {
     let schema = schema();
     // `ab` is last: expanded at 2 characters. `tv` is not last: kept at 2. `red` is 3: expanded.
     let s = step(&schema, "tv red ab").unwrap();
@@ -145,6 +145,21 @@ fn the_last_term_is_expanded_whatever_its_length_and_the_others_from_three_chara
     assert_eq!(parts[2], both(&schema, "ab", "ab"));
     // Only short terms, none last: nothing is expanded, so no step.
     assert_eq!(step(&schema, "tv \"ab cd\"").map(|s| s.query), None);
+    // A one-character last term stays exact (ROADMAP 8.1.20): `red` alone is expanded, and with no other term of 3
+    // characters there is no step.
+    let s = step(&schema, "tv red a").unwrap();
+    let compiled = compile(&schema, "tv red a");
+    let parts = must(&s.query);
+    assert_eq!(parts[1], both(&schema, "red", "red"));
+    assert_eq!(parts[2], compiled.parts(2).unwrap()[0]);
+    assert_eq!(step(&schema, "tv a").map(|s| s.query), None);
+    assert_eq!(step(&schema, "a").map(|s| s.query), None);
+    // Counted in characters: `ñ` is one character in 2 bytes, so it stays exact; `ñu` (2) is expanded.
+    assert_eq!(step(&schema, "ñ").map(|s| s.query), None);
+    assert_eq!(
+        step(&schema, "ñu").unwrap().query,
+        both(&schema, "ñu", "nu")
+    );
 }
 
 #[test]
@@ -262,7 +277,7 @@ fn a_programmatic_query_expands_its_root_must_terms_the_last_one_last() {
             term(title, "ab"),
             term(brand, "acme"),
             term(title, "red"),
-            term(title, "x"),
+            term(title, "xy"),
         ],
         must_not: vec![excluded.clone()],
         ..BoolQuery::default()
@@ -270,23 +285,27 @@ fn a_programmatic_query_expands_its_root_must_terms_the_last_one_last() {
     let s = step_of(&query, None, &text_fields(&schema)).unwrap();
     assert_eq!(s.effective, None);
     let Query::Bool(b) = &s.query else { panic!() };
-    // `ab` is short and not last; `acme` is a keyword; `red` is 3; `x` is last.
+    // `ab` is short and not last; `acme` is a keyword; `red` is 3; `xy` is last, of 2.
     assert_eq!(
         b.must,
         [
             term(title, "ab"),
             term(brand, "acme"),
             prefix_of(title, "red"),
-            prefix_of(title, "x")
+            prefix_of(title, "xy")
         ]
     );
     assert_eq!(b.must_not, [excluded]);
-    // A term alone is its own last term; a root with `should` clauses is not relaxed.
+    // A term alone is its own last term, expanded from 2 characters; a root with `should` clauses is not relaxed.
     assert_eq!(
-        step_of(&term(title, "x"), None, &text_fields(&schema))
+        step_of(&term(title, "xy"), None, &text_fields(&schema))
             .unwrap()
             .query,
-        prefix_of(title, "x")
+        prefix_of(title, "xy")
+    );
+    assert_eq!(
+        step_of(&term(title, "x"), None, &text_fields(&schema)),
+        None
     );
     let any = Query::Bool(BoolQuery {
         should: vec![term(title, "red")],

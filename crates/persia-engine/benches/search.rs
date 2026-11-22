@@ -918,13 +918,15 @@ fn relaxed(c: &mut Criterion) {
             black_box(out)
         });
     });
-    // L3 (ROADMAP 8.2.3) alone: `w` is no term, but every term starts with it. L0 (`w3` and `w`) has no hit, so the
-    // step requires `w3` exactly (2 characters, not last) and one of the 50 most frequent terms starting `w`.
+    // L3 (ROADMAP 8.2.3) alone: `w` is no term, but every term starts with it. L0 (`w3` and `w`) has no hit. Until
+    // ROADMAP 8.1.20 the step required `w3` exactly (2 characters, not last) and one of the 50 most frequent terms
+    // starting `w`, walking every term of every view to keep them; a last term of one character is now kept exact, so
+    // L3 builds no step and the cascade goes on to L5 (`l3/two_letters` below is the shortest last term L3 expands).
     // L4 (ROADMAP 8.2.4) alone: `w1x4` is no term, but one edit from `w104`..`w194` and `w14`. L0 has no hit, so the
     // step requires `w3` exactly (2 characters) and one of the terms within one edit of `w1x4`.
-    for (name, level, text) in [
-        ("l3", Level::Prefix, "w3 w"),
-        ("l4", Level::Fuzzy, "w3 w1x4"),
+    for (name, level, text, reached) in [
+        ("l3", Level::Prefix, "w3 w", RelaxLevel::Fallback),
+        ("l4", Level::Fuzzy, "w3 w1x4", RelaxLevel::Fuzzy),
     ] {
         let alone = RelaxPlan::new(
             schema.relaxation(),
@@ -940,7 +942,7 @@ fn relaxed(c: &mut Criterion) {
                 let out = views
                     .search_relaxed(&query, &request, &alone, &exec)
                     .unwrap();
-                assert_eq!(out.relaxation.level, RelaxLevel::from(level));
+                assert_eq!(out.relaxation.level, reached);
                 black_box(out)
             });
         });
@@ -948,12 +950,58 @@ fn relaxed(c: &mut Criterion) {
     group.finish();
 }
 
+/// L3 over the shortest last word it expands (ROADMAP 8.1.20: 2 characters), in the `search_relaxed` group: every
+/// `w0`..`w9` is a term, so L0 of `w3 w1` has hits, and only a `min_results` above them (10 000) reaches L3, alone and
+/// without the fallback. L0 collects its matches, then the step requires `w3` exactly and one of the 50 most frequent
+/// terms starting `w1`.
+fn relaxed_two_letters(c: &mut Criterion) {
+    let (db, _) = collection(4, false);
+    let snapshot = db.snapshot();
+    let coll = snapshot.collection("bench").unwrap();
+    let memtable = coll.memtable();
+    let schema = coll.schema();
+    let views = coll.views(&memtable).unwrap();
+    let request = SearchRequest {
+        limit: 10,
+        ..SearchRequest::default()
+    };
+    let exec = Execution::default().threads(Threads::Current);
+    let compiler = QueryCompiler::new(schema, &AnalyzerRegistry::builtin()).unwrap();
+    let mut group = c.benchmark_group("search_relaxed");
+    let two_letters = RelaxPlan::new(
+        schema.relaxation(),
+        &RelaxOptions {
+            levels: Some(Levels::Custom(vec![Level::Prefix])),
+            min_results: Some(*RelaxationConfig::MIN_RESULTS.end()),
+            fallback: Some(Fallback::None),
+            ..RelaxOptions::default()
+        },
+    )
+    .unwrap();
+    let query = compiler.compile(
+        "w3 w1",
+        &DefaultFields::all(schema),
+        &QueryLimits::default(),
+    );
+    group.bench_function("l3/two_letters", |b| {
+        b.iter(|| {
+            let out = views
+                .search_relaxed(&query, &request, &two_letters, &exec)
+                .unwrap();
+            assert_eq!(out.relaxation.applied, ["prefix"]);
+            black_box(out)
+        });
+    });
+    group.finish();
+}
+
 /// The tier steps (ROADMAP 8.2.7), in the `search_relaxed` group, each level alone, without the fallback.
-/// `l3/tiers`: `w12` (3 characters, not last) is expanded too, so L3 first searches `w12` exactly beside the 50 most
-/// frequent terms starting `w` (`prefix:last`), which finds the hits, so the cascade stops there (before ROADMAP 8.2.7
-/// its one step expanded both). `l4/tiers`: `w1x4zzzz` (8 characters) may take two edits, so L4 first builds and
-/// searches its step within one edit (`fuzzy:1`); no bench term is that long, so neither step finds a hit, and this
-/// measures what the tier step adds to a query that qualifies.
+/// `l3/tiers`: `w12` (3 characters, not last) is expanded. Until ROADMAP 8.1.20 the one-letter `w` was too, so L3 first
+/// searched `w12` exactly beside the 50 most frequent terms starting `w` (`prefix:last`), which found the hits, so the
+/// cascade stopped there (before ROADMAP 8.2.7 its one step expanded both). Now `w` stays exact: L3 builds its one
+/// step, `w12` expanded beside `w`, which no document holds, so it finds nothing. `l4/tiers`: `w1x4zzzz` (8
+/// characters) may take two edits, so L4 first builds and searches its step within one edit (`fuzzy:1`); no bench term
+/// is that long, so neither step finds a hit, and this measures what the tier step adds to a query that qualifies.
 fn relaxed_tiers(c: &mut Criterion) {
     let (db, _) = collection(4, false);
     let snapshot = db.snapshot();
@@ -1157,6 +1205,7 @@ criterion_group!(
     relaxed,
     relaxed_fallback,
     relaxed_tiers,
+    relaxed_two_letters,
     relaxed_filters,
     compile
 );

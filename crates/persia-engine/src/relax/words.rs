@@ -26,7 +26,8 @@ pub(crate) struct Words<'a> {
     /// ([`super::LevelInput::expands`]).
     pub(crate) expands: &'a dyn Fn(FieldId) -> Option<f64>,
     /// The query that replaces the analyzed `term` of `field`, `None` to keep it exact. `last` marks the query's last
-    /// term (L3 expands it whatever its length). Asked only for a field `expands` accepts and a term that is not empty.
+    /// term (L3 expands it from 2 characters, the others from 3). Asked only for a field `expands` accepts and a term
+    /// that is not empty.
     pub(crate) leaf: &'a dyn Fn(FieldId, &str, bool) -> Option<Query>,
 }
 

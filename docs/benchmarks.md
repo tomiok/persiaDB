@@ -648,6 +648,23 @@ After the review fix that drops the request filter from a caller root the join w
 step), `filters/last_resort` with one codegen unit reads 792 µs, +0.5% on main, within noise; `filters/never`, which
 never builds the step, reads 337 µs (+1.9%) in the same run, the drift above.
 
+With L3's last term expanded from 2 characters (ROADMAP 8.1.20, ADR-0057), same collection and thread, default
+build, 2026-11-22, rustc 1.99.0, AMD Ryzen 5 3600, Linux. Before is main (6d0a7d3) with `l3/two_letters` added, run
+in the same worktree just before the change. Command: `cargo bench -p persia-engine --bench search --
+'search_relaxed/(l3|l3/two_letters|l3/tiers)$'`. `l3` is still `w3 w` with L3 alone: its one-letter last word is now
+kept exact, so L3 builds no step and the cascade reaches L5, whose recency walk reads the 10 newest documents (the
+bench asserts level `fallback` now, `prefix` before). `l3/tiers` is still `w12 w`: no tier step any more, and its one
+step, `w12` expanded beside `w` exact, finds nothing. `l3/two_letters` is new: `w3 w1` with L3 alone at the largest
+`min_results` (10 000) and no fallback, the shortest last word L3 expands, whose step is the same before and after.
+
+| Recorded | `l3` | `l3/tiers` | `l3/two_letters` |
+|---|--:|--:|--:|
+| main (6d0a7d3) | 22.6 ms | 22.7 ms | 14.5 ms |
+| ROADMAP 8.1.20 | 26.4 µs | 85.5 µs | 14.9 ms |
+
+`l3/two_letters` builds the same step on both; its 2.6% is within the drift earlier rows show on code a change does
+not touch.
+
 ## `persia-engine` relevance
 
 `cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2, 7.8.4): 18 user-text queries with graded judgments over
