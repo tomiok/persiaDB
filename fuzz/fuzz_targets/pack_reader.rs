@@ -3,7 +3,7 @@
 //! a new blob and reads it back. The checksum scan `persia verify` runs over it (ROADMAP 9.5.3) never panics, its counts
 //! agree with the index, and a recovered pack scans the same after another open.
 //!
-//! The first input byte picks the mode: 0, the rest is the whole file; with bit 3 set, the rest is the frames after a
+//! The first input byte picks the mode: 0, the rest is the whole file; with bit 4 set, the rest is the frames after a
 //! valid pack prefix, each frame found renumbered and resealed, committed by the slot (bit 1) or left as the tail a
 //! read-write open rolls forward, so arbitrary frames reach the open's scan and recovery (ROADMAP 9.2.14); otherwise
 //! the rest is a list of 3-byte edits (`offset u16`, `value u8`) applied to a valid two-blob pack, whose slot and frame
@@ -155,7 +155,7 @@ fn cut_template() -> &'static Template {
     })
 }
 
-/// A new pack's header and slots, then `frames` padded to 8 (mode bit 3, ROADMAP 9.2.14): every frame found by its
+/// A new pack's header and slots, then `frames` padded to 8 (mode bit 4, ROADMAP 9.2.14): every frame found by its
 /// length gets the frame magic, `frame_seq` 1, 2, ... and a valid CRC, so arbitrary kinds, lengths and payloads reach
 /// the open's frame rules. With `committed`, slot A commits them when the last one ends the file (`blob_count` the
 /// frames of kind `BlobIndex`), so the open scans them; otherwise a read-write open's roll-forward reads them.
@@ -263,12 +263,13 @@ fuzz_target!(|data: &[u8]| {
     let Some((&mode, rest)) = data.split_first() else {
         return;
     };
-    // mode 0: the rest is the whole file. Bit 3: the rest is frames after a valid prefix, committed if bit 1 is set.
+    // mode 0: the rest is the whole file. Bit 4: the rest is frames after a valid prefix, committed if bit 1 is set.
     // Otherwise bit 0 clear reseals the CRCs, bit 1 picks the template with a cut bind after log_end, bit 2 resizes the
-    // file by the first two bytes of the rest (append or truncate).
+    // file by the first two bytes of the rest (append or truncate). Bit 3 is not a mode bit: the committed seeds of the
+    // edit mode use 8 and 10 for an even, nonzero mode.
     let file = if mode == 0 {
         rest.to_vec()
-    } else if mode & 8 != 0 {
+    } else if mode & 0x10 != 0 {
         arbitrary_frames(rest, mode & 2 != 0)
     } else {
         let (template, frames) = if mode & 2 == 0 {

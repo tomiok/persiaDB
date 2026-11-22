@@ -468,3 +468,53 @@ fn with_per_process_locks_no_pack_temporary_file_is_swept() {
         "{files:?}"
     );
 }
+
+/// ROADMAP 9.2.10 on the operating system's file system: symbolic links named like the pack's temporary file, lock
+/// file and lease directory, pointing outside the directory, are none of the pack's side files. The listing leaves them
+/// out, the sweep removes only the real temporary file beside them, and neither a link nor what it points to is
+/// touched.
+#[cfg(unix)]
+#[test]
+fn symlinks_named_like_the_packs_side_files_are_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    drop(Container::create(&path).unwrap());
+    let target_file = outside.path().join("precious");
+    std::fs::write(&target_file, b"not the pack's").unwrap();
+    let target_dir = outside.path().join("dir");
+    std::fs::create_dir(&target_dir).unwrap();
+    std::fs::write(target_dir.join("kept"), b"kept").unwrap();
+    let links = [
+        ("app.persia.blobs.tmp.0123456789abcdef.1", &target_file),
+        ("app.persia.blobs.tmp.0123456789abcdef.2", &target_dir),
+        ("app.persia.blobs.lock", &target_file),
+        ("app.persia.blobs.leases", &target_dir),
+    ];
+    for (name, target) in links {
+        std::os::unix::fs::symlink(target, dir.path().join(name)).unwrap();
+    }
+    let stale = dir.path().join("app.persia.blobs.tmp.fedcba9876543210.3");
+    std::fs::write(&stale, b"left by a crash").unwrap();
+
+    let listed: Vec<PathBuf> = Container::side_files(&path)
+        .unwrap()
+        .into_iter()
+        .map(|f| f.path)
+        .collect();
+    // The listing canonicalizes the container's path (a temporary directory may sit behind a link).
+    let real_dir = std::fs::canonicalize(dir.path()).unwrap();
+    assert_eq!(listed, [real_dir.join(stale.file_name().unwrap())]);
+    let c = Container::open(&path, Mode::ReadWrite).unwrap();
+    assert_eq!(
+        c.sweep_stale_files().unwrap(),
+        [real_dir.join(stale.file_name().unwrap())]
+    );
+    assert!(!stale.exists());
+    for (name, _) in links {
+        let meta = std::fs::symlink_metadata(dir.path().join(name)).unwrap();
+        assert!(meta.file_type().is_symlink(), "{name}");
+    }
+    assert_eq!(std::fs::read(&target_file).unwrap(), b"not the pack's");
+    assert_eq!(std::fs::read(target_dir.join("kept")).unwrap(), b"kept");
+}
