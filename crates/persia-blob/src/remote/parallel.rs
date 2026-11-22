@@ -2,15 +2,23 @@
 //! one request in flight each, results in index order.
 
 use core::num::NonZeroUsize;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use crate::error::{Error, Result};
 
+/// `state` value: the index has finished and its job returned `Ok`.
+const FINISHED_OK: u8 = 1;
+/// `state` value: the index has finished and its job returned `Err`. Stored only after `failed` is set.
+const FINISHED_ERR: u8 = 2;
+
 /// Runs `job(0..count)` on at most `parallelism` threads (the caller's included) and returns the results in index
-/// order, or the error of the lowest failing index. Once a thread sees a failure it starts no new index (a thread
-/// that checked just before the failure was recorded may start one more, whose result is dropped); every index below
-/// a failure was started before it, so the error reported does not depend on scheduling.
+/// order, or the error of the lowest failing index. A worker claims the next index only after it has seen no failure,
+/// and only while `index < finished_prefix + parallelism`. The prefix is the longest leading run of finished indices.
+/// It does not move past a failure until that failure is published, so a failure at `f` starts at most `f + parallelism`
+/// jobs (indices `0..f + parallelism`): the `parallelism` slots of the window stuck on `f`. A worker that checked just
+/// before the failure was recorded may claim one more index, still inside that window, and its result is dropped.
+/// Every index below a failure was started before it, so the error reported does not depend on scheduling.
 pub(crate) fn run<T, F>(count: usize, parallelism: NonZeroUsize, job: F) -> Result<Vec<T>>
 where
     T: Send,
@@ -38,18 +46,63 @@ where
     }
     let next = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
+    // Longest leading run of finished indices. Claims stay below `prefix + workers`, so a failure that has not
+    // finished yet stops the run `workers` indices past it, instead of letting the other workers race to `count`.
+    let prefix = AtomicUsize::new(0);
     let slots: Vec<Mutex<Option<Result<T>>>> = (0..count).map(|_| Mutex::new(None)).collect();
+    // `0` pending, [`FINISHED_OK`], or [`FINISHED_ERR`] (the last only after `failed` is set).
+    let state: Vec<AtomicU8> = (0..count).map(|_| AtomicU8::new(0)).collect();
     let work = || {
-        while !failed.load(Ordering::Acquire) {
-            let index = next.fetch_add(1, Ordering::AcqRel);
+        loop {
+            if failed.load(Ordering::Acquire) {
+                break;
+            }
+            let at = prefix.load(Ordering::Acquire);
+            let index = next.load(Ordering::Acquire);
+            if index >= count {
+                break;
+            }
+            if index >= at.saturating_add(workers) {
+                // The window is full. Try the prefix again: the index that held it may have finished since
+                // this thread last looked, and that store is visible now even if an earlier advance missed it.
+                advance_prefix(&prefix, &state, &failed);
+                if prefix.load(Ordering::Acquire).saturating_add(workers) <= index
+                    && !failed.load(Ordering::Acquire)
+                {
+                    std::thread::yield_now();
+                }
+                continue;
+            }
+            // Immediately before the claim. A prefix past a failure is published only after `failed`, and this
+            // load is sequenced after the prefix load, so it sees that flag.
+            if failed.load(Ordering::Acquire) {
+                break;
+            }
+            let Some(claimed) = index.checked_add(1) else {
+                break;
+            };
+            if next
+                .compare_exchange(index, claimed, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                continue;
+            }
             let Some(slot) = slots.get(index) else {
                 break;
             };
             let result = job(index);
-            if result.is_err() {
+            let err = result.is_err();
+            if err {
                 failed.store(true, Ordering::Release);
             }
             *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(result);
+            if let Some(cell) = state.get(index) {
+                cell.store(
+                    if err { FINISHED_ERR } else { FINISHED_OK },
+                    Ordering::Release,
+                );
+            }
+            advance_prefix(&prefix, &state, &failed);
         }
     };
     std::thread::scope(|scope| {
@@ -83,10 +136,32 @@ where
     }
 }
 
+/// Moves `prefix` over the finished leading run. A failure is stored again before the prefix steps past it, so a
+/// claimer that observes the new prefix (and then loads `failed`) also observes the flag.
+fn advance_prefix(prefix: &AtomicUsize, state: &[AtomicU8], failed: &AtomicBool) {
+    loop {
+        let at = prefix.load(Ordering::Acquire);
+        let kind = match state.get(at) {
+            Some(cell) => cell.load(Ordering::Acquire),
+            None => break,
+        };
+        if kind == FINISHED_ERR {
+            failed.store(true, Ordering::Release);
+        } else if kind != FINISHED_OK {
+            break;
+        }
+        let Some(next_at) = at.checked_add(1) else {
+            break;
+        };
+        // Success steps one index ahead. A lost race reloads the prefix another worker published.
+        let _ = prefix.compare_exchange(at, next_at, Ordering::AcqRel, Ordering::Acquire);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     fn n(v: usize) -> NonZeroUsize {
         NonZeroUsize::new(v).unwrap()
@@ -159,13 +234,13 @@ mod tests {
                 matches!(err, Error::InvalidResume { what: "ten" }),
                 "{p}: {err:?}"
             );
-            // `run`: once a thread sees a failure it starts no new index, though a thread that
-            // checked just before the failure was recorded may start one more. Indices above the
-            // lowest failure (10) may already have been claimed before that store, so the started
-            // count is at most `count`, not the failing index plus the parallelism. Every index
-            // below the failure was started before it, and the failing index itself ran.
-            let n = started.load(Ordering::Relaxed);
-            assert!((11..=1000).contains(&n), "{p}: {n}");
+            // `run`: a claim happens only after the worker has seen no failure, and only while
+            // `index < finished_prefix + parallelism`. The prefix does not move past a failure until
+            // that failure is published, so with the lowest failure at 10 the highest index started
+            // is `10 + p - 1` (the window stuck on 10): at most `10 + p` starts. Indices `0..=10`
+            // all ran, which is why the error is the one from 10.
+            let nstarted = started.load(Ordering::Relaxed);
+            assert!((11..=10 + p).contains(&nstarted), "{p}: {nstarted}");
         }
     }
 
@@ -176,6 +251,9 @@ mod tests {
             let state = Mutex::new((0_usize, 0_usize)); // (in flight, started)
             let changed = Condvar::new();
             let max = AtomicUsize::new(0);
+            // Sticky: set once `p` jobs are in flight together. A fast job may leave before a slow one
+            // rechecks the count, and `run` will not start a later index while an older one is unfinished.
+            let full = AtomicBool::new(false);
             let threads = Mutex::new(std::collections::BTreeSet::new());
             run(40, n(p), |_| {
                 threads
@@ -186,12 +264,15 @@ mod tests {
                 s.0 += 1;
                 s.1 += 1;
                 max.fetch_max(s.0, Ordering::Relaxed);
+                if s.0 == p {
+                    full.store(true, Ordering::Release);
+                }
                 changed.notify_all();
                 // Wait (bounded) until `p` jobs are in flight together or every job has started, so the run shows real
                 // overlap, and an unbounded run would pile up more.
                 let (mut s, _) = changed
                     .wait_timeout_while(s, std::time::Duration::from_secs(10), |s| {
-                        s.0 < p && s.1 < 40
+                        !full.load(Ordering::Acquire) && s.1 < 40
                     })
                     .unwrap();
                 s.0 -= 1;
