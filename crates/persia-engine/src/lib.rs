@@ -22,3 +22,8 @@ pub mod stats;
 pub mod tombstone;
 pub mod view;
 pub mod wal;
+
+/// The analysis crate (SPEC §6.3): the [`AnalyzerRegistry`](persia_analysis::AnalyzerRegistry) a database opens with
+/// ([`db::DatabaseOptions::registry`]) and the analyzers a caller registers in it (ROADMAP 6.6.8), for crates that
+/// reach the engine only, such as the CLI.
+pub use persia_analysis as analysis;

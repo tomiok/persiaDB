@@ -84,7 +84,7 @@ pub use objects::ContainerObjects;
 use obsolete::Pin;
 pub use obsolete::{ObsoleteKind, ObsoleteObject};
 pub use policy::{CommitPolicy, CommitReason, MemtableState};
-pub use read_only::ReadOnlyDatabase;
+pub use read_only::{ReadOnlyDatabase, SkippedAnalysis};
 pub use relaxed::{
     Correction, Relaxation, RelaxedHit, RelaxedQuery, RelaxedResults, RelaxedSearchError,
 };
@@ -102,7 +102,7 @@ use crate::manifest::{
 };
 use crate::memtable::{Logged, Memtable, MemtableError};
 use crate::merge::MergeOptions;
-use crate::schema::{CollectionSchema, EvolutionError};
+use crate::schema::{CollectionSchema, EvolutionError, FieldKind};
 use crate::segment::{ReadError, Segment, SegmentError, SegmentMeta, Tombstones, WriteOptions};
 use crate::tombstone::{SidecarError, TombstoneSidecar};
 use crate::view::{SearchView, SegmentView};
@@ -213,6 +213,20 @@ pub enum DatabaseError {
     CorruptTail {
         /// Where the scan from `log_end` stopped.
         offset: u64,
+    },
+    /// A committed schema names an analyzer that is not a built-in of this build and that the registry the database
+    /// is opened with lacks ([`DatabaseOptions::registry`], SPEC §6.2.2): register it, or open with a build that has
+    /// it. Not corruption: the open fails before any segment is read.
+    #[error(
+        "collection {collection:?}, field {field:?}: analyzer {analyzer} is not registered (not a built-in of this build; open with a registry that has it)"
+    )]
+    UnregisteredAnalyzer {
+        /// The collection.
+        collection: String,
+        /// The field.
+        field: String,
+        /// The analyzer, `name@version`.
+        analyzer: String,
     },
     /// Building a segment failed: nothing was written.
     #[error(transparent)]
@@ -349,7 +363,9 @@ impl DatabaseError {
 pub struct DatabaseOptions {
     /// When the database commits on its own.
     pub policy: CommitPolicy,
-    /// The analyzers of `text` fields; the built-in ones by default.
+    /// The analyzers of `text` fields: the built-in ones, which the database always has whatever this holds, and
+    /// those registered here (SPEC §6.2.2). An open fails with [`DatabaseError::UnregisteredAnalyzer`] if a schema
+    /// names one this lacks.
     pub registry: AnalyzerRegistry,
     /// Where time is read.
     pub clock: Arc<dyn Clock>,
@@ -383,6 +399,37 @@ impl Default for DatabaseOptions {
             memtable_max_docs: None,
         }
     }
+}
+
+impl DatabaseOptions {
+    /// These options with every built-in analyzer in the registry, as a database opens with them.
+    fn with_builtins(mut self) -> Self {
+        self.registry = std::mem::take(&mut self.registry).with_builtins();
+        self
+    }
+}
+
+/// Fails with [`DatabaseError::UnregisteredAnalyzer`] if `registry` lacks an analyzer of a `text` field of `schema`,
+/// collection `collection` (SPEC §6.2.2).
+pub(crate) fn check_analyzers(
+    collection: &str,
+    schema: &CollectionSchema,
+    registry: &AnalyzerRegistry,
+) -> Result<(), DatabaseError> {
+    for field in schema.fields() {
+        if let FieldKind::Text(options) = field.kind()
+            && registry
+                .get(options.analyzer.name(), options.analyzer.version())
+                .is_none()
+        {
+            return Err(DatabaseError::UnregisteredAnalyzer {
+                collection: collection.to_owned(),
+                field: field.name().to_owned(),
+                analyzer: options.analyzer.to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// A committed segment and its current deletions (SPEC §8.3).
@@ -600,6 +647,7 @@ impl<F: ContainerFile + Sync> Database<F> {
     }
 
     fn created(container: Container<F>, options: DatabaseOptions) -> Result<Self, DatabaseError> {
+        let options = options.with_builtins();
         let wal = WalWriter::resume(container, BTreeMap::new())
             .with_chunk_target(options.wal_chunk_target);
         let mut db = Self::assemble(wal, Manifest::empty(), BTreeMap::new(), options);

@@ -48,8 +48,9 @@ pub enum ManifestError {
         /// The version read.
         version: u32,
     },
-    /// A stored schema names an analyzer version this build does not have (a newer build wrote it, SPEC §6.2.2,
-    /// §15): the manifest is valid, but this build cannot index or query that field.
+    /// A stored schema names a version this build does not have of a built-in analyzer (a newer build wrote it, SPEC
+    /// §6.2.2, §15): the manifest is valid, but this build cannot index or query that field. Any other well-formed
+    /// `name@version` decodes as a registered analyzer, which the database open looks up in its registry.
     #[error(
         "collection schema at offset {offset}: field {field:?} uses analyzer {analyzer:?}, which this build lacks"
     )]

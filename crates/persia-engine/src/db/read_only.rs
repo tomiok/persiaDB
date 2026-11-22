@@ -14,13 +14,14 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use persia_analysis::AnalyzerRegistry;
+use persia_analysis::{Analyzer, AnalyzerRegistry, TokenStream, Tokenizer};
 use persia_storage::container::{Container, ContainerFile, Mode};
 
 use super::recovery::{for_each_record, load, wal_chunks};
-use super::{ContainerObjects, DatabaseError, Snapshot, snapshot_of};
+use super::{ContainerObjects, DatabaseError, Snapshot, check_analyzers, snapshot_of};
 use crate::manifest::Manifest;
 use crate::memtable::Memtable;
+use crate::schema::{CollectionSchema, FieldKind};
 use crate::wal::{MAX_CHUNK_LEN, ReplayError, apply};
 
 /// A database opened read-only (see the module docs).
@@ -60,6 +61,8 @@ pub struct ReadOnlyDatabase<F = File> {
     wal_chunks: Vec<u64>,
     /// The end of the last of those chunks, the committed `wal_start` if none ([`ReadOnlyDatabase::wal_end`]).
     wal_end: u64,
+    /// The `text` fields whose analysis the open skipped ([`ReadOnlyDatabase::open_container_skipping_analysis`]).
+    skipped: Vec<SkippedAnalysis>,
 }
 
 impl ReadOnlyDatabase<File> {
@@ -73,6 +76,18 @@ impl ReadOnlyDatabase<File> {
         registry: &AnalyzerRegistry,
     ) -> Result<Self, DatabaseError> {
         Self::open_container(Container::open(path, Mode::ReadOnly)?, registry)
+    }
+
+    /// [`ReadOnlyDatabase::open`] that skips the analysis of `text` fields whose analyzer `registry` lacks
+    /// ([`ReadOnlyDatabase::open_container_skipping_analysis`]).
+    ///
+    /// # Errors
+    /// As [`Container::open`] and [`ReadOnlyDatabase::open_container_skipping_analysis`].
+    pub fn open_skipping_analysis(
+        path: impl AsRef<Path>,
+        registry: &AnalyzerRegistry,
+    ) -> Result<Self, DatabaseError> {
+        Self::open_container_skipping_analysis(Container::open(path, Mode::ReadOnly)?, registry)
     }
 }
 
@@ -98,7 +113,38 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
         container: Container<F>,
         registry: &AnalyzerRegistry,
     ) -> Result<Self, DatabaseError> {
-        let (manifest, mut collections) = load(&container, |s| Memtable::new(s, registry))?;
+        Self::open_with(container, registry, Analysis::Required)
+    }
+
+    /// [`ReadOnlyDatabase::open_container`] for a check of the database, such as `persia verify` (ROADMAP 6.6.8): a
+    /// `text` field whose analyzer `registry` lacks (a registered analyzer, SPEC §6.2.2) does not fail the open.
+    /// Replay then validates and applies every record, but indexes no terms for that field, so its memtable cannot
+    /// answer a query on the field; [`ReadOnlyDatabase::skipped_analysis`] lists such fields. Everything else is
+    /// checked as by `open_container`.
+    ///
+    /// # Errors
+    /// As [`ReadOnlyDatabase::open_container`], but never [`DatabaseError::UnregisteredAnalyzer`].
+    pub fn open_container_skipping_analysis(
+        container: Container<F>,
+        registry: &AnalyzerRegistry,
+    ) -> Result<Self, DatabaseError> {
+        Self::open_with(container, registry, Analysis::SkipUnregistered)
+    }
+
+    fn open_with(
+        container: Container<F>,
+        registry: &AnalyzerRegistry,
+        analysis: Analysis,
+    ) -> Result<Self, DatabaseError> {
+        let mut registry = registry.clone().with_builtins();
+        let mut skipped = Vec::new();
+        let (manifest, mut collections) = load(&container, |name, schema| {
+            if analysis == Analysis::SkipUnregistered {
+                skip_unregistered(name, schema, &mut registry, &mut skipped)?;
+            }
+            check_analyzers(name, schema, &registry)?;
+            Ok(Memtable::new(schema, &registry)?)
+        })?;
         let mut replayed = 0u64;
         let mut wal_end = container.superblock().wal_start;
         // Stop at a Manifest a fresh superblock read shows committed during this scan (SPEC §8.6).
@@ -130,6 +176,7 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
             replayed,
             wal_chunks: chunks,
             wal_end,
+            skipped,
         })
     }
 
@@ -172,8 +219,85 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
         &self.wal_chunks
     }
 
+    /// The `text` fields whose analysis the open skipped, in collection then field id order: none unless it was
+    /// [`ReadOnlyDatabase::open_container_skipping_analysis`] with a registry lacking their analyzers.
+    pub fn skipped_analysis(&self) -> &[SkippedAnalysis] {
+        &self.skipped
+    }
+
     /// The committed objects of the container, as [`persia_storage::Storage`] (ROADMAP 6.3.6).
     pub fn objects(&self) -> ContainerObjects<'_, F> {
         ContainerObjects::new(&self.container, self.snapshot.manifest())
     }
+}
+
+/// Whether a read-only open needs every `text` field's analyzer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Analysis {
+    /// A missing one fails the open ([`DatabaseError::UnregisteredAnalyzer`]).
+    Required,
+    /// A missing one is replaced by one that emits no token, and the field is listed as skipped.
+    SkipUnregistered,
+}
+
+/// A `text` field whose analysis a read-only open skipped, because its registry lacks the field's analyzer
+/// ([`ReadOnlyDatabase::open_container_skipping_analysis`], ROADMAP 6.6.8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SkippedAnalysis {
+    /// The collection.
+    pub collection: String,
+    /// The field.
+    pub field: String,
+    /// Its analyzer, `name@version`.
+    pub analyzer: String,
+}
+
+/// A tokenizer that emits nothing: what a field whose analysis is skipped is indexed with.
+struct NoTokens;
+
+impl Tokenizer for NoTokens {
+    fn tokenize(&self, _text: &str, _out: &mut TokenStream) {}
+}
+
+/// Registers, for every `text` field of `schema` whose analyzer `registry` lacks, an analyzer that emits no token
+/// under its name and version, and lists the field in `skipped`. A built-in name cannot be registered: its versions
+/// this build lacks were refused when the manifest was decoded (SPEC §6.2.2), so that fails the open as unregistered.
+fn skip_unregistered(
+    collection: &str,
+    schema: &CollectionSchema,
+    registry: &mut AnalyzerRegistry,
+    skipped: &mut Vec<SkippedAnalysis>,
+) -> Result<(), DatabaseError> {
+    for field in schema.fields() {
+        let FieldKind::Text(options) = field.kind() else {
+            continue;
+        };
+        let analyzer = &options.analyzer;
+        // An analyzer an earlier field lacked is in `registry` now, as the no-token one: this field is skipped too.
+        let replaced = skipped.iter().any(|s| s.analyzer == analyzer.to_string());
+        if !replaced {
+            if registry.get(analyzer.name(), analyzer.version()).is_some() {
+                continue;
+            }
+            let unregistered = || DatabaseError::UnregisteredAnalyzer {
+                collection: collection.to_owned(),
+                field: field.name().to_owned(),
+                analyzer: analyzer.to_string(),
+            };
+            registry
+                .register(
+                    analyzer.name(),
+                    analyzer.version(),
+                    Analyzer::builder(NoTokens).build(),
+                )
+                .map_err(|_| unregistered())?;
+        }
+        skipped.push(SkippedAnalysis {
+            collection: collection.to_owned(),
+            field: field.name().to_owned(),
+            analyzer: analyzer.to_string(),
+        });
+    }
+    Ok(())
 }

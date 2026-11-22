@@ -66,6 +66,23 @@ pub const BUILTIN_ANALYZERS: &[BuiltinAnalyzer] = &[
 /// The analyzer a text field gets when it names none (SPEC §6.2.2).
 pub const DEFAULT_ANALYZER: &str = "standard";
 
+/// Whether `name` has the shape every analyzer name has, built-in or registered: `[a-z][a-z0-9_-]*` (SPEC §6.3.3).
+///
+/// A build that lacks an analyzer of this shape reads a schema naming it as written by a newer build or with an
+/// analyzer to register, never as corrupt (SPEC §6.2.2), so [`AnalyzerRegistry::register`] accepts no other name.
+///
+/// ```
+/// use persia_analysis::is_analyzer_name;
+///
+/// assert!(is_analyzer_name("en") && is_analyzer_name("my-prefix_2"));
+/// assert!(!is_analyzer_name("Mine") && !is_analyzer_name("2nd") && !is_analyzer_name("a@b"));
+/// ```
+pub fn is_analyzer_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
 /// The current (highest) version of built-in analyzer `name`, or `None` if there is no such analyzer.
 pub fn current_builtin_version(name: &str) -> Option<u32> {
     BUILTIN_ANALYZERS
@@ -173,7 +190,8 @@ pub struct AnalyzerRegistry {
 /// [`AnalyzerRegistry::register`] refused an analyzer.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RegisterError {
-    /// The name is empty or contains `@`, so no `name@version` could refer to it.
+    /// The name is not of the shape `[a-z][a-z0-9_-]*` ([`is_analyzer_name`]): a build without the analyzer could not
+    /// tell a schema naming it from a corrupt one (SPEC §6.2.2).
     #[error("invalid analyzer name {0:?}")]
     InvalidName(String),
     /// The name is a built-in analyzer's: its versions, released or future, are defined by this crate alone.
@@ -200,31 +218,49 @@ impl AnalyzerRegistry {
 
     /// A registry holding every version of every built-in analyzer ([`BUILTIN_ANALYZERS`]).
     pub fn builtin() -> Self {
-        let mut registry = Self::new();
+        Self::new().with_builtins()
+    }
+
+    /// This registry with every built-in analyzer version it lacks added: what a database opens with, so a schema
+    /// can always name the built-ins whatever registry the caller gives (SPEC §6.2.2). [`Self::register`] refuses
+    /// built-in names, so nothing registered is replaced.
+    ///
+    /// ```
+    /// use persia_analysis::{Analyzer, AnalyzerRegistry, WhitespaceTokenizer};
+    ///
+    /// let mut mine = AnalyzerRegistry::new();
+    /// mine.register("mine", 1, Analyzer::builder(WhitespaceTokenizer).build())?;
+    /// let all = mine.with_builtins();
+    /// assert!(all.get("mine", 1).is_some() && all.get("standard", 1).is_some());
+    /// # Ok::<(), persia_analysis::RegisterError>(())
+    /// ```
+    #[must_use]
+    pub fn with_builtins(mut self) -> Self {
         for a in BUILTIN_ANALYZERS {
+            let versions = self.analyzers.entry(a.name.to_owned()).or_default();
+            if versions.contains_key(&a.version) {
+                continue;
+            }
             if let Some(analyzer) = builtin_analyzer(a.name, a.version) {
-                registry
-                    .analyzers
-                    .entry(a.name.to_owned())
-                    .or_default()
-                    .insert(a.version, Arc::new(analyzer));
+                versions.insert(a.version, Arc::new(analyzer));
             }
         }
-        registry
+        self
     }
 
     /// Adds `analyzer` as version `version` of `name`.
     ///
     /// # Errors
-    /// [`RegisterError`] if the name is empty, contains `@` or is a built-in analyzer's (any version: a built-in
-    /// name never means another chain, SPEC §6.3), the version is 0, or the name and version are taken.
+    /// [`RegisterError`] if the name is not of the shape `[a-z][a-z0-9_-]*` ([`is_analyzer_name`]), or is a built-in
+    /// analyzer's (any version: a built-in name never means another chain, SPEC §6.3), the version is 0, or the name
+    /// and version are taken.
     pub fn register(
         &mut self,
         name: &str,
         version: u32,
         analyzer: Analyzer,
     ) -> Result<(), RegisterError> {
-        if name.is_empty() || name.contains('@') {
+        if !is_analyzer_name(name) {
             return Err(RegisterError::InvalidName(name.to_owned()));
         }
         if current_builtin_version(name).is_some() {

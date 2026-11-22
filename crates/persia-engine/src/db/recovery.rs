@@ -30,7 +30,7 @@ use persia_storage::container::{Container, ContainerFile};
 
 use super::{
     Collection, ContainerObjects, Database, DatabaseError, DatabaseOptions, LiveSegment,
-    Structural, objects, open_source,
+    Structural, check_analyzers, objects, open_source,
 };
 use crate::manifest::{Layout, MAX_MANIFEST_LEN, Manifest, ManifestDiff, SegmentEntry};
 use crate::memtable::{Memtable, MemtableError};
@@ -45,8 +45,11 @@ impl<F: ContainerFile + Sync> Database<F> {
         container: Container<F>,
         options: DatabaseOptions,
     ) -> Result<Self, DatabaseError> {
-        let (manifest, collections) =
-            load(&container, |schema| super::new_memtable(schema, &options))?;
+        let options = options.with_builtins();
+        let (manifest, collections) = load(&container, |name, schema| {
+            check_analyzers(name, schema, &options.registry)?;
+            Ok(super::new_memtable(schema, &options)?)
+        })?;
         let wal = WalWriter::resume(container, BTreeMap::new())
             .with_chunk_target(options.wal_chunk_target);
         let mut db = Self::assemble(wal, manifest, collections, options);
@@ -144,10 +147,11 @@ fn is_capacity(error: &MemtableError) -> bool {
 }
 
 /// Steps 2 and 3 of the open sequence (module docs): the committed manifest, and each collection with its segments
-/// open and an empty memtable from `memtable`.
+/// open and an empty memtable from `memtable`, which gets the collection's name and schema and runs before its
+/// segments are opened.
 pub(super) fn load<F: ContainerFile + Sync>(
     container: &Container<F>,
-    mut memtable: impl FnMut(&CollectionSchema) -> Result<Memtable, MemtableError>,
+    mut memtable: impl FnMut(&str, &CollectionSchema) -> Result<Memtable, DatabaseError>,
 ) -> Result<(Manifest, BTreeMap<String, Collection>), DatabaseError> {
     let sb = *container.superblock();
     let manifest = if sb.seq == 0 {
@@ -166,12 +170,14 @@ pub(super) fn load<F: ContainerFile + Sync>(
         for entry in manifest.collections() {
             let name = entry.name();
             let schema = Arc::new(entry.schema().clone());
+            // First: an analyzer the registry lacks fails the open before any segment is read.
+            let memtable = memtable(name, &schema)?;
             let mut segments = Vec::with_capacity(entry.segments().len());
             for segment in entry.segments() {
                 segments.push(open_segment(&objects, name, segment, &schema)?);
             }
             let collection = Collection {
-                memtable: memtable(&schema)?,
+                memtable,
                 schema,
                 segments,
                 first_write: None,

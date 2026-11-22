@@ -3,7 +3,9 @@
 //! A document error is reported without opening the pack. The pack open and the pack scan both bound each frame's
 //! length by its kind before reading it (ROADMAP 9.2.14).
 //!
-//! The output is for people: `key  value` lines, then `verify  ok`. A failed check is the command's error.
+//! The output is for people: `key  value` lines, then `verify  ok`. A failed check is the command's error. The command
+//! has the built-in analyzers only: the `analysis` row names the `text` fields whose registered analyzer it lacks, whose
+//! WAL records it validates without analyzing them (ROADMAP 6.6.8). That is not a failure.
 //!
 //! A live writer may commit and collect blobs while this runs. A dangling reference is reported as such only if the
 //! container's committed `seq` has not moved since the documents were opened. Otherwise the documents may be older
@@ -17,7 +19,7 @@ use anyhow::{Context, Result, bail};
 use persia::internal::documents::{ReadOnlyBlobDatabase, ReaderLease};
 
 use persia::internal::verify::{Scan, VerifyError};
-use persia_engine::db::{DatabaseOptions, ReadOnlyDatabase, Tail};
+use persia_engine::db::{DatabaseOptions, ReadOnlyDatabase, SkippedAnalysis, Tail};
 use persia_storage::container::{Container, Mode};
 
 /// Opens the database at `path` read-only, verifies it and its blobs as deep as `scan` asks, and writes what it found
@@ -26,20 +28,23 @@ pub fn verify(out: &mut dyn Write, path: &Path, scan: Scan) -> Result<()> {
     if !path.is_file() {
         bail!("{} is not a container file", path.display());
     }
-    // The built-in analyzers: replay analyzes the `text` fields of the logged documents, and a schema names only
-    // built-in analyzers (SPEC §6.2.2); one this build lacks, from a newer build, fails the open as unsupported.
+    // The built-in analyzers: this command cannot load registered ones (SPEC §6.2.2). Replay validates and applies
+    // every record, but does not analyze a `text` field whose analyzer it lacks; the `analysis` row lists those
+    // fields, and a skip is not a failure (ROADMAP 6.6.8). A built-in version this build lacks, from a newer build,
+    // still fails the open as unsupported.
     let options = DatabaseOptions::default();
     // The reader lease first, so a writer's GC cannot sweep a blob these documents show while this runs (SPEC §9.3).
     // It opens the container first: a file that is not one fails here as the container reports it (exit 4), and
     // nothing is created beside it.
     let lease = ReaderLease::take_beside(path)
         .with_context(|| format!("taking a reader lease beside {}", path.display()))?;
-    let docs = ReadOnlyDatabase::open(path, &options.registry)
+    let docs = ReadOnlyDatabase::open_skipping_analysis(path, &options.registry)
         .with_context(|| format!("opening {}", path.display()))?;
     // Document checks before the pack is opened, so a damaged container is reported without opening the pack.
     let report = docs
         .verify()
         .with_context(|| format!("verifying {}", path.display()))?;
+    let analysis = analysis(docs.skipped_analysis());
     let db = ReadOnlyBlobDatabase::with_lease(lease, docs, path)
         .with_context(|| format!("opening the blob pack of {}", path.display()))?;
     let tail = match report.tail {
@@ -66,6 +71,7 @@ pub fn verify(out: &mut dyn Write, path: &Path, scan: Scan) -> Result<()> {
             format!("{} frames", report.uncommitted_frames),
         ),
         ("tail", tail),
+        ("analysis", analysis),
     ];
     // The blob rows; a dangling reference (SPEC §9.5) or a damaged pack frame is the command's error.
     let blobs = match db.verify_blobs(scan) {
@@ -113,6 +119,21 @@ pub fn verify(out: &mut dyn Write, path: &Path, scan: Scan) -> Result<()> {
     }
     writeln!(out, "verify            ok")?;
     Ok(())
+}
+
+/// The `analysis` row: which `text` fields replay did not analyze, as `collection.field (name@version)`.
+fn analysis(skipped: &[SkippedAnalysis]) -> String {
+    if skipped.is_empty() {
+        return "every text field".to_owned();
+    }
+    let fields: Vec<_> = skipped
+        .iter()
+        .map(|s| format!("{}.{} ({})", s.collection, s.field, s.analyzer))
+        .collect();
+    format!(
+        "skipped for {} (not registered with this build; their WAL records are validated, not analyzed)",
+        fields.join(", ")
+    )
 }
 
 /// After a dangling reference: fails (status 1) if the container's committed `seq` moved since the documents were

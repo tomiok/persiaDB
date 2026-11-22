@@ -46,6 +46,8 @@ is persisted in every segment, so it must not drift across releases, dependency 
 8. **Analyzer registry.** The schema accepts exactly the built-in analyzer versions `persia-analysis` ships
    (`BUILTIN_ANALYZERS`, SPEC §6.3.3) and rejects anything else. *Amended in ROADMAP 4.4.3:* this replaced a stub
    list in the schema module that also named `fr`, `de` and `it`, which have no analyzer yet (ROADMAP 4.4.10).
+   *Amended by ADR-0059 (ROADMAP 6.6.8):* a schema may also name an analyzer registered with
+   `AnalyzerRegistry::register`, with the same naming and bytes; the database open checks its registry.
 
 ## Consequences
 

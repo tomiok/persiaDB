@@ -444,6 +444,7 @@ fn verify_reports_a_sound_database_also_beside_its_writer() {
         pair("replayed", "1 WAL records"),
         pair("uncommitted", "1 frames"),
         pair("tail", "clean"),
+        pair("analysis", "every text field"),
         pair("references", "0 to 0 blobs"),
         pair("pack", "none"),
         pair("scan", "no pack"),
@@ -459,6 +460,58 @@ fn verify_reports_a_sound_database_also_beside_its_writer() {
     assert_eq!(std::fs::read(&path).unwrap(), before);
     drop(writer);
     assert_eq!(report(&persia(&["verify", path_arg(&path)])), expected);
+}
+
+/// ROADMAP 6.6.8: a schema naming a registered analyzer, which this command cannot load. `verify` replays and checks
+/// every record without analyzing that field, names it in the `analysis` row, and succeeds (a skip is not a failure).
+#[test]
+fn verify_skips_and_names_a_field_whose_registered_analyzer_it_lacks() {
+    use persia_engine::analysis::{Analyzer, AnalyzerRegistry, WhitespaceTokenizer};
+    use persia_engine::db::{Database, DatabaseOptions};
+    use persia_engine::document::{Document, Value};
+    use persia_engine::schema::CollectionSchema;
+    use persia_engine::wal::Durability;
+
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let mut registry = AnalyzerRegistry::builtin();
+    registry
+        .register("tags", 1, Analyzer::builder(WhitespaceTokenizer).build())
+        .unwrap();
+    let schema = CollectionSchema::from_json_in(
+        r#"{"name": "notes", "fields": {"tags": {"type": "text", "analyzer": "tags"}, "body": {"type": "text"}}}"#,
+        &registry,
+    )
+    .unwrap();
+    let tags = schema.field("tags").unwrap().id();
+    let options = DatabaseOptions {
+        registry,
+        ..DatabaseOptions::default()
+    };
+    let mut db = Database::create(&path, options).unwrap();
+    db.create_collection(schema).unwrap();
+    for id in ["n1", "n2"] {
+        let doc = Document::new(id).with(tags, Value::String("a b".into()));
+        db.put("notes", &doc, Durability::Fsync).unwrap();
+        if id == "n1" {
+            db.commit().unwrap();
+        }
+    }
+    drop(db);
+    let found = report(&persia(&["verify", path_arg(&path)]));
+    for expected in [
+        pair("documents", "1 (0 deleted)"),
+        pair("replayed", "1 WAL records"),
+        pair(
+            "analysis",
+            "skipped for notes.tags (tags@1) (not registered with this build; their WAL records are validated, not \
+             analyzed)",
+        ),
+        pair("verify", "ok"),
+    ] {
+        assert!(found.contains(&expected), "{expected:?} in {found:?}");
+    }
 }
 
 #[test]
