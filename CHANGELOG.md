@@ -209,7 +209,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `Error::ResumeUnchecked` before anything is read (ROADMAP 9.3.7).
 - `persia` (internal API, breaking): `BlobDatabase::gc` on the pack does not sweep while any reader lease is behind the
   committed seq (or opening, ahead, unreadable); every commit and compaction puts readers behind until they refresh.
-  `with_pack_beside` / `with_pack_in` can fail with `OpenedBeforeLease`. `GcReport` is `#[non_exhaustive]`;
+  `with_pack_beside` / `with_pack_in` can fail with `OpenedBeforeLease`, and `with_pack_in` with `NoContainerPath`.
+  `persia_blob::Error` gains `Container`, and `Error::is_corruption` is no longer `const`. `GcReport` is `#[non_exhaustive]`;
   `BlobReferences` gains `committed_seq` (ROADMAP 9.2.16).
 - `persia verify` takes a reader lease before it opens the documents (ROADMAP 9.2.16).
 - `persia-blob` / `persia`: on the remote layout, `put_blob` failures after staging come wrapped in

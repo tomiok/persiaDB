@@ -2683,10 +2683,13 @@ longer), exactly 64 bytes, the CRC32C, `flags` (any bit unsupported), `reserved`
 `lease_id` against the name and an open `db_uuid` against the pack's. Anything else is corruption. The writer reads at
 most 4096 bytes of one.
 
-A take opens the container once (nothing is created beside a file that is not one), creates the file, writes the
-opening record, takes the lock, checks that the path still names the file, then reads the container's committed seq
-again (the **taken seq**). A refused lock, a sidecar that cannot be opened (a delete-pending name on Windows) or a name
-removed before the lock starts it again under a new id, at most 3 times; then it fails with `LeaseContended`. `open`
+A take opens the container once (its canonical path; nothing is created beside a file that is not a container, and
+that failure is the container's, reported by `ReadOnlyBlobDatabase` as the documents' open would report it), creates
+the file, writes the opening record, takes the lock, checks that the lease's path (and, on Windows, the sidecar's)
+still names the locked file, then reads the container's committed seq again (the **taken seq**), through the pack's
+file system: the documents and the pack share one. A refused lock, a sidecar or name that is delete pending (Windows
+`PermissionDenied`), or a name removed before the lock, starts it again under a new id; a failed attempt removes what
+it created before releasing its lock. At most 3 attempts; then it fails with `LeaseContended`. `open`
 takes the lease, opens the documents, then writes the open record. Documents given to `with_lease` (and
 `with_pack_beside`, which takes its lease after them) must not be older than the taken seq (`OpenedBeforeLease`; equal
 is safe) and must use the pack beside which the lease lies (`LeaseElsewhere`, also after `open`, against a symbolic
@@ -2694,7 +2697,8 @@ link retargeted in between). A `refresh` rewrites the record in place (one 64-by
 succeeded. A drop removes the name(s), then unlocks explicitly. Nothing about a lease is synced: a machine crash ends
 every reader.
 
-When creating the directory or the file fails with permission denied or a read-only file system, the handle opens
+A `<pack>.leases` that is not a directory fails the take. Only when creating the directory or the lease file fails
+with permission denied or a read-only file system does the handle open
 without a lease and logs a warning naming the path. GC may then sweep a blob a document it shows references, which
 reads as `BlobNotFound`, never as other bytes.
 
@@ -2832,10 +2836,14 @@ the same process that runs `put_blob`, and keeps a **pin set** with it:
   another process or this one, is not in the mark. After the mark, and before the sweep, GC on the pack scans the
   reader leases (§9.3), holding the pack's writer lock. Where locks cannot be judged (asked of the pack file first),
   every lease counts live, none is opened, none is removed. Elsewhere each regular file `<id>.lease` is judged by its
-  lock, never by its record:
-  - one the writer is granted is stale: removed with its sidecar, then unlocked, whatever its record says;
-  - one held elsewhere is live, and its record is read;
+  lock, never by its record, and its kind is checked again right before its open (anything but a regular file is
+  skipped):
+  - one the writer is granted is stale: removed with its sidecar, then unlocked, whatever its record says, unread
+    (garbage, any version or length);
+  - one held elsewhere is live, and its record is read (at most 4096 bytes);
   - a name gone since the listing is skipped;
+  - a sidecar whose lease is gone is removed only if its lease does not exist once the sidecar's lock is granted;
+  - a leases path that cannot be listed (one that is not a directory included) holds GC back;
   - an open or lock error, or a record that does not decode (torn, another version, another database or id), is live
     and unreadable.
 
@@ -2883,7 +2891,9 @@ A read-only handle holds a reader lease (§9.3): `ReaderLease::take_beside(path)
 `ReadOnlyBlobDatabase::with_lease(lease, db, path)` (or `with_lease_in`). `ReadOnlyBlobDatabase::open` does both
 around its document open; `with_pack_beside` and `with_pack_in` take the lease after the given documents. `lease()`
 is `None` when the directory refused writes. Errors: `OpenedBeforeLease { opened, taken }`, `LeaseElsewhere { lease,
-expected }`, and `LeaseContended { attempts }` when the take's 3 attempts were refused.
+expected }`, `LeaseContended { attempts }` when the take's 3 attempts were refused, and `NoContainerPath` when
+`with_pack_in` is given documents of a container opened without a path. A container failure while taking the lease
+is `Error::Database` from `ReadOnlyBlobDatabase` and `persia_blob::Error::Container` from `ReaderLease`.
 Convenience: `put(doc, blob: Blob::from_path(..))` performs both steps in the right order: it logs the document only
 after the blob is durable (`put_blob` returned) or, for a given `BlobRef`, pinned and found bound, at every WAL
 durability (ADR-0051).
