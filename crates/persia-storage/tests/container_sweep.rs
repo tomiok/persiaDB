@@ -270,3 +270,201 @@ fn with_per_process_locks_no_temporary_file_is_swept() {
     assert_eq!(c.sweep_stale_files().unwrap(), Vec::<PathBuf>::new());
     assert_eq!(names(&fs), before);
 }
+
+// --- The blob pack's side files (ROADMAP 9.2.10; SPEC §9.3) ---
+
+const PACK_LOCK: &str = "/db/app.persia.blobs.lock";
+const LEASES: &str = "/db/app.persia.blobs.leases";
+const PACK_STALE: [&str; 2] = [
+    "/db/app.persia.blobs.tmp.0123456789abcdef.0",
+    "/db/app.persia.blobs.tmp.fedcba9876543210.17",
+];
+
+/// A container, two stale pack temporary files, names a pack never makes, the pack itself, and a lease directory with
+/// a lease in it: all durable.
+fn with_pack_side_files() -> SimFs {
+    let fs = SimFs::new();
+    fs.create_dir(Path::new("/db")).unwrap();
+    fs.sync_dir(Path::new("/")).unwrap();
+    drop(Container::create_in(vfs(&fs), DB).unwrap());
+    for name in PACK_STALE.into_iter().chain([
+        "/db/app.persia.blobs",
+        "/db/app.persia.blobs.tmp.0123456789ABCDEF.1",
+        "/db/app.persia.blobs.tmp.0123456789abcdef",
+        "/db/app.persia.blobs.tmp.0123456789abcdef.1x",
+        "/db/app.persia.blobs.compact.0123456789abcdef.1",
+        "/db/app.persia.blobs.lock.tmp.0123456789abcdef.1",
+        "/db/other.persia.blobs.tmp.0123456789abcdef.1",
+    ]) {
+        let f = fs.create_new(Path::new(name)).unwrap();
+        f.write_all_at(b"left by a crash", 0).unwrap();
+        f.sync_data().unwrap();
+    }
+    // A directory with a temporary file's name is not one.
+    fs.create_dir(Path::new("/db/app.persia.blobs.tmp.aaaaaaaaaaaaaaaa.2"))
+        .unwrap();
+    fs.create_dir(Path::new(LEASES)).unwrap();
+    fs.create_new(Path::new(&format!(
+        "{LEASES}/0123456789abcdef0123456789abcdef.lease"
+    )))
+    .unwrap()
+    .sync_data()
+    .unwrap();
+    fs.sync_dir(Path::new(LEASES)).unwrap();
+    fs.sync_dir(Path::new("/db")).unwrap();
+    fs
+}
+
+fn listed(fs: &SimFs) -> Vec<(String, SideFileKind, InUse)> {
+    Container::side_files_in(fs, DB)
+        .unwrap()
+        .into_iter()
+        .map(|f| {
+            assert!(!f.removed);
+            (f.path.to_string_lossy().into_owned(), f.kind, f.in_use)
+        })
+        .collect()
+}
+
+/// `side_files` lists the pack's temporary files by the pack's own strict rule (regular files, lowercase hex, the
+/// exact name), its lock file and its lease directory; the sweep removes exactly the stale temporary files, under the
+/// pack's writer lock (whose file it creates), with one directory sync, and never the lock or the leases.
+#[test]
+fn the_packs_stale_temporary_files_are_listed_and_swept_and_its_lock_and_leases_kept() {
+    let fs = with_pack_side_files();
+    let before = names(&fs);
+    let want = |lock: Option<InUse>| {
+        let mut want = vec![
+            (PACK_STALE[0].to_owned(), SideFileKind::Temporary, InUse::No),
+            (PACK_STALE[1].to_owned(), SideFileKind::Temporary, InUse::No),
+            (LEASES.to_owned(), SideFileKind::Leases, InUse::Unknown),
+        ];
+        want.extend(lock.map(|l| (PACK_LOCK.to_owned(), SideFileKind::Lock, l)));
+        want.sort_by(|a, b| a.0.cmp(&b.0));
+        want
+    };
+    // No lock file: no pack writer has run, so the temporary files are free.
+    assert_eq!(listed(&fs), want(None));
+    assert_eq!(
+        names(&fs),
+        before,
+        "listing removes nothing and creates no lock"
+    );
+
+    let c = Container::open_in(vfs(&fs), DB, Mode::ReadWrite).unwrap();
+    let mut removed = c.sweep_stale_files().unwrap();
+    removed.sort();
+    assert_eq!(removed, PACK_STALE.map(PathBuf::from));
+    // Durable: one directory sync covered both removals.
+    let after = names(&fs.crash(CrashLoss::All));
+    for name in &before {
+        let stale = PACK_STALE.iter().any(|s| s.ends_with(name.as_str()));
+        assert_eq!(after.contains(name), !stale, "{name}: {after:?}");
+    }
+    assert!(
+        fs.read(Path::new(PACK_LOCK)).is_some(),
+        "the sweep created the lock file"
+    );
+    assert!(
+        fs.read(Path::new(&format!(
+            "{LEASES}/0123456789abcdef0123456789abcdef.lease"
+        )))
+        .is_some(),
+        "a lease is never touched"
+    );
+    // The sweep released the pack's lock.
+    assert!(
+        fs.open(Path::new(PACK_LOCK), true)
+            .unwrap()
+            .try_lock()
+            .unwrap()
+    );
+    assert_eq!(
+        listed(&fs),
+        [
+            (LEASES.to_owned(), SideFileKind::Leases, InUse::Unknown),
+            (PACK_LOCK.to_owned(), SideFileKind::Lock, InUse::No),
+        ]
+    );
+    assert_eq!(
+        c.sweep_stale_files().unwrap(),
+        Vec::<PathBuf>::new(),
+        "idempotent"
+    );
+    assert!(
+        fs.read(Path::new(PACK_LOCK)).is_some(),
+        "the lock file is never removed"
+    );
+}
+
+/// While a pack writer holds the pack's lock (a pack handle that outlived its database), the pack's temporary files
+/// and its lock are in use: the listing says so and the sweep keeps them, removing only the container's own; the
+/// lock stays the writer's.
+#[test]
+fn a_held_pack_lock_keeps_the_packs_temporary_files() {
+    let fs = with_pack_side_files();
+    let writer = fs.create_new(Path::new(PACK_LOCK)).unwrap();
+    assert!(writer.try_lock().unwrap());
+    let container_stale = "/db/app.persia.tmp.0123456789abcdef.4";
+    fs.create_new(Path::new(container_stale)).unwrap();
+    assert_eq!(
+        listed(&fs),
+        [
+            (LEASES.to_owned(), SideFileKind::Leases, InUse::Unknown),
+            (PACK_LOCK.to_owned(), SideFileKind::Lock, InUse::Yes),
+            (
+                PACK_STALE[0].to_owned(),
+                SideFileKind::Temporary,
+                InUse::Yes
+            ),
+            (
+                PACK_STALE[1].to_owned(),
+                SideFileKind::Temporary,
+                InUse::Yes
+            ),
+            (
+                container_stale.to_owned(),
+                SideFileKind::Temporary,
+                InUse::No
+            ),
+        ]
+    );
+    let c = Container::open_in(vfs(&fs), DB, Mode::ReadWrite).unwrap();
+    assert_eq!(
+        c.sweep_stale_files().unwrap(),
+        [PathBuf::from(container_stale)]
+    );
+    for stale in PACK_STALE {
+        assert!(fs.read(Path::new(stale)).is_some(), "{stale} kept");
+    }
+    assert!(
+        !fs.open(Path::new(PACK_LOCK), true)
+            .unwrap()
+            .try_lock()
+            .unwrap(),
+        "still the writer's"
+    );
+    drop(writer);
+    assert_eq!(c.sweep_stale_files().unwrap().len(), 2);
+}
+
+/// Where locks belong to the process (ADR-0019), a pack lock taken proves nothing: the pack's temporary files are
+/// listed as unknown and kept.
+#[test]
+fn with_per_process_locks_no_pack_temporary_file_is_swept() {
+    let fs = with_pack_side_files();
+    fs.set_per_process_locks(true);
+    let c = Container::open_in(vfs(&fs), DB, Mode::ReadWrite).unwrap();
+    assert_eq!(c.sweep_stale_files().unwrap(), Vec::<PathBuf>::new());
+    for stale in PACK_STALE {
+        assert!(fs.read(Path::new(stale)).is_some(), "{stale} kept");
+    }
+    let files = Container::side_files_in(&fs, DB).unwrap();
+    assert!(
+        files
+            .iter()
+            .filter(|f| f.kind != SideFileKind::Leases)
+            .all(|f| f.in_use == InUse::Unknown),
+        "{files:?}"
+    );
+}

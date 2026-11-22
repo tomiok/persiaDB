@@ -1,10 +1,12 @@
 //! The `persia` command-line tool: inspect, dump, verify, compact, bench.
 //!
-//! Maintenance commands (ROADMAP 2.3.8, 2.4.19; ADR-0019) list and remove the files a crash or a recovery leaves next
-//! to a container or inside a local store. Each found file is printed as one tab-separated line, so the output can be
-//! piped: `<action>\t<kind>\t<state>\t<path>`, with `action` `found`, `removed` or `kept`, `kind` `temporary` or
-//! `quarantine`, and `state` `free`, `in-use` or `unknown` (whether a live writer holds the file's lock). Control
-//! characters in a path are escaped (`\t`, `\n`, `\u{1b}`). A sweep that fails part-way still prints what it removed.
+//! Maintenance commands (ROADMAP 2.3.8, 2.4.19, 9.2.10; ADR-0019) list and remove the files a crash or a recovery leaves
+//! next to a container (its blob pack's included) or inside a local store. Each found file is printed as one
+//! tab-separated line, so the output can be piped: `<action>\t<kind>\t<state>\t<path>`, with `action` `found`,
+//! `removed` or `kept`, `kind` `temporary`, `quarantine`, `lock` (the blob pack's writer lock file) or `leases` (its
+//! reader lease directory; neither is ever removed), and `state` `free`, `in-use` or `unknown` (whether a live writer
+//! holds the file's lock). Control characters in a path are escaped (`\t`, `\n`, `\u{1b}`). A sweep that fails
+//! part-way still prints what it removed.
 //!
 //! Segment commands (ROADMAP 5.4.2, 5.4.3) read one segment file with the schema it was written with: `inspect
 //! segment` prints its footer, sections and per-field statistics, and `dump segment` a field's terms or one term's
@@ -94,14 +96,18 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum ContainerCommand {
-    /// Lists the temporary and quarantine files next to a container. Takes no writer lock: it only probes each
-    /// temporary file's lock for an instant (a create racing with it may then fail with "locked" and be retried).
+    /// Lists the temporary and quarantine files next to a container, and those of its blob pack: its temporary
+    /// files, its writer lock file (`<name>.persia.blobs.lock`) and its reader lease directory. Takes no writer
+    /// lock: it only probes each temporary file's lock, and the pack's, for an instant (a create racing with it may
+    /// then fail with "locked" and be retried).
     Files {
         /// The container file.
         path: PathBuf,
     },
-    /// Removes the stale temporary files of crashed creates and compactions. Opens the container read-write (which
-    /// recovers it, as any writer would), so it fails while another writer has it open.
+    /// Removes the stale temporary files of crashed creates and compactions, and of crashed blob pack creations and
+    /// rewrites (only while no pack writer holds the pack's lock). Opens the container read-write (which recovers it,
+    /// as any writer would), so it fails while another writer has it open. The pack's lock file and lease directory
+    /// are never removed.
     Sweep {
         /// The container file.
         path: PathBuf,
@@ -421,6 +427,8 @@ fn print_files(action: &str, files: &[SideFile]) {
         let kind = match f.kind {
             SideFileKind::Temporary => "temporary",
             SideFileKind::Quarantine => "quarantine",
+            SideFileKind::Lock => "lock",
+            SideFileKind::Leases => "leases",
         };
         let state = match f.in_use {
             InUse::No => "free",

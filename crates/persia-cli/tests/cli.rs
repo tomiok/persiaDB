@@ -112,6 +112,77 @@ fn container_sweep_keeps_quarantine_unless_asked() {
     Container::open(&path, Mode::ReadOnly).unwrap();
 }
 
+/// ROADMAP 9.2.10: the blob pack's stale temporary files (`<name>.persia.blobs.tmp.*`, lowercase hex) are listed and
+/// swept with the container's, under the pack's writer lock, whose file the sweep creates and keeps; the lease directory
+/// is listed and never touched. While a pack writer (another process: this test) holds the lock, they are in use and
+/// kept.
+#[test]
+fn container_sweep_removes_the_packs_stale_temporary_files_unless_its_writer_lives() {
+    const PACK_TMP: &str = "app.persia.blobs.tmp.0123456789abcdef.2";
+    const NOT_OURS: &str = "app.persia.blobs.tmp.0123456789ABCDEF.2";
+    let _serial = serial();
+    let (_dir, path) = container();
+    let leases = path.with_file_name("app.persia.blobs.leases");
+    std::fs::create_dir(&leases).unwrap();
+    std::fs::write(leases.join("0123456789abcdef0123456789abcdef.lease"), b"").unwrap();
+    let lock = path.with_file_name("app.persia.blobs.lock");
+    std::fs::write(&lock, b"").unwrap();
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock)
+        .unwrap();
+    held.try_lock().unwrap();
+    for name in [PACK_TMP, NOT_OURS] {
+        std::fs::write(path.with_file_name(name), b"a crashed pack rewrite").unwrap();
+    }
+    assert_eq!(
+        lines(&persia(&["container", "files", path_arg(&path)])),
+        [
+            row("found", "leases", "unknown", "app.persia.blobs.leases"),
+            row("found", "lock", "in-use", "app.persia.blobs.lock"),
+            row("found", "quarantine", "free", QUARANTINE),
+            row("found", "temporary", "free", TMP),
+            row("found", "temporary", "in-use", PACK_TMP),
+        ]
+    );
+    let out = persia(&["container", "sweep", path_arg(&path)]);
+    assert_eq!(
+        lines(&out),
+        [
+            row("kept", "leases", "unknown", "app.persia.blobs.leases"),
+            row("kept", "lock", "in-use", "app.persia.blobs.lock"),
+            row("kept", "quarantine", "free", QUARANTINE),
+            row("kept", "temporary", "in-use", PACK_TMP),
+            row("removed", "temporary", "free", TMP),
+        ]
+    );
+    assert!(path.with_file_name(PACK_TMP).exists());
+    held.unlock().unwrap();
+    drop(held);
+    let out = persia(&["container", "sweep", path_arg(&path)]);
+    assert_eq!(
+        lines(&out),
+        [
+            row("kept", "leases", "unknown", "app.persia.blobs.leases"),
+            row("kept", "lock", "free", "app.persia.blobs.lock"),
+            row("kept", "quarantine", "free", QUARANTINE),
+            row("removed", "temporary", "free", PACK_TMP),
+        ]
+    );
+    assert!(!path.with_file_name(PACK_TMP).exists());
+    assert!(
+        path.with_file_name(NOT_OURS).exists(),
+        "not a name the pack makes"
+    );
+    assert!(lock.exists(), "the lock file is never removed");
+    assert!(
+        leases
+            .join("0123456789abcdef0123456789abcdef.lease")
+            .exists()
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn container_sweep_fails_while_a_writer_holds_the_container() {

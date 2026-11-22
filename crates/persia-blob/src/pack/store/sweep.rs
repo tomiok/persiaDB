@@ -6,10 +6,11 @@
 //! empty pack or a second name of the pack (removing a name never touches the file's data), and a rewrite's file is
 //! renamed over the pack only once complete. Removing a rewrite's file relies on SPEC §18.10 (b): nothing is bound
 //! into the new pack until its directory sync succeeds, and writing stops if that sync fails, so the file holds no
-//! blob a reader can still name. The container's `sweep_stale_files` (SPEC §4.5.1) matches only the
-//! container's own names, so the pack sweeps its own, with rules like the container's but stricter: only regular
-//! files named exactly as [`temp_path`](super::temp_path) names them (lowercase hex only, where the container
-//! accepts either case), and one directory sync after the removals.
+//! blob a reader can still name. The pack sweeps its own names at each read-write open, with rules like the
+//! container's but stricter: only regular files named exactly as [`temp_path`](super::temp_path) names them
+//! (lowercase hex only, where the container accepts either case), and one directory sync after the removals. The
+//! container's `side_files` and `sweep_stale_files` (SPEC §4.5.1) list and remove the same names by the same rules,
+//! the sweep only while it holds the pack's writer lock (ROADMAP 9.2.10).
 //!
 //! Only the container's writer opens the pack read-write (ADR-0049 item 8), and it creates or rewrites the pack only
 //! through that handle, after the open: when the sweep runs, no creation or rewrite of this pack is in flight, so no

@@ -15,7 +15,7 @@
 
 mod pack_support;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use persia_blob::{
@@ -335,4 +335,25 @@ fn two_writers_with_no_pack_file_on_a_real_file() {
     ));
     drop(first);
     assert!(PackStore::open_writer(pack_path(&db), &proof).is_ok());
+}
+
+/// ROADMAP 9.2.10 with a real pack writer: the container's sweep sees the lock a live pack handle holds (one an `Arc`
+/// kept after its container closed) and keeps the pack's temporary files; once the handle drops, it removes them.
+#[test]
+fn the_container_sweep_keeps_the_packs_temporary_files_while_its_writer_lives() {
+    let fs = fs();
+    let path = pack_path(Path::new(DB));
+    let container = Container::create_in(vfs(&fs), DB).unwrap();
+    let store = Arc::new(
+        PackStore::open_writer_in(vfs(&fs), &path, &container.writer_proof().unwrap()).unwrap(),
+    );
+    let stale = "/db/app.persia.blobs.tmp.0123456789abcdef.3";
+    fs.create_new(Path::new(stale)).unwrap();
+    let kept = Arc::clone(&store);
+    drop((store, container));
+    let next = Container::open_in(vfs(&fs), DB, Mode::ReadWrite).unwrap();
+    assert_eq!(next.sweep_stale_files().unwrap(), Vec::<PathBuf>::new());
+    assert!(fs.read(Path::new(stale)).is_some());
+    drop(kept);
+    assert_eq!(next.sweep_stale_files().unwrap(), [PathBuf::from(stale)]);
 }

@@ -1,6 +1,6 @@
-//! Files Persia leaves beside its data: temporary files of writes a crash interrupted, and quarantine copies of a
-//! corrupt container tail (ADR-0014). None of them holds acknowledged data, except possibly a quarantine copy, which
-//! is for an operator to inspect.
+//! Files Persia leaves beside its data: temporary files of writes a crash interrupted, quarantine copies of a corrupt
+//! container tail (ADR-0014), and the blob pack's writer lock and reader lease directory. None of them holds
+//! acknowledged data, except possibly a quarantine copy, which is for an operator to inspect.
 
 use std::borrow::Cow;
 use std::io;
@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use crate::container::ContainerFile;
 
-/// A file found beside a container or in a local store, from [`LocalStorage::sweep_temporaries`](crate::LocalStorage::sweep_temporaries)
+/// A file (or the blob pack's lease directory) found beside a container or in a local store, from [`LocalStorage::sweep_temporaries`](crate::LocalStorage::sweep_temporaries)
 /// or [`Container::side_files`](crate::container::Container::side_files).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SideFile {
@@ -25,11 +25,18 @@ pub struct SideFile {
 /// What a [`SideFile`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SideFileKind {
-    /// The temporary file of a write: a local store's `put` (`@tmp.*`, SPEC §10.1.1), or a container's create or
-    /// compaction (`<name>.tmp.*`, `<name>.compact.*`, SPEC §4.5.1, §4.6). Left behind, it holds no acknowledged data.
+    /// The temporary file of a write: a local store's `put` (`@tmp.*`, SPEC §10.1.1), a container's create or
+    /// compaction (`<name>.tmp.*`, `<name>.compact.*`, SPEC §4.5.1, §4.6), or its blob pack's creation or rewrite
+    /// (`<name>.blobs.tmp.*`, SPEC §9.3). Left behind, it holds no acknowledged data.
     Temporary,
     /// The copy of a corrupt container tail a recovery made before truncating it (`<name>.quarantine.*`, ADR-0014).
     Quarantine,
+    /// The blob pack's writer lock file, `<name>.blobs.lock` (SPEC §9.3, ROADMAP 9.2.15): in use while a pack writer
+    /// holds it. Never removed: a writer that locked it while another file took its name would not exclude the next.
+    Lock,
+    /// The blob pack's reader lease directory, `<name>.blobs.leases` (ROADMAP 9.2.16): readers keep their leases in it.
+    /// Never removed, nor anything in it; whether it is in use is never checked ([`InUse::Unknown`]).
+    Leases,
 }
 
 /// Whether a live writer is using a [`SideFile`]: each one holds the file's lock while it does (on Unix).
