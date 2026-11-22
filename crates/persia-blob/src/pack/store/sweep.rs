@@ -16,13 +16,13 @@
 //! temporary file can be in use. That is why the pack needs no lock on its temporary files, unlike the container's
 //! (whose creates take their own lock, SPEC §4.5.1).
 //!
-//! The pack's writer lock enforces that (ROADMAP 9.2.7): a read-write open takes it before it sweeps, on the pack file
-//! or beside it. Before the pack exists there is no file to lock on Unix, so two handles of a pack not yet created
-//! can both sweep; that case still fails safe: a temporary name the sweep removes before the other handle links (a
-//! creation) or renames (a rewrite) makes that step fail, so it reports an error and publishes nothing. A creation
-//! whose link already succeeded treats the missing temporary name as removed (`NotFound` is success) and goes on to
-//! its directory sync.
-//! Either way it never leaves a half-made pack at the pack's name.
+//! The pack's writer lock enforces that (ROADMAP 9.2.7, 9.2.15): a read-write open takes `<name>.persia.blobs.lock`
+//! beside the pack before it sweeps, whether or not the pack exists, so two handles never sweep at once. The
+//! container's `sweep_stale_files` takes that lock too before it removes these names (ROADMAP 9.2.10). Were a
+//! temporary name still removed under a live creation or rewrite, the step that needs it (the link, the rename) fails,
+//! so it reports an error and publishes nothing; a creation whose link already succeeded treats the missing name as
+//! removed (`NotFound` is success) and goes on to its directory sync. Either way it never leaves a half-made pack at
+//! the pack's name.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

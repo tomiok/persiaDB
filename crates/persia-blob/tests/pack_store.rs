@@ -36,6 +36,8 @@ use persia_storage::vfs::sim::{SimFs, SimFsFile};
 use proptest::prelude::*;
 
 const PACK: &str = "/db/app.persia.blobs";
+/// The pack's writer lock file beside it (ROADMAP 9.2.15), created by the first read-write open.
+const LOCK: &str = "/db/app.persia.blobs.lock";
 
 fn manifest_of(data: &[u8], chunk: u32, upload: u128) -> BlobManifest {
     let crcs = data.chunks(chunk as usize).map(crc32c).collect();
@@ -105,7 +107,7 @@ fn the_pack_is_created_by_the_first_write_and_leaves_no_temporary_file() {
     store.stage_chunk(UploadId::new(1), 0, b"abc").unwrap();
     assert!(store.exists());
     let names: Vec<_> = fs.files().into_iter().map(|(p, _)| p).collect();
-    assert_eq!(names, [Path::new(PACK)]);
+    assert_eq!(names, [Path::new(PACK), Path::new(LOCK)]);
     // The name is durable before anything is appended: a crash now keeps an empty pack.
     let crashed = fs.crash(CrashLoss::All);
     let reopened = open(&crashed, PackMode::ReadOnly).unwrap();
@@ -257,8 +259,8 @@ fn a_real_file_round_trips() {
     assert_eq!(read_all(&store, &m).unwrap(), data);
     assert_eq!(
         std::fs::read_dir(dir.path()).unwrap().count(),
-        1,
-        "only the pack"
+        2,
+        "only the pack and its lock file"
     );
 }
 
@@ -536,9 +538,9 @@ fn a_failed_creation_leaves_no_temporary_file_and_can_be_retried() {
             // what a restart sees is checked, the live view is not.
             let names: Vec<_> = crashed.files().into_iter().map(|(p, _)| p).collect();
             assert!(
-                names
-                    .iter()
-                    .all(|p| p == Path::new(PACK) || p.to_string_lossy().contains(".tmp.")),
+                names.iter().all(|p| p == Path::new(PACK)
+                    || p == Path::new(LOCK)
+                    || p.to_string_lossy().contains(".tmp.")),
                 "{what}: {names:?}"
             );
             // ROADMAP 9.2.6: the read-write open sweeps what the crash left, durably.
@@ -561,26 +563,45 @@ fn a_failed_creation_leaves_no_temporary_file_and_can_be_retried() {
     }
 }
 
-/// The cleanup of a creation the process survives: a link that finds the name taken (a second writer created a pack
-/// there, outside the contract) removes its temporary file and stops the handle; a reopen finds the other pack.
+/// The cleanup of a creation the process survives: a link that finds the name taken removes its temporary file and
+/// stops the handle; a reopen finds the other pack. No second writer of this version can put it there, since the
+/// writer lock beside the pack is held before any pack exists (ROADMAP 9.2.15): here the file is planted.
 #[test]
 fn a_failed_link_removes_its_temporary_file_and_poisons() {
+    let elsewhere = sim();
+    let first = store_blob(
+        &open(&elsewhere, PackMode::ReadWrite).unwrap(),
+        b"first",
+        4,
+        1,
+    );
     let fs = sim();
     let late = open(&fs, PackMode::ReadWrite).unwrap();
-    let early = open(&fs, PackMode::ReadWrite).unwrap();
-    early.stage_chunk(UploadId::new(1), 0, b"first").unwrap();
+    let planted = fs.create_new(Path::new(PACK)).unwrap();
+    planted
+        .write_all_at(&elsewhere.read(Path::new(PACK)).unwrap(), 0)
+        .unwrap();
+    planted.sync_data().unwrap();
+    fs.sync_dir(Path::new("/db")).unwrap();
     let err = late.stage_chunk(UploadId::new(2), 0, b"x").unwrap_err();
     assert!(matches!(err, Error::PackIo { .. }), "{err:?}");
     assert!(late.is_poisoned());
     let names: Vec<_> = fs.files().into_iter().map(|(p, _)| p).collect();
-    assert_eq!(names, [Path::new(PACK)], "no temporary file left");
-    // The pack exists now, and `early` holds its writer lock (ROADMAP 9.2.7).
+    assert_eq!(
+        names,
+        [Path::new(PACK), Path::new(LOCK)],
+        "no temporary file left"
+    );
+    // The poisoned handle still holds the writer lock.
     assert!(matches!(
         open(&fs, PackMode::ReadWrite),
         Err(Error::PackLocked)
     ));
-    drop((late, early));
-    assert!(open(&fs, PackMode::ReadWrite).unwrap().exists());
+    drop(late);
+    assert_eq!(
+        open(&fs, PackMode::ReadWrite).unwrap().blob_ids(),
+        [first.blob_id()]
+    );
 }
 
 /// ROADMAP 9.4.7: after a failed slot sync the pack refuses every write until it is reopened, and says so through

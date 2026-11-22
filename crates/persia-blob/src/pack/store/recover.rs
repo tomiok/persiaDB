@@ -5,7 +5,7 @@ use super::{
     Access, BLOB_PACK, BlobId, BlobManifest, ContainerFile, Entry, Error, FIRST_FRAME_OFFSET,
     FRAME_HEADER_LEN, FrameHeader, FrameKind, HashMap, MIN_FRAME_LEN, Pack, PackMode, PackRecovery,
     Reader, Result, StreamScanner, at, commit_slot, corrupt_at, decode_frame, decode_index_payload,
-    decode_prefix, from_format_at, io, io_err, layout, lock, u64_from_usize, usize_from_u32,
+    decode_prefix, from_format_at, io, io_err, layout, u64_from_usize, usize_from_u32,
 };
 
 /// The prefix of the pack in `file`: header and active slot.
@@ -48,18 +48,14 @@ fn checked_prefix<F: ContainerFile>(
 }
 
 /// Opens the pack in `file` (SPEC §9.3, ADR-0049 item 9): header, active slot against the file length, the index
-/// rebuilt by scanning `12288..log_end`; a read-write open then truncates to `log_end` and syncs. `locked`: the caller
-/// took the writer lock on `file`, which the returned pack releases when dropped, and a failure releases now.
+/// rebuilt by scanning `12288..log_end`; a read-write open then truncates to `log_end` and syncs. A read-write caller
+/// holds the writer lock beside the pack (ROADMAP 9.2.15).
 pub(super) fn recover<F: ContainerFile>(
     file: F,
     mode: PackMode,
     db_uuid: [u8; 16],
-    locked: bool,
 ) -> Result<(Pack<F>, PackRecovery)> {
-    let (p, file_len) = match checked_prefix(&file, mode, db_uuid) {
-        Ok(found) => found,
-        Err(e) => return Err(lock::unlock_after(&file, locked, e)),
-    };
+    let (p, file_len) = checked_prefix(&file, mode, db_uuid)?;
     let mut pack = Pack {
         file,
         header: p.header,
@@ -71,8 +67,6 @@ pub(super) fn recover<F: ContainerFile>(
         uploads: HashMap::new(),
         chunk_frames: Vec::new(),
         window: None,
-        // From here the pack's `Drop` releases the lock, on any error too (ROADMAP 9.2.7).
-        locked,
     };
     let mut last_index = None;
     scan_committed(

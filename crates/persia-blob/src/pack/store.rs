@@ -108,16 +108,6 @@ struct Pack<F: ContainerFile> {
     chunk_frames: Vec<u64>,
     /// The mapping of `12288..` a committed `log_end`, with mapped reads on (ROADMAP 9.2.3).
     window: Option<ByteSource>,
-    /// Whether this handle holds the writer lock on `file`, released when the pack is dropped (ROADMAP 9.2.7).
-    locked: bool,
-}
-
-impl<F: ContainerFile> Drop for Pack<F> {
-    fn drop(&mut self) {
-        if self.locked {
-            lock::release(&self.file);
-        }
-    }
 }
 
 /// What readers share with the writer, behind the `RwLock`. Only a writer holding [`PackStore`]'s writer mutex
@@ -193,14 +183,9 @@ pub struct PackStore<F: ContainerFile = File> {
     recovery: PackRecovery,
     writer: Mutex<WriterState>,
     inner: RwLock<Inner<F>>,
-    /// Whether a read-write handle locks its pack file (and each new file it creates or rewrites) itself: `false`
-    /// where the lock is the file beside the pack (Windows), and for a read-only handle (ROADMAP 9.2.7).
-    lock_file: bool,
-    /// The writer lock beside the pack (Windows), held for the handle's life.
-    _beside: Option<lock::Held<F>>,
-    /// New pack files a rewrite may have renamed over the path although its rename reported an error: kept locked
-    /// for the handle's life, so the path never names an unlocked pack while this writer lives (ROADMAP 9.2.7).
-    held: Mutex<Vec<lock::Held<F>>>,
+    /// The writer lock beside the pack, `<name>.persia.blobs.lock`, held for a read-write handle's life (ROADMAP
+    /// 9.2.7, 9.2.15); `None` for a read-only handle.
+    _lock: Option<lock::Held<F>>,
 }
 
 impl PackStore<File> {
@@ -246,12 +231,12 @@ impl<F: ContainerFile + 'static> PackStore<F> {
     /// caller holds the container's writer lock (only a read-write [`Container`](persia_storage::container::Container)
     /// mints one), so no other read-write handle of this pack can exist while that container is open, and the pack
     /// carries the proof's `db_uuid`. The proof is the API gate, checked here and not kept; the pack's own writer lock
-    /// is the enforcement: taken before anything else, on the pack file (`flock` on Unix) or on
-    /// `<name>.persia.blobs.lock` beside it (Windows), as the container's (SPEC §4.5.1), and held until the handle is
-    /// dropped, however long other owners keep it (an `Arc` clone outlives the database: the lock goes with it). A
-    /// second read-write handle, in this process or another, fails with [`Error::PackLocked`]. A missing file is a pack
-    /// with no blobs, created at the first write with that `db_uuid` in its header, its new file locked before it is
-    /// written; a pack rewrite locks its new file before the rename too.
+    /// is the enforcement: taken before anything else, on `<name>.persia.blobs.lock` beside the pack on
+    /// every platform (created if missing, never removed), with the container's primitive (SPEC §4.5.1), and held until
+    /// the handle is dropped, however long other owners keep it (an `Arc` clone outlives the database: the lock goes with
+    /// it). A second read-write handle, in this process or another, fails with [`Error::PackLocked`], also while no
+    /// pack file exists yet (ROADMAP 9.2.15). A missing file is a pack with no blobs, created at the first write with
+    /// that `db_uuid` in its header.
     ///
     /// Before it opens the file, it removes the stale temporary files of crashed pack creations and rewrites beside
     /// it (`<pack>.tmp.<nonce>.<n>`, counted in [`PackRecovery::swept`]). A removal or directory sync that fails
@@ -280,21 +265,17 @@ impl<F: ContainerFile + 'static> PackStore<F> {
     ) -> Result<Self> {
         let path = path.to_owned();
         let write = mode == PackMode::ReadWrite;
-        // The writer lock first (ROADMAP 9.2.7): a second writer stops here, before it sweeps or recovers anything.
-        let beside = if write {
-            lock::lock_beside(&*vfs, &path)?
+        // The writer lock first (ROADMAP 9.2.7, 9.2.15): a second writer stops here, before it sweeps, recovers or
+        // creates anything, whether or not a pack file exists.
+        let held = if write {
+            Some(lock::lock_beside(&*vfs, &path)?)
         } else {
             None
         };
-        let lock_file = write && beside.is_none();
-        let file = if lock_file {
-            lock::open_locked(&*vfs, &path)?
-        } else {
-            match vfs.open(&path, write) {
-                Ok(file) => Some(file),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-                Err(e) => return Err(io_err("open")(e)),
-            }
+        let file = match vfs.open(&path, write) {
+            Ok(file) => Some(file),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(io_err("open")(e)),
         };
         // Before the recovery, while no creation or rewrite of this pack can be in flight (ADR-0049 item 8).
         let swept = if write {
@@ -304,7 +285,7 @@ impl<F: ContainerFile + 'static> PackStore<F> {
         };
         let (pack, mut recovery) = match file {
             Some(file) => {
-                let (pack, recovery) = recover(file, mode, db_uuid, lock_file)?;
+                let (pack, recovery) = recover(file, mode, db_uuid)?;
                 (Some(pack), recovery)
             }
             None => (None, PackRecovery::default()),
@@ -322,9 +303,7 @@ impl<F: ContainerFile + 'static> PackStore<F> {
                 staged: HashMap::new(),
                 mapper: None,
             }),
-            lock_file,
-            _beside: beside,
-            held: Mutex::new(Vec::new()),
+            _lock: held,
         })
     }
 
@@ -414,15 +393,9 @@ impl<F: ContainerFile + 'static> PackStore<F> {
         if self.read().pack.is_some() {
             return Ok(());
         }
-        match create_pack(
-            &*self.vfs,
-            &self.path,
-            self.db_uuid,
-            self.lock_file,
-            &self.held,
-        ) {
+        match create_pack(&*self.vfs, &self.path, self.db_uuid) {
             Ok((file, pack_id)) => {
-                self.write().pack = Some(Pack::new(file, self.db_uuid, pack_id, self.lock_file));
+                self.write().pack = Some(Pack::new(file, self.db_uuid, pack_id));
                 Ok(())
             }
             Err(Created::NoPack(e)) => Err(e),
@@ -468,14 +441,12 @@ fn parent_of(path: &Path) -> &Path {
 /// written to a temporary file and synced, the file hard-linked to `path` (which fails if the name exists), then the
 /// temporary name removed and the directory synced whatever happened, as `Container::create_in` does. A failure the
 /// process survives leaves a stale temporary file only if that removal fails too (the sweep, ROADMAP 9.2.6, takes it).
-/// `NotFound` from the removal is success: the name is already gone (another handle's sweep may have taken it after
-/// the link).
+/// `NotFound` from the removal is success: the name is already gone. The new file needs no lock of its own: the caller
+/// holds the writer lock beside the pack (ROADMAP 9.2.15).
 fn create_pack<F: ContainerFile>(
     vfs: &dyn Vfs<File = F>,
     path: &Path,
     db_uuid: [u8; 16],
-    lock_file: bool,
-    held: &Mutex<Vec<lock::Held<F>>>,
 ) -> core::result::Result<(F, u128), Created> {
     let pack_id = random_u128();
     let prefix = layout::new_pack_prefix(db_uuid, pack_id).map_err(Created::NoPack)?;
@@ -483,67 +454,36 @@ fn create_pack<F: ContainerFile>(
     let file = vfs
         .create_new(&temp)
         .map_err(|e| Created::NoPack(io_err("create")(e)))?;
-    // Locked before it is written or linked, so the pack's name never names an unlocked pack (ROADMAP 9.2.7).
-    let locked = if lock_file { lock::lock(&file) } else { Ok(()) };
-    let locked_ok = lock_file && locked.is_ok();
-    // The guard unlocks on drop unless disarmed. A failure must unlock, not only close: a forked copy of the
-    // descriptor keeps the lock after the close (SPEC §4.5.1).
-    let (created, was_linked) = {
-        let mut unlock = lock::UnlockOnDrop {
-            file: &file,
-            locked: locked_ok,
-        };
-        let written = locked
-            .and_then(|()| {
-                file.write_all_at(&prefix, 0)
-                    .map_err(io_err("write header"))
-            })
-            .and_then(|()| file.sync_data().map_err(io_err("sync")))
-            .map_err(Created::NoPack);
-        // A crash before the link leaves only the temporary file (no pack); after it, a complete empty pack.
-        let linked = written.and_then(|()| {
-            vfs.hard_link(&temp, path).map_err(|e| {
-                if e.kind() == io::ErrorKind::AlreadyExists {
-                    // Another writer created a pack there: a second read-write handle opened while there was no pack
-                    // file to lock (ROADMAP 9.2.7), whose creation lost the race.
-                    Created::MaybePack(io_err("link: a pack already exists at the path")(e))
-                } else {
-                    Created::NoPack(io_err("link")(e))
-                }
-            })
-        });
-        // One directory sync covers the link and the removal, and runs even if the removal failed.
-        // NotFound is the name already gone (another read-write handle's sweep may have removed it after the link,
-        // ROADMAP 9.2.7). That is what the removal wanted, so the creation continues.
-        let removed = match vfs.remove_file(&temp) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            other => other.map_err(io_err("remove temporary file")),
-        };
-        let synced = vfs
-            .sync_dir(parent_of(path))
-            .map_err(io_err("sync directory"));
-        let was_linked = linked.is_ok();
-        let created = linked
-            .and_then(|()| removed.map_err(Created::MaybePack))
-            .and_then(|()| synced.map_err(Created::MaybePack));
-        // The caller keeps the lock: the returned file, or a file the path now names (held for the handle's life).
-        if created.is_ok() || (was_linked && unlock.locked) {
-            unlock.locked = false;
-        }
-        (created, was_linked)
+    let written = file
+        .write_all_at(&prefix, 0)
+        .map_err(io_err("write header"))
+        .and_then(|()| file.sync_data().map_err(io_err("sync")))
+        .map_err(Created::NoPack);
+    // A crash before the link leaves only the temporary file (no pack); after it, a complete empty pack.
+    let linked = written.and_then(|()| {
+        vfs.hard_link(&temp, path).map_err(|e| {
+            if e.kind() == io::ErrorKind::AlreadyExists {
+                // Something else put a file there although this handle holds the writer lock: not a pack writer of
+                // this version (ROADMAP 9.2.15). The handle stops writing; a reopen finds what the path holds.
+                Created::MaybePack(io_err("link: a pack already exists at the path")(e))
+            } else {
+                Created::NoPack(io_err("link")(e))
+            }
+        })
+    });
+    // One directory sync covers the link and the removal, and runs even if the removal failed.
+    // NotFound is the name already gone, which is what the removal wanted, so the creation continues.
+    let removed = match vfs.remove_file(&temp) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other.map_err(io_err("remove temporary file")),
     };
-    match created {
-        Ok(()) => Ok((file, pack_id)),
-        // The path names this file now: it stays locked while the (poisoned) handle lives.
-        Err(e) if was_linked && locked_ok => {
-            held.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(lock::Held(file));
-            Err(e)
-        }
-        // The guard already unlocked. Closing the descriptor is what happens as `file` drops.
-        Err(e) => Err(e),
-    }
+    let synced = vfs
+        .sync_dir(parent_of(path))
+        .map_err(io_err("sync directory"));
+    linked
+        .and_then(|()| removed.map_err(Created::MaybePack))
+        .and_then(|()| synced.map_err(Created::MaybePack))?;
+    Ok((file, pack_id))
 }
 
 /// 128 bits from the standard library's per-process hash keys, the time and the pid: a pack id (ADR-0049 item 3).
@@ -567,7 +507,7 @@ fn io_err(op: &'static str) -> impl FnOnce(io::Error) -> Error {
 
 impl<F: ContainerFile> Pack<F> {
     /// A pack just created: the new-pack state.
-    fn new(file: F, db_uuid: [u8; 16], pack_id: u128, locked: bool) -> Self {
+    fn new(file: F, db_uuid: [u8; 16], pack_id: u128) -> Self {
         let sb = PackSuperblock::new_pack(pack_id);
         Self {
             file,
@@ -580,7 +520,6 @@ impl<F: ContainerFile> Pack<F> {
             uploads: HashMap::new(),
             chunk_frames: Vec::new(),
             window: None,
-            locked,
         }
     }
 
