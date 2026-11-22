@@ -48,12 +48,9 @@ ignores the prefix.
 
 `stage_chunks` and `read_chunks` run on `std::thread::scope`. They use at most `parallelism` threads, each with one
 request in flight (`RemoteBlobStore::with_parallelism`, default `DEFAULT_PARALLELISM` = 8). With 1 they run in the
-caller's thread. Workers take the next index from a shared counter, and only while it is below the longest finished
-prefix plus `parallelism`: an unfinished index holds later claims to that window, so a failure at index `f` starts at
-most `f + parallelism` jobs. After a failure is published, no new index is handed out (a worker that already passed
-the check may take one more, still inside the window), so a failed transfer stops early. Results go back in index
-order, and the error reported is that of the lowest failing index. Every index below the first failure was handed
-out before it, so that error does not depend on scheduling. No
+caller's thread. Workers take the next index from a shared counter. After a failure no new index is handed out, so a
+failed transfer stops early. Results go back in index order, and the error reported is that of the lowest failing
+index. Every index below the first failure was handed out before it, so that error does not depend on scheduling. No
 dependency is added (`rayon` would also serve, but a pool shared with the engine's merges would mix I/O waits into
 CPU work). Memory stays the caller's: `stage_chunks` takes the slices the caller passes (it bounds how many), and
 `read_chunks` returns the chunks `read_range` asked for.

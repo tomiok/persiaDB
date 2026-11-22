@@ -688,18 +688,10 @@ impl Run {
             self.stats.stale,
             self.stats.kills
         );
-        // macOS: the child reports the canonical lease path (`/private/var/...`) while a directory
-        // listing of the temp dir is `/var/...`. Compare the real paths, exactly.
-        let leases: BTreeSet<PathBuf> = self
-            .readers
-            .iter()
-            .map(|r| std::fs::canonicalize(&r.lease).unwrap())
-            .collect();
-        let listed: BTreeSet<PathBuf> = lease_files(&self.path)
-            .into_iter()
-            .map(|p| std::fs::canonicalize(p).unwrap())
-            .collect();
-        assert_eq!(listed, leases, "seed {}: {ctx}", self.seed);
+        // The database is opened under the canonical temp directory (`run_readers`), so the paths the
+        // children report and a listing of that directory agree exactly, also on macOS (`/var` is a symlink).
+        let leases: BTreeSet<PathBuf> = self.readers.iter().map(|r| r.lease.clone()).collect();
+        assert_eq!(lease_files(&self.path), leases, "seed {}: {ctx}", self.seed);
         self.writer.send("check");
         let check = self.writer_expect("check ", &ctx);
         let c = fields(&check);
