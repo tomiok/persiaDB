@@ -2270,7 +2270,8 @@ mod nested {
     //!    as one where every step excludes every earlier step: excluding the latest of a nested level excludes them all.
     //! 2. Under tight limits, where steps are cut or skipped, no document is a hit of two steps: a cut step does not
     //!    stand for its level's earlier steps.
-    //! 3. A step of a nested level never excludes more than the old rule did, so it is cut or skipped no more often.
+    //! 3. A step of a nested level never excludes more than the old rule did while both searched the same steps before
+    //!    it, so it is cut or skipped no more often.
     //! 4. Pages by cursor under tight limits are slices of the one ranking, and state the same cascade without `fill`.
 
     use std::collections::BTreeSet;
@@ -2455,7 +2456,8 @@ mod nested {
         }
         let old = views.search_relaxed(&l0, &all, &every, &exec()).unwrap();
         // Both build the same steps in order, until one has its hits: per step, the old rule's exclusions hold the new
-        // rule's, so a step it cuts or skips was cut or skipped by the old rule too.
+        // rule's, so a step it cuts or skips was cut or skipped by the old rule too. That holds while both searched the
+        // same steps before it: once the new rule searched one the old skipped, its later steps exclude that one too.
         for (new, was) in got.relaxation.applied.iter().zip(&old.relaxation.applied) {
             let held = |label: &str| label.ends_with(":skipped") || label.ends_with(":cut");
             prop_assert!(
@@ -2470,6 +2472,9 @@ mod nested {
                 got.relaxation.applied,
                 old.relaxation.applied
             );
+            if new.ends_with(":skipped") != was.ends_with(":skipped") {
+                break;
+            }
         }
         // A page after a cursor builds the same steps again without searching those before it: the pages by cursor are
         // the one ranking, and, without `fill`, each states the same cascade.

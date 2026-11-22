@@ -2153,14 +2153,15 @@ fn a_cut_gives_the_expansions_left_in_query_order() {
     assert_eq!(hit_ids(&out), ["d0", "d1", "d2", "d3", "d4"]);
 }
 
-/// SPEC §7.1.3 and §7.6 by hand (ROADMAP 8.1.19): a cut L2 rung stands for no earlier rung, so both stay excluded and
-/// count in full. `bool { must: [prefix(ca, 50), cat, bee] }` under a limit of 120: L2's 75% rung (count 2) fits
-/// beside L0 (50 + 50), its 50% rung does not beside L0 and the 75% rung, and is cut to the 20 left
-/// (`drop_terms:50%:cut`). L3 then counts L0, the 75% rung and the cut rung (120): its step is skipped, where it would be
-/// cut had the cut rung replaced the 75% one. Its tier step is not built: L2's last rung was built and searched. L5
-/// finds the one document.
+/// SPEC §7.1.3 and §7.6 by hand (ROADMAP 8.1.19, 8.2.12): an expansion a step excludes that the step itself holds
+/// counts once. `bool { must: [prefix(ca, 50), cat, bee] }` under a limit of 120: each L2 rung holds L0's
+/// `prefix(ca, 50)`, so neither the L0 copy nor the 75% rung's counts again beside the 50% rung, which fits uncut (it
+/// was cut to the 20 left before 8.2.12). L3's step (`prefix` of `ca`, `cat` and `bee`, 150) is over the limit beside
+/// L0 and the 50% rung (which stands for the 75% one): cut to 40 each, its `prefix(ca)` keeps fewer terms than the
+/// copies it excludes, which then count again (100), so it is cut to the 20 left (`prefix:cut`). Its tier step is not
+/// built: L2's last rung was built and searched. L5 finds the one document.
 #[test]
-fn a_cut_rung_leaves_the_earlier_rungs_excluded() {
+fn an_expansion_a_rung_excludes_and_holds_counts_once() {
     let word = |w: &str| {
         RefQuery::Word(vec![Clause {
             field: BODY,
@@ -2188,12 +2189,7 @@ fn a_cut_rung_leaves_the_earlier_rungs_excluded() {
     let out = search_input(&ops, &Input::Query(root), 120);
     assert_eq!(
         out.relaxation.applied,
-        [
-            "drop_terms:75%",
-            "drop_terms:50%:cut",
-            "prefix:skipped",
-            "fallback"
-        ]
+        ["drop_terms:75%", "drop_terms:50%", "prefix:cut", "fallback"]
     );
     assert_eq!(hit_ids(&out), ["d0"]);
 }
@@ -2790,8 +2786,8 @@ impl Reference<'_> {
             corrected: Vec::new(),
         }];
         // What the later steps exclude (SPEC §7.6, the cascade), each with its level: every step searched, except the
-        // earlier steps of a nested level (L2) that its latest uncut step stands for, and every step before an uncut
-        // L5, which stands for them all.
+        // earlier steps of a nested level (L2, and L4 since ROADMAP 8.2.12) that its latest uncut step stands for, and
+        // every step before an uncut L5, which stands for them all.
         let mut excluded = vec![(RelaxLevel::Exact, root.clone())];
         let mut levels = words.to_vec();
         levels.push(RelaxLevel::Fallback);
@@ -2829,8 +2825,8 @@ impl Reference<'_> {
                     .collect();
                 taken.extend(matches.keys().cloned());
                 // A cut step matches less than its level built, so it stands for no earlier step (SPEC §7.1.3).
-                if !cut && level == RelaxLevel::DropTerms {
-                    excluded.retain(|(l, _)| *l != RelaxLevel::DropTerms);
+                if !cut && matches!(level, RelaxLevel::DropTerms | RelaxLevel::Fuzzy) {
+                    excluded.retain(|(l, _)| *l != level);
                 }
                 if !cut && level == RelaxLevel::Fallback {
                     excluded.clear();
@@ -3004,8 +3000,8 @@ impl Reference<'_> {
     /// The corrections of `text`'s words at distances capped at `max` (SPEC §7.6), each with its clause's index, in
     /// text order: a required word of one part, one token over the default fields (not one they split apart), no field
     /// of which holds its analyzed term (collection `df` 0), whose rewritten fields hold a term within its distance;
-    /// its correction the term that field's `fuzzy` keeps first (the highest `df`, ties by bytes), the
-    /// highest `df` over the fields, ties to the field first in the `combined` (the schema's order).
+    /// its correction the term that field's `fuzzy` keeps first (the fewest edits, then the highest `df`, ties by
+    /// bytes), the first by that order over the fields, ties to the field first in the `combined` (the schema's order).
     fn corrections(&self, text: &Text, max: u8) -> Vec<(usize, String, String)> {
         let parts = text.parts(self.params, &ids(self.schema));
         let mut out = Vec::new();
@@ -3017,19 +3013,22 @@ impl Reference<'_> {
             if *excluded || clauses.iter().any(|c| self.corpus.df(c.field, &c.term) > 0) {
                 continue;
             }
-            let mut best: Option<(u64, String)> = None;
+            // The first by the order a `fuzzy` keeps its terms in: the fewest edits, then the highest `df`.
+            let mut best: Option<(usize, u64, String)> = None;
             for Clause { field, term, .. } in clauses {
                 let Some(RefQuery::Fuzzy { distance, .. }) = self.fuzzy(*field, term, max) else {
                     continue;
                 };
-                if let Some((term, df, _)) =
+                if let Some((term, df, d)) =
                     self.corpus.fuzzy_terms(*field, term, distance, 1).pop()
-                    && best.as_ref().is_none_or(|(top, _)| df > *top)
+                    && best
+                        .as_ref()
+                        .is_none_or(|(e, top, _)| d < *e || d == *e && df > *top)
                 {
-                    best = Some((df, term));
+                    best = Some((d, df, term));
                 }
             }
-            if let Some((_, term)) = best {
+            if let Some((_, _, term)) = best {
                 out.push((i, word.clone(), term));
             }
         }
@@ -3237,22 +3236,29 @@ impl Reference<'_> {
         }
         let before: usize = excluded.iter().map(|(_, q)| expansions(q)).sum();
         let own = expansions(step);
-        if before + own <= self.max_expansions {
+        if before - credit(step, excluded) + own <= self.max_expansions {
             return Some((step.clone(), false));
         }
-        let mut cut = step.clone();
-        let mut caps = Vec::new();
-        cuttable(&mut cut, &mut caps);
-        let fixed = own - caps.iter().map(|c| **c).sum::<usize>();
-        let left = self
-            .max_expansions
-            .checked_sub(before)?
-            .checked_sub(fixed)?;
-        if caps.is_empty() || caps.len() > left {
-            return None;
+        // A cut that lowers a subsuming cap below the one it subsumes counts that one again: tried with the step's
+        // credit as built, then with none.
+        for credit in [credit(step, excluded), 0] {
+            let mut cut = step.clone();
+            let mut caps = Vec::new();
+            cuttable(&mut cut, &mut caps);
+            let fixed = own - caps.iter().map(|c| **c).sum::<usize>();
+            let left = self
+                .max_expansions
+                .checked_sub(before - credit)?
+                .checked_sub(fixed)?;
+            if caps.is_empty() || caps.len() > left {
+                return None;
+            }
+            share(&mut caps, left);
+            if before - self::credit(&cut, excluded) + expansions(&cut) <= self.max_expansions {
+                return Some((cut, true));
+            }
         }
-        share(&mut caps, left);
-        Some((cut, true))
+        None
     }
 
     /// L1's step held to the limits beside the `excluded` steps (SPEC §7.1.3, ROADMAP 8.1.13): with every alternative
@@ -3535,6 +3541,67 @@ fn expansions(q: &RefQuery) -> usize {
         RefQuery::Boost(inner, _) | RefQuery::Constant(inner, _) => expansions(inner),
         RefQuery::Word(_) | RefQuery::Combined(_) | RefQuery::Phrase { .. } | RefQuery::All => 0,
     }
+}
+
+/// A `prefix` (distance 0) or `fuzzy` of `q` by what decides its terms (SPEC §7.1): whether it is a `fuzzy`, its
+/// field, bytes, distance and `max_expansions`.
+type Expanded = (bool, usize, String, u8, usize);
+
+/// Every `prefix` and `fuzzy` of `q`, those under a `must_not` too when `negated`.
+fn expanded(q: &RefQuery, negated: bool, out: &mut Vec<Expanded>) {
+    match q {
+        RefQuery::Prefix {
+            field,
+            prefix,
+            max_expansions,
+            ..
+        } => out.push((false, *field, prefix.clone(), 0, *max_expansions)),
+        RefQuery::Fuzzy {
+            field,
+            term,
+            distance,
+            max_expansions,
+            ..
+        } => out.push((true, *field, term.clone(), *distance, *max_expansions)),
+        RefQuery::Bool {
+            must,
+            should,
+            must_not,
+            ..
+        } => {
+            for c in must.iter().chain(should) {
+                expanded(c, negated, out);
+            }
+            if negated {
+                for c in must_not {
+                    expanded(c, negated, out);
+                }
+            }
+        }
+        RefQuery::Boost(inner, _) | RefQuery::Constant(inner, _) => expanded(inner, negated, out),
+        RefQuery::Word(_) | RefQuery::Combined(_) | RefQuery::Phrase { .. } | RefQuery::All => {}
+    }
+}
+
+/// The expansions of the `excluded` steps that `step`'s own subsume, which count once (SPEC §7.1.3, ROADMAP 8.2.12):
+/// an excluded `prefix` the step holds with as many expansions or more, an excluded `fuzzy` of a term the step holds a
+/// `fuzzy` of at a distance and with expansions at least its own (a `fuzzy` keeps the fewest edits first, so its
+/// terms are among the step's). Its `max_expansions` summed.
+fn credit(step: &RefQuery, excluded: &[(RelaxLevel, RefQuery)]) -> usize {
+    let mut own = Vec::new();
+    expanded(step, false, &mut own);
+    let mut out = Vec::new();
+    for (_, q) in excluded {
+        expanded(q, true, &mut out);
+    }
+    out.iter()
+        .filter(|(f, field, bytes, d, cap)| {
+            own.iter().any(|(of, ofield, obytes, od, ocap)| {
+                of == f && ofield == field && obytes == bytes && d <= od && cap <= ocap
+            })
+        })
+        .map(|e| e.4)
+        .sum()
 }
 
 /// SPEC §7.1.3's `max_terms` count of `q`: per field of a word (a `term` or `combined`), per `prefix` and `fuzzy`, per

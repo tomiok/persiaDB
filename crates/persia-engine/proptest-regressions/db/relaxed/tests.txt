@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 2e2626d60ec004b97e8ded442e1f27dfae3cc9397fa5b58c52050403d9fb1042 # macOS CI on main a1a3615: the budget read the wall clock and cut the cascade before its last step (min_results = 13, fill, k = 2)
+cc 336d78fedf3fb0da01be370490d408d43b14be429b00fc00bb139f9734654ecc # shrinks to case = Case { docs: [([0], 0)], commits: [], must: [Word(0), Word(0), Prefix(false, 1), Word(0)], must_not: None, l1: None, filter: true, min_results: 2, fill: false, tight: (4, 16) }

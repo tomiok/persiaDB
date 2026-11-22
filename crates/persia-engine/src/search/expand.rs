@@ -477,8 +477,11 @@ impl Automaton for Expansion {
     }
 }
 
-/// The terms of `field` in range that `expansion` takes from `terms`, at most `cap`: the highest collection `df`
-/// (`stats`) first, ties by bytes; returned in byte order with their `df`s (SPEC §7.1).
+/// The terms of `field` in range that `expansion` takes from `terms`, at most `cap`: for a `fuzzy`, the fewest edits
+/// first (ROADMAP 8.2.12), then the highest collection `df` (`stats`), ties by bytes; returned in byte order with their
+/// `df`s (SPEC §7.1). A `prefix` has no edits, so it keeps the highest `df` first. Fewest edits first, a `fuzzy` of a
+/// term keeps every term a `fuzzy` of the same term at a lower distance and as many expansions keeps: its terms come
+/// first in the same order. So L4's tier step `fuzzy:1` keeps only terms its `fuzzy` step keeps (SPEC §7.6).
 ///
 /// `terms` lists each term once with the views' own counts ([`TermSource::each_term`]), so each `df` is read once
 /// ([`StatisticsProvider::expansion_df`]) without looking the term up in every view again (ROADMAP 7.4.14, 7.4.15),
@@ -494,27 +497,32 @@ pub(crate) fn expand(
     terms: &(impl TermSource + ?Sized),
     stats: &(impl StatisticsProvider + ?Sized),
 ) -> Result<Vec<(Vec<u8>, u64)>, ReadError> {
-    let mut kept = BTreeSet::<(Reverse<u64>, Vec<u8>)>::new();
+    // By edits (all alike for a prefix, which has none), then `df` descending, then bytes.
+    let mut kept = BTreeSet::<(u8, Reverse<u64>, Vec<u8>)>::new();
     if cap == 0 {
         return Ok(Vec::new());
     }
     terms.each_term(field, range.0, range.1, expansion, &mut |term, counts| {
         let df = stats.expansion_df(field, term, counts)?;
+        let edits = expansion.distance(term).unwrap_or(u8::MAX);
         // Full: a term ranking after the last kept one (or that one again) changes nothing. One evicted before
         // ranks after it too, since the last kept only moves up.
         if kept.len() >= cap
-            && kept
-                .last()
-                .is_some_and(|(last, bytes)| (Reverse(df), term) >= (*last, bytes.as_slice()))
+            && kept.last().is_some_and(|(d, last, bytes)| {
+                (edits, Reverse(df), term) >= (*d, *last, bytes.as_slice())
+            })
         {
             return Ok(());
         }
-        if kept.insert((Reverse(df), term.to_vec())) && kept.len() > cap {
+        if kept.insert((edits, Reverse(df), term.to_vec())) && kept.len() > cap {
             kept.pop_last();
         }
         Ok(())
     })?;
-    let mut out: Vec<(Vec<u8>, u64)> = kept.into_iter().map(|(Reverse(df), t)| (t, df)).collect();
+    let mut out: Vec<(Vec<u8>, u64)> = kept
+        .into_iter()
+        .map(|(_, Reverse(df), t)| (t, df))
+        .collect();
     out.sort_unstable();
     for (term, _) in &out {
         stats.expansion_kept(field, term)?;

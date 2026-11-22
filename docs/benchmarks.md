@@ -648,6 +648,24 @@ After the review fix that drops the request filter from a caller root the join w
 step), `filters/last_resort` with one codegen unit reads 792 µs, +0.5% on main, within noise; `filters/never`, which
 never builds the step, reads 337 µs (+1.9%) in the same run, the drift above.
 
+ROADMAP 8.2.12 (a `fuzzy` keeps the fewest edits first, so L4's tier steps nest; an excluded expansion the step
+subsumes counts once): the expansion walk now reads each accepted term's edit distance again to rank it. Command:
+`cargo bench -p persia-engine --bench search -- 'search_expansion_collection|search_top10_expansion|search_relaxed/(l4|l4/tiers)$'`,
+the default build, against a baseline saved on the commit before (2026-11-22, rustc 1.99.0, 12 threads, Linux).
+
+| | before | after | change |
+|---|--:|--:|--:|
+| `search_expansion_collection/fuzzy/plan` | 504 µs | 517 µs | +1.9% |
+| `search_expansion_collection/fuzzy_long/plan` | 104 µs | 104 µs | within noise |
+| `search_expansion_collection/prefix/plan` | 725 µs | 711 µs | −1.6% |
+| `search_top10_expansion/fuzzy` | 22.9 ms | 21.9 ms | −4.5% |
+| `search_top10_expansion/prefix` | 26.8 ms | 26.4 ms | −1.5% |
+| `search_relaxed/l4` | 2.69 ms | 2.65 ms | within noise |
+| `search_relaxed/l4/tiers` | 366 µs | 359 µs | within noise |
+
+Planning a `fuzzy` alone costs about 2% more (the distance of each term the automaton accepted); the prefix rows, which
+compute nothing new, move as much the other way, the drift between the two runs.
+
 ## `persia-engine` relevance
 
 `cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2, 7.8.4): 18 user-text queries with graded judgments over
