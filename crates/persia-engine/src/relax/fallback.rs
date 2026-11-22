@@ -39,8 +39,10 @@ impl LevelTransform for Fallback {
                 filter.push(kept.clone());
             }
         }
+        // Required clauses a caller added beside a compiled query's clauses stay required (ROADMAP 8.2.15).
+        let must = input.compiled.map_or(&[][..], Compiled::extra_must);
         Ok(vec![Step {
-            query: query(must_not, &filter),
+            query: query(must, must_not, &filter),
             applied: APPLIED.to_owned(),
             effective: input.compiled.map(|compiled| effective(compiled, &[])),
             alternatives: None,
@@ -55,13 +57,18 @@ impl LevelTransform for Fallback {
     }
 }
 
-/// Every live document `filter` keeps and `must_not` does not match: `match_all` when there is neither.
-pub(crate) fn query(must_not: &[Query], filter: &[Filter]) -> Query {
-    if must_not.is_empty() && filter.is_empty() {
+/// Every live document `must` requires (every one when it is empty), `filter` keeps and `must_not` does not match:
+/// `match_all` when there is none of them.
+pub(crate) fn query(must: &[Query], must_not: &[Query], filter: &[Filter]) -> Query {
+    if must.is_empty() && must_not.is_empty() && filter.is_empty() {
         return Query::MatchAll;
     }
     Query::Bool(BoolQuery {
-        must: vec![Query::MatchAll],
+        must: if must.is_empty() {
+            vec![Query::MatchAll]
+        } else {
+            must.to_vec()
+        },
         must_not: must_not.to_vec(),
         filter: filter.to_vec(),
         ..BoolQuery::default()

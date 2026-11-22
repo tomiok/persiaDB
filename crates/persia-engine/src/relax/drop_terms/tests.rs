@@ -687,11 +687,10 @@ fn a_compiled_root_changed_to_hold_should_clauses_is_not_relaxed() {
     let should =
         crate::relax::tests::with_root(compiled.clone(), |b| b.should.push(term(0, "shoes")));
     assert_eq!(input(&should), 0);
-    // A required clause added beside the clauses: the ladder over them would relax it away, so the compilation is
-    // detached and L2 builds nothing (ROADMAP 8.2.14).
+    // A required clause added after the clauses: every rung requires it, unchanged (ROADMAP 8.2.15).
     let required =
         crate::relax::tests::with_root(compiled.clone(), |b| b.must.push(term(0, "leather")));
-    assert_eq!(input(&required), 0);
+    assert_eq!(input(&required), 1);
     // An exclusion added after the clauses is kept on every step: still the clauses' root.
     let excluded =
         crate::relax::tests::with_root(compiled.clone(), |b| b.must_not.push(term(0, "blue")));

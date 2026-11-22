@@ -207,6 +207,9 @@ struct Term {
 #[derive(Debug)]
 struct Root<'a> {
     terms: Vec<Term>,
+    /// The required clauses a caller added beside a compiled query's clauses ([`Compiled::extra_must`], ROADMAP 8.2.15):
+    /// every step requires them, unchanged. None for a programmatic query, whose `must` clauses are its terms.
+    must: &'a [Query],
     must_not: &'a [Query],
     filter: &'a [Filter],
 }
@@ -244,6 +247,7 @@ impl<'a> Root<'a> {
         };
         Some(Self {
             terms,
+            must: input.compiled.map_or(&[], Compiled::extra_must),
             must_not,
             filter,
         })
@@ -313,6 +317,7 @@ impl LevelTransform for DropTerms {
     fn steps(&self, input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
         let Some(Root {
             terms,
+            must,
             must_not,
             filter,
         }) = Root::of(input)
@@ -344,11 +349,11 @@ impl LevelTransform for DropTerms {
                 continue;
             };
             let query = Query::Bool(BoolQuery {
+                must: must.to_vec(),
                 should: should.clone(),
                 must_not: must_not.to_vec(),
                 filter: filter.to_vec(),
                 minimum_should_match,
-                ..BoolQuery::default()
             });
             let effective = input.compiled.map(|compiled| {
                 let mut keeps = vec![false; compiled.clauses.len()];

@@ -304,6 +304,33 @@ impl Compiled {
         }
     }
 
+    /// The required clauses a caller added beside the clauses' parts (ROADMAP 8.2.15, ADR-0056): the entries of
+    /// [`Self::root`]'s `must` after the clauses' own, which a query put in place ([`Self::with_query`]) may append.
+    /// Every relaxation step carries them unchanged (SPEC §7.6): the word levels rebuild their steps from the clauses
+    /// and add these after them, L5 `fallback` requires them, and the filter step keeps them. They have no source text,
+    /// so no `effective` renders them. Empty for a query as compiled, and when the clauses describe no root.
+    pub fn extra_must(&self) -> &[Query] {
+        let Some(root) = self.root() else {
+            return &[];
+        };
+        let own = if self.part.is_some() {
+            1
+        } else {
+            self.clause_must()
+        };
+        root.must.get(own..).unwrap_or(&[])
+    }
+
+    /// How many of the root's `must` entries are the clauses' parts: they come first, in text order (SPEC §7.1.1).
+    fn clause_must(&self) -> usize {
+        self.clauses
+            .iter()
+            .filter(|c| !c.negated)
+            .map(|c| c.parts.end)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// The query a search runs: as compiled, with the request filter joined ([`Self::with_filter`]), or the one
     /// [`Self::with_query`] put in, joined to that filter again. It holds every filter of [`Self::filter`] at its root
     /// `bool`, so neither L0 nor a level built from it loses one (SPEC §7.6, ROADMAP 8.2.14).
@@ -336,8 +363,9 @@ impl Compiled {
         }
     }
 
-    /// How [`Self::query`] holds a one-part compilation's part: as itself, or as the one `must` clause of a `bool` without
-    /// `should` clauses (a request's filter, or an exclusion a caller added, beside it). `None` for anything else, and
+    /// How [`Self::query`] holds a one-part compilation's part: as itself, or as the first `must` clause of a `bool`
+    /// without `should` clauses (a request's filter, an exclusion or a required clause a caller added beside it, ROADMAP
+    /// 8.2.15). `None` for anything else, and
     /// for a compilation of other than one part.
     fn one_part(&self) -> Option<OnePart<'_>> {
         let part = self.part.as_ref()?;
@@ -348,7 +376,7 @@ impl Compiled {
             Query::Bool(root)
                 if root.should.is_empty()
                     && root.minimum_should_match == 0
-                    && root.must.as_slice() == std::slice::from_ref(part) =>
+                    && root.must.first() == Some(part) =>
             {
                 Some(OnePart::Wrapped(root))
             }
@@ -415,10 +443,11 @@ impl Compiled {
     /// filter step drops it).
     ///
     /// The clauses keep describing the new query only while it holds their parts where they were ([`Self::parts`]): a
-    /// one-part compilation's part as itself or as the one `must` clause of a `bool` without `should` clauses, or, for
-    /// any other compilation, a root without `should` clauses or a `minimum_should_match` whose `must` is the clauses'
-    /// entries exactly and whose `must_not` holds theirs at the same indexes (a caller may add exclusions after them:
-    /// every level keeps the root's `must_not`, but rebuilds `must` from the clauses alone). Otherwise [`Self::parts`]
+    /// one-part compilation's part as itself or as the first `must` clause of a `bool` without `should` clauses, or, for
+    /// any other compilation, a root without `should` clauses or a `minimum_should_match` whose `must` starts with the
+    /// clauses' entries and whose `must_not` holds theirs at the same indexes. A caller may add exclusions after them,
+    /// which every level keeps with the root's `must_not`, and required clauses after them ([`Self::extra_must`],
+    /// ROADMAP 8.2.15), which every step carries unchanged beside the ones it rebuilds from the clauses. Otherwise [`Self::parts`]
     /// and [`Self::root`] are `None`, and the word levels of the cascade build no step from the clauses: a one-part
     /// compilation's again once a query holds its part, any other's from then on. L5 `fallback` keeps the request
     /// filter beside the new root `bool`'s `must_not` and `filter`, and the filter step drops the request filter alone
@@ -464,10 +493,10 @@ impl Compiled {
     }
 
     /// Whether `query`, put in place of a compilation of other than one part, holds every clause's parts where the
-    /// current root holds them: a `bool` without `should` clauses or a `minimum_should_match` whose `must` is the
-    /// current one (the clauses' parts, which the word levels rebuild their steps from, so a `must` clause added beside
-    /// them would be relaxed away), and whose `must_not` holds the clauses' at the same indexes. False once the clauses
-    /// describe no root, and for a compilation of no clause, which has nothing to describe.
+    /// current root holds them: a `bool` without `should` clauses or a `minimum_should_match` whose `must` starts with
+    /// the clauses' parts (any entries after them are required clauses a caller added, [`Self::extra_must`], which
+    /// every relaxation step carries, ROADMAP 8.2.15), and whose `must_not` holds the clauses' at the same indexes.
+    /// False once the clauses describe no root, and for a compilation of no clause, which has nothing to describe.
     fn holds_parts(&self, query: &Query) -> bool {
         let (Some(old), Query::Bool(new)) = (self.root(), query) else {
             return false;
@@ -475,7 +504,10 @@ impl Compiled {
         !self.clauses.is_empty()
             && new.should.is_empty()
             && new.minimum_should_match == 0
-            && new.must == old.must
+            && old
+                .must
+                .get(..self.clause_must())
+                .is_some_and(|own| new.must.starts_with(own))
             && self.clauses.iter().filter(|c| c.negated).all(|clause| {
                 old.must_not
                     .get(clause.parts.clone())
