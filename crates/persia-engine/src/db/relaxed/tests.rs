@@ -2555,6 +2555,7 @@ fn l3_does_not_expand_a_field_whose_analyzer_stacks_tokens() {
     assert_eq!(applied(), Vec::<String>::new());
 }
 
+mod effective;
 mod explain;
 mod fill;
 mod filters;
