@@ -1,6 +1,6 @@
 # Persia DB — Roadmap
 
-**Versions.** M0–M15 are the MVP and ship as v1.0. Milestones M16 and later are post-MVP; each heading names its target version. The percentage and burn-up in [`PROGRESS.md`](./PROGRESS.md) count M0–M15 only. A leaf of M0–M15 labelled with a later version (`(v1.1)`, `(post-v1)`: right after its id or at the end of its text) is post-MVP work filed under its milestone: it counts with the post-MVP leaves and does not hold its milestone, or the ones depending on it, open.
+**Versions.** M0–M15 are the MVP and ship as v1.0. Milestones M16 and later are post-MVP; each heading names its target version. The percentage and burn-up in [`PROGRESS.md`](./PROGRESS.md) count M0–M15 only. A leaf of M0–M15 labelled with a later version (`(v1.1)`, `(post-v1)`: right after its id, or ending its text, before any "Done as:" remark; `cargo xtask progress` rejects one placed elsewhere) is post-MVP work filed under its milestone: it counts with the post-MVP leaves and does not hold its milestone, or the ones depending on it, open.
 
 How to read this file:
 - Numbering is hierarchical: `M1` → `1.1` → `1.1.1` → `1.1.1.1`. **Every leaf is one GitHub issue** (title: `[1.1.1] short title`).

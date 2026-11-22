@@ -110,33 +110,36 @@ fn is_mvp(ms: &Milestone) -> bool {
 /// The version the MVP ships as: a leaf label above it is later work.
 const MVP_VERSION: (u32, u32) = (1, 0);
 
-/// `true` for a version label after the MVP's: `v1.1`, `v2`, `v2.0.1`, `post-v1`. `v1.0`, `v0.9` and other
-/// text are not.
-fn is_later_version(label: &str) -> bool {
-    if label.starts_with("post-v") {
-        return true;
-    }
-    let Some(version) = label.strip_prefix('v') else {
-        return false;
-    };
+/// `1`, `1.1`, `2.0.1` -> (major, minor); anything else (empty parts, non-digits) -> `None`.
+fn parse_version(version: &str) -> Option<(u32, u32)> {
     let parts: Vec<&str> = version.split('.').collect();
-    if parts.is_empty()
-        || parts
-            .iter()
-            .any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
+    if parts
+        .iter()
+        .any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
     {
-        return false;
+        return None;
     }
     let number = |i: usize| parts.get(i).map_or(Some(0), |p| p.parse::<u32>().ok());
-    match (number(0), number(1)) {
-        (Some(major), Some(minor)) => (major, minor) > MVP_VERSION,
-        _ => false,
-    }
+    Some((number(0)?, number(1)?))
 }
 
-/// `true` when a leaf's text carries a later version label: `(v1.1) Text`, or `Text (v1.1)` before an optional
-/// ` Done as: ...` remark (appended when the leaf is ticked, so ticking it must not move it into the MVP).
-fn later_label(text: &str) -> bool {
+/// `true` for a version label after the MVP's: `v1.1`, `v2`, `v2.0.1`, `post-v1`, `post-v0.9` (after a version is
+/// later whatever the version). `v1.0`, `v0.9`, `post-v`, `post-vx` and other text are not.
+fn is_later_version(label: &str) -> bool {
+    if let Some(version) = label.strip_prefix("post-v") {
+        return parse_version(version).is_some();
+    }
+    label
+        .strip_prefix('v')
+        .and_then(parse_version)
+        .is_some_and(|v| v > MVP_VERSION)
+}
+
+/// Whether a leaf's text carries a later version label: `(v1.1) Text`, or `Text (v1.1)` before an optional
+/// ` Done as: ...` remark (appended when the leaf is ticked, so ticking it must not move it into the MVP); a `.` or
+/// `;` after the label is allowed. A later label anywhere else (mid-text, after `[T]`, followed by another remark)
+/// is an error: classifying such a leaf as MVP would change the counts silently.
+fn later_label(text: &str) -> Result<bool, String> {
     fn label_of(s: &str) -> Option<&str> {
         s.strip_prefix('(')?.strip_suffix(')')
     }
@@ -144,12 +147,25 @@ fn later_label(text: &str) -> bool {
     let body = text
         .split_once(" Done as:")
         .map_or(text, |(b, _)| b)
-        .trim_end();
+        .trim_end()
+        .trim_end_matches(['.', ';']);
     let trailing = body
         .rsplit_once(" (")
-        .map(|(_, tail)| tail.strip_suffix(')'));
-    label_of(leading).is_some_and(is_later_version)
-        || trailing.flatten().is_some_and(is_later_version)
+        .and_then(|(_, tail)| tail.strip_suffix(')'));
+    if label_of(leading).is_some_and(is_later_version) || trailing.is_some_and(is_later_version) {
+        return Ok(true);
+    }
+    let misplaced = text.match_indices('(').find_map(|(i, _)| {
+        let rest = text.get(i + 1..)?;
+        let label = rest.get(..rest.find(')')?)?;
+        is_later_version(label).then_some(label)
+    });
+    match misplaced {
+        Some(label) => Err(format!(
+            "version label ({label}) must come right after the id or end the text (before any \"Done as:\")"
+        )),
+        None => Ok(false),
+    }
 }
 
 /// Totals of the post-MVP work: the later milestones' leaves and the later-labelled leaves of MVP ones.
@@ -344,11 +360,15 @@ pub(crate) fn parse_roadmap(text: &str) -> Result<Vec<Milestone>> {
                 (true, true, Some(_)) => {
                     if let (Some(ms), Some(status)) = (milestones.last_mut(), status) {
                         let text = rest.trim().to_owned();
-                        let list = if is_mvp(ms) && later_label(&text) {
-                            &mut ms.later
+                        let later = if is_mvp(ms) {
+                            later_label(&text).unwrap_or_else(|e| {
+                                errors.push(format!("line {n}: leaf {id}: {e}"));
+                                false
+                            })
                         } else {
-                            &mut ms.leaves
+                            false
                         };
+                        let list = if later { &mut ms.later } else { &mut ms.leaves };
                         list.push(Leaf {
                             id: id.to_owned(),
                             text,
@@ -415,8 +435,7 @@ fn dependency_cycle(milestones: &[Milestone]) -> Option<Vec<String>> {
 
 fn milestone_state(ms: &Milestone, by_key: &BTreeMap<&str, &Milestone>, depth: usize) -> State {
     let (total, done) = (ms.leaves.len(), ms.count(Status::Done));
-    // A milestone whose every leaf is labelled later has nothing left for the MVP: done, so it blocks nothing.
-    if (total > 0 || !ms.later.is_empty()) && done == total {
+    if total > 0 && done == total {
         return State::Done;
     }
     if done > 0 || ms.count(Status::Doing) > 0 {
@@ -429,10 +448,12 @@ fn milestone_state(ms: &Milestone, by_key: &BTreeMap<&str, &Milestone>, depth: u
                 .get(d.as_str())
                 .is_some_and(|dep| milestone_state(dep, by_key, depth + 1) == State::Done)
         });
-    if deps_done {
-        State::Ready
-    } else {
-        State::Blocked
+    // A milestone whose every leaf is labelled later has nothing left for the MVP: it is transparent in the chain,
+    // done once its dependencies are, so it neither blocks its dependents nor opens them early.
+    match (deps_done, total == 0 && !ms.later.is_empty()) {
+        (true, true) => State::Done,
+        (true, false) => State::Ready,
+        (false, _) => State::Blocked,
     }
 }
 
@@ -1274,21 +1295,88 @@ Deps: M0–M1
             "1.1",
             "V1.1",
             "found in 6.1",
+            "post-v",
+            "post-vx",
+            "post-v1.",
         ] {
             assert!(!is_later_version(not), "{not}");
         }
-        assert!(later_label("(v1.1) A leaf"));
-        assert!(later_label("(post-v1) A leaf"));
-        assert!(later_label("A leaf (found in 6.1) (v1.1)"));
-        assert!(later_label(
-            "A leaf (v1.1) Done as: deferred work, see 6.1.8."
-        ));
-        assert!(!later_label("(v1.0) A leaf"));
-        assert!(!later_label("A leaf (v1.0)"));
-        assert!(!later_label("A leaf (v1.1, found in 6.1)"));
-        assert!(!later_label("A leaf named after v1.1 (found in 6.1)"));
-        assert!(!later_label("A (v1.1) label in the middle of the text"));
-        assert!(!later_label("A leaf (v1.1) and more text"));
+        for later in [
+            "(v1.1) A leaf",
+            "(post-v1) A leaf",
+            "A leaf (found in 6.1) (v1.1)",
+            "A leaf (v1.1).",
+            "A leaf (v1.1) Done as: deferred work, see 6.1.8.",
+            "A leaf (v1.1). Done as: x.",
+            "A leaf (v1.1); Done as: x.",
+        ] {
+            assert_eq!(later_label(later), Ok(true), "{later}");
+        }
+        for mvp in [
+            "(v1.0) A leaf",
+            "A leaf (v1.0)",
+            "(v1.0) [T] A leaf (found in 6.1)",
+            "A leaf (v1.1, found in 6.1)",
+            "A leaf named after v1.1 (found in 6.1)",
+            "A leaf (post-v) with a malformed label",
+        ] {
+            assert_eq!(later_label(mvp), Ok(false), "{mvp}");
+        }
+        // A later label the rule does not place would silently count the leaf as MVP: an error instead.
+        for misplaced in [
+            "A (v1.1) label in the middle of the text",
+            "A leaf (v1.1) and more text",
+            "A leaf (v1.1) (found in 6.1)",
+            "[T] (v1.1) A label after the test mark",
+            "A leaf (post-v1) Done later. Done as: x.",
+        ] {
+            let err = later_label(misplaced).unwrap_err();
+            assert!(
+                err.contains("must come right after the id"),
+                "{misplaced}: {err}"
+            );
+        }
+        let err =
+            parse_roadmap("# M0 — Bootstrap\nDeps: none.\n- [ ] 0.1 A (v1.1) misplaced label\n")
+                .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("line 3: leaf 0.1: version label (v1.1)"),
+            "{err:#}"
+        );
+        // Outside the MVP a label changes nothing, so it is not checked.
+        assert!(
+            parse_roadmap("# M16 — Later (target: v1.1)\nDeps: none.\n- [ ] 16.1 A (v2.0) label\n")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_milestone_of_later_leaves_only_waits_for_its_dependencies() {
+        let text = "\
+# M0 — Bootstrap
+Deps: none.
+- [ ] 0.1 Open leaf
+
+# M1 — Labels only
+Deps: M0.
+- [ ] 1.1 (v1.1) Every leaf is later
+
+# M2 — Needs M1
+Deps: M1.
+- [ ] 2.1 Todo leaf
+";
+        let ms = parse_roadmap(text).unwrap();
+        let by_key: BTreeMap<&str, &Milestone> = ms.iter().map(|m| (m.key.as_str(), m)).collect();
+        let state = |key: &str| milestone_state(by_key[key], &by_key, 0);
+        assert_eq!(state("M0"), State::Ready);
+        assert_eq!(state("M1"), State::Blocked);
+        assert_eq!(state("M2"), State::Blocked);
+        let ready = render(&ms, &[]);
+        let ready = ready.split("## Ready next").nth(1).unwrap();
+        assert!(
+            ready.contains("`0.1`") && !ready.contains("`2.1`"),
+            "{ready}"
+        );
     }
 
     #[test]
