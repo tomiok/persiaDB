@@ -138,7 +138,7 @@ fn is_later_version(label: &str) -> bool {
 /// Whether a leaf's text carries a later version label: `(v1.1) Text`, or `Text (v1.1)` before an optional
 /// ` Done as: ...` remark (appended when the leaf is ticked, so ticking it must not move it into the MVP); a `.` or
 /// `;` after the label is allowed. A later label anywhere else before the remark (mid-text, after `[T]`, followed by
-/// another remark, or opening a compound parenthesis such as `(v1.1, found in 6.1)`) is an error: classifying such a
+/// another remark, or sharing a parenthesis, such as `(v1.1, found in 6.1)` or `(ADR-0029; v1.1)`) is an error: classifying such a
 /// leaf as MVP would change the counts silently. The "Done as:" remark itself may name later work freely.
 fn later_label(text: &str) -> Result<bool, String> {
     fn label_of(s: &str) -> Option<&str> {
@@ -159,12 +159,14 @@ fn later_label(text: &str) -> Result<bool, String> {
     let misplaced = body.match_indices('(').find_map(|(i, _)| {
         let rest = body.get(i + 1..)?;
         let inside = rest.get(..rest.find(')')?)?;
-        let label = inside.split([',', ';']).next()?.trim();
-        is_later_version(label).then_some(label)
+        inside
+            .split([',', ';'])
+            .map(str::trim)
+            .find(|p| is_later_version(p))
     });
     match misplaced {
         Some(label) => Err(format!(
-            "version label ({label}) must come right after the id or end the text (before any \"Done as:\")"
+            "version label ({label}) must stand alone in its parentheses, right after the id or ending the text (before any \"Done as:\")"
         )),
         None => Ok(false),
     }
@@ -1330,13 +1332,14 @@ Deps: M0–M1
             "A leaf (v1.1) and more text",
             "A leaf (v1.1) (found in 6.1)",
             "A leaf (v1.1, found in 6.1)",
-            "A leaf (found in 6.1; v1.1) (post-v1; see 8.2.11) more",
+            "A leaf (ADR-0029; v1.1)",
+            "A leaf (found in 6.1) (post-v1; see 8.2.11) more",
             "[T] (v1.1) A label after the test mark",
             "A leaf (post-v1) Done later. Done as: x.",
         ] {
             let err = later_label(misplaced).unwrap_err();
             assert!(
-                err.contains("must come right after the id"),
+                err.contains("must stand alone in its parentheses"),
                 "{misplaced}: {err}"
             );
         }
