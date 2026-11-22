@@ -246,6 +246,10 @@ pub enum Error {
         /// How many attempts were made.
         attempts: u32,
     },
+    /// Opening the container a reader lease belongs to failed (SPEC §9.3, ADR-0054 item 4): a file that is not a
+    /// container, a damaged one, or an I/O error, classified as the container classifies it ([`Error::is_corruption`]).
+    #[error("opening the container of a reader lease failed")]
+    Container(#[source] persia_storage::container::Error),
 }
 
 impl Error {
@@ -268,8 +272,12 @@ impl Error {
     ///
     /// [`Error::UploadInterrupted`] is not corruption, even when its source is (SPEC §9.4): the upload can be resumed,
     /// and the source carries the cause. [`Error::corrupt_offset`] is `None` for the same reason.
-    pub const fn is_corruption(&self) -> bool {
-        matches!(self, Self::Corrupt { .. } | Self::CorruptAt { .. })
+    pub fn is_corruption(&self) -> bool {
+        match self {
+            Self::Corrupt { .. } | Self::CorruptAt { .. } => true,
+            Self::Container(e) => e.is_corruption(),
+            _ => false,
+        }
     }
 
     /// The offset of the slot or frame a corruption was found in, when it is known ([`Error::CorruptAt`]).

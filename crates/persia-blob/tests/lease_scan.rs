@@ -22,6 +22,7 @@
     clippy::panic,
     clippy::indexing_slicing,
     clippy::cast_possible_truncation,
+    clippy::assert_is_empty,
     missing_docs
 )] // Tests: inputs are fixed.
 
@@ -37,21 +38,24 @@ use persia_blob::pack::lease::{
     leases_dir, parse_lease_name, scan_leases,
 };
 use persia_blob::{Error, PackMode};
-use persia_storage::container::ContainerFile;
+use persia_storage::container::{Container, ContainerFile};
 use persia_storage::vfs::sim::{SimFs, SimFsFile};
 use persia_storage::vfs::{DirEntry, EntryKind, Vfs};
 
+const DB: &str = "/db/app.persia";
 const PACK: &str = "/db/app.persia.blobs";
 const UUID: [u8; 16] = [7; 16];
 
+/// A simulated file system with a container at [`DB`]: a take reopens it to read its committed seq.
 fn sim() -> SimFs {
     let fs = SimFs::new();
     fs.create_dir(Path::new("/db")).unwrap();
+    drop(Container::create_in(Arc::new(fs.clone()), DB).unwrap());
     fs
 }
 
 fn take(vfs: &Arc<dyn Vfs<File = SimFsFile>>) -> ReaderLease<SimFsFile> {
-    ReaderLease::take_in(vfs, Path::new(PACK), None).unwrap()
+    ReaderLease::take_in(vfs, Path::new(PACK), Path::new(DB)).unwrap()
 }
 
 fn record_at(fs: &SimFs, path: &Path) -> LeaseRecord {
@@ -90,7 +94,13 @@ fn a_take_writes_the_opening_record_locked_and_a_drop_removes_it() {
     let vfs: Arc<dyn Vfs<File = SimFsFile>> = Arc::new(fs.clone());
     let mut lease = take(&vfs);
     assert!(lease.is_held());
-    assert_eq!(lease.taken_seq(), 0, "no container path: nothing to read");
+    let (committed, _) =
+        persia_blob::pack::lease::committed_seq_in(Arc::clone(&vfs), Path::new(DB)).unwrap();
+    assert_eq!(
+        lease.taken_seq(),
+        committed,
+        "the container's committed seq, read after the lock"
+    );
     let path = lease.path().unwrap().to_owned();
     assert_eq!(path.parent().unwrap(), leases_dir(Path::new(PACK)));
     let id = parse_lease_name(path.file_name().unwrap()).unwrap();
@@ -307,6 +317,12 @@ struct Script {
     create_fails: Option<io::ErrorKind>,
     /// `create_new` calls of `.lease` files.
     creates: u32,
+    /// Left out of every listing (a listing that missed a name).
+    hidden: Option<PathBuf>,
+    /// The next `n` `same_file` checks of a `.lease` name fail with `PermissionDenied` (a delete-pending name).
+    same_file_denied: u32,
+    /// `lock_beside` removes the sidecar's name once it opened it (an orphan sweep in between).
+    unlink_sidecar: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -443,7 +459,10 @@ impl Vfs for Scripted {
         self.fs.is_dir(path)
     }
     fn read_dir(&self, dir: &Path) -> io::Result<Vec<DirEntry>> {
-        let listed = self.fs.read_dir(dir)?;
+        let mut listed = self.fs.read_dir(dir)?;
+        if let Some(hidden) = &self.script().hidden {
+            listed.retain(|e| dir.join(&e.name) != *hidden);
+        }
         if let Some(path) = self.script().remove_after_list.take() {
             self.fs.remove_file(&path)?;
         }
@@ -453,6 +472,12 @@ impl Vfs for Scripted {
         self.fs.canonicalize(path)
     }
     fn same_file(&self, file: &File, path: &Path) -> io::Result<bool> {
+        let mut s = self.script();
+        if is_lease(path) && s.same_file_denied > 0 {
+            s.same_file_denied -= 1;
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        drop(s);
         self.fs.same_file(&file.inner, path)
     }
     fn lock_beside(&self, path: &Path) -> io::Result<Option<File>> {
@@ -473,6 +498,9 @@ impl Vfs for Scripted {
             Err(e) if e.kind() == io::ErrorKind::NotFound => self.fs.create_new(&sidecar)?,
             Err(e) => return Err(e),
         };
+        if self.script().unlink_sidecar {
+            self.fs.remove_file(&sidecar)?;
+        }
         if inner.try_lock()? {
             Ok(Some(self.wrap(inner, &sidecar)))
         } else {
@@ -485,7 +513,7 @@ impl Vfs for Scripted {
 fn a_lock_error_is_live_and_unreadable_and_a_name_gone_mid_scan_is_skipped() {
     let s = Scripted::new();
     let vfs = s.vfs();
-    let mut lease = ReaderLease::take_in(&vfs, Path::new(PACK), None).unwrap();
+    let mut lease = ReaderLease::take_in(&vfs, Path::new(PACK), Path::new(DB)).unwrap();
     lease.set_open(UUID, 5);
     s.script().lock_error = true;
     let scan = scan_leases(&*vfs, Path::new(PACK), true, UUID);
@@ -514,7 +542,7 @@ fn a_take_starts_again_when_refused_and_gives_up_after_three_attempts() {
             script.refuse_locks = refuse;
             script.remove_after_create = remove;
         }
-        let lease = ReaderLease::take_in(&vfs, Path::new(PACK), None).unwrap();
+        let lease = ReaderLease::take_in(&vfs, Path::new(PACK), Path::new(DB)).unwrap();
         assert!(lease.is_held(), "{what}");
         assert_eq!(s.script().creates, 1 + refuse + remove, "{what}");
         assert_eq!(
@@ -527,7 +555,7 @@ fn a_take_starts_again_when_refused_and_gives_up_after_three_attempts() {
     let vfs = s.vfs();
     s.script().refuse_locks = 3;
     assert!(matches!(
-        ReaderLease::take_in(&vfs, Path::new(PACK), None),
+        ReaderLease::take_in(&vfs, Path::new(PACK), Path::new(DB)),
         Err(Error::LeaseContended { attempts: 3 })
     ));
     assert!(lease_files(&s.fs).is_empty(), "nothing is left");
@@ -538,7 +566,7 @@ fn with_a_lock_sidecar_the_record_stays_readable_and_stale_sidecars_go() {
     let s = Scripted::new();
     s.script().sidecars = true;
     let vfs = s.vfs();
-    let mut lease = ReaderLease::take_in(&vfs, Path::new(PACK), None).unwrap();
+    let mut lease = ReaderLease::take_in(&vfs, Path::new(PACK), Path::new(DB)).unwrap();
     lease.set_open(UUID, 5);
     let name = lease
         .path()
@@ -572,7 +600,7 @@ fn with_a_lock_sidecar_the_record_stays_readable_and_stale_sidecars_go() {
 
     // A take racing a stale removal: the sidecar is delete pending, so the take starts again.
     s.script().sidecar_denied = 1;
-    let lease = ReaderLease::take_in(&vfs, Path::new(PACK), None).unwrap();
+    let lease = ReaderLease::take_in(&vfs, Path::new(PACK), Path::new(DB)).unwrap();
     assert!(lease.is_held());
     assert_eq!(lease_files(&s.fs).len(), 2, "{:?}", lease_files(&s.fs));
 }
@@ -585,7 +613,7 @@ fn a_directory_that_refuses_writes_gives_a_lease_that_holds_nothing() {
     ] {
         let s = Scripted::new();
         s.script().create_fails = Some(kind);
-        let lease = ReaderLease::take_in(&s.vfs(), Path::new(PACK), None).unwrap();
+        let lease = ReaderLease::take_in(&s.vfs(), Path::new(PACK), Path::new(DB)).unwrap();
         assert!(!lease.is_held(), "{kind:?}");
         assert_eq!(lease.path(), None);
         assert_eq!(lease.dir(), leases_dir(Path::new(PACK)));
@@ -594,7 +622,7 @@ fn a_directory_that_refuses_writes_gives_a_lease_that_holds_nothing() {
     let s = Scripted::new();
     s.script().create_fails = Some(io::ErrorKind::StorageFull);
     assert!(matches!(
-        ReaderLease::take_in(&s.vfs(), Path::new(PACK), None),
+        ReaderLease::take_in(&s.vfs(), Path::new(PACK), Path::new(DB)),
         Err(Error::PackIo { .. })
     ));
 }
@@ -620,4 +648,126 @@ fn special_entries_named_like_a_lease_are_ignored_without_a_hang() {
         assert!(fifo.exists());
     }
     assert!(link.symlink_metadata().is_ok() && sub.is_dir());
+}
+
+#[test]
+fn an_orphan_sidecar_candidate_whose_lease_exists_is_left_alone() {
+    // A take in progress creates its lease, then its sidecar; a listing that missed the lease must not make the
+    // sweep remove that sidecar.
+    let s = Scripted::new();
+    s.script().sidecars = true;
+    let vfs = s.vfs();
+    let lease = stale(&s.fs, 0xc);
+    let sidecar = PathBuf::from(format!("{}.lock", lease.display()));
+    s.fs.create_new(&sidecar).unwrap();
+    s.script().hidden = Some(lease.clone());
+    let scan = scan_leases(&*vfs, Path::new(PACK), true, UUID);
+    assert_eq!(scan.stale_removed, 0, "{scan:?}");
+    assert!(
+        s.fs.read(&sidecar).is_some(),
+        "the sidecar stays while its lease exists"
+    );
+    // Listed again, the stale lease and its sidecar go together.
+    s.script().hidden = None;
+    let scan = scan_leases(&*vfs, Path::new(PACK), true, UUID);
+    assert_eq!(scan.stale_removed, 1, "{scan:?}");
+    assert!(lease_files(&s.fs).is_empty(), "{:?}", lease_files(&s.fs));
+}
+
+#[test]
+fn a_take_whose_name_or_sidecar_was_removed_before_its_lock_starts_again() {
+    // A delete-pending name (Windows): `same_file` is refused, which is "not granted", never a refusing directory.
+    let s = Scripted::new();
+    s.script().same_file_denied = 1;
+    let lease = ReaderLease::take_in(&s.vfs(), Path::new(PACK), Path::new(DB)).unwrap();
+    assert!(lease.is_held());
+    assert_eq!(s.script().creates, 2);
+    assert_eq!(lease_files(&s.fs).len(), 1, "{:?}", lease_files(&s.fs));
+    drop(lease);
+    // The sidecar's name removed between its open and its lock: the lock protects nothing, so start again (and the
+    // attempt removes the lease it created before releasing).
+    let s = Scripted::new();
+    {
+        let mut script = s.script();
+        script.sidecars = true;
+        script.unlink_sidecar = true;
+    }
+    assert!(matches!(
+        ReaderLease::take_in(&s.vfs(), Path::new(PACK), Path::new(DB)),
+        Err(Error::LeaseContended { attempts: 3 })
+    ));
+    assert!(lease_files(&s.fs).is_empty(), "{:?}", lease_files(&s.fs));
+}
+
+#[test]
+fn a_stale_lease_is_removed_without_reading_its_record() {
+    let fs = sim();
+    let dir = leases_dir(Path::new(PACK));
+    fs.create_dir(&dir).unwrap();
+    let mut v2 = LeaseRecord::open(2, 1, UUID, 3).encode().to_vec();
+    v2[4..8].copy_from_slice(&2_u32.to_le_bytes());
+    v2.extend([0; 64]);
+    for (id, bytes) in [
+        (1_u128, b"garbage".to_vec()),
+        (2, v2),
+        (3, vec![0xAB; 5000]),
+    ] {
+        let file = fs.create_new(&dir.join(lease_file_name(id))).unwrap();
+        file.write_all_at(&bytes, 0).unwrap();
+    }
+    let scan = scan_leases(&fs, Path::new(PACK), true, UUID);
+    assert_eq!((scan.stale_removed, scan.live.len()), (3, 0), "{scan:?}");
+    assert!(lease_files(&fs).is_empty());
+    // A live one that long is read only up to the bound, and is unreadable.
+    let vfs: Arc<dyn Vfs<File = SimFsFile>> = Arc::new(fs.clone());
+    let lease = take(&vfs);
+    fs.open(lease.path().unwrap(), true)
+        .unwrap()
+        .write_all_at(&[0; 5000], 64)
+        .unwrap();
+    let scan = scan_leases(&fs, Path::new(PACK), true, UUID);
+    assert!(
+        matches!(
+            &scan.live[..],
+            [ScannedLease {
+                lease: LiveLease::Unreadable(_),
+                ..
+            }]
+        ),
+        "{scan:?}"
+    );
+}
+
+#[test]
+fn a_leases_path_that_is_a_regular_file_fails_the_take_and_holds_gc_back() {
+    let fs = sim();
+    fs.create_new(&leases_dir(Path::new(PACK))).unwrap();
+    let vfs: Arc<dyn Vfs<File = SimFsFile>> = Arc::new(fs.clone());
+    assert!(matches!(
+        ReaderLease::take_in(&vfs, Path::new(PACK), Path::new(DB)),
+        Err(Error::PackIo { .. })
+    ));
+    let scan = scan_leases(&fs, Path::new(PACK), true, UUID);
+    assert!(scan.unlisted, "{scan:?}");
+    assert!(scan.judge(0).held_back);
+}
+
+#[test]
+fn a_take_beside_a_file_that_is_not_a_container_creates_nothing() {
+    let fs = SimFs::new();
+    fs.create_dir(Path::new("/db")).unwrap();
+    fs.create_new(Path::new(DB))
+        .unwrap()
+        .write_all_at(b"not a container", 0)
+        .unwrap();
+    let vfs: Arc<dyn Vfs<File = SimFsFile>> = Arc::new(fs.clone());
+    let e = ReaderLease::take_in(&vfs, Path::new(PACK), Path::new(DB)).unwrap_err();
+    assert!(
+        matches!(e, Error::Container(_)) && e.is_corruption(),
+        "{e:?}"
+    );
+    assert!(
+        fs.read_dir(&leases_dir(Path::new(PACK))).is_err(),
+        "nothing created"
+    );
 }

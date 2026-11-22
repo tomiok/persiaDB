@@ -52,7 +52,9 @@ text, its own magic and version, this ADR, and golden files (item 17).
    ```
    **Opening** is `db_uuid` all zero (and then `manifest_seq` must be 0): the handle has not opened its documents yet.
    **Open** is any other `db_uuid`, with the seq of its documents, which may be 0 (a database that never committed).
-   So each state has one encoding; a zero `db_uuid` with a non-zero `manifest_seq` is corruption.
+   So each state has one encoding; a zero `db_uuid` with a non-zero `manifest_seq` is corruption. `LeaseRecord::open`
+   with a zero `db_uuid` builds the opening record (a database whose `db_uuid` is zero keeps its handles opening,
+   which holds GC back: safe, it deletes less).
    Decoding checks, in this order: at least 8 bytes, the magic, `version` (0 is corruption, above 1 is unsupported:
    a later version may be longer), then exactly 64 bytes, the CRC32C, `flags` (any bit is unsupported), `reserved`
    zero, the opening rule above; then, against the context, `lease_id` against the name and an open `db_uuid`
@@ -74,9 +76,21 @@ text, its own magic and version, this ADR, and golden files (item 17).
      stale removal's delete pending, item 12), or the name is gone (the writer judged the new file stale before
      the lock was taken and removed it), the handle drops that file and starts again with a new id, at most 3
      times; then the take fails with `Error::LeaseContended`. The lock is taken after the record is written, so a
-     reader lease a writer finds locked always holds a whole record.
-   - *Open*: `ReadOnlyBlobDatabase::open(path)` canonicalizes `path`, takes the reader lease beside its pack, opens
-     the documents, checks them (below), then writes the open record (`db_uuid`, `manifest_seq`).
+     reader lease a writer finds locked always holds a whole record. With a sidecar the take also checks, after the
+     lock, that the sidecar's name still names the locked file (`same_file(lock, sidecar)`): an orphan sweep (item
+     8) may have removed it in between. A failed attempt removes what it created (the lease file, its own sidecar)
+     before it releases its lock. Only an error of the creation itself (`create_dir`, `create_new`) can mean "the
+     directory refuses writes" (item 11).
+     A container failure (a file that is not a container, a damaged one) is `Error::Container`, classified as the
+     container classifies it, and `ReadOnlyBlobDatabase` reports it as `Error::Database`, as the documents' open
+     would. The take reopens the container through the pack's `Vfs`, so **the documents and the pack must share one
+     file system**. Documents of a container opened without a path (`ReadOnlyDatabase::open_on`) cannot take a
+     lease: `with_pack_in` refuses them (`Error::NoContainerPath`); only tests opened documents that way.
+     A `<pack>.leases` that is a regular file fails every take with a clear I/O error; the writer cannot list it and
+     holds GC back (item 8).
+   - *Open*: `ReadOnlyBlobDatabase::open(path)` takes the reader lease beside its pack (the container's open gives
+     the canonical path), opens the documents, checks them (below), then writes the open record (`db_uuid`,
+     `manifest_seq`).
    - *Given documents*: `with_lease(lease, db, path)` and `with_lease_in(lease, db, vfs, pack)` (and
      `with_pack_beside`, `with_pack_in`, which take a lease first and then call them) checks, before anything else:
      - `db.seq() >= taken seq`, else `Error::OpenedBeforeLease { opened, taken }`: a GC may have swept a blob those
@@ -85,7 +99,8 @@ text, its own magic and version, this ADR, and golden files (item 17).
        GC whose mark is not newer than a reader's documents sweeps no blob they show (item 9, "why one seq is
        enough");
      - the lease's directory is `<pack>.leases` of the pack these documents use (the one derived from
-       `db.container()`'s canonical path, or the pack `with_pack_in` is given), else `Error::LeaseElsewhere`. The
+       `db.container()`'s canonical path, or the pack `with_pack_in` is given), compared exactly, else
+       `Error::LeaseElsewhere`. The
        same check runs after `open`'s document open: a symbolic link retargeted between the canonicalization and
        the open would otherwise lease one pack and read another.
      `persia verify` takes the lease first and uses `with_lease`, so it has no window.
@@ -129,15 +144,23 @@ text, its own magic and version, this ADR, and golden files (item 17).
      nothing is removed.
    - Otherwise each entry that is a regular file named `<id>.lease` (`DirEntry` kind `File`; item 2) is judged by its
      lock, never by its record:
-     - **Gone**: `NotFound` on open (removed since the listing, by its holder's drop or by an earlier step): skipped.
+     - **Checked again**: right before the open, the entry's kind is read again (`entry_kind`, which does not follow
+       a symbolic link): anything but a regular file is skipped, so a FIFO put there since the listing is not
+       opened (its open would block). Only a hostile process swapping the name between that check and the open could
+       still make the open block; that needs a directory such a process can write.
+     - **Gone**: `NotFound` on that check or the open (removed since the listing, by its holder's drop or by an
+       earlier step): skipped.
      - **Not openable**: `PermissionDenied` on open (another user's file the writer may not read) or any other open
        error: live and unreadable. It holds GC back; it is never a GC failure.
      - **Stale**: the writer is granted the lock (Unix: `try_lock` on the file opened read-only; Windows:
        `lock_beside`). The holder is gone, whatever the record says or its version: the writer removes `<id>.lease`
        (and on Windows `<id>.lease.lock`) while it holds the lock, then unlocks explicitly (`ContainerFile::unlock`,
        also when a removal failed, as `persia-storage`'s side-file sweep does). A failed removal is logged and retried
-       by the next GC; a stale reader lease never holds GC back. A `<id>.lease.lock` with no `<id>.lease` is removed
-       the same way.
+       by the next GC; a stale reader lease never holds GC back. It is counted as removed only when its names are
+       gone. Its record is never read, so a stale lease of garbage, another version or any length goes the same way.
+       A `<id>.lease.lock` with no `<id>.lease` in the listing is removed once its lock is granted, and only if
+       `<id>.lease` does not exist then (a take creates its lease before its sidecar, and a listing may miss the
+       lease). A sidecar lock error other than `WouldBlock` is logged, and the next GC tries again.
      - **Live**: the lock is held elsewhere (`WouldBlock`). The writer reads the record and decodes it.
      - **Lock error**: any other `try_lock` error (`EBADF`, `ENOLCK`, an emulation's failure): live and unreadable,
        never a GC failure.
@@ -184,8 +207,9 @@ text, its own magic and version, this ADR, and golden files (item 17).
     opens files with `FILE_SHARE_DELETE`, so deleting an open file succeeds, but whether its name disappears at once
     or stays **delete pending** until the last handle closes depends on the Windows version and file system; opening
     a delete-pending name fails with access denied. So while the writer removes a stale `<id>.lease.lock` it still
-    holds, the owner's `lock_beside` of that name may get `PermissionDenied`: that is "lock not granted, start again
-    under a new id" (item 4), never "the directory refuses writes" (item 11). Names are unique per handle, so removing
+    holds, the owner's `lock_beside` of that name may get `PermissionDenied`, and so may its `same_file` check of the
+    lease's own name after the writer removed it as stale: both are "lock not granted, start again under a new id"
+    (item 4), never "the directory refuses writes" (item 11). Names are unique per handle, so removing
     a stale reader lease's lock file does not race with a later taker, unlike the container's `<name>.lock` (ADR-0016
     item 3), which is never removed.
 13. **File systems where locks cannot be judged.** `ContainerFile::locks_per_handle` is true only on a local disk
@@ -240,6 +264,14 @@ text, its own magic and version, this ADR, and golden files (item 17).
       hang; a `try_lock` error and an entry gone mid-scan (a simulated `Vfs`) are live-unreadable and skipped; with
       `locks_per_handle` false and a read-only handle in the writer's process, nothing is opened or removed and GC
       holds back; on Windows, a take racing a stale removal starts again.
+    - Review fixes: an open of a file that is not a container, or of a damaged one, is `Error::Database` corruption
+      and creates nothing; documents without a container path are `NoContainerPath`; a `same_file` refused with
+      `PermissionDenied` (a delete-pending name) starts the take again; a sidecar removed between its open and its
+      lock starts it again, and the attempt removes what it created; an orphan-sidecar candidate whose lease exists
+      is left alone; a stale lease of garbage, version 2 or over 4096 bytes is removed unread, and a live one that
+      long is read only up to the bound; a `<pack>.leases` that is a regular file fails the take and holds GC back.
+      The GC tests on real files print why they skip where locks cannot be judged. The lease code runs on real
+      Windows only once CI runs `persia-blob` there (a follow-up leaf).
 
 ## Consequences
 

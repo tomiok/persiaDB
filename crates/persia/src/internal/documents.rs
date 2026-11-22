@@ -129,7 +129,9 @@ pub enum Error {
         taken: u64,
     },
     /// The reader lease is in another leases directory than the one beside the pack these documents use (another
-    /// database, or a symbolic link retargeted between the lease and the documents' open). Nothing was opened.
+    /// database, or a symbolic link retargeted between the lease and the documents' open). The paths are compared
+    /// exactly, both derived from canonical container paths (or the pack path given to `with_lease_in`). Nothing was
+    /// opened.
     #[error("the reader lease is in {lease}, not {expected}")]
     LeaseElsewhere {
         /// The lease's directory.
@@ -137,6 +139,11 @@ pub enum Error {
         /// The leases directory of the documents' pack.
         expected: PathBuf,
     },
+    /// [`ReadOnlyBlobDatabase::with_pack_in`] was given documents of a container opened without a path
+    /// ([`ReadOnlyDatabase::open_on`]): a reader lease must reopen the container at its path to read its committed seq,
+    /// or [`Error::OpenedBeforeLease`] could not be checked. Nothing was opened.
+    #[error("the documents' container has no path, so no reader lease can be taken for them")]
+    NoContainerPath,
 }
 
 /// The blob of a [`BlobDatabase::put`] (SPEC §9.6).
@@ -473,6 +480,15 @@ fn pack_beside(container: Option<&Path>, given: &Path) -> PathBuf {
     pack_path(container.unwrap_or(given))
 }
 
+/// A reader lease's error as a read-only open reports it: the container's failure as [`Error::Database`], with its
+/// classification ([`Error::is_corruption`]), as [`ReadOnlyDatabase::open`] would have reported it.
+fn lease_error(error: persia_blob::Error) -> Error {
+    match error {
+        persia_blob::Error::Container(e) => Error::Database(Box::new(DatabaseError::from(e))),
+        other => Error::Blob(other),
+    }
+}
+
 impl BlobDatabase<PackStore> {
     /// Creates a database in a new container file at `path` ([`Database::create`]) with its blob pack at
     /// [`pack_path`] of it, `<name>.persia.blobs`, opened read-write with the database's writer proof, so the pack
@@ -624,11 +640,13 @@ impl ReadOnlyBlobDatabase<File> {
     /// refuses writes the handle opens without one ([`ReadOnlyBlobDatabase::lease`] is `None`, a warning is logged).
     ///
     /// # Errors
-    /// [`Error::Blob`] when the reader lease cannot be taken ([`persia_blob::Error::LeaseContended`], an I/O error);
-    /// [`Error::Database`] as [`ReadOnlyDatabase::open`]; then as [`ReadOnlyBlobDatabase::with_lease`].
+    /// [`Error::Database`] when the container cannot be opened (a file that is not one, a damaged one: corruption, as
+    /// [`ReadOnlyDatabase::open`] reports it), also while the lease is taken; [`Error::Blob`] when the reader lease
+    /// cannot be taken ([`persia_blob::Error::LeaseContended`], an I/O error); then as [`ReadOnlyDatabase::open`] and
+    /// [`ReadOnlyBlobDatabase::with_lease`].
     pub fn open(path: impl AsRef<Path>, options: &DatabaseOptions) -> Result<Self, Error> {
         let path = path.as_ref();
-        let lease = ReaderLease::take_beside(path)?;
+        let lease = ReaderLease::take_beside(path).map_err(lease_error)?;
         Self::with_lease(
             lease,
             ReadOnlyDatabase::open(path, &options.registry)?,
@@ -646,7 +664,8 @@ impl ReadOnlyBlobDatabase<File> {
     /// As [`ReaderLease::take_beside`] and [`ReadOnlyBlobDatabase::with_lease`].
     pub fn with_pack_beside(db: ReadOnlyDatabase, path: impl AsRef<Path>) -> Result<Self, Error> {
         let path = path.as_ref();
-        let lease = ReaderLease::take_beside(db.container().path().unwrap_or(path))?;
+        let lease =
+            ReaderLease::take_beside(db.container().path().unwrap_or(path)).map_err(lease_error)?;
         Self::with_lease(lease, db, path)
     }
 
@@ -672,18 +691,20 @@ impl ReadOnlyBlobDatabase<File> {
 
 impl<F: ContainerFile + Sync + 'static> ReadOnlyBlobDatabase<F> {
     /// `db` with the pack at `pack` on `vfs`, opened read-only with the `db_uuid` of `db`'s container
-    /// ([`PackStore::open_in`]), after a reader lease taken now in `<pack>.leases` ([`ReaderLease::take_in`], with
-    /// the committed seq of `db`'s container path read again; a container without a path cannot be, so nothing is
-    /// checked then).
+    /// ([`PackStore::open_in`]), after a reader lease taken now in `<pack>.leases` ([`ReaderLease::take_in`], which
+    /// reads the committed seq of `db`'s container again at its path, through `vfs`: the documents and the pack must
+    /// be on that one file system).
     ///
     /// # Errors
-    /// As [`ReaderLease::take_in`] and [`ReadOnlyBlobDatabase::with_lease_in`].
+    /// [`Error::NoContainerPath`] for documents of a container opened without a path; then as [`ReaderLease::take_in`]
+    /// (a container error as [`Error::Database`]) and [`ReadOnlyBlobDatabase::with_lease_in`].
     pub fn with_pack_in(
         db: ReadOnlyDatabase<F>,
         vfs: Arc<dyn Vfs<File = F>>,
         pack: impl AsRef<Path>,
     ) -> Result<Self, Error> {
-        let lease = ReaderLease::take_in(&vfs, pack.as_ref(), db.container().path())?;
+        let container = db.container().path().ok_or(Error::NoContainerPath)?;
+        let lease = ReaderLease::take_in(&vfs, pack.as_ref(), container).map_err(lease_error)?;
         Self::with_lease_in(lease, db, vfs, pack)
     }
 
@@ -913,7 +934,8 @@ impl Error {
             | Self::RefreshedOlder { .. }
             | Self::RefreshDiverged { .. }
             | Self::OpenedBeforeLease { .. }
-            | Self::LeaseElsewhere { .. } => false,
+            | Self::LeaseElsewhere { .. }
+            | Self::NoContainerPath => false,
         }
     }
 }

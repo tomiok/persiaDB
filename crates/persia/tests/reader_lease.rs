@@ -74,6 +74,24 @@ fn record(reader: &ReadOnlyBlobDatabase) -> LeaseRecord {
     LeaseRecord::decode(&std::fs::read(path).unwrap()).unwrap()
 }
 
+/// Whether the file system under `dir` lets the writer judge a lease by its lock (`locks_per_handle`, ADR-0054 item
+/// 13). Where it does not, every lease holds GC back, and the GC tests here have nothing to show: they are skipped,
+/// with the reason printed.
+fn locks_judged(dir: &Path) -> bool {
+    let probe = dir.join("locks-probe");
+    let file = std::fs::File::create(&probe).unwrap();
+    let judged = persia_blob::pack::ContainerFile::locks_per_handle(&file);
+    drop(file);
+    std::fs::remove_file(&probe).unwrap();
+    if !judged {
+        eprintln!(
+            "skipped: locks cannot be judged on the file system under {}",
+            dir.display()
+        );
+    }
+    judged
+}
+
 fn leases(path: &Path) -> Vec<PathBuf> {
     match std::fs::read_dir(leases_dir(&pack_path(path))) {
         Ok(entries) => entries.map(|e| e.unwrap().path()).collect(),
@@ -84,6 +102,9 @@ fn leases(path: &Path) -> Vec<PathBuf> {
 #[test]
 fn a_reader_behind_a_delete_holds_gc_back_until_it_refreshes() {
     let dir = tempfile::tempdir().unwrap();
+    if !locks_judged(dir.path()) {
+        return;
+    }
     let path = dir.path().join("app.persia");
     let mut writer = create(&path);
     let gone = put(&mut writer, "gone", b"swept later");
@@ -146,6 +167,9 @@ fn a_refused_refresh_keeps_the_record() {
 #[test]
 fn a_lease_ahead_of_the_committed_seq_holds_gc_back() {
     let dir = tempfile::tempdir().unwrap();
+    if !locks_judged(dir.path()) {
+        return;
+    }
     let path = dir.path().join("app.persia");
     let mut writer = create(&path);
     put(&mut writer, "a", b"a");
@@ -279,6 +303,9 @@ fn child_role() {
 #[test]
 fn a_reader_killed_while_holding_its_lease_leaves_a_stale_one_gc_removes() {
     let dir = tempfile::tempdir().unwrap();
+    if !locks_judged(dir.path()) {
+        return;
+    }
     let path = dir.path().join("app.persia");
     let mut writer = create(&path);
     put(&mut writer, "gone", b"gone");
@@ -301,9 +328,10 @@ fn a_reader_killed_while_holding_its_lease_leaves_a_stale_one_gc_removes() {
         .expect("the child printed its lease");
     delete(&mut writer, "gone");
     let report = gc(&writer);
+    let readers = report.readers.unwrap();
     assert!(
-        report.readers.unwrap().held_back,
-        "the live child holds GC back"
+        readers.held_back && readers.behind == 1,
+        "the live child holds GC back: {readers:?}"
     );
     assert!(lease.exists());
 
@@ -316,4 +344,28 @@ fn a_reader_killed_while_holding_its_lease_leaves_a_stale_one_gc_removes() {
     assert!(!readers.held_back);
     assert_eq!(report.sweep.blobs_deleted, 1, "{report:?}");
     assert!(!lease.exists());
+}
+
+/// The reader lease opens the container first; its failure is reported as the documents' open reports it: a file that
+/// is not a container, and a damaged one, are `Error::Database` corruption, and nothing is created beside them.
+#[test]
+fn an_open_of_a_file_that_is_not_a_container_or_a_damaged_one_is_database_corruption() {
+    let dir = tempfile::tempdir().unwrap();
+    let garbage = dir.path().join("notes.persia");
+    std::fs::write(&garbage, b"this is not a database").unwrap();
+    let damaged = dir.path().join("app.persia");
+    drop(create(&damaged));
+    let mut bytes = std::fs::read(&damaged).unwrap();
+    // The magic intact, a header byte flipped: the header's CRC no longer matches.
+    bytes[20] ^= 0xFF;
+    std::fs::write(&damaged, &bytes).unwrap();
+    for path in [&garbage, &damaged] {
+        let e = ReadOnlyBlobDatabase::open(path, &DatabaseOptions::default()).unwrap_err();
+        assert!(
+            matches!(e, Error::Database(_)) && e.is_corruption(),
+            "{}: {e:?}",
+            path.display()
+        );
+        assert!(!leases_dir(&pack_path(path)).exists(), "{}", path.display());
+    }
 }

@@ -20,7 +20,8 @@
 //! 8. A reader whose documents are behind a delete holds GC back (its reader lease, ROADMAP 9.2.16): the blob stays
 //!    until the reader refreshes past the delete, and the next GC sweeps it. A writer that ignores reader leases (one
 //!    from before ADR-0054) leaves a pack newer than the documents: a document whose blob is gone reads as
-//!    `BlobNotFound`, never a panic, and every other blob reads on.
+//!    `BlobNotFound`, never a panic, and every other blob reads on. The reader lease itself is tested in
+//!    `reader_lease.rs`.
 #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)] // Tests: inputs are fixed.
 
 use std::io::Read;

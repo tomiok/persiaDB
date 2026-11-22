@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use persia_format::checksum::crc32c;
 use persia_storage::container::{Container, ContainerFile, Mode};
-use persia_storage::vfs::{FileType, RealFs, Vfs};
+use persia_storage::vfs::{EntryKind, FileType, RealFs, Vfs};
 
 use super::pack_path;
 use crate::error::{Error, Result};
@@ -252,36 +252,19 @@ fn io_err(op: &'static str) -> impl FnOnce(io::Error) -> Error {
     move |source| Error::PackIo { op, source }
 }
 
-/// A fresh lease id: random, like a `pack_id`.
-fn random_id() -> u128 {
-    use std::hash::{BuildHasher, Hasher};
-    let half = |salt: u64| {
-        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-        h.write_u64(salt);
-        h.write_u32(std::process::id());
-        if let Ok(t) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-            h.write_u128(t.as_nanos());
-        }
-        h.finish()
-    };
-    (u128::from(half(1)) << 64) | u128::from(half(2))
-}
-
-/// The committed seq of the container at `path`, opened read-only again (as `persia verify` does: a compaction
-/// renames a new file over the path, SPEC §4.6).
+/// The committed seq of the container at `path` and its canonical path, opened read-only again (as `persia verify`
+/// does: a compaction renames a new file over the path, SPEC §4.6).
 ///
 /// # Errors
-/// [`Error::PackIo`] when the container cannot be opened.
+/// [`Error::Container`] when the container cannot be opened (its classification kept: a file that is not a
+/// container, or a damaged one, is corruption).
 pub fn committed_seq_in<F: ContainerFile + 'static>(
     vfs: Arc<dyn Vfs<File = F>>,
     container: &Path,
-) -> Result<u64> {
-    let container =
-        Container::open_in(vfs, container, Mode::ReadOnly).map_err(|e| Error::PackIo {
-            op: "open the container to read its committed seq",
-            source: io::Error::other(e),
-        })?;
-    Ok(container.superblock().seq)
+) -> Result<(u64, PathBuf)> {
+    let container = Container::open_in(vfs, container, Mode::ReadOnly).map_err(Error::Container)?;
+    let canonical = container.path().unwrap_or(Path::new("")).to_path_buf();
+    Ok((container.superblock().seq, canonical))
 }
 
 // -- the reader's side --
@@ -325,58 +308,75 @@ enum Attempt<F: ContainerFile> {
 
 impl ReaderLease<std::fs::File> {
     /// The reader lease beside the container at `container` on the operating system's file system: in
-    /// `<canonical container>.blobs.leases/`, with the container's committed seq read after the lock.
+    /// `<canonical container>.blobs.leases/`, with the container's committed seq read after the lock. The container is
+    /// opened twice: once first (its canonical path, and nothing is created beside a file that is not a container),
+    /// once after the lock.
     ///
     /// # Errors
-    /// As [`ReaderLease::take_in`]; [`Error::PackIo`] when `container` cannot be canonicalized.
+    /// As [`ReaderLease::take_in`].
     pub fn take_beside(container: impl AsRef<Path>) -> Result<Self> {
-        let canonical = RealFs
-            .canonicalize(container.as_ref())
-            .map_err(io_err("canonicalize"))?;
         let vfs: Arc<dyn Vfs<File = std::fs::File>> = Arc::new(RealFs);
-        Self::take_in(&vfs, &pack_path(&canonical), Some(&canonical))
+        let (_, canonical) = committed_seq_in(Arc::clone(&vfs), container.as_ref())?;
+        Self::take_checked(&vfs, &pack_path(&canonical), &canonical)
     }
 }
 
 impl<F: ContainerFile + 'static> ReaderLease<F> {
-    /// Takes a reader lease in `<pack>.leases/` on `vfs` (ADR-0054 item 4): creates the directory if missing, creates
-    /// `<id>.lease` holding the opening record, locks it, checks the path still names it, then reads the committed seq
-    /// of the container at `container` (its **taken seq**; 0 without a container path, which cannot be reopened). The
-    /// container is opened once before too, so nothing is created beside a file that is not a container.
-    /// Starts again under a new id when the lock is not granted or the name is gone, at most [`TAKE_ATTEMPTS`] times.
-    /// When creating the directory or the file fails with permission denied or a read-only file system, the lease
-    /// holds nothing and a warning names the path.
+    /// Takes a reader lease in `<pack>.leases/` on `vfs` for the container at `container`, on the same `vfs` (ADR-0054
+    /// item 4): opens the container (nothing is created beside a file that is not one), creates the directory if
+    /// missing, creates `<id>.lease` holding the opening record, locks it, checks the path still names it, then reads
+    /// the container's committed seq again (its **taken seq**). Starts again under a new id when the lock is not
+    /// granted, its sidecar or its name is delete pending (Windows), or the name is gone, at most [`TAKE_ATTEMPTS`]
+    /// times. When creating the directory or the file fails with permission denied or a read-only file system, the
+    /// lease holds nothing and a warning names the path.
     ///
     /// # Errors
-    /// [`Error::LeaseContended`] when every attempt was refused; [`Error::PackIo`] for another I/O error;
-    /// [`Error::PackIo`] when the container cannot be opened.
-    pub fn take_in(
-        vfs: &Arc<dyn Vfs<File = F>>,
-        pack: &Path,
-        container: Option<&Path>,
-    ) -> Result<Self> {
-        // A container first: nothing is created beside a file that is not one.
-        if let Some(container) = container {
-            committed_seq_in(Arc::clone(vfs), container)?;
-        }
+    /// [`Error::Container`] when the container cannot be opened; [`Error::LeaseContended`] when every attempt was
+    /// refused; [`Error::PackIo`] for another I/O error, `<pack>.leases` that is not a directory included.
+    pub fn take_in(vfs: &Arc<dyn Vfs<File = F>>, pack: &Path, container: &Path) -> Result<Self> {
+        committed_seq_in(Arc::clone(vfs), container)?;
+        Self::take_checked(vfs, pack, container)
+    }
+
+    /// [`ReaderLease::take_in`] once the container was found to be one.
+    fn take_checked(vfs: &Arc<dyn Vfs<File = F>>, pack: &Path, container: &Path) -> Result<Self> {
         let dir = leases_dir(pack);
         match vfs.create_dir(&dir) {
             Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                // A regular file there (not Persia's) fails every read-only open, clearly, and holds GC back.
+                if !vfs
+                    .is_dir(&dir)
+                    .map_err(io_err("stat the reader leases directory"))?
+                {
+                    return Err(Error::PackIo {
+                        op: "use the reader leases directory, which is not a directory",
+                        source: io::Error::new(
+                            io::ErrorKind::NotADirectory,
+                            dir.display().to_string(),
+                        ),
+                    });
+                }
+            }
             Err(e) if refuses_writes(&e) => return Ok(Self::unheld(dir, &e)),
             Err(e) => return Err(io_err("create the reader leases directory")(e)),
         }
         let mut held = None;
         for _ in 0..TAKE_ATTEMPTS {
-            let path = dir.join(lease_file_name(random_id()));
+            let path = dir.join(lease_file_name(super::store::random_u128()));
             match attempt(vfs, &path) {
                 Ok(Attempt::Held(h)) => {
                     held = Some(h);
                     break;
                 }
                 Ok(Attempt::Again) => {}
-                Err(e) if refuses_writes(&e) => return Ok(Self::unheld(dir, &e)),
-                Err(e) => return Err(io_err("take a reader lease")(e)),
+                // ADR-0054 item 11: only a creation the directory refuses opens without a lease.
+                Err(AttemptError::Create(e)) if refuses_writes(&e) => {
+                    return Ok(Self::unheld(dir, &e));
+                }
+                Err(AttemptError::Create(e) | AttemptError::Other(e)) => {
+                    return Err(io_err("take a reader lease")(e));
+                }
             }
         }
         let Some(held) = held else {
@@ -385,10 +385,7 @@ impl<F: ContainerFile + 'static> ReaderLease<F> {
             });
         };
         // Read after the lock: every GC that ran before this lease existed had a mark seq at most this one.
-        let taken_seq = match container {
-            Some(container) => committed_seq_in(Arc::clone(&held.vfs), container)?,
-            None => 0,
-        };
+        let (taken_seq, _) = committed_seq_in(Arc::clone(&held.vfs), container)?;
         Ok(Self {
             dir,
             taken_seq,
@@ -479,15 +476,20 @@ impl<F: ContainerFile> Drop for ReaderLease<F> {
     }
 }
 
-fn remove_logged<F: ContainerFile>(vfs: &dyn Vfs<File = F>, path: &Path) {
+/// Removes `path`; whether it is gone (removed now, or already). A failure is logged: the writer removes an unlocked
+/// file left behind.
+fn remove_logged<F: ContainerFile>(vfs: &dyn Vfs<File = F>, path: &Path) -> bool {
     match vfs.remove_file(path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => tracing::warn!(
-            path = %path.display(),
-            %error,
-            "removing a reader lease file failed; the writer removes it once it is unlocked",
-        ),
+        Ok(()) => true,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => true,
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "removing a reader lease file failed; the writer removes it once it is unlocked",
+            );
+            false
+        }
     }
 }
 
@@ -499,16 +501,38 @@ fn refuses_writes(error: &io::Error) -> bool {
     )
 }
 
-/// One take attempt at `path`. Errors of the creation are returned as they are, for [`refuses_writes`]; a refused
-/// lock or a sidecar that cannot be opened is [`Attempt::Again`], never a refusal of the directory.
-fn attempt<F: ContainerFile>(vfs: &Arc<dyn Vfs<File = F>>, path: &Path) -> io::Result<Attempt<F>> {
-    let file = vfs.create_new(path)?;
+/// Why a take attempt failed.
+enum AttemptError {
+    /// Creating the lease file failed: the directory may refuse writes (ADR-0054 item 11).
+    Create(io::Error),
+    /// Anything after the file was created: never taken for a directory that refuses writes.
+    Other(io::Error),
+}
+
+/// Whether `error` from a lock or a name check means "not granted, start again": held elsewhere, or (Windows) a
+/// delete-pending name after the writer removed a stale lease of the same name (ADR-0054 item 12).
+fn not_granted(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::PermissionDenied
+    )
+}
+
+/// One take attempt at `path`. Only the creation's error is [`AttemptError::Create`]; a refused lock, a sidecar or a
+/// name that is delete pending, and a name gone before the lock are [`Attempt::Again`]. A failed attempt removes what
+/// it created before it releases its lock.
+fn attempt<F: ContainerFile>(
+    vfs: &Arc<dyn Vfs<File = F>>,
+    path: &Path,
+) -> std::result::Result<Attempt<F>, AttemptError> {
+    let file = vfs.create_new(path).map_err(AttemptError::Create)?;
+    let failed = |e: io::Error| {
+        remove_logged(&**vfs, path);
+        AttemptError::Other(e)
+    };
     let record = LeaseRecord::opening(parse_id(path), std::process::id());
     // Written before the lock: a reader lease the writer finds locked always holds a whole record.
-    if let Err(e) = file.write_all_at(&record.encode(), 0) {
-        remove_logged(&**vfs, path);
-        return Err(e);
-    }
+    file.write_all_at(&record.encode(), 0).map_err(failed)?;
     let sidecar = match vfs.lock_beside(path) {
         Ok(Some(lock)) => Some((sidecar_path(path), lock)),
         Ok(None) => match file.try_lock() {
@@ -518,29 +542,35 @@ fn attempt<F: ContainerFile>(vfs: &Arc<dyn Vfs<File = F>>, path: &Path) -> io::R
                 remove_logged(&**vfs, path);
                 return Ok(Attempt::Again);
             }
-            Err(e) => {
-                remove_logged(&**vfs, path);
-                return Err(e);
-            }
+            Err(e) => return Err(failed(e)),
         },
-        // Held elsewhere, or (Windows) delete pending after the writer removed a stale lease: not granted.
-        Err(e)
-            if matches!(
-                e.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::PermissionDenied
-            ) =>
-        {
+        Err(e) if not_granted(&e) => {
             remove_logged(&**vfs, path);
             return Ok(Attempt::Again);
         }
-        Err(e) => {
-            remove_logged(&**vfs, path);
-            return Err(e);
+        Err(e) => return Err(failed(e)),
+    };
+    // The writer may have judged the new file stale before the lock and removed it, or (Windows) removed the sidecar
+    // as an orphan before it was locked: then this lock protects nothing.
+    let named = match &sidecar {
+        Some((name, lock)) => match vfs.same_file(lock, name) {
+            Ok(true) => vfs.same_file(&file, path),
+            other => other,
+        },
+        None => vfs.same_file(&file, path),
+    };
+    let undo = |sidecar: &Option<(PathBuf, F)>| {
+        remove_logged(&**vfs, path);
+        if let Some((name, lock)) = sidecar {
+            if vfs.same_file(lock, name).unwrap_or(false) {
+                remove_logged(&**vfs, name);
+            }
+            release(lock);
+        } else {
+            release(&file);
         }
     };
-    let locked = sidecar.as_ref().map_or(&file, |(_, lock)| lock);
-    // The writer may have judged the new file stale before the lock and removed it: then this lock protects nothing.
-    match vfs.same_file(&file, path) {
+    match named {
         Ok(true) => Ok(Attempt::Held(Held {
             vfs: Arc::clone(vfs),
             path: path.to_owned(),
@@ -549,12 +579,16 @@ fn attempt<F: ContainerFile>(vfs: &Arc<dyn Vfs<File = F>>, path: &Path) -> io::R
             record,
         })),
         Ok(false) => {
-            release(locked);
+            undo(&sidecar);
+            Ok(Attempt::Again)
+        }
+        Err(e) if not_granted(&e) => {
+            undo(&sidecar);
             Ok(Attempt::Again)
         }
         Err(e) => {
-            release(locked);
-            Err(e)
+            undo(&sidecar);
+            Err(AttemptError::Other(e))
         }
     }
 }
@@ -702,7 +736,14 @@ pub fn scan_leases<F: ContainerFile>(
     let mut scan = LeaseScan::default();
     let entries = match vfs.read_dir(&dir) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return scan,
+        // No leases only when nothing is there: a regular file of that name (which some file systems list as missing)
+        // is not a directory the writer can judge, so it holds GC back.
+        Err(e)
+            if e.kind() == io::ErrorKind::NotFound
+                && matches!(vfs.entry_kind(&dir), Err(e) if e.kind() == io::ErrorKind::NotFound) =>
+        {
+            return scan;
+        }
         Err(error) => {
             tracing::warn!(path = %dir.display(), %error, "cannot list the reader leases: GC is held back");
             scan.unlisted = true;
@@ -737,10 +778,24 @@ pub fn scan_leases<F: ContainerFile>(
             continue;
         }
         let lease = dir.join(lease_file_name(id));
-        if let Ok(Some(lock)) = vfs.lock_beside(&lease) {
-            remove_logged(vfs, &sidecar);
-            release(&lock);
-            scan.stale_removed = scan.stale_removed.saturating_add(1);
+        match vfs.lock_beside(&lease) {
+            Ok(Some(lock)) => {
+                // A take in progress creates its lease before its sidecar, and a listing may miss the lease: the
+                // sidecar goes only if its lease does not exist now.
+                let orphan =
+                    matches!(vfs.entry_kind(&lease), Err(e) if e.kind() == io::ErrorKind::NotFound);
+                if orphan && remove_logged(vfs, &sidecar) {
+                    scan.stale_removed = scan.stale_removed.saturating_add(1);
+                }
+                release(&lock);
+            }
+            Ok(None) => {}
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => tracing::warn!(
+                path = %sidecar.display(),
+                %error,
+                "cannot lock a reader lease's sidecar; the next GC tries again",
+            ),
         }
     }
     scan
@@ -759,9 +814,17 @@ fn judge_one<F: ContainerFile>(
             lease: LiveLease::Unreadable(why),
         });
     };
+    // Checked again right before the open, so a FIFO put there since the listing is not opened (an open of one blocks);
+    // only a hostile process swapping the name between this check and the open could make it block.
+    match vfs.entry_kind(path) {
+        Ok(EntryKind::File { .. }) => {}
+        // Removed since the listing: by its holder's drop, or an earlier step.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return,
+        Ok(_) => return,
+        Err(e) => return unreadable(scan, format!("stat: {e}")),
+    }
     let file = match vfs.open(path, false) {
         Ok(file) => file,
-        // Removed since the listing: by its holder's drop, or an earlier step.
         Err(e) if e.kind() == io::ErrorKind::NotFound => return,
         Err(e) => return unreadable(scan, format!("open: {e}")),
     };
@@ -776,13 +839,16 @@ fn judge_one<F: ContainerFile>(
         Err(e) => return unreadable(scan, format!("lock: {e}")),
     };
     if let Some(sidecar) = granted {
-        // Stale: its holder is gone, whatever the record says. Names while the lock is held, then the lock.
-        remove_logged(vfs, path);
+        // Stale: its holder is gone, whatever the record says (it is not read). Names while the lock is held, then the
+        // lock, explicitly, also after a failed removal (as the side-file sweep does).
+        let mut removed = remove_logged(vfs, path);
         if sidecar.is_some() {
-            remove_logged(vfs, &sidecar_path(path));
+            removed &= remove_logged(vfs, &sidecar_path(path));
         }
         release(sidecar.as_ref().unwrap_or(&file));
-        scan.stale_removed = scan.stale_removed.saturating_add(1);
+        if removed {
+            scan.stale_removed = scan.stale_removed.saturating_add(1);
+        }
         return;
     }
     let lease = match read_record(&file) {

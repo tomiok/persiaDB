@@ -29,9 +29,9 @@ pub fn verify(out: &mut dyn Write, path: &Path, scan: Scan) -> Result<()> {
     // The built-in analyzers: replay analyzes the `text` fields of the logged documents, and a schema names only
     // built-in analyzers (SPEC §6.2.2); one this build lacks, from a newer build, fails the open as unsupported.
     let options = DatabaseOptions::default();
-    // The container first, so a file that is not one is reported as such (exit 4) and nothing is created beside it.
-    Container::open(path, Mode::ReadOnly).with_context(|| format!("opening {}", path.display()))?;
-    // Then the reader lease, so a writer's GC cannot sweep a blob these documents show while this runs (SPEC §9.3).
+    // The reader lease first, so a writer's GC cannot sweep a blob these documents show while this runs (SPEC §9.3).
+    // It opens the container first: a file that is not one fails here as the container reports it (exit 4), and
+    // nothing is created beside it.
     let lease = ReaderLease::take_beside(path)
         .with_context(|| format!("taking a reader lease beside {}", path.display()))?;
     let docs = ReadOnlyDatabase::open(path, &options.registry)

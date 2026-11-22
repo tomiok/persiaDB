@@ -36,7 +36,7 @@ use persia_engine::schema::SchemaBuilder;
 use persia_engine::view::SearchView;
 use persia_engine::wal::Durability;
 use persia_storage::container::sim::SimFile;
-use persia_storage::container::{Container, ContainerFile};
+use persia_storage::container::{Container, ContainerFile, Mode};
 use persia_storage::vfs::Vfs;
 use persia_storage::vfs::sim::{SimFs, SimFsFile};
 use proptest::prelude::*;
@@ -171,6 +171,19 @@ fn open(bytes: &[u8]) -> ReadOnlyDatabase<SimFsFile> {
     ReadOnlyDatabase::open_on(file, &options().registry).unwrap()
 }
 
+/// A read-only open of `bytes` at `/db/app.persia` on a file system of its own, by path: what a reader lease needs (it
+/// reopens the container at its path, on the pack's file system).
+fn open_at(bytes: &[u8]) -> (SimFs, ReadOnlyDatabase<SimFsFile>) {
+    let fs = sim();
+    let file = fs.create_new(Path::new("/db/app.persia")).unwrap();
+    file.write_all_at(bytes, 0).unwrap();
+    drop(file);
+    let vfs: Arc<dyn Vfs<File = SimFsFile>> = Arc::new(fs.clone());
+    let container = Container::open_in(vfs, "/db/app.persia", Mode::ReadOnly).unwrap();
+    let db = ReadOnlyDatabase::open_container(container, &options().registry).unwrap();
+    (fs, db)
+}
+
 /// What a refresh compares: `(seq, replayed WAL records, WAL end)`.
 type State = (u64, u64, u64);
 
@@ -228,10 +241,10 @@ fn table(current: State, reopened: State) -> Outcome {
 /// Refreshes a reader of `current` with an open of `reopened` and checks invariant 4: a taken open is what the reader
 /// shows after, and a refused one leaves the reader as it was, with an error naming both opens.
 fn refresh(current: &[u8], reopened: &[u8]) -> Outcome {
+    let (fs, current) = open_at(current);
     let mut reader =
-        ReadOnlyBlobDatabase::with_pack_in(open(current), Arc::new(sim()), "/db/app.persia.blobs")
-            .unwrap();
-    let reopened = open(reopened);
+        ReadOnlyBlobDatabase::with_pack_in(current, Arc::new(fs), "/db/app.persia.blobs").unwrap();
+    let reopened = open_at(reopened).1;
     let (before, before_live) = (state(reader.database()), live(reader.database()));
     let (wanted, wanted_live) = (state(&reopened), live(&reopened));
     let refreshed = reader.refresh(reopened);
@@ -531,4 +544,19 @@ proptest! {
             prop_assert_eq!(refresh(other, a_bytes), table(other_state, a_state), "b {} then a", j);
         }
     }
+}
+
+/// A reader lease reopens the documents' container at its path to read its committed seq: documents of a container
+/// opened without a path are refused (`NoContainerPath`), and nothing is created.
+#[test]
+fn documents_without_a_container_path_cannot_take_a_reader_lease() {
+    let fs = sim();
+    let e = ReadOnlyBlobDatabase::with_pack_in(
+        open(&created()),
+        Arc::new(fs.clone()),
+        "/db/app.persia.blobs",
+    )
+    .unwrap_err();
+    assert!(matches!(e, Error::NoContainerPath), "{e:?}");
+    assert_eq!(fs.read_dir(Path::new("/db")).unwrap(), Vec::new());
 }
