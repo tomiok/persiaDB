@@ -2636,23 +2636,25 @@ documents and the pack stay paired. The pack may be newer than the reopened docu
 document and GC sweeps its blob between the documents' open and the refresh, the reader shows the document and
 `get_blob` fails with `BlobNotFound` for its blob, while every other blob reads on; a local reader lease (ROADMAP
 9.2.16) will close this window.
-`PackStore::refresh` itself does not reopen or remap (ROADMAP 9.2.13). The pack is found beside the container's canonical path, so a database opened through a symlink uses
+`PackStore::refresh` itself needs no reopen or remap: the file it opened, and the bytes it mapped, stay valid until it is dropped (ROADMAP 9.2.13). The pack is found beside the container's canonical path, so a database opened through a symlink uses
 the pack beside the real file. Creating it is durable before the first blob is bound: the
 file with its header and superblock synced, then its directory synced (§4.5.2). A read-write open first removes the stale
 temporary files a crashed creation or pack rewrite left beside the pack (`<name>.persia.blobs.tmp.<nonce>.<n>`), then
 syncs the directory; only the container's writer opens the pack read-write, so none is in use. It proves it: a
 read-write open takes the container's `WriterProof`, which only a read-write container handle mints, and the pack
 carries that proof's `db_uuid` (ROADMAP 9.2.7, ADR-0053). A read-write pack handle holds the pack's writer lock from
-open to drop: on Unix an advisory lock on the pack file itself, on Windows the locked `<name>.persia.blobs.lock` beside
-it, taken before the open sweeps or recovers anything. A created or rewritten pack file is locked before it is
-written, so the path never names an unlocked pack while its writer lives. A second read-write open fails with
-`PackLocked`, however the first handle is kept alive. That sweep relies on
+open to drop: on every platform the locked file `<name>.persia.blobs.lock` beside it (created if missing, never removed,
+not synced), taken before the open sweeps, recovers or creates anything (ROADMAP 9.2.15). A second read-write open
+fails with `PackLocked`, however the first handle is kept alive, also before the pack exists. `Container::side_files` lists the
+pack's stale temporaries, its lock file and `<name>.persia.blobs.leases/`; `sweep_stale_files` (and `persia container
+sweep`) removes those temporaries only while it holds the pack's writer lock, with one directory sync, and never
+removes the lock file or the leases directory (ROADMAP 9.2.10). The open's sweep relies on
 §18.10 (b): nothing is bound into the new pack until its directory sync succeeds, and writing stops if it fails, so a
 swept rewrite file holds no blob a reader can still name. A removal or directory sync that fails is logged and does
 not fail the open (ROADMAP 9.2.6). The next open does not retry that directory sync: a name the removal left, or that
 a crash brings back, is swept again. A blob is durable per bind, before any
 document that references it is logged (§18.9). A reader learns that the pack was replaced from its
-`(pack_id, generation)` (§18.10). A copy of the database takes both files (§4.8).
+`(pack_id, generation)` (§18.10). A copy of the database takes both files (§4.8); the lock file need not be copied.
 
 ### 9.4 Remote layout
 ```
@@ -2770,7 +2772,7 @@ the same process that runs `put_blob`, and keeps a **pin set** with it:
   listing and the locked check, then is referenced by `BlobRef`, can lose the old chunks until the sweep re-lists the
   upload under the lock (ROADMAP 9.5.10).
   Readers in other processes are not in the writer's view. `PackStore::refresh` keeps the pack file it opened, and
-  the bytes it mapped, only until it returns `PackReplaced`; it does not reopen or remap (ROADMAP 9.2.13).
+  the bytes it mapped, until it is dropped; after `PackReplaced` it needs no reopen or remap of its own (ROADMAP 9.2.13).
   `ReadOnlyBlobDatabase::refresh` reopens a read-only pack at the same path on that error, and on any other pack
   error restores the documents it had, so a long-lived reader stays paired after a GC rewrite. A reader in another process is not in the mark: documents it
   opened before a delete whose blob the sweep then collected show a blob that is gone (`BlobNotFound`) once its refresh
@@ -2788,8 +2790,9 @@ live, and every put of the WAL chunks the read-only open replayed, replaced sinc
 chunk frames GC's mark keeps (every WAL chunk frame, not only the ones a read-only open replayed): verify checks no
 reference GC would drop. The
 scan reads only the committed frames `12288..log_end` and bounds each frame's length before reading it; that bound
-applies after the pack is opened. The open itself still reads index frames bounded only by the file length
-(ROADMAP 9.2.14). An orphan chunk is one no bound blob names, counted and never
+applies after the pack is opened. The open bounds each frame by its kind too, before any read: a committed frame
+longer than any frame of its kind is corruption, and an oversize tail frame ends the roll-forward unread and is
+truncated (ROADMAP 9.2.14). An orphan chunk is one no bound blob names, counted and never
 an error. `persia verify` checks the documents before it opens the pack, so a document error is reported without
 opening the pack. A dangling reference found once the container's
 committed seq has moved since the documents were opened is reported as "changed during verify, rerun" (exit status 1), not as damage (exit
@@ -3229,7 +3232,7 @@ Comparison against other engines is reported with methodology, never cherry-pick
     rewrite in place, so the path names a complete old or new pack at every instant. On Windows the rename over a
     file that readers hold open or mapped succeeds on NTFS (ADR-0016 item 2) and those readers keep the old bytes;
     where it fails the rewrite fails without harm. The container's writer lock covers the pack. (a) answered by
-    ADR-0049: readers compare `(pack_id, generation)`. `PackStore::refresh` does not reopen or remap when it returns
+    ADR-0049: readers compare `(pack_id, generation)`. `PackStore::refresh` needs no reopen or remap of its own when it returns
     `PackReplaced` (ROADMAP 9.2.13). `ReadOnlyBlobDatabase::refresh` reopens the pack read-only. (b) answered: the writer holds its mutex from the start of the copy through
     the directory sync, and re-checks the pin set under that lock (`unless_pinned`) before the rename, so nothing is
     bound into the new pack before that sync succeeds; a failed sync poisons the handle, which has moved to the new

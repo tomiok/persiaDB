@@ -33,6 +33,10 @@ error; `Unsupported` trait defaults; a restage that makes the chunks young.
    so the path never names an unlocked pack while its writer lives. A second read-write open fails with `PackLocked`.
    Remaining gap: before the pack file exists on Unix there is nothing to lock, so two read-write handles opened then
    can both exist; the one that loses the race to create the pack fails at its first write and is poisoned.
+   Amended (ROADMAP 9.2.15): the lock is `<name>.persia.blobs.lock` on every platform; it names no file a creation
+   links or a rewrite renames, so those files need no lock of their own, and the gap before the pack exists is
+   closed. The lock file is never removed; `Container::sweep_stale_files` removes the pack's temporaries only while
+   holding it (ROADMAP 9.2.10).
 2. **Drop order.** The proof does not keep the container alive, so owners declare the pack before the container
    (`BlobDatabase`: pins, then blobs, then the log) and the pack drops first. Tests mint real proofs from a real
    `Container` over a `SimFile`; there is no test-only constructor.
