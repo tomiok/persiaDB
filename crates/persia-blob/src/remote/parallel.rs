@@ -2,21 +2,72 @@
 //! one request in flight each, results in index order.
 
 use core::num::NonZeroUsize;
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::error::{Error, Result};
 
 /// Runs `job(0..count)` on at most `parallelism` threads (the caller's included) and returns the results in index
 /// order, or the error of the lowest failing index. Once a thread sees a failure it starts no new index (a thread
 /// that checked just before the failure was recorded may start one more, whose result is dropped); every index below
-/// a failure was started before it, so the error reported does not depend on scheduling.
+/// a failure was started before it, so the error reported does not depend on scheduling. A panicking job records that
+/// failure as it panics, and the original panic resumes here once the other workers have stopped.
 pub(crate) fn run<T, F>(count: usize, parallelism: NonZeroUsize, job: F) -> Result<Vec<T>>
 where
     T: Send,
     F: Fn(usize) -> Result<T> + Sync,
 {
     run_with(count, parallelism, None, job)
+}
+
+thread_local! {
+    /// `Some` while this thread is inside [`run_with`]'s worker. A panic then publishes the failure before the
+    /// default hook writes it out: that write happens before unwinding, and it is long enough for the other
+    /// workers to claim every remaining index.
+    static PANIC_STOPS: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+
+/// Wraps the process panic hook so [`PANIC_STOPS`] is published before the previous hook runs. Stable Rust has
+/// `take_hook` / `set_hook` only (`update_hook` is still unstable); this runs once, and a later `set_hook` in the
+/// process replaces it. [`StopOnPanic`] still publishes on unwind in that case.
+fn install_panic_stop() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            PANIC_STOPS.with(|stop| {
+                if let Ok(guard) = stop.try_borrow()
+                    && let Some(flag) = guard.as_ref()
+                {
+                    flag.store(true, Ordering::Release);
+                }
+            });
+            prev(info);
+        }));
+    });
+}
+
+/// Clears [`PANIC_STOPS`] when the worker ends, including on unwind, so a later panic on this thread (the caller's,
+/// after `run` returns) does not publish a finished transfer's flag.
+struct ClearPanicStop;
+
+impl Drop for ClearPanicStop {
+    fn drop(&mut self) {
+        PANIC_STOPS.with(|stop| *stop.borrow_mut() = None);
+    }
+}
+
+/// Publishes a failure when a job unwinds. A later `set_hook` removes [`install_panic_stop`]'s wrapper, and a
+/// panic never returns `Err`, so without this the other workers would keep claiming.
+struct StopOnPanic<'a>(&'a AtomicBool);
+
+impl Drop for StopOnPanic<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.store(true, Ordering::Release);
+        }
+    }
 }
 
 /// [`run`], with the spawned threads' stack size (`None`: the default). A thread that fails to spawn (no memory, a
@@ -36,20 +87,44 @@ where
     if workers <= 1 {
         return (0..count).map(job).collect();
     }
+    install_panic_stop();
     let next = AtomicUsize::new(0);
-    let failed = AtomicBool::new(false);
+    let failed = Arc::new(AtomicBool::new(false));
+    // Caught here, then resumed on the caller after the scope. Letting it escape the worker would make
+    // `thread::scope` wait until every other worker finished the remaining indices, and replace the payload
+    // with "a scoped thread panicked".
+    let panic_payload: Mutex<Option<Box<dyn std::any::Any + Send>>> = Mutex::new(None);
     let slots: Vec<Mutex<Option<Result<T>>>> = (0..count).map(|_| Mutex::new(None)).collect();
     let work = || {
+        PANIC_STOPS.with(|stop| *stop.borrow_mut() = Some(Arc::clone(&failed)));
+        let _clear = ClearPanicStop;
         while !failed.load(Ordering::Acquire) {
             let index = next.fetch_add(1, Ordering::AcqRel);
             let Some(slot) = slots.get(index) else {
                 break;
             };
-            let result = job(index);
-            if result.is_err() {
-                failed.store(true, Ordering::Release);
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _stop = StopOnPanic(failed.as_ref());
+                job(index)
+            }));
+            match outcome {
+                Ok(result) => {
+                    if result.is_err() {
+                        failed.store(true, Ordering::Release);
+                    }
+                    *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(result);
+                }
+                Err(payload) => {
+                    // The hook (or `StopOnPanic`, if the hook was replaced) already published `failed`. Store
+                    // again so this arm does not depend on either, keep the first payload, and stop this worker.
+                    failed.store(true, Ordering::Release);
+                    let mut recorded = panic_payload.lock().unwrap_or_else(PoisonError::into_inner);
+                    if recorded.is_none() {
+                        *recorded = Some(payload);
+                    }
+                    break;
+                }
             }
-            *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(result);
         }
     };
     std::thread::scope(|scope| {
@@ -64,6 +139,12 @@ where
         }
         work();
     });
+    if let Some(payload) = panic_payload
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner)
+    {
+        std::panic::resume_unwind(payload);
+    }
     let mut out = Vec::with_capacity(count);
     for slot in slots {
         match slot.into_inner().unwrap_or_else(PoisonError::into_inner) {
@@ -174,7 +255,7 @@ mod tests {
         // At most `p` jobs were in flight when the failure was seen. The bound depends on scheduling: the failure is
         // recorded only after the failing job returns, so a thread paused between the two lets the others start any
         // number of indices. Native threads close that gap in nanoseconds; Miri pauses threads anywhere, so `just
-        // miri` skips this test. The scheduling-independent proof is ROADMAP 35.3.3 (Loom).
+        // miri` skips this test. The scheduling-independent proof will be checked by ROADMAP 35.3.3 (v1.1).
         for p in [1, 2, 4, 16] {
             let (err, started) = run_failing_at_10_11_500(p);
             assert!(
@@ -185,19 +266,83 @@ mod tests {
         }
     }
 
+    /// The text of a panic payload (`panic!` / `assert!` with a string message).
+    fn panic_text(payload: &(dyn std::any::Any + Send)) -> &str {
+        if let Some(message) = payload.downcast_ref::<&str>() {
+            message
+        } else if let Some(message) = payload.downcast_ref::<String>() {
+            message.as_str()
+        } else {
+            ""
+        }
+    }
+
+    /// Runs `body` on another thread. A worker that never returns (the old window loop, after a panic) fails here
+    /// instead of holding CI until the job limit.
+    fn finish_within<T: Send + 'static>(
+        limit: std::time::Duration,
+        body: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+            let _ = tx.send(outcome);
+        });
+        match rx.recv_timeout(limit) {
+            Ok(Ok(value)) => value,
+            Ok(Err(payload)) => std::panic::resume_unwind(payload),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("did not finish within {limit:?}")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("worker thread ended without a result")
+            }
+        }
+    }
+
     #[test]
     fn a_panicking_job_unwinds_out_of_run() {
         // A job calls the caller's `Storage`, which may panic. The other workers must still finish, so the scope
         // joins them and the panic reaches the caller, rather than the call waiting forever on the job that never
-        // finished. More jobs than threads, so a worker is always left to claim after the panic.
+        // finished. More jobs than threads, so a worker is always left to claim after the panic. The payload is the
+        // job's own message.
         for p in [2, 4, 8] {
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run(64, n(p), |i| {
-                    assert!(i != 3, "job three panics");
-                    Ok(i)
-                })
-            }));
-            assert!(outcome.is_err(), "{p}: the panic did not reach the caller");
+            let outcome = finish_within(std::time::Duration::from_secs(5), move || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run(64, n(p), |i| {
+                        assert!(i != 3, "job three panics");
+                        Ok(i)
+                    })
+                }))
+            });
+            let payload = outcome.expect_err("the panic did not reach the caller");
+            assert_eq!(panic_text(payload.as_ref()), "job three panics", "{p}");
+        }
+    }
+
+    #[test]
+    fn few_jobs_start_after_a_panic_under_native_scheduling() {
+        // Same bound as a returned error: indices `0..=10` start, plus at most `p` already in flight when the panic
+        // is published. The bound depends on scheduling (a thread paused before the store can claim any number of
+        // indices). Native threads close that gap in nanoseconds; Miri pauses threads anywhere, so `just miri` skips
+        // this test. The scheduling-independent proof will be checked by ROADMAP 35.3.3 (v1.1).
+        for p in [1, 2, 4, 16] {
+            let (text, started) = finish_within(std::time::Duration::from_secs(5), move || {
+                let started = AtomicUsize::new(0);
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run(1000, n(p), |i| {
+                        started.fetch_add(1, Ordering::Relaxed);
+                        assert!(i != 10, "job ten panics");
+                        Ok(i)
+                    })
+                }));
+                let text = outcome
+                    .err()
+                    .map(|payload| panic_text(payload.as_ref()).to_owned());
+                (text, started.load(Ordering::Relaxed))
+            });
+            assert_eq!(text.as_deref(), Some("job ten panics"), "{p}: {text:?}");
+            assert!(started <= 11 + p, "{p}: {started} started");
         }
     }
 
