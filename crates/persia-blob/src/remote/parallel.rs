@@ -2,9 +2,8 @@
 //! one request in flight each, results in index order.
 
 use core::num::NonZeroUsize;
-use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError};
 
 use crate::error::{Error, Result};
 
@@ -12,7 +11,8 @@ use crate::error::{Error, Result};
 /// order, or the error of the lowest failing index. Once a thread sees a failure it starts no new index (a thread
 /// that checked just before the failure was recorded may start one more, whose result is dropped); every index below
 /// a failure was started before it, so the error reported does not depend on scheduling. A panicking job records that
-/// failure as it panics, and the original panic resumes here once the other workers have stopped.
+/// failure while it unwinds, after the panic hook has run, and the original panic resumes here once the other
+/// workers have stopped.
 pub(crate) fn run<T, F>(count: usize, parallelism: NonZeroUsize, job: F) -> Result<Vec<T>>
 where
     T: Send,
@@ -21,45 +21,8 @@ where
     run_with(count, parallelism, None, job)
 }
 
-thread_local! {
-    /// `Some` while this thread is inside [`run_with`]'s worker. A panic then publishes the failure before the
-    /// default hook writes it out: that write happens before unwinding, and it is long enough for the other
-    /// workers to claim every remaining index.
-    static PANIC_STOPS: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
-}
-
-/// Wraps the process panic hook so [`PANIC_STOPS`] is published before the previous hook runs. Stable Rust has
-/// `take_hook` / `set_hook` only (`update_hook` is still unstable); this runs once, and a later `set_hook` in the
-/// process replaces it. [`StopOnPanic`] still publishes on unwind in that case.
-fn install_panic_stop() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            PANIC_STOPS.with(|stop| {
-                if let Ok(guard) = stop.try_borrow()
-                    && let Some(flag) = guard.as_ref()
-                {
-                    flag.store(true, Ordering::Release);
-                }
-            });
-            prev(info);
-        }));
-    });
-}
-
-/// Clears [`PANIC_STOPS`] when the worker ends, including on unwind, so a later panic on this thread (the caller's,
-/// after `run` returns) does not publish a finished transfer's flag.
-struct ClearPanicStop;
-
-impl Drop for ClearPanicStop {
-    fn drop(&mut self) {
-        PANIC_STOPS.with(|stop| *stop.borrow_mut() = None);
-    }
-}
-
-/// Publishes a failure when a job unwinds. A later `set_hook` removes [`install_panic_stop`]'s wrapper, and a
-/// panic never returns `Err`, so without this the other workers would keep claiming.
+/// Publishes a failure when a job unwinds. A panic never returns `Err`, so without this the other workers keep
+/// claiming every remaining index until the scope joins.
 struct StopOnPanic<'a>(&'a AtomicBool);
 
 impl Drop for StopOnPanic<'_> {
@@ -87,24 +50,21 @@ where
     if workers <= 1 {
         return (0..count).map(job).collect();
     }
-    install_panic_stop();
     let next = AtomicUsize::new(0);
-    let failed = Arc::new(AtomicBool::new(false));
+    let failed = AtomicBool::new(false);
     // Caught here, then resumed on the caller after the scope. Letting it escape the worker would make
     // `thread::scope` wait until every other worker finished the remaining indices, and replace the payload
     // with "a scoped thread panicked".
     let panic_payload: Mutex<Option<Box<dyn std::any::Any + Send>>> = Mutex::new(None);
     let slots: Vec<Mutex<Option<Result<T>>>> = (0..count).map(|_| Mutex::new(None)).collect();
     let work = || {
-        PANIC_STOPS.with(|stop| *stop.borrow_mut() = Some(Arc::clone(&failed)));
-        let _clear = ClearPanicStop;
         while !failed.load(Ordering::Acquire) {
             let index = next.fetch_add(1, Ordering::AcqRel);
             let Some(slot) = slots.get(index) else {
                 break;
             };
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _stop = StopOnPanic(failed.as_ref());
+                let _stop = StopOnPanic(&failed);
                 job(index)
             }));
             match outcome {
@@ -115,8 +75,8 @@ where
                     *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(result);
                 }
                 Err(payload) => {
-                    // The hook (or `StopOnPanic`, if the hook was replaced) already published `failed`. Store
-                    // again so this arm does not depend on either, keep the first payload, and stop this worker.
+                    // `StopOnPanic` published `failed` while unwinding. Store again so this arm does not depend
+                    // on the guard, keep the first payload, and stop this worker.
                     failed.store(true, Ordering::Release);
                     let mut recorded = panic_payload.lock().unwrap_or_else(PoisonError::into_inner);
                     if recorded.is_none() {
@@ -322,15 +282,19 @@ mod tests {
 
     #[test]
     fn few_jobs_start_after_a_panic_under_native_scheduling() {
-        // Same bound as a returned error: indices `0..=10` start, plus at most `p` already in flight when the panic
-        // is published. The bound depends on scheduling (a thread paused before the store can claim any number of
-        // indices). Native threads close that gap in nanoseconds; Miri pauses threads anywhere, so `just miri` skips
-        // this test. The scheduling-independent proof will be checked by ROADMAP 35.3.3 (v1.1).
+        // `failed` is stored from `StopOnPanic` while the job unwinds. The default panic hook runs first and
+        // prints the panic — a `RUST_BACKTRACE` walks the stack there too — and the other workers keep claiming
+        // through that gap. It is wider than the nanoseconds after a returned `Err`, so this is not the `11 + p`
+        // bound. Index 10 of `COUNT` panics. Stopping inside the first quarter means the workers did stop;
+        // running the whole window, which is what a panic used to do, does not. How many start depends on
+        // scheduling, so `just miri` skips this test. The scheduling-independent proof will be checked by
+        // ROADMAP 35.3.3 (v1.1).
+        const COUNT: usize = 65_536;
         for p in [1, 2, 4, 16] {
             let (text, started) = finish_within(std::time::Duration::from_secs(5), move || {
                 let started = AtomicUsize::new(0);
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run(1000, n(p), |i| {
+                    run(COUNT, n(p), |i| {
                         started.fetch_add(1, Ordering::Relaxed);
                         assert!(i != 10, "job ten panics");
                         Ok(i)
@@ -342,7 +306,7 @@ mod tests {
                 (text, started.load(Ordering::Relaxed))
             });
             assert_eq!(text.as_deref(), Some("job ten panics"), "{p}: {text:?}");
-            assert!(started <= 11 + p, "{p}: {started} started");
+            assert!(started <= COUNT / 4, "{p}: {started} of {COUNT} started");
         }
     }
 

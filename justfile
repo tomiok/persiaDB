@@ -43,8 +43,8 @@ repo-checks:
 # failure persistence calls `getcwd`), exhaustive sweeps that take minutes interpreted (each over 90 s), and tests that
 # build `MAX_DOCUMENT_LEN` (16 MiB) inputs (filling one takes over 15 min interpreted), and a test that needs a thread
 # spawn to fail (it asks for a 2^62-byte stack, a size Miri does not apply), bounds on how many parallel jobs start
-# after a failure or a panic (they depend on scheduling, and Miri pauses threads anywhere; they will be checked by
-# ROADMAP 35.3.3 (v1.1)), and
+# after a failure or a panic (both depend on scheduling; a panic is published only while unwinding, after the default
+# hook prints; Miri pauses threads anywhere; they will be checked by ROADMAP 35.3.3 (v1.1)), and
 # the pack store's tests (a `PackStore` draws its `pack_id` from the real-time clock, which Miri's isolation lacks; the
 # pack's codecs, `pack::layout`, run). Native runs cover all of those.
 # CI runs this recipe.
