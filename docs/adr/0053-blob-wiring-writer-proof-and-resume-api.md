@@ -1,6 +1,6 @@
 # ADR-0053: Blob wiring, the writer proof and the resume API
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-11-20
 - Related: SPEC §4.8, §9.2, §9.3, §9.4, §9.5, §9.6, §10.1; ROADMAP 9.2.7, 9.3.4, 9.3.6, 9.4.5, 9.4.6, 9.5.3, 9.5.6,
   9.5.9, 13.2.6; ADR-0049, ADR-0050, ADR-0051, ADR-0052
