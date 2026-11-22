@@ -52,8 +52,11 @@
 //!    for fields that split it apart, also through L2's importance, L3's last term and L4's corrections). The runs
 //!    are each field's own, merged as SPEC §6.3.2 says: the union in group then term order (a later field's term
 //!    before an earlier one's), the later field's overlapping match dropped, an alternative compiled away as a
-//!    duplicate over the fields; each is covered. Neither analyzer removes a token, so stopword gaps, and a run whose
-//!    alternatives all compile away (unreachable over two fields with positions), stay with `tests/relax_synonyms.rs`.
+//!    duplicate over the fields; each is covered. Neither analyzer removes a token, so stopword gaps stay with
+//!    `tests/relax_synonyms.rs`. A run whose alternatives all compile away is unreachable through the compiler: an
+//!    alternative equals the run only as a word of the same tokens in every field, which no field reports (a phrase of
+//!    several tokens compiles to a `phrase` or to `term`s required, a run's words to `combined`s; ROADMAP 8.1.26), so
+//!    the compiler's unit test checks it alone.
 //! 6. A sort led by the score with a later key on the `n` column (each order and `missing` pair, with the proximity
 //!    bonus and without, in turn) ranks as the score order re-sorted, among exact score ties, by the reference's `n`
 //!    values, then location: every strategy, pages walked by cursor across ties, and on the pool a page of `k` and
@@ -62,7 +65,11 @@
 //! Queries hold `prefix` and `fuzzy` leaves of few expansions (SPEC §7.1: the terms of highest collection `df`, ties
 //! by bytes, one shared `idf`, a `fuzzy` term's edit-distance weight), checked by invariants 1–4 like any leaf. The
 //! vocabulary ([`VOCAB`], [`TYPOS`]) makes completions and one- and two-edit neighbours common, and the test counts the
-//! steps the reference cascade builds, so the property does not pass vacuously.
+//! steps the reference cascade builds, so the property does not pass vacuously. The rarest kinds of step are built
+//! on purpose in every case, not left to the seed (ROADMAP 8.1.27): one synonym writing of each shape ([`synonyms`]),
+//! compiled alone and once searched ([`shaped_text`]); texts built from the live documents ([`built_texts`]); and each
+//! `fuzzy` step that finds a hit, searched again at the bound where its expansions are cut. So the coverage asserts
+//! hold on any `PROPTEST_RNG_SEED`.
 
 #![allow(
     clippy::unwrap_used,
@@ -120,10 +127,12 @@ const EPSILON: f64 = 1e-9;
 const VOCAB: [&str; 10] = [
     "cat", "cats", "cart", "card", "café", "cafe", "bee", "elephant", "elephnat", "elegant",
 ];
-/// Words of queries alone, which no document holds: prefixes of the documents' words (`ca` shorter than L3 expands
-/// other than last, `ele` not) and typos (`crat` a swap from `cart`, `elehpant` a swap from `elephant`, `elepant` one
+/// Words of queries alone, which no document holds: prefixes of the documents' words (`c` shorter than L3 expands
+/// even last, ROADMAP 8.1.20, `ca` shorter than it expands other than last, `ele` not) and typos (`crat` a swap from `cart`, `elehpant` a swap from `elephant`, `elepant` one
 /// edit from both `elephant` and `elegant`, `bees` and `carts` an insertion).
-const TYPOS: [&str; 7] = ["ca", "ele", "crat", "carts", "bees", "elepant", "elehpant"];
+const TYPOS: [&str; 8] = [
+    "c", "ca", "ele", "crat", "carts", "bees", "elepant", "elehpant",
+];
 const TAGS: [&str; 3] = ["x", "y", "z"];
 const NS: [i64; 4] = [-1, 0, 1, 2];
 const TITLE: usize = 0;
@@ -731,7 +740,7 @@ struct Case {
     /// document matches, scoring the query or 0) rather than as the `must`.
     queries: Vec<(RefQuery, Option<(Filter, bool)>)>,
     /// User text, compiled and relaxed (invariant 5): what a level states of a query from `q`.
-    texts: Vec<Text>,
+    texts: Texts,
     /// The `max_expansions` limit the relaxed steps are held to (SPEC §7.1.3).
     max_expansions: usize,
     /// The `max_terms` limit the relaxed steps are held to (SPEC §7.1.3), which cuts L1's alternatives; the other
@@ -741,6 +750,19 @@ struct Case {
     /// alternatives (SPEC §6.3.2), rather than at the defaults.
     compile_at_limit: bool,
     k: usize,
+}
+
+/// A case's user text (invariant 5).
+#[derive(Debug, Clone)]
+struct Texts {
+    /// Searched after every operation.
+    random: Vec<Text>,
+    /// Written as terms the synonym groups were shaped for ([`shaped_text`]): searched after the case's last operation
+    /// only, with [`built_texts`] (ROADMAP 8.1.27).
+    shaped: Option<Text>,
+    /// Each term a group was shaped for, as its own text: compiled after the case's last operation, its runs checked
+    /// against the reference's (SPEC §6.3.2), and not searched, so every shape meets the compiler in every case.
+    shapes: Vec<Text>,
 }
 
 /// User text of whitespace-separated words, some excluded (`-`), over the default fields `title` and `body`, and an
@@ -874,7 +896,9 @@ fn text(fields: [FieldId; 4], pool: Vec<String>) -> impl Strategy<Value = Text> 
 /// words come from [`text_word`], so they have capitals and `-` at times, and the pool also holds other writings of
 /// some of its terms, with capitals or with `-` for spaces, which `body` analyzes alike and `title` does not, so a
 /// group may shrink to one term in `body` alone, and a field may match where the other does not (ROADMAP 8.1.24).
-fn synonyms() -> impl Strategy<Value = (Vec<String>, Vec<Vec<String>>)> {
+/// Every case has one writing of each shape (ROADMAP 8.1.27), and also returns the term each shape is for, so text
+/// written as it meets the shape whatever the seed draws.
+fn synonyms() -> impl Strategy<Value = (Vec<String>, Vec<Vec<String>>, Vec<String>)> {
     let term = (
         prop_oneof![3 => 1..2_usize, 2 => 2..4_usize],
         prop::collection::vec(text_word(), 3),
@@ -893,14 +917,28 @@ fn synonyms() -> impl Strategy<Value = (Vec<String>, Vec<Vec<String>>)> {
             0..5,
         ),
         prop::option::weighted(0.25, many),
-        prop::collection::vec(
-            (
-                prop::array::uniform3(any::<prop::sample::Index>()),
-                0..3_u8,
-                0..6_u8,
+        // One writing of each kind that builds a shape (1 to 5, ROADMAP 8.1.27), then up to 3 more of any kind.
+        (
+            prop::collection::vec(
+                (prop::array::uniform3(any::<prop::sample::Index>()), 0..3_u8),
+                5,
             ),
-            0..4,
-        ),
+            prop::collection::vec(
+                (
+                    prop::array::uniform3(any::<prop::sample::Index>()),
+                    0..3_u8,
+                    0..6_u8,
+                ),
+                0..4,
+            ),
+        )
+            .prop_map(|(built, more)| {
+                let built = built
+                    .into_iter()
+                    .zip(1..=5_u8)
+                    .map(|((t, how), kind)| (t, how, kind));
+                built.chain(more).collect::<Vec<_>>()
+            }),
     )
         .prop_map(|(mut pool, picks, many, writings)| {
             // Other writings of some terms (ROADMAP 8.1.24), each alone or in two groups with other terms `x` and
@@ -912,6 +950,8 @@ fn synonyms() -> impl Strategy<Value = (Vec<String>, Vec<Vec<String>>)> {
             // (which never matches it), so `title` reports a place before `body`'s: a union of both fields with the
             // later field's term first. Kind 5 puts them in that one group alone: a run `title` alone matches.
             let mut groups: Vec<Vec<String>> = Vec::new();
+            // The term each writing's shape is for, in writing order (ROADMAP 8.1.27): user text written as it meets the shape.
+            let mut shaped: Vec<String> = Vec::new();
             for ([t, x, y], how, kind) in writings {
                 let (mut t, x, y) = (
                     t.get(&pool).clone(),
@@ -921,6 +961,12 @@ fn synonyms() -> impl Strategy<Value = (Vec<String>, Vec<Vec<String>>)> {
                 // For an overlap, a term of two words or more, whose first word is the second group's term.
                 if kind == 3 && !t.contains(char::is_whitespace) {
                     t = format!("{t} {y}");
+                }
+                // For a run `title` alone matches, a term of no other group (ROADMAP 8.1.27): its words and `y`'s first, joined by
+                // `-`, one clause no other group's match in `body` covers whole, so no `body` match overlaps it.
+                if kind == 5 {
+                    let words = t.split_whitespace().chain(y.split_whitespace().take(1));
+                    t = words.collect::<Vec<_>>().join("-");
                 }
                 let Some(other) = (0..3).map(|k| writing(&t, (how + k) % 3)).find(|o| *o != t)
                 else {
@@ -932,6 +978,9 @@ fn synonyms() -> impl Strategy<Value = (Vec<String>, Vec<Vec<String>>)> {
                     }
                 }
                 let first = t.split_whitespace().next().unwrap_or_default().to_owned();
+                if (1..=5).contains(&kind) {
+                    shaped.push(t.clone());
+                }
                 let pair = match kind {
                     1 => Some((t, y)),
                     2 => Some((t, x.clone())),
@@ -970,13 +1019,47 @@ fn synonyms() -> impl Strategy<Value = (Vec<String>, Vec<Vec<String>>)> {
                 groups.push(std::iter::once(w.clone()).chain(pairs).collect());
                 pool.push(w);
             }
-            (pool, groups)
+            (pool, groups, shaped)
         })
+}
+
+/// `term` as user text: its words, none excluded, no filter.
+fn words_of(term: &str) -> Text {
+    Text {
+        clauses: term
+            .split_whitespace()
+            .map(|w| (w.to_owned(), false))
+            .collect(),
+        filter: None,
+    }
+}
+
+/// User text written as the terms the synonym groups were shaped for ([`synonyms`], ROADMAP 8.1.27): one term, or two in
+/// a row (two runs, or one over both), so each shape meets text on every seed, not only where [`text`] happens to
+/// draw its term. `None` when no writing built a shape.
+fn shaped_text(shaped: Vec<String>) -> impl Strategy<Value = Option<Text>> {
+    let words = |t: &String| {
+        t.split_whitespace()
+            .map(|w| (w.to_owned(), false))
+            .collect::<Vec<_>>()
+    };
+    let n = shaped.len();
+    (0..n.max(1), prop::option::of(0..n.max(1))).prop_map(move |(a, b)| {
+        let first = shaped.get(a)?;
+        let mut clauses = words(first);
+        if let Some(second) = b.and_then(|b| shaped.get(b)) {
+            clauses.extend(words(second));
+        }
+        Some(Text {
+            clauses,
+            filter: None,
+        })
+    })
 }
 
 fn case() -> impl Strategy<Value = Case> {
     let fields = ids(&schema(&[(1.0, 1.2, 0.75); 2], &[]));
-    (params(), synonyms()).prop_flat_map(move |(p, (pool, synonyms))| {
+    (params(), synonyms()).prop_flat_map(move |(p, (pool, synonyms, shaped))| {
         (
             Just(p),
             Just(synonyms),
@@ -988,7 +1071,15 @@ fn case() -> impl Strategy<Value = Case> {
                 ),
                 1..4,
             ),
-            prop::collection::vec(text(fields, pool), 1..4),
+            (
+                prop::collection::vec(text(fields, pool), 1..4),
+                shaped_text(shaped.clone()),
+            )
+                .prop_map(move |(random, shaped_text)| Texts {
+                    random,
+                    shaped: shaped_text,
+                    shapes: shaped.iter().map(|t| words_of(t)).collect(),
+                }),
             // The default, which the steps' 50-term expansions reach late in a cascade, or a limit that cuts them
             // and skips steps sooner (ROADMAP 8.1.19).
             prop_oneof![2 => Just(QueryLimits::default().max_expansions), 1 => 1..12_usize, 1 => 40..240_usize],
@@ -1208,11 +1299,13 @@ fn check_explanation(
     Ok(())
 }
 
+/// Invariants 1 to 5 after an operation; `last` after the case's last one, which also searches the texts built from the
+/// live documents ([`built_texts`]).
 fn check(
     c: &CollectionSnapshot,
     memtable: &MemtableView,
     model: &Model,
-    case: &Case,
+    (case, last): (&Case, bool),
 ) -> Result<(), TestCaseError> {
     same_segments(c, model)?;
     let schema = c.schema();
@@ -1429,7 +1522,18 @@ fn check(
     let registry = AnalyzerRegistry::builtin();
     let text_compiler = QueryCompiler::new(schema, &registry).unwrap();
     let defaults = DefaultFields::all(schema);
-    for (t, text) in case.texts.iter().enumerate() {
+    // After the last operation, the texts built on purpose (ROADMAP 8.1.27): searched, then compiled alone (`false`).
+    let (built, shapes): (Vec<Text>, &[Text]) = if last {
+        let shaped = case.texts.shaped.iter().cloned();
+        (
+            shaped.chain(built_texts(&live)).collect(),
+            &case.texts.shapes,
+        )
+    } else {
+        (Vec::new(), &[])
+    };
+    let texts = case.texts.random.iter().chain(&built).map(|t| (t, true));
+    for (t, (text, searched)) in texts.chain(shapes.iter().map(|t| (t, false))).enumerate() {
         // Compiled at the case's `max_terms` when its query fits it (SPEC §6.3.2: the compilation then bounds the
         // alternatives), else at the defaults.
         let unfiltered = Text {
@@ -1514,6 +1618,9 @@ fn check(
                 cover("synonyms run of words".to_owned());
             }
         }
+        if !searched {
+            continue;
+        }
         let reference = Reference {
             schema,
             corpus: &corpus,
@@ -1532,6 +1639,41 @@ fn check(
             None,
             (case, false),
         )?;
+        // L4 at the bound where it binds (ROADMAP 8.1.27), every fourth text and operation: a `fuzzy` step that found a hit
+        // uncut (at the largest `min_results`, which reaches it most) is searched again at one expansion fewer than it
+        // needs beside the steps it excludes, so it is cut and its hits checked (`fuzzy:cut hit`), however rarely the
+        // case's own limit falls there. Every earlier step needs no more than the expansions it excludes, so it stays as it
+        // was.
+        let levels = [
+            RelaxLevel::Synonyms,
+            RelaxLevel::DropTerms,
+            RelaxLevel::Prefix,
+            RelaxLevel::Fuzzy,
+        ];
+        let steps = if (live.len() + t).is_multiple_of(4) {
+            reference.cascade(&root, Some(text), &levels, 10_000, true)
+        } else {
+            Vec::new()
+        };
+        let found = |s: &&RefStep| s.matches.as_ref().is_some_and(|m| !m.is_empty());
+        if let Some(step) = steps.iter().find(|s| s.applied == "fuzzy" && found(s)) {
+            let tight = Case {
+                max_expansions: step.needs - 1,
+                ..case.clone()
+            };
+            let reference = Reference {
+                max_expansions: tight.max_expansions,
+                ..reference
+            };
+            check_relaxed(
+                &views,
+                Engine::Compiled(&compiled),
+                &reference,
+                (&root, Some(text)),
+                None,
+                (&tight, false),
+            )?;
+        }
         // L1's cut at a `max_terms` within its window (SPEC §7.1.3): from one term below L1's step with one
         // alternative per run beside L0 (skipped) to that step with every alternative the compilation kept (as it is,
         // listed cut when the compilation cut it), a different one at each operation (`t` and the live count), so the
@@ -1587,6 +1729,54 @@ fn check(
         }
     }
     Ok(())
+}
+
+/// User text built from the live documents (ROADMAP 8.1.27), so the steps that need a document of one shape meet one
+/// whatever the seed, from the first live document that has the words: `<word> <prefix>`, a title or body word as it
+/// is and the first 2 characters of another word of the same field (no document holds a 2-character word), which
+/// L3's tier step `prefix:last` finds the document by when L2 does not run before it; `<word>-<prefix>` of two body
+/// words, one clause that `body` splits in two and `title` keeps whole, a last word the fields split apart that L3
+/// completes; and `<typo>-<typo>`, two body words of 4 characters or more with their second character a `q` (in no
+/// word), split alike, which only L4 finds the document by, and does not correct (a word of several tokens). Searched
+/// after the case's last operation only.
+fn built_texts(live: &BTreeMap<String, Values>) -> Vec<Text> {
+    let text = |words: Vec<String>| Text {
+        clauses: words.into_iter().map(|w| (w, false)).collect(),
+        filter: None,
+    };
+    let typo = |w: &String| {
+        let mut chars: Vec<char> = w.chars().collect();
+        chars[1] = 'q';
+        chars.into_iter().collect::<String>()
+    };
+    let mut out = Vec::new();
+    let prefixed = live.values().find_map(|v| {
+        [TITLE, BODY].into_iter().find_map(|f| {
+            let words = &v.doc[f];
+            let (a, b) = (words.first()?, words.get(1)?);
+            Some(text(vec![a.clone(), b.chars().take(2).collect()]))
+        })
+    });
+    out.extend(prefixed);
+    let split_prefix = live.values().find_map(|v| {
+        let words = &v.doc[BODY];
+        let (a, b) = (words.first()?, words.get(1)?);
+        Some(text(vec![format!(
+            "{a}-{}",
+            b.chars().take(2).collect::<String>()
+        )]))
+    });
+    out.extend(split_prefix);
+    let split = live.values().find_map(|v| {
+        let long: Vec<&String> = v.doc[BODY]
+            .iter()
+            .filter(|w| w.chars().count() >= 4)
+            .collect();
+        let (a, b) = (long.first()?, long.get(1)?);
+        Some(text(vec![format!("{}-{}", typo(a), typo(b))]))
+    });
+    out.extend(split);
+    out
 }
 
 /// Invariant 6: a sort led by the score with a later key on the `n` column (ROADMAP 7.4.11; SPEC §7.4), both orders
@@ -1725,7 +1915,7 @@ fn run_case(case: &Case) -> Result<(), TestCaseError> {
     let fields = ids(&schema);
     let mut db = database(schema);
     let mut model = Model::default();
-    for op in &case.ops {
+    for (i, op) in case.ops.iter().enumerate() {
         match op {
             Op::Put(id, v) => {
                 let id = format!("d{id}");
@@ -1746,7 +1936,7 @@ fn run_case(case: &Case) -> Result<(), TestCaseError> {
         let snapshot = db.snapshot();
         let c = snapshot.collection("c").unwrap();
         let memtable = c.memtable();
-        check(c, &memtable, &model, case)?;
+        check(c, &memtable, &model, (case, i + 1 == case.ops.len()))?;
     }
     Ok(())
 }
@@ -1782,7 +1972,7 @@ fn run<S>(
 }
 
 /// Invariants 1–5 over random histories and queries. The cascade's levels must run, or invariant 5 passes vacuously:
-/// each kind of step listed is built, and finds hits, in some case (ROADMAP 8.1.19).
+/// each kind of step listed is built, and finds hits, in some case (ROADMAP 8.1.19), on any seed (ROADMAP 8.1.27).
 #[test]
 fn collection_searches_match_the_reference() {
     let cases = if cfg!(feature = "slow") { 512 } else { 48 };
@@ -1823,6 +2013,7 @@ fn collection_searches_match_the_reference() {
             "prefix:cut",
             "prefix:last:cut",
             "prefix:skipped",
+            "prefix last term of one character kept",
             "fuzzy:1 hit",
             "fuzzy hit",
             "fuzzy:cut hit",
@@ -1872,7 +2063,7 @@ fn the_reference_analysis_is_the_analyzers_on_the_generated_alphabet() {
     ] {
         check(text).unwrap();
     }
-    let terms = synonyms().prop_map(|(pool, groups)| (pool, groups.concat()));
+    let terms = synonyms().prop_map(|(pool, groups, _)| (pool, groups.concat()));
     run(
         "the_reference_analysis_is_the_analyzers_on_the_generated_alphabet",
         64,
@@ -2075,7 +2266,11 @@ fn search_input(ops: &[Op], input: &Input<'_>, max_expansions: usize) -> Relaxed
         synonyms: Vec::new(),
         ops: ops.to_vec(),
         queries,
-        texts,
+        texts: Texts {
+            random: texts,
+            shaped: None,
+            shapes: Vec::new(),
+        },
         max_expansions,
         max_terms: QueryLimits::default().max_terms,
         compile_at_limit: false,
@@ -2745,6 +2940,9 @@ struct RefStep {
     matches: Option<BTreeMap<String, (f64, f64)>>,
     effective: Option<String>,
     corrected: Vec<(String, String)>,
+    /// The expansions the step as built needs beside the steps it excludes (SPEC §7.1.3): the `max_expansions` it fits
+    /// uncut from (0 for L0).
+    needs: usize,
 }
 
 /// A step a level built, before the limits hold it.
@@ -2790,6 +2988,7 @@ impl Reference<'_> {
             matches: Some(l0),
             effective: text.map(Text::render),
             corrected: Vec::new(),
+            needs: 0,
         }];
         // What the later steps exclude (SPEC §7.6, the cascade), each with its level: every step searched, except the
         // earlier steps of a nested level (L2) that its latest uncut step stands for, and every step before an uncut
@@ -2808,6 +3007,8 @@ impl Reference<'_> {
                 if taken.len() >= min_results {
                     break 'levels;
                 }
+                let needs = excluded.iter().map(|(_, q)| expansions(q)).sum::<usize>()
+                    + expansions(&built.query);
                 let fitted = if level == RelaxLevel::Synonyms {
                     self.fit_synonyms(root, text, &excluded, &steps[0])
                 } else {
@@ -2820,6 +3021,7 @@ impl Reference<'_> {
                         matches: None,
                         effective: None,
                         corrected: Vec::new(),
+                        needs,
                     });
                     continue;
                 };
@@ -2848,6 +3050,7 @@ impl Reference<'_> {
                     matches: Some(matches),
                     effective: built.effective,
                     corrected: built.corrected,
+                    needs,
                 });
             }
         }
@@ -2899,6 +3102,9 @@ impl Reference<'_> {
                 };
                 let every = |f: usize, t: &str, last: bool| {
                     let len = t.chars().count();
+                    if last && len < LAST_PREFIX_LEN {
+                        cover("prefix last term of one character kept".to_owned());
+                    }
                     (last && len >= LAST_PREFIX_LEN || len >= PREFIX_LEN).then(|| prefix(f, t))
                 };
                 let Some(full) = self.rewrite_root(root, text, &every) else {
