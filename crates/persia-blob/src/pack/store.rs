@@ -1098,4 +1098,4 @@ mod lock;
 // -- end wiring --
 
 use mapped::Mapper;
-use recover::{check_scan, read_prefix, recover, scan_committed};
+use recover::{check_scan, longest_frame, read_prefix, recover, scan_committed};

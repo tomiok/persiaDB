@@ -1,7 +1,7 @@
 //! `persia verify` (ROADMAP 6.6.3, 9.5.3): checks a whole database read-only, with [`ReadOnlyDatabase::verify`]
 //! before the blob pack is opened, then its blobs with [`ReadOnlyBlobDatabase::verify_blobs`] (SPEC §9.5, ADR-0053).
-//! A document error is reported without opening the pack. The pack scan bounds each frame's length before reading
-//! it, and that bound applies after the open; the open itself is not bounded that way (ROADMAP 9.2.14).
+//! A document error is reported without opening the pack. The pack open and the pack scan both bound each frame's
+//! length by its kind before reading it (ROADMAP 9.2.14).
 //!
 //! The output is for people: `key  value` lines, then `verify  ok`. A failed check is the command's error.
 //!
@@ -31,7 +31,6 @@ pub fn verify(out: &mut dyn Write, path: &Path, scan: Scan) -> Result<()> {
     let docs = ReadOnlyDatabase::open(path, &options.registry)
         .with_context(|| format!("opening {}", path.display()))?;
     // Document checks before the pack is opened, so a damaged container is reported without opening the pack.
-    // The scan's length bound applies only after that open (ROADMAP 9.2.14).
     let report = docs
         .verify()
         .with_context(|| format!("verifying {}", path.display()))?;

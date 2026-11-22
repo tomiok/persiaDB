@@ -15,9 +15,8 @@
 //! (ROADMAP 6.6.3, module `database`) before it opens the blob pack, then its blobs (ROADMAP 9.5.3, ADR-0053): every
 //! blob a live document or a WAL record from `wal_start` on references must be bound in the blob pack, and by default
 //! every frame of the pack is checksummed (`--quick` skips that scan, `--deep` also re-hashes every referenced blob).
-//! The scan bounds each frame's length before reading it; that bound applies after the pack is opened. The open
-//! itself still reads index frames bounded only by the file length (ROADMAP 9.2.14). Only the local layout is
-//! checked (the remote one is ROADMAP 13.2.6).
+//! The pack open and the scan bound each frame's length by its kind before reading it (ROADMAP 9.2.14). Only the local
+//! layout is checked (the remote one is ROADMAP 13.2.6).
 //!
 //! Exit status (ROADMAP 6.6.7, SPEC §8.6): 0 on success, 3 when the command failed on corrupt stored bytes (a database,
 //! container, segment or blob pack that breaks its format) or on a broken blob reference (`verify`: a document that
@@ -78,15 +77,13 @@ enum Command {
     /// open makes, every segment's bytes, one live copy per document id, and the bytes after the last commit.
     /// Those document checks run before the blob pack is opened. Then its blobs: every blob a live document or a
     /// WAL record references must be bound in the blob pack (`<name>.persia.blobs`), and every frame's checksum
-    /// and chunk's CRC32C of the pack is checked. That scan bounds each frame's length before reading it, and the
-    /// bound applies after the pack is opened; the open itself is not bounded that way (ROADMAP 9.2.14). Exits with
-    /// status 3 on corruption or a missing referenced blob, 4 when the file is not a Persia container, and 1 on any
-    /// other failure (see the crate docs).
+    /// and chunk's CRC32C of the pack is checked. The open and that scan bound each frame's length by its kind before
+    /// reading it (ROADMAP 9.2.14). Exits with status 3 on corruption or a missing referenced blob, 4 when the file is
+    /// not a Persia container, and 1 on any other failure (see the crate docs).
     Verify {
         /// The container file.
         path: PathBuf,
-        /// Skip the checksum scan of the blob pack: only check that every referenced blob is bound. The scan is
-        /// what bounds each frame's length, and that bound applies after the pack is opened (ROADMAP 9.2.14).
+        /// Skip the checksum scan of the blob pack: only check that every referenced blob is bound.
         #[arg(long, conflicts_with = "deep")]
         quick: bool,
         /// Also read every referenced blob whole and check its SHA-256 against its id.

@@ -110,75 +110,83 @@ pub(super) fn recover<F: ContainerFile>(
 /// that continues the `frame_seq` run and ends in a `BlobIndex` frame whose chunks are all in the pack is kept, and
 /// committed by the caller. That is a bind cut after its data sync and before its slot (an orphan blob, harmless), or
 /// one whose synced slot was lost (a damaged newer slot: its blob was acknowledged, and documents may reference it).
-/// Everything after it is left for the caller to truncate: a torn tail, staged chunks, garbage.
+/// Everything after it is left for the caller to truncate: a torn tail, staged chunks, garbage, and a frame longer than
+/// any frame of its kind, which ends the run unread (ROADMAP 9.2.14). The frames are taken as the scan yields them,
+/// so memory holds the offsets of the tail's chunk frames, never a list of its frames.
 fn roll_forward<F: ContainerFile>(
     pack: &mut Pack<F>,
     file_len: u64,
     recovery: &mut PackRecovery,
 ) -> Result<()> {
     let mut scanner = StreamScanner::new(pack.end, file_len).expect_frame_seq(pack.next_frame_seq);
-    let mut read = |offset, buf: &mut [u8]| pack.file.read_exact_at(buf, offset);
-    let mut tail = Vec::new();
-    while let Some(header) = scanner.next_frame(&mut read).map_err(io_err("read"))? {
-        tail.push(header);
-    }
-    let committed_chunks = pack.chunk_frames.len();
+    let committed: &Pack<F> = pack;
+    let mut read = |offset, buf: &mut [u8]| committed.file.read_exact_at(buf, offset);
+    // The tail's chunk frames an index may name (after the committed ones), and those not yet followed by an index.
+    let mut tail_chunks: Vec<u64> = Vec::new();
+    let mut pending = Vec::new();
     let mut keep = None;
     let mut entries = Vec::new();
-    let mut pending = Vec::new();
-    for header in &tail {
+    while let Some(header) = scanner.next_frame(&mut read).map_err(io_err("read"))? {
         let offset = header.offset();
-        match header.kind() {
-            FrameKind::BlobChunk => pending.push(offset),
-            FrameKind::BlobIndex => {
-                pack.chunk_frames.append(&mut pending);
-                let Ok(bytes) = pack.bytes_at(offset, header.total_len()) else {
-                    break;
-                };
-                let Ok((_, payload)) = decode_frame(&bytes, offset, FrameKind::BlobIndex) else {
-                    break;
-                };
-                let Ok((manifest, chunks)) = decode_index_payload(payload, offset) else {
-                    break;
-                };
-                let id = manifest.blob_id();
-                let known = |o: &u64| pack.chunk_frames.binary_search(o).is_ok();
-                let fresh = !pack.index.contains_key(&id)
-                    && !pack.uploads.contains_key(&manifest.upload_id())
-                    && entries.iter().all(|(e, entry): &(BlobId, Entry)| {
-                        *e != id && entry.upload_id != manifest.upload_id()
-                    });
-                if !fresh
-                    || !chunks.iter().all(known)
-                    || !chunks_match(pack, &manifest, &chunks, file_len)
-                {
-                    break;
-                }
-                entries.push((
-                    id,
-                    Entry {
-                        index_off: offset,
-                        index_len: header.total_len(),
-                        upload_id: manifest.upload_id(),
-                        chunks: chunks.into_boxed_slice(),
-                    },
-                ));
-                keep = Some((
-                    header.offset().saturating_add(header.total_len()),
-                    header.frame_seq(),
-                    pack.chunk_frames.len(),
-                    entries.len(),
-                ));
-            }
-            _ => break,
+        let seen = committed
+            .chunk_frames
+            .len()
+            .saturating_add(tail_chunks.len())
+            .saturating_add(pending.len());
+        if longest_frame(header.kind(), seen).is_none_or(|longest| header.total_len() > longest) {
+            break;
         }
+        if header.kind() == FrameKind::BlobChunk {
+            pending.push(offset);
+            continue;
+        }
+        tail_chunks.append(&mut pending);
+        let Ok(bytes) = committed.bytes_at(offset, header.total_len()) else {
+            break;
+        };
+        let Ok((_, payload)) = decode_frame(&bytes, offset, FrameKind::BlobIndex) else {
+            break;
+        };
+        let Ok((manifest, chunks)) = decode_index_payload(payload, offset) else {
+            break;
+        };
+        let id = manifest.blob_id();
+        let known = |o: &u64| {
+            committed.chunk_frames.binary_search(o).is_ok() || tail_chunks.binary_search(o).is_ok()
+        };
+        let fresh = !committed.index.contains_key(&id)
+            && !committed.uploads.contains_key(&manifest.upload_id())
+            && entries.iter().all(|(e, entry): &(BlobId, Entry)| {
+                *e != id && entry.upload_id != manifest.upload_id()
+            });
+        if !fresh
+            || !chunks.iter().all(known)
+            || !chunks_match(committed, &manifest, &chunks, file_len)
+        {
+            break;
+        }
+        entries.push((
+            id,
+            Entry {
+                index_off: offset,
+                index_len: header.total_len(),
+                upload_id: manifest.upload_id(),
+                chunks: chunks.into_boxed_slice(),
+            },
+        ));
+        keep = Some((
+            offset.saturating_add(header.total_len()),
+            header.frame_seq(),
+            tail_chunks.len(),
+            entries.len(),
+        ));
     }
     let Some((end, last_seq, chunk_count, entry_count)) = keep else {
-        pack.chunk_frames.truncate(committed_chunks);
         return Ok(());
     };
-    pack.chunk_frames.truncate(chunk_count);
+    tail_chunks.truncate(chunk_count);
     entries.truncate(entry_count);
+    pack.chunk_frames.append(&mut tail_chunks);
     for (id, entry) in entries {
         pack.uploads.insert(entry.upload_id, id);
         pack.index.insert(id, entry);
@@ -246,6 +254,16 @@ pub(super) fn scan_committed<F: ContainerFile>(
         if header.frame_seq() != pack.next_frame_seq {
             return Err(corrupt_at(
                 "a committed frame out of the frame_seq run",
+                offset,
+            ));
+        }
+        // Before any read of the frame: only its kind bounds its length, the file does not (ROADMAP 9.2.14). A chunk
+        // frame is not read here, but a staged-bytes check or a rewrite reads it whole by this length later.
+        if longest_frame(header.kind(), pack.chunk_frames.len())
+            .is_some_and(|longest| header.total_len() > longest)
+        {
+            return Err(corrupt_at(
+                "a committed frame longer than any frame of its kind",
                 offset,
             ));
         }
@@ -361,4 +379,34 @@ fn whole_frame_valid<F: ContainerFile>(pack: &Pack<F>, offset: u64, file_len: u6
         StreamScanner::new(offset, file_len).check_frame(&mut read),
         Ok(Ok(header)) if header.offset() == offset
     )
+}
+
+/// The longest frame of `kind` a pack holds after `chunk_frames` chunk frames (SPEC §9.3; ROADMAP 9.2.14): a chunk
+/// frame of a 64 MiB chunk, or an index frame naming each of them ([`max_index_frame_len`]); `None` for a kind no
+/// pack holds. Checked against a frame's header before the frame is read, so a damaged or crafted length never sizes
+/// a read or an allocation, which the file's length alone would bound.
+pub(super) fn longest_frame(kind: FrameKind, chunk_frames: usize) -> Option<u64> {
+    match kind {
+        FrameKind::BlobChunk => Some(layout::chunk_frame_len(layout::MAX_CHUNK_LEN)),
+        FrameKind::BlobIndex => Some(max_index_frame_len(u64_from_usize(chunk_frames))),
+        _ => None,
+    }
+}
+
+/// The longest `BlobIndex` frame that can name at most `chunks` chunk frames (SPEC §9.3): an 8-byte head, the
+/// largest manifest of that many chunks (`76 + 4·n`, or for one chunk an inline manifest of `80 + 64 MiB`, SPEC
+/// §9.1.1) padded to 8, and 8 bytes per offset. An index names distinct chunk frames before it, so `chunks` is the
+/// number of chunk frames scanned so far. Saturates: a bound that large is never reached by a frame within the file.
+pub(super) fn max_index_frame_len(chunks: u64) -> u64 {
+    let plain = chunks.saturating_mul(4).saturating_add(76);
+    let inline = if chunks >= 1 {
+        u64::from(layout::MAX_CHUNK_LEN).saturating_add(80)
+    } else {
+        0
+    };
+    let manifest = plain.max(inline).saturating_add(7) & !7;
+    let payload = u64_from_usize(layout::INDEX_HEAD_LEN)
+        .saturating_add(manifest)
+        .saturating_add(chunks.saturating_mul(8));
+    persia_format::frame::frame_len(payload).unwrap_or(u64::MAX)
 }

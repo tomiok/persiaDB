@@ -719,18 +719,21 @@ struct VfsFaults {
     remove_not_found: bool,
 }
 
-/// `SimFs` with failures injected into chosen calls, and a count of `read_exact_at` calls on its files.
+/// `SimFs` with failures injected into chosen calls, and a count of `read_exact_at` calls on its files, and the
+/// longest of them (ROADMAP 9.2.14).
 #[derive(Debug, Clone)]
 struct Wrapped {
     fs: SimFs,
     faults: Arc<std::sync::Mutex<VfsFaults>>,
     reads: Arc<std::sync::atomic::AtomicU64>,
+    longest: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Debug)]
 struct CountedFile {
     file: SimFsFile,
     reads: Arc<std::sync::atomic::AtomicU64>,
+    longest: Arc<std::sync::atomic::AtomicU64>,
 }
 
 use persia_storage::container::ContainerFile;
@@ -743,6 +746,8 @@ impl ContainerFile for CountedFile {
     fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
         self.reads
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.longest
+            .fetch_max(buf.len() as u64, std::sync::atomic::Ordering::Relaxed);
         self.file.read_exact_at(buf, offset)
     }
     fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
@@ -774,16 +779,22 @@ impl Wrapped {
             fs: fs.clone(),
             faults: Arc::default(),
             reads: Arc::default(),
+            longest: Arc::default(),
         }
     }
     fn wrap(&self, file: SimFsFile) -> CountedFile {
         CountedFile {
             file,
             reads: Arc::clone(&self.reads),
+            longest: Arc::clone(&self.longest),
         }
     }
     fn reads(&self) -> u64 {
         self.reads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    /// The longest `read_exact_at` on its files so far.
+    fn longest_read(&self) -> u64 {
+        self.longest.load(std::sync::atomic::Ordering::Relaxed)
     }
     fn faults(&self) -> std::sync::MutexGuard<'_, VfsFaults> {
         self.faults.lock().unwrap()
@@ -949,6 +960,93 @@ fn a_range_read_makes_one_read_per_chunk() {
     let before = vfs.reads();
     store.read_chunk_source(&m, 3).unwrap();
     assert_eq!(vfs.reads() - before, 1);
+}
+
+// --- Frame lengths bounded before the open reads them (ROADMAP 9.2.14) ---
+
+/// The pack of one empty blob: its index frame, naming no chunk, is the only frame (12288..12408).
+fn empty_blob_pack() -> Vec<u8> {
+    let fs = sim();
+    let store = open(&fs, PackMode::ReadWrite).unwrap();
+    assert_eq!(
+        store.bind(&manifest_of(b"", 4, 1)).unwrap(),
+        BindOutcome::Bound
+    );
+    drop(store);
+    fs.read(Path::new(PACK)).unwrap()
+}
+
+/// A whole `BlobIndex` frame at `offset`, `frame_seq` `seq`, of `payload_len` zero bytes: its CRC valid, its length
+/// far beyond any index frame's that names no chunk.
+fn long_index_frame(offset: u64, seq: u64, payload_len: usize) -> Vec<u8> {
+    use persia_format::block::Compression;
+    use persia_format::frame::{FrameKind, encode_frame};
+    let mut w = persia_format::Writer::with_base_offset(offset);
+    encode_frame(
+        &mut w,
+        FrameKind::BlobIndex,
+        seq,
+        &vec![0; payload_len],
+        Compression::None,
+    )
+    .unwrap();
+    w.into_inner()
+}
+
+/// A committed `BlobIndex` frame longer than any index frame naming the chunk frames before it is `Corrupt` at its
+/// offset before it is read: the open never sizes a read, or an allocation, by a length only the file bounds. The
+/// longest read is the 12288-byte prefix.
+#[test]
+fn a_committed_index_frame_longer_than_its_kind_allows_is_corrupt_before_its_read() {
+    use persia_blob::pack::layout::decode_prefix;
+    let mut bytes = empty_blob_pack();
+    bytes.truncate(12288);
+    let frame = long_index_frame(12288, 1, 1 << 20);
+    bytes.extend_from_slice(&frame);
+    let p = decode_prefix(&bytes).unwrap();
+    let mut sb = p.superblock;
+    sb.index_len = frame.len() as u64;
+    sb.log_end = 12288 + sb.index_len;
+    let at = p.slot.offset() as usize;
+    bytes[at..at + 4096].copy_from_slice(&sb.encode());
+    for mode in [PackMode::ReadOnly, PackMode::ReadWrite] {
+        let fs = sim();
+        let f = fs.create_new(Path::new(PACK)).unwrap();
+        f.write_all_at(&bytes, 0).unwrap();
+        let vfs = Wrapped::new(&fs);
+        let err = vfs.open(mode).map(|_| ()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::CorruptAt {
+                    what: "a committed frame longer than any frame of its kind",
+                    offset: 12288,
+                    ..
+                }
+            ),
+            "{mode:?}: {err:?}"
+        );
+        assert_eq!(vfs.longest_read(), 12288, "{mode:?}");
+        assert_eq!(fs.read(Path::new(PACK)).unwrap(), bytes, "nothing written");
+    }
+}
+
+/// After `log_end`, such a frame ends the roll-forward unread (ADR-0049 item 9): the read-write open truncates it,
+/// reading it only in the checksum pass's bounded pieces (64 KiB).
+#[test]
+fn a_tail_index_frame_longer_than_its_kind_allows_is_truncated_unread() {
+    let mut bytes = empty_blob_pack();
+    let log_end = bytes.len() as u64;
+    bytes.extend_from_slice(&long_index_frame(log_end, 2, 1 << 20));
+    let fs = sim();
+    let f = fs.create_new(Path::new(PACK)).unwrap();
+    f.write_all_at(&bytes, 0).unwrap();
+    let vfs = Wrapped::new(&fs);
+    let store = vfs.open(PackMode::ReadWrite).unwrap();
+    assert_eq!(store.recovery().rolled_forward, 0);
+    assert_eq!(store.recovery().truncated_from, Some(bytes.len() as u64));
+    assert_eq!(store.blob_ids(), [blob_id_of(b"")]);
+    assert!(vfs.longest_read() <= 64 * 1024, "{}", vfs.longest_read());
 }
 
 /// ROADMAP 9.2.6: a symbolic link named like a temporary file is not one of the pack's files: the sweep leaves the
