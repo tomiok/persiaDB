@@ -8,8 +8,9 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use persia_format::block::Compression;
 use persia_format::frame::FrameKind;
@@ -586,4 +587,128 @@ fn a_held_pack_lock_on_a_real_file_keeps_the_packs_temporary_files() {
     assert_eq!(after.len(), 1, "{after:?}");
     assert_eq!(after[0].0, lock);
     assert_eq!(after[0].1, SideFileKind::Lock);
+}
+
+/// `lock_beside` as Windows [`RealFs`](persia_storage::vfs::RealFs) does it: create `<path>.lock` when it is missing,
+/// then lock that file. `SimFs::lock_beside` returns `None` and creates nothing, so it cannot catch a listing that
+/// would create the pack's lock file.
+#[derive(Debug, Clone)]
+struct CreatingBesideLock {
+    fs: SimFs,
+    /// Every path `lock_beside` was asked to lock.
+    calls: Arc<Mutex<Vec<PathBuf>>>,
+}
+
+impl Vfs for CreatingBesideLock {
+    type File = SimFsFile;
+
+    fn open(&self, path: &Path, write: bool) -> io::Result<SimFsFile> {
+        self.fs.open(path, write)
+    }
+    fn create_new(&self, path: &Path) -> io::Result<SimFsFile> {
+        self.fs.create_new(path)
+    }
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        self.fs.create_dir(path)
+    }
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.fs.rename(from, to)
+    }
+    fn hard_link(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.fs.hard_link(from, to)
+    }
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        self.fs.remove_file(path)
+    }
+    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+        self.fs.sync_dir(dir)
+    }
+    fn entry_kind(&self, path: &Path) -> io::Result<persia_storage::vfs::EntryKind> {
+        self.fs.entry_kind(path)
+    }
+    fn is_dir(&self, path: &Path) -> io::Result<bool> {
+        self.fs.is_dir(path)
+    }
+    fn read_dir(&self, dir: &Path) -> io::Result<Vec<persia_storage::vfs::DirEntry>> {
+        self.fs.read_dir(dir)
+    }
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        self.fs.canonicalize(path)
+    }
+    fn same_file(&self, file: &SimFsFile, path: &Path) -> io::Result<bool> {
+        self.fs.same_file(file, path)
+    }
+    fn lock_beside(&self, path: &Path) -> io::Result<Option<SimFsFile>> {
+        self.calls.lock().unwrap().push(path.to_path_buf());
+        let mut name = path
+            .file_name()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?
+            .to_owned();
+        name.push(".lock");
+        let lock = path.with_file_name(name);
+        let file = match self.fs.open(&lock, true) {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => self.fs.create_new(&lock)?,
+            Err(err) => return Err(err),
+        };
+        if file.try_lock()? {
+            Ok(Some(file))
+        } else {
+            Err(io::ErrorKind::WouldBlock.into())
+        }
+    }
+}
+
+fn asked_for_pack(calls: &[PathBuf]) -> bool {
+    calls
+        .iter()
+        .any(|path| path.file_name().and_then(|n| n.to_str()) == Some("app.persia.blobs"))
+}
+
+/// Listing a stale pack temporary file when no `<name>.persia.blobs.lock` exists must not create that lock file.
+/// The sweep (`create: true`) still creates it and removes the temporary file.
+#[test]
+fn listing_a_stale_pack_temp_does_not_create_the_lock_file() {
+    let fs = SimFs::new();
+    fs.create_dir(Path::new("/db")).unwrap();
+    fs.sync_dir(Path::new("/")).unwrap();
+    let vfs = CreatingBesideLock {
+        fs: fs.clone(),
+        calls: Arc::default(),
+    };
+    drop(Container::create_in(Arc::new(vfs.clone()), DB).unwrap());
+    let stale = Path::new("/db/app.persia.blobs.tmp.0123456789abcdef.0");
+    vfs.create_new(stale).unwrap();
+    assert!(fs.read(Path::new(PACK_LOCK)).is_none());
+    vfs.calls.lock().unwrap().clear();
+
+    let listed = Container::side_files_in(&vfs, DB).unwrap();
+    let calls = vfs.calls.lock().unwrap().clone();
+    assert!(
+        !asked_for_pack(&calls),
+        "listing called lock_beside on the pack: {calls:?}"
+    );
+    assert!(
+        fs.read(Path::new(PACK_LOCK)).is_none(),
+        "listing created the pack lock file"
+    );
+    assert!(
+        listed
+            .iter()
+            .any(|f| f.path == stale && f.kind == SideFileKind::Temporary && f.in_use == InUse::No),
+        "{listed:?}"
+    );
+
+    let c = Container::open_in(Arc::new(vfs.clone()), DB, Mode::ReadWrite).unwrap();
+    let stale_buf = stale.to_path_buf();
+    assert_eq!(
+        c.sweep_stale_files().unwrap(),
+        std::slice::from_ref(&stale_buf)
+    );
+    assert!(
+        fs.read(Path::new(PACK_LOCK)).is_some(),
+        "the sweep still creates the lock file"
+    );
+    assert!(fs.read(stale).is_none());
+    assert!(asked_for_pack(&vfs.calls.lock().unwrap()));
 }

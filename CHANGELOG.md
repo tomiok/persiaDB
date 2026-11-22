@@ -418,6 +418,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   skip like unknown kinds. Golden files in `tests/fixtures/blob-pack/v1/`.
 
 ### Fixed
+- `persia-storage`: `Container::side_files` no longer creates `<name>.persia.blobs.lock` when that file is absent. On
+  Windows the pack lock is taken with `Vfs::lock_beside`, which creates the file; a listing now skips that call unless
+  a regular lock file is already there. `sweep_stale_files` still creates it (ROADMAP 9.2.10, 9.2.15).
 - `persia-blob`: a crafted pack can no longer make its open allocate up to the file's length: the open bounds each
   frame by its kind before reading it (ROADMAP 9.2.14).
 - `persia-engine` (breaking: a new `DatabaseError` variant): a `put_batch` (or `put`) that ends early (a rejected

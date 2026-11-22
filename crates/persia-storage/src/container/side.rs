@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use super::{Container, ContainerFile, Error, Result};
 use crate::local::fs::parent_or_cwd;
 use crate::side::{self, InUse, SideFile, SideFileKind};
-use crate::vfs::{FileType, RealFs, Vfs};
+use crate::vfs::{EntryKind, FileType, RealFs, Vfs};
 
 /// What the blob pack's file name adds to its container's (SPEC §9.3): `persia-blob`'s `PACK_SUFFIX`, which sits
 /// above this crate.
@@ -61,7 +61,7 @@ fn kind_of(name: &str, container: &str) -> Option<SideFileKind> {
 /// What the entry `name` of type `file_type` is beside the container named `container`: one of its own names
 /// ([`kind_of`], regular files only) or one of its blob pack's (ROADMAP 9.2.10). The pack's temporary names are
 /// matched as strictly as the pack's own open-time sweep matches them (regular files, lowercase hex only, the exact
-// name the pack makes); its lock is listed whatever it is (a pack writer follows a link there), and its lease
+/// name the pack makes); its lock is listed whatever it is (a pack writer follows a link there), and its lease
 /// directory only as a directory.
 fn side_of(name: &str, file_type: FileType, container: &str) -> Option<Side> {
     let pack = name
@@ -142,6 +142,10 @@ fn pack_path(path: &Path) -> PathBuf {
 /// `Some(true)`, a regular file; `Some(false)`, anything else, which is never opened ([`InUse::Unknown`]: a pack
 /// writer follows a link there, so only following it would tell, and the target may be anything).
 ///
+/// [`Vfs::lock_beside`] creates the lock file on Windows. Without `create` this never calls it unless a regular lock
+/// file is already there (checked again at the call, so one removed since the scan is not recreated). The sweep passes
+/// `create` and does create the file.
+///
 /// While this call holds the lock, a pack writer opening at that instant fails with its `PackLocked` and may retry.
 fn take_pack_lock<F: ContainerFile>(
     vfs: &dyn Vfs<File = F>,
@@ -157,6 +161,22 @@ fn take_pack_lock<F: ContainerFile>(
     let mut lock = pack.as_os_str().to_owned();
     lock.push(".lock");
     let lock = PathBuf::from(lock);
+    // `lock_beside` creates the file on Windows. A listing must not, even if the scan's `found` is stale.
+    if !create {
+        match vfs.entry_kind(&lock) {
+            Ok(EntryKind::File { .. }) => {}
+            Ok(_) => return Ok((InUse::Unknown, None)),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok((InUse::No, None));
+            }
+            Err(e) => return Err(Error::io("lock the pack's lock file")(e)),
+        }
+    }
     match vfs.lock_beside(pack) {
         // A lock file's lock is the handle's on Windows (`LockFileEx`).
         Ok(Some(file)) => return Ok((InUse::No, Some(file))),
