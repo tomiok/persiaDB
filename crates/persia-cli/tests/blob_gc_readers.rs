@@ -688,8 +688,18 @@ impl Run {
             self.stats.stale,
             self.stats.kills
         );
-        let leases: BTreeSet<PathBuf> = self.readers.iter().map(|r| r.lease.clone()).collect();
-        assert_eq!(lease_files(&self.path), leases, "seed {}: {ctx}", self.seed);
+        // macOS: the child reports the canonical lease path (`/private/var/...`) while a directory
+        // listing of the temp dir is `/var/...`. Compare the real paths, exactly.
+        let leases: BTreeSet<PathBuf> = self
+            .readers
+            .iter()
+            .map(|r| std::fs::canonicalize(&r.lease).unwrap())
+            .collect();
+        let listed: BTreeSet<PathBuf> = lease_files(&self.path)
+            .into_iter()
+            .map(|p| std::fs::canonicalize(p).unwrap())
+            .collect();
+        assert_eq!(listed, leases, "seed {}: {ctx}", self.seed);
         self.writer.send("check");
         let check = self.writer_expect("check ", &ctx);
         let c = fields(&check);
@@ -723,7 +733,10 @@ fn run_readers(seed: u64, rounds: u64, stats: &mut Stats) {
     if !locks_judged(dir.path()) {
         return;
     }
-    let path = create(dir.path());
+    // `/var` on macOS is a symlink to `/private/var`. Open under the canonical directory so the
+    // lease paths the children report match a listing of that directory.
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let path = create(&root);
     let writer = ChildIo::spawn("batch-writer", &path, seed, "w", 0);
     assert_eq!(writer.expect("writer open"), "opened");
     let mut run = Run {
