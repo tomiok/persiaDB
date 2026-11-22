@@ -34,7 +34,13 @@ impl LevelTransform for Fallback {
         };
         let must_not: &[Query] = root.map_or(&[], |root| &root.must_not);
         let mut filter: Vec<Filter> = root.map_or_else(Vec::new, |root| root.filter.clone());
-        for kept in input.compiled.map_or(&[][..], Compiled::filter) {
+        // Hard and soft alike: L5 relaxes no filter (ROADMAP 8.2.13).
+        let kept = input
+            .compiled
+            .map(|c| c.filter().iter().chain(c.soft_filter()))
+            .into_iter()
+            .flatten();
+        for kept in kept {
             if !filter.contains(kept) {
                 filter.push(kept.clone());
             }

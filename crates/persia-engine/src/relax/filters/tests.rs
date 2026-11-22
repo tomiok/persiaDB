@@ -61,9 +61,21 @@ impl StatisticsProvider for NoStats {
     }
 }
 
+/// The filter step of `query`: a compiled query's soft filters are its own; every root filter of a programmatic one is
+/// marked soft (the caller's `RelaxedQuery::with_soft_filter`, ROADMAP 8.2.13).
 fn steps(query: &Query, compiled: Option<&Compiled>) -> Vec<Step> {
+    let soft: Vec<Filter> = match (compiled, query) {
+        (Some(c), _) => c.soft_filter().to_vec(),
+        (None, Query::Bool(root)) => root.filter.clone(),
+        (None, _) => Vec::new(),
+    };
+    marked(query, compiled, &soft)
+}
+
+/// The filter step of `query` with `soft` the filters it may drop.
+fn marked(query: &Query, compiled: Option<&Compiled>, soft: &[Filter]) -> Vec<Step> {
     Filters
-        .steps(&LevelInput::new(query, compiled, &NoStats))
+        .steps(&LevelInput::new(query, compiled, &NoStats).softening(soft))
         .unwrap()
 }
 
@@ -120,7 +132,7 @@ fn brand_is(schema: &CollectionSchema, value: &str) -> Filter {
 fn a_compiled_query_drops_its_request_filter_and_keeps_every_clause() {
     let schema = schema();
     let compiled = compile(&schema, "-blue red -\"green hat\" shoes")
-        .with_filter([brand_is(&schema, "acme"), brand_is(&schema, "zeta")]);
+        .with_soft_filter([brand_is(&schema, "acme"), brand_is(&schema, "zeta")]);
     let root = compiled.root().unwrap().clone();
     assert_eq!(root.filter.len(), 2);
     let step = one(compiled.query(), Some(&compiled));
@@ -146,7 +158,7 @@ fn a_compiled_query_drops_its_request_filter_and_keeps_every_clause() {
     // A one-word compilation wrapped with a filter is the word alone again, in its `bool`.
     let red = compile(&schema, "red");
     let word = red.query().clone();
-    let filtered = red.with_filter([brand_is(&schema, "acme")]);
+    let filtered = red.with_soft_filter([brand_is(&schema, "acme")]);
     let step = one(filtered.query(), Some(&filtered));
     assert_eq!(
         step.query,
@@ -163,7 +175,7 @@ fn a_replaced_query_drops_the_request_filter_alone() {
     let schema = schema();
     let acme = brand_is(&schema, "acme");
     let own = brand_is(&schema, "other");
-    let filtered = compile(&schema, "red shoes").with_filter([acme.clone()]);
+    let filtered = compile(&schema, "red shoes").with_soft_filter([acme.clone()]);
     // A term put in place of the compiled query is wrapped to keep the request filter; the step is the wrap without it.
     let replaced = filtered.clone().with_query(term(&schema, "hat"));
     assert_eq!(
@@ -221,7 +233,7 @@ fn a_request_filter_the_wrapped_caller_root_holds_is_dropped_there_too() {
     // level down. The step drops it there too, or it would search L0's filtered matches again and find nothing.
     let schema = schema();
     let acme = brand_is(&schema, "acme");
-    let filtered = compile(&schema, "red shoes").with_filter([acme.clone()]);
+    let filtered = compile(&schema, "red shoes").with_soft_filter([acme.clone()]);
     let Query::Bool(mut caller) = filtered.query().clone() else {
         panic!()
     };
@@ -350,7 +362,7 @@ fn a_query_without_words_builds_no_step() {
     // live document the exclusions leave (the unfiltered L5 ADR-0047 rejects). Stopwords are the `en` case below:
     // this schema's `standard` analyzer keeps `the`.
     for text in ["", "-blue", "-blue -\"green hat\""] {
-        let compiled = compile(&schema, text).with_filter([brand_is(&schema, "acme")]);
+        let compiled = compile(&schema, text).with_soft_filter([brand_is(&schema, "acme")]);
         assert!(
             compiled.root().is_some_and(|r| !r.filter.is_empty()),
             "{text:?}"
@@ -411,7 +423,7 @@ fn stopwords_only_build_no_step() {
     // `the` and `a` analyze to no token, so the compilation is `match_all` and the filter wraps it. That is still
     // no word: dropping the filter would return every live document.
     for text in ["the", "the a of", "a and the"] {
-        let compiled = compile(&schema, text).with_filter([brand_is(&schema, "acme")]);
+        let compiled = compile(&schema, text).with_soft_filter([brand_is(&schema, "acme")]);
         assert!(
             matches!(
                 compiled.query(),
@@ -423,7 +435,7 @@ fn stopwords_only_build_no_step() {
         assert_eq!(steps(compiled.query(), Some(&compiled)), [], "{text:?}");
     }
     // A stopword beside a real word still searches that word.
-    let red = compile(&schema, "the red").with_filter([brand_is(&schema, "acme")]);
+    let red = compile(&schema, "the red").with_soft_filter([brand_is(&schema, "acme")]);
     assert_eq!(steps(red.query(), Some(&red)).len(), 1);
 }
 
@@ -577,4 +589,62 @@ proptest! {
         prop_assert_eq!(query.filter.as_slice(), [].as_slice());
         prop_assert_eq!(query.must.as_slice(), source.must.as_slice());
     }
+}
+
+/// ROADMAP 8.2.13: a request's `filter` is hard and never dropped; its `soft_filter` alone is. Without a soft filter
+/// no step is built, and a filter given as both is hard.
+#[test]
+fn a_compiled_query_drops_only_its_soft_filter_and_keeps_the_hard_one() {
+    let schema = schema();
+    let (tenant, acme) = (brand_is(&schema, "tenant"), brand_is(&schema, "acme"));
+    let hard = compile(&schema, "red shoes").with_filter([tenant.clone()]);
+    assert_eq!(steps(hard.query(), Some(&hard)).len(), 0);
+    let both = hard.clone().with_soft_filter([acme.clone()]);
+    let Query::Bool(root) = both.query() else {
+        panic!()
+    };
+    assert_eq!(root.filter, [tenant.clone(), acme.clone()]);
+    let step = one(both.query(), Some(&both));
+    let Query::Bool(b) = &step.query else {
+        panic!()
+    };
+    assert_eq!(b.filter, std::slice::from_ref(&tenant));
+    assert_eq!((&b.must, &b.must_not), (&root.must, &root.must_not));
+    // Given as both, hard: soft before hard, or hard before soft.
+    let twice = compile(&schema, "red shoes")
+        .with_soft_filter([tenant.clone()])
+        .with_filter([tenant.clone()]);
+    assert_eq!(
+        (twice.filter(), twice.soft_filter()),
+        (std::slice::from_ref(&tenant), &[][..])
+    );
+    assert_eq!(steps(twice.query(), Some(&twice)).len(), 0);
+    let twice = hard.with_soft_filter([tenant.clone()]);
+    assert_eq!(twice.soft_filter().len(), 0);
+    assert_eq!(steps(twice.query(), Some(&twice)).len(), 0);
+    // Marked soft by a caller too, a hard filter stays.
+    assert_eq!(marked(twice.query(), Some(&twice), &[tenant]).len(), 0);
+}
+
+/// ROADMAP 8.2.13: a programmatic root's filters are hard unless its caller marks them soft; the step drops the
+/// marked ones alone, and none without a mark.
+#[test]
+fn a_programmatic_root_drops_only_the_filters_marked_soft() {
+    let schema = schema();
+    let (tenant, acme) = (brand_is(&schema, "tenant"), brand_is(&schema, "acme"));
+    let query = Query::Bool(BoolQuery {
+        must: vec![term(&schema, "red")],
+        filter: vec![tenant.clone(), acme.clone()],
+        ..BoolQuery::default()
+    });
+    assert_eq!(marked(&query, None, &[]).len(), 0);
+    let [step] = marked(&query, None, std::slice::from_ref(&acme))
+        .try_into()
+        .unwrap();
+    let Query::Bool(b) = &step.query else {
+        panic!()
+    };
+    assert_eq!(b.filter, std::slice::from_ref(&tenant));
+    // A mark the root does not hold drops nothing: no step.
+    assert_eq!(marked(&query, None, &[brand_is(&schema, "zeta")]).len(), 0);
 }

@@ -222,7 +222,7 @@ fn the_filter_step_keeps_a_required_clause_added_beside_the_clauses() {
         Fallback::StaticRank,
         FilterRelaxation::LastResort,
     );
-    let compiled = compile(&views, "red").with_filter([y]);
+    let compiled = compile(&views, "red").with_soft_filter([y]);
     let out = views
         .search_relaxed(&compiled, &request(), &relax, &exec())
         .unwrap();

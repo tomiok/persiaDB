@@ -49,7 +49,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::query::{Compiled, Query, QueryLimits};
+use crate::query::{Compiled, Filter, Query, QueryLimits};
 use crate::schema::{Fallback, FieldId, FilterRelaxation, Level, RankingConfig, RelaxationConfig};
 use crate::search::TermSource;
 use crate::segment::ReadError;
@@ -203,6 +203,11 @@ pub(crate) struct LevelInput<'a> {
     /// ([`Self::dropping`]). A query L2 builds no step for (one required clause, even one the analyzer splits in
     /// several terms) or a plan without L2 leaves it false.
     pub(crate) drops_terms: bool,
+    /// The filters the filter step may drop (ROADMAP 8.2.13, ADR-0056): a compiled query's `soft_filter`
+    /// ([`Compiled::soft_filter`]) and those a caller marked soft ([`crate::db::RelaxedQuery::with_soft_filter`]). None
+    /// by default ([`Self::new`]): every filter is hard and the filter step builds nothing; the search sets them
+    /// ([`Self::softening`]).
+    pub(crate) soft: &'a [Filter],
 }
 
 impl<'a> LevelInput<'a> {
@@ -218,6 +223,7 @@ impl<'a> LevelInput<'a> {
             expands: &no_field,
             terms: None,
             drops_terms: true,
+            soft: &[],
         }
     }
 
@@ -232,6 +238,11 @@ impl<'a> LevelInput<'a> {
             drops_terms,
             ..self
         }
+    }
+
+    /// This input with `soft` the filters the filter step may drop (ROADMAP 8.2.13).
+    pub(crate) fn softening(self, soft: &'a [Filter]) -> Self {
+        Self { soft, ..self }
     }
 
     /// This input with L4 walking `terms` for its corrections.

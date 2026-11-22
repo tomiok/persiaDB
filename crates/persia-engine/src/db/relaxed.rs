@@ -23,7 +23,7 @@ use std::time::Instant;
 use super::exec::{ExecTerms, Execution};
 use super::search::{Collected, Cursor, Part, Ranked, SearchHit, SearchRequest, StepCursor};
 use super::views::CollectionViews;
-use crate::query::{BoolQuery, Compiled, Fit, Query, QueryLimits, StepLimits};
+use crate::query::{BoolQuery, Compiled, Filter, Fit, Query, QueryLimits, StepLimits};
 pub use crate::relax::Correction;
 use crate::relax::{
     Expansion, FallbackOrder, LevelInput, PlannedLevel, RelaxLevel, RelaxPlan, RelaxSettings,
@@ -205,6 +205,42 @@ impl Relaxation {
 pub struct RelaxedQuery<'a> {
     query: &'a Query,
     compiled: Option<&'a Compiled>,
+    /// Root filters a caller marked soft ([`Self::with_soft_filter`]).
+    soft: &'a [Filter],
+}
+
+impl<'a> RelaxedQuery<'a> {
+    /// This query with `soft` marking the filters of its root `bool` that the filter step under
+    /// `filters: "last_resort"` may drop (SPEC §7.6, ROADMAP 8.2.13, ADR-0056): a root filter equal to one of them is
+    /// soft, and every other one hard. A programmatic query's root filters are hard unless marked, so without marks it
+    /// builds no filter step. A compiled query's soft filters are its request's `soft_filter`
+    /// ([`Compiled::with_soft_filter`]), and these beside them; its request's `filter` ([`Compiled::filter`]) stays hard
+    /// even if marked. Marking a filter the root does not hold changes nothing: the query is searched as it is.
+    ///
+    /// ```
+    /// use persia_engine::db::RelaxedQuery;
+    /// use persia_engine::query::{BoolQuery, Filter, FilterValue, Query, TermQuery};
+    /// use persia_engine::schema::{FieldKind, KeywordOptions, SchemaBuilder, TextOptions};
+    ///
+    /// let schema = SchemaBuilder::new("c")
+    ///     .field("body", FieldKind::Text(TextOptions::default()))
+    ///     .field("tenant", FieldKind::Keyword(KeywordOptions::default()))
+    ///     .field("brand", FieldKind::Keyword(KeywordOptions::default()))
+    ///     .build()?;
+    /// let id = |name: &str| schema.field(name).map(|f| f.id()).ok_or("no field");
+    /// let keyword = |field, value: &str| Filter::Term { field, value: FilterValue::Keyword(value.into()) };
+    /// let (tenant, nike) = (keyword(id("tenant")?, "t1"), keyword(id("brand")?, "nike"));
+    /// let shoes = Query::Term(TermQuery { field: id("body")?, term: "shoes".into() });
+    /// let query = Query::Bool(BoolQuery { must: vec![shoes], filter: vec![tenant, nike.clone()], ..BoolQuery::default() });
+    /// // The filter step may drop `brand: nike`, never `tenant: t1`.
+    /// let soft = [nike];
+    /// let _relaxed = RelaxedQuery::from(&query).with_soft_filter(&soft);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn with_soft_filter(self, soft: &'a [Filter]) -> Self {
+        Self { soft, ..self }
+    }
 }
 
 impl<'a> From<&'a Query> for RelaxedQuery<'a> {
@@ -212,6 +248,7 @@ impl<'a> From<&'a Query> for RelaxedQuery<'a> {
         Self {
             query,
             compiled: None,
+            soft: &[],
         }
     }
 }
@@ -221,6 +258,7 @@ impl<'a> From<&'a Compiled> for RelaxedQuery<'a> {
         Self {
             query: compiled.query(),
             compiled: Some(compiled),
+            soft: &[],
         }
     }
 }
@@ -651,7 +689,12 @@ impl CollectionViews<'_> {
         relax: &RelaxPlan,
         exec: &Execution,
     ) -> Result<RelaxedResults, RelaxedSearchError> {
-        let RelaxedQuery { query, compiled } = query.into();
+        let RelaxedQuery {
+            query,
+            compiled,
+            soft,
+        } = query.into();
+        let soft = soft_filters(compiled, soft);
         // Every step is planned as `SearchPlan::with_terms` plans by default: without proximity (SPEC §7.4).
         let window = self.check_request(request, false, relax.settings())?;
         let collection = self.collection();
@@ -688,7 +731,8 @@ impl CollectionViews<'_> {
             // match of the tier step (ROADMAP 8.2.7). The same snapshot, query and limits build the same steps on every page.
             let input = LevelInput::new(query, compiled, &stats)
                 .expanding(&expands)
-                .dropping(built.drops_terms());
+                .dropping(built.drops_terms())
+                .softening(&soft);
             let Some(steps) = self.budgeted_level(planned, first, input, exec, budget)? else {
                 truncated = true;
                 break;
@@ -1108,6 +1152,16 @@ fn is_deadline(e: &RelaxedSearchError) -> bool {
         RelaxedSearchError::Plan(SearchError::Interrupted(Interrupt::DeadlineExceeded))
             | RelaxedSearchError::Request(RequestError::Interrupted(Interrupt::DeadlineExceeded))
     )
+}
+
+/// The filters the filter step may drop (ROADMAP 8.2.13): a compiled query's `soft_filter`, then those a caller `marked`.
+fn soft_filters(compiled: Option<&Compiled>, marked: &[Filter]) -> Vec<Filter> {
+    compiled
+        .map_or(&[][..], Compiled::soft_filter)
+        .iter()
+        .chain(marked)
+        .cloned()
+        .collect()
 }
 
 /// The plan of a step's `query` with the `earlier` steps' queries excluded (SPEC §7.6): a document they match is

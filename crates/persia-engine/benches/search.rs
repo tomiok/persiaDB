@@ -1052,8 +1052,9 @@ fn relaxed_fallback(c: &mut Criterion) {
     group.finish();
 }
 
-/// L6 `filters` (ROADMAP 8.2.6), in the `search_relaxed` group: `w3 w40` under `tag = nosuch`, a filter no document
-/// passes, so every level of the collection's defaults (L2's rungs, L3, L4 and L5) finds nothing under it.
+/// L6 `filters` (ROADMAP 8.2.6), in the `search_relaxed` group: `w3 w40` under the soft filter `tag = nosuch` (ROADMAP
+/// 8.2.13), which no document passes, so every level of the collection's defaults (L2's rungs, L3, L4 and L5) finds
+/// nothing under it.
 /// `filters/never` is that cascade, which returns nothing; `filters/last_resort` adds the filter step, `w3 w40`
 /// without the filter, which excludes L5's step alone (L5 matches every document an earlier step does) and finds the
 /// hits.
@@ -1077,7 +1078,8 @@ fn relaxed_filters(c: &mut Criterion) {
             &DefaultFields::all(schema),
             &QueryLimits::default(),
         )
-        .with_filter([Filter::Term {
+        // Soft (ROADMAP 8.2.13): a hard `filter` is never dropped, so `last_resort` would build no step.
+        .with_soft_filter([Filter::Term {
             field: tag,
             value: FilterValue::Keyword("nosuch".into()),
         }]);
@@ -1147,6 +1149,7 @@ fn compile_text(schema: &CollectionSchema, text: &str) -> Query {
         .compile(text, &DefaultFields::all(schema), &QueryLimits::default())
         .into_query()
 }
+
 criterion_group!(
     benches,
     bench,

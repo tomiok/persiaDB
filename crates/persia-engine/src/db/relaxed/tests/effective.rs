@@ -89,7 +89,7 @@ fn every_step_of_every_level_states_its_text_for_a_compiled_query() {
     let terms = exec.terms(&views);
     let expands = |field: FieldId| views.expands(field);
     let compiled =
-        compile(&views, "tv wonderfull jack -red").with_filter([brand(brand_field, "acme")]);
+        compile(&views, "tv wonderfull jack -red").with_soft_filter([brand(brand_field, "acme")]);
     let all = plan(
         Level::ALL.to_vec(),
         Fallback::StaticRank,
@@ -101,7 +101,8 @@ fn every_step_of_every_level_states_its_text_for_a_compiled_query() {
         let input = LevelInput::new(compiled.query(), Some(&compiled), &stats)
             .expanding(&expands)
             .dropping(false)
-            .walking(&terms);
+            .walking(&terms)
+            .softening(compiled.soft_filter());
         let steps: Vec<_> = planned
             .transform
             .steps(&input)
@@ -237,7 +238,7 @@ fn each_level_as_the_hit_step_states_its_text() {
     }
 
     // The filter step: `red` holds only for `nike`, so with `brand: acme` every earlier step finds nothing.
-    let compiled = compile(&views, "red").with_filter([brand(brand_field, "acme")]);
+    let compiled = compile(&views, "red").with_soft_filter([brand(brand_field, "acme")]);
     let relax = plan(Vec::new(), none, FilterRelaxation::LastResort);
     let out = views
         .search_relaxed(&compiled, &request, &relax, &exec())

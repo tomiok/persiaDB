@@ -189,6 +189,10 @@ pub struct Compiled {
     /// query put in its place ([`Self::with_query`]) is joined to it again and every relaxation level keeps it (SPEC
     /// §7.1.1, §7.6; ROADMAP 8.2.14).
     filter: Vec<Filter>,
+    /// The request's soft filter joined to the query ([`Self::with_soft_filter`], ROADMAP 8.2.13), in the order joined,
+    /// none of them a [`Self::filter`]: the filters L6 under `filters: "last_resort"` may drop, kept beside the query as
+    /// the hard ones are.
+    soft_filter: Vec<Filter>,
     /// Whether a query put in place of a compilation of other than one part ([`Self::with_query`]) no longer holds
     /// its clauses' parts where they were: its root is then not the clauses' ([`Self::root`]). A one-part compilation
     /// checks its query against [`Self::part`] instead.
@@ -346,10 +350,19 @@ impl Compiled {
     }
 
     /// The request filter joined to the query ([`Self::with_filter`]), kept beside it (SPEC §7.1.1): empty when none
-    /// was. The relaxation levels read it here: L5 `fallback` keeps it and the filter step drops exactly it (SPEC §7.6,
-    /// ROADMAP 8.2.14), whatever query [`Self::with_query`] put in.
+    /// was. It is hard (ROADMAP 8.2.13): no relaxation level drops it, the filter step included, whatever query
+    /// [`Self::with_query`] put in; L5 `fallback` reads it here (SPEC §7.6, ROADMAP 8.2.14). The filters the filter step
+    /// may drop are [`Self::soft_filter`].
     pub fn filter(&self) -> &[Filter] {
         &self.filter
+    }
+
+    /// The request's soft filter joined to the query ([`Self::with_soft_filter`], SPEC §7.1.2, ROADMAP 8.2.13): the
+    /// filters the filter step under `filters: "last_resort"` drops, and the only ones (SPEC §7.6). Every other level
+    /// keeps them, as it keeps [`Self::filter`]. None of them is a hard filter: one given as both is hard. Empty when
+    /// none was given, and then no filter step is built.
+    pub fn soft_filter(&self) -> &[Filter] {
+        &self.soft_filter
     }
 
     /// The query the request filter's join wrapped (`bool { must: [query], filter }`), when it wrapped one: a root of
@@ -365,8 +378,7 @@ impl Compiled {
 
     /// How [`Self::query`] holds a one-part compilation's part: as itself, or as the first `must` clause of a `bool`
     /// without `should` clauses (a request's filter, an exclusion or a required clause a caller added beside it, ROADMAP
-    /// 8.2.15). `None` for anything else, and
-    /// for a compilation of other than one part.
+    /// 8.2.15). `None` for anything else, and for a compilation of other than one part.
     fn one_part(&self) -> Option<OnePart<'_>> {
         let part = self.part.as_ref()?;
         if *part == self.query {
@@ -433,24 +445,80 @@ impl Compiled {
                 self.filter.push(f);
             }
         }
+        // A filter given as hard and soft is hard: it never relaxes (ROADMAP 8.2.13).
+        let hard = &self.filter;
+        self.soft_filter.retain(|f| !hard.contains(f));
         self
     }
 
-    /// This compilation searching `query` in place of [`Self::query`], joined to the request filter ([`Self::filter`])
-    /// as [`Self::with_filter`] joins it (SPEC §7.1.1, ROADMAP 8.2.14): a caller cannot drop the request filter by
-    /// replacing the query, so no relaxation level before the filter step searches without it. Pass a query without the
-    /// request filter: a root filter equal to one of its filters is not added again, and counts as the request's (the
-    /// filter step drops it).
+    /// This compilation with `filter` joined as a request's `soft_filter` joins `q` (SPEC §7.1, §7.1.2; ROADMAP 8.2.13,
+    /// ADR-0056): to the root `bool`, as [`Self::with_filter`] joins a filter, so every search applies it, and kept
+    /// beside the query ([`Self::soft_filter`]) as the filters the filter step under `filters: "last_resort"` may drop.
+    /// The request's `filter` ([`Self::with_filter`]) is hard: no level drops it. A soft filter equal to a hard one is
+    /// the hard one, not added again. No filter, no change.
+    ///
+    /// ```
+    /// use persia_analysis::AnalyzerRegistry;
+    /// use persia_engine::query::{DefaultFields, Filter, FilterValue, QueryCompiler, QueryLimits};
+    /// use persia_engine::schema::{FieldKind, KeywordOptions, SchemaBuilder, TextOptions};
+    ///
+    /// let schema = SchemaBuilder::new("c")
+    ///     .field("title", FieldKind::Text(TextOptions::default()))
+    ///     .field("tenant", FieldKind::Keyword(KeywordOptions::default()))
+    ///     .field("brand", FieldKind::Keyword(KeywordOptions::default()))
+    ///     .build()?;
+    /// let keyword = |name: &str, value: &str| -> Result<Filter, Box<dyn std::error::Error>> {
+    ///     let field = schema.field(name).ok_or("no field")?.id();
+    ///     Ok(Filter::Term { field, value: FilterValue::Keyword(value.into()) })
+    /// };
+    /// let (tenant, nike) = (keyword("tenant", "t1")?, keyword("brand", "nike")?);
+    /// let compiler = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin())?;
+    /// let compiled = compiler
+    ///     .compile("red shoes", &DefaultFields::all(&schema), &QueryLimits::default())
+    ///     .with_filter([tenant.clone()])
+    ///     .with_soft_filter([nike.clone()]);
+    /// // Both filter the query; only the soft one may be dropped by the filter step.
+    /// let root = compiled.root().ok_or("no root")?;
+    /// assert_eq!(root.filter, [tenant.clone(), nike.clone()]);
+    /// assert_eq!((compiled.filter(), compiled.soft_filter()), (&[tenant][..], &[nike][..]));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn with_soft_filter(mut self, filter: impl IntoIterator<Item = Filter>) -> Self {
+        let filter: Vec<Filter> = filter
+            .into_iter()
+            .filter(|f| !self.filter.contains(f))
+            .collect();
+        if filter.is_empty() {
+            return self;
+        }
+        let query = std::mem::replace(&mut self.query, Query::MatchAll);
+        let (query, wrapped) = join(query, &filter, self.part.as_ref());
+        self.query = query;
+        self.wrapped |= wrapped;
+        for f in filter {
+            if !self.soft_filter.contains(&f) {
+                self.soft_filter.push(f);
+            }
+        }
+        self
+    }
+
+    /// This compilation searching `query` in place of [`Self::query`], joined to the request filters ([`Self::filter`],
+    /// then [`Self::soft_filter`]) as [`Self::with_filter`] joins them (SPEC §7.1.1, ROADMAP 8.2.13, 8.2.14): a caller
+    /// cannot drop a request filter by replacing the query, so no relaxation level searches without the hard ones, and
+    /// none before the filter step without the soft ones. Pass a query without the request filters: a root filter equal
+    /// to one of them is not added again, and counts as that one (the filter step drops it when it is soft).
     ///
     /// The clauses keep describing the new query only while it holds their parts where they were ([`Self::parts`]): a
     /// one-part compilation's part as itself or as the first `must` clause of a `bool` without `should` clauses, or, for
     /// any other compilation, a root without `should` clauses or a `minimum_should_match` whose `must` starts with the
     /// clauses' entries and whose `must_not` holds theirs at the same indexes. A caller may add exclusions after them,
     /// which every level keeps with the root's `must_not`, and required clauses after them ([`Self::extra_must`],
-    /// ROADMAP 8.2.15), which every step carries unchanged beside the ones it rebuilds from the clauses. Otherwise [`Self::parts`]
-    /// and [`Self::root`] are `None`, and the word levels of the cascade build no step from the clauses: a one-part
+    /// ROADMAP 8.2.15), which every step carries unchanged beside the ones it rebuilds from the clauses. Otherwise
+    /// [`Self::parts`] and [`Self::root`] are `None`, and the word levels of the cascade build no step from the clauses: a one-part
     /// compilation's again once a query holds its part, any other's from then on. L5 `fallback` keeps the request
-    /// filter beside the new root `bool`'s `must_not` and `filter`, and the filter step drops the request filter alone
+    /// filters beside the new root `bool`'s `must_not` and `filter`, and the filter step drops the soft ones alone
     /// (SPEC §7.6). The text, the clauses' spans and [`Self::effective`] still state what the user wrote. The new query
     /// is not checked against [`Self::limits`]: a search checks it as it checks any query (SPEC §7.1.3).
     ///
@@ -484,10 +552,17 @@ impl Compiled {
         if self.part.is_none() && !self.holds_parts(&query) {
             self.detached = true;
         }
-        (self.query, self.wrapped) = if self.filter.is_empty() {
+        // The hard filters, then the soft ones (ROADMAP 8.2.13), as they were joined.
+        let filters: Vec<Filter> = self
+            .filter
+            .iter()
+            .chain(&self.soft_filter)
+            .cloned()
+            .collect();
+        (self.query, self.wrapped) = if filters.is_empty() {
             (query, false)
         } else {
-            join(query, &self.filter, self.part.as_ref())
+            join(query, &filters, self.part.as_ref())
         };
         self
     }
@@ -911,6 +986,7 @@ fn finish(
         limits: *limits,
         synonyms,
         filter: Vec::new(),
+        soft_filter: Vec::new(),
         detached: false,
         wrapped: false,
     }

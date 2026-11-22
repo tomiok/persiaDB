@@ -95,10 +95,20 @@ fn compile(views: &CollectionViews<'_>, text: &str, filtered: bool) -> Compiled 
         .unwrap()
         .compile(text, &DefaultFields::all(schema), &QueryLimits::default());
     if filtered {
-        compiled.with_filter([tag_is(field(views, "tag"), "x")])
+        compiled.with_soft_filter([tag_is(field(views, "tag"), "x")])
     } else {
         compiled
     }
+}
+
+/// `query` with every filter of its root `bool` marked soft (ROADMAP 8.2.13), as a request's `soft_filter`: the filter
+/// step may drop them all.
+fn marked(query: &Query) -> RelaxedQuery<'_> {
+    let soft = match query {
+        Query::Bool(root) => root.filter.as_slice(),
+        _ => &[],
+    };
+    RelaxedQuery::from(query).with_soft_filter(soft)
 }
 
 fn plan(views: &CollectionViews<'_>, json: &str) -> RelaxPlan {
@@ -451,7 +461,7 @@ fn without_l5_the_filter_step_follows_the_last_word_level() {
     });
     let out = run(
         &views,
-        &programmatic,
+        marked(&programmatic),
         &request(10),
         r#"{"min_results": 3, "filters": "last_resort"}"#,
     );
@@ -684,7 +694,7 @@ fn a_root_of_should_clauses_requires_one_of_them_without_its_filters() {
     });
     let out = run(
         &views,
-        &query,
+        marked(&query),
         &request(10),
         r#"{"min_results": 4, "levels": [], "filters": "last_resort"}"#,
     );
@@ -1221,7 +1231,7 @@ impl L0 {
     fn relaxed(&self) -> RelaxedQuery<'_> {
         match self {
             Self::Compiled(compiled) => compiled.as_ref().into(),
-            Self::Query(query) => query.into(),
+            Self::Query(query) => marked(query),
         }
     }
 }

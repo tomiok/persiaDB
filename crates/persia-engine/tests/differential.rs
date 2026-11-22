@@ -27,7 +27,8 @@
 //!    from 8 characters, after the tier step `fuzzy:1` when a term takes 2), then L5 `fallback` (every live document
 //!    the root's filters keep and its `must_not` does not match, by recency: memtable first, then segments and docids
 //!    descending), and under `filters: "last_resort"` L6
-//!    `filters` (the root without its filters, when it has some and searches a word), each step's matches the earlier
+//!    `filters` (the root without its filters, when it has some and searches a word: the case's filter is the soft one,
+//!    `soft_filter` or marked soft, ROADMAP 8.2.13), each step's matches the earlier
 //!    steps lack, scored as the reference scores that step; L0 alone, ranked as a plain search, when it has
 //!    `min_results` hits. Every step after L0 is held to the case's `max_expansions` and `max_terms` beside the steps it
 //!    excludes (SPEC §7.1.3): `applied` lists it `:cut` or `:skipped` as the reference does. The response is flagged
@@ -85,7 +86,7 @@ use std::sync::Arc;
 use persia_analysis::AnalyzerRegistry;
 use persia_engine::db::{
     CollectionSnapshot, CollectionViews, Database, DatabaseOptions, Execution, Located,
-    ManualClock, RelaxedResults, SearchHit, SearchRequest, SegmentIds, Threads,
+    ManualClock, RelaxedQuery, RelaxedResults, SearchHit, SearchRequest, SegmentIds, Threads,
 };
 use persia_engine::document::{Document, Value};
 use persia_engine::memtable::MemtableView;
@@ -1447,7 +1448,7 @@ fn check(
         };
         let mut compiled = text_compiler.compile(&text.render(), &defaults, &compile_limits);
         if let Some(f) = &text.filter {
-            compiled = compiled.with_filter([f.clone()]);
+            compiled = compiled.with_soft_filter([f.clone()]);
         }
         let root = text.root(&case.params, &fields);
         prop_assert_eq!(
@@ -1498,7 +1499,7 @@ fn check(
             if bound.iter().any(|r| r.cut) {
                 cover("synonyms compiled cut".to_owned());
                 if let Some(f) = &text.filter {
-                    at_bound = at_bound.with_filter([f.clone()]);
+                    at_bound = at_bound.with_soft_filter([f.clone()]);
                 }
                 bound_compiled = Some((at_bound, bound));
             }
@@ -2304,7 +2305,20 @@ fn search_relaxed(
     exec: &Execution,
 ) -> RelaxedResults {
     match query {
-        Engine::Query(q) => views.search_relaxed(q, request, relax, exec),
+        // The root's filters are the case's soft filter (ROADMAP 8.2.13): `last_resort` may drop them, as it may the
+        // compiled text's `soft_filter`. Hard filters, which no level drops, are `tests/relax_hard_filters.rs`'s.
+        Engine::Query(q) => {
+            let soft = match q {
+                Query::Bool(root) => root.filter.as_slice(),
+                _ => &[],
+            };
+            views.search_relaxed(
+                RelaxedQuery::from(q).with_soft_filter(soft),
+                request,
+                relax,
+                exec,
+            )
+        }
         Engine::Compiled(c) => views.search_relaxed(c, request, relax, exec),
     }
     .unwrap()
