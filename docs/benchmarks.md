@@ -161,6 +161,20 @@ Documents and postings per second.
 |---|--:|--:|--:|
 | 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.1) | 78.9 K | 45.4 M | 69.6 K |
 
+`cargo bench -p persia-engine --bench segment -- memtable/put_rejected` (ROADMAP 6.1.6): one `put` the memtable rejects
+after indexing part of it, into a memtable holding the 2 000 documents. `body` (120 words none indexed before) and
+`brand` are indexed, then a field under a registered analyzer without the length guard fails on a token over 32 KiB,
+and the put is undone. Before 6.1.6 the undo rehashed every field's whole term table (about 5 000 terms in `body`);
+now it empties the slots of the terms the put added. Rejected puts per second; the rest of a rejected put (the
+document's encoding, analyzing a 40 000-byte value, interning) dominates, so the undo's share was about a tenth. The
+undo now costs the terms the put added, where it cost the field's whole vocabulary (measured here at 2 000 documents
+only).
+
+| Recorded | `memtable/put_rejected` |
+|---|--:|
+| 2026-11-22, rustc 1.99.0, AMD Ryzen 5 3600, Linux; full rehash (before ROADMAP 6.1.6) | 18.5 K |
+| 2026-11-22, rustc 1.99.0, AMD Ryzen 5 3600, Linux; slots of the added terms (ROADMAP 6.1.6) | 20.6 K |
+
 ## `persia-engine` segment merging
 
 `cargo bench -p persia-engine --bench segment -- segment_merge`: the 2 000 documents of the segment building
