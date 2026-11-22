@@ -276,6 +276,11 @@ fn write_into(image: &mut Vec<u8>, offset: u64, data: &[u8]) {
 }
 
 impl ContainerFile for SimFile {
+    /// A clone: the same simulated file, faults included.
+    fn try_clone_handle(&self) -> io::Result<Self> {
+        Ok(self.clone())
+    }
+
     fn file_len(&self) -> io::Result<u64> {
         Ok(u64_from_usize(self.lock().current.len()))
     }

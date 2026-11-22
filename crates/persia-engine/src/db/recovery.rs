@@ -26,7 +26,7 @@ use std::sync::Arc;
 use persia_format::frame::FrameKind;
 use persia_format::superblock::Superblock;
 use persia_storage::Storage;
-use persia_storage::container::{Container, ContainerFile};
+use persia_storage::container::{Container, ContainerFile, FrameRef};
 
 use super::{
     Collection, ContainerObjects, Database, DatabaseError, DatabaseOptions, LiveSegment,
@@ -89,6 +89,7 @@ impl<F: ContainerFile + Sync> Database<F> {
     fn replay(&mut self) -> Result<(), DatabaseError> {
         let seq = self.manifest.seq();
         for chunk in wal_chunks(self.wal.log(), seq, true)? {
+            let chunk = chunk.offset;
             let frame = self
                 .wal
                 .log()
@@ -153,17 +154,7 @@ pub(super) fn load<F: ContainerFile + Sync>(
     container: &Container<F>,
     mut memtable: impl FnMut(&str, &CollectionSchema) -> Result<Memtable, DatabaseError>,
 ) -> Result<(Manifest, BTreeMap<String, Collection>), DatabaseError> {
-    let sb = *container.superblock();
-    let manifest = if sb.seq == 0 {
-        // Created, but the first commit did not complete.
-        Manifest::empty()
-    } else {
-        let frame = container.read_frame_source(sb.manifest_off, MAX_MANIFEST_LEN)?;
-        let manifest = Manifest::decode(&frame.payload)?;
-        check_slot(&manifest, &sb)?;
-        manifest
-    };
-    manifest.check_layout(Layout::Container)?;
+    let manifest = read_manifest(container)?;
     let mut collections = BTreeMap::new();
     {
         let objects = ContainerObjects::new(container, &manifest);
@@ -189,7 +180,26 @@ pub(super) fn load<F: ContainerFile + Sync>(
     Ok((manifest, collections))
 }
 
-/// The positions of the `WalChunk` frames to replay onto the manifest loaded at `loaded_seq`, in log order (SPEC
+/// Step 2 of the open sequence (module docs): the manifest `container`'s superblock commits (empty at `seq` 0),
+/// decoded and checked against the slot and the local layout (ROADMAP 6.3.7). A refresh reads the next one with it.
+pub(super) fn read_manifest<F: ContainerFile>(
+    container: &Container<F>,
+) -> Result<Manifest, DatabaseError> {
+    let sb = *container.superblock();
+    let manifest = if sb.seq == 0 {
+        // Created, but the first commit did not complete.
+        Manifest::empty()
+    } else {
+        let frame = container.read_frame_source(sb.manifest_off, MAX_MANIFEST_LEN)?;
+        let manifest = Manifest::decode(&frame.payload)?;
+        check_slot(&manifest, &sb)?;
+        manifest
+    };
+    manifest.check_layout(Layout::Container)?;
+    Ok(manifest)
+}
+
+/// The `WalChunk` frames to replay onto the manifest loaded at `loaded_seq`, in log order (SPEC
 /// §8.6): every `WalChunk` from the committed `wal_start` on, including those recovery found after `log_end`.
 ///
 /// A read-only open (`writer` false) holds no lock, so a writer may commit while the tail is scanned. It stops at
@@ -211,7 +221,7 @@ pub(super) fn wal_chunks<F: ContainerFile>(
     container: &Container<F>,
     loaded_seq: u64,
     writer: bool,
-) -> Result<Vec<u64>, DatabaseError> {
+) -> Result<Vec<FrameRef>, DatabaseError> {
     let log_end = container.superblock().log_end;
     let mut chunks = Vec::new();
     for frame in container.frames() {
@@ -223,7 +233,7 @@ pub(super) fn wal_chunks<F: ContainerFile>(
             }
         }
         if frame.kind == FrameKind::WalChunk {
-            chunks.push(frame.offset);
+            chunks.push(*frame);
         }
     }
     Ok(chunks)
@@ -284,7 +294,7 @@ fn check_slot(manifest: &Manifest, sb: &Superblock) -> Result<(), DatabaseError>
 
 /// Opens a committed segment and its tombstone sidecar through the container's objects, which check their frames
 /// (ROADMAP 6.3.6, 6.3.7), and checks both against the manifest entry.
-fn open_segment<F: ContainerFile + Sync>(
+pub(super) fn open_segment<F: ContainerFile + Sync>(
     objects: &ContainerObjects<'_, F>,
     collection: &str,
     entry: &SegmentEntry,

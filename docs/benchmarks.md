@@ -222,6 +222,18 @@ Commits that tombstone older copies (ROADMAP 6.4.3): `commit_upserts` commits 2 
 |---|--:|--:|--:|--:|
 | 2026-10-28, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.4, 6750fe8) | 201 K | 153 K | 174 K | 97.4 K |
 
+## `persia-engine` read-only refresh
+
+`cargo bench -p persia-engine --bench read_only`: a database of 4 committed segments of 2 000 documents of about 40
+words and 2 000 more unflushed in the WAL (20 synced batches). `refresh_one_put` is a synced put by the writer, then
+`ReadOnlyDatabase::refresh` (incremental: the container is reopened and the one new chunk replayed, ADR-0060);
+`refresh_unchanged` a refresh with nothing new; `reopen` the new `ReadOnlyDatabase::open_on` a reader needed before
+(every segment opened, the 2 000-record backlog replayed). The container is a `SimFile`. Time per call.
+
+| Recorded | `refresh_one_put` | `refresh_unchanged` | `reopen` |
+|---|--:|--:|--:|
+| 2026-11-22, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.6.6) | 1.96 ms | 2.07 ms | 56.0 ms |
+
 ## `persia-engine` query execution
 
 `cargo bench -p persia-engine --bench search`: one segment of 50 000 documents of 5 to 34 words drawn from 200

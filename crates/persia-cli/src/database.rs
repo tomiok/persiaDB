@@ -44,7 +44,7 @@ pub fn verify(out: &mut dyn Write, path: &Path, scan: Scan) -> Result<()> {
     let report = docs
         .verify()
         .with_context(|| format!("verifying {}", path.display()))?;
-    let analysis = analysis(docs.skipped_analysis());
+    let analysis = analysis(&docs.skipped_analysis());
     let db = ReadOnlyBlobDatabase::with_lease(lease, docs, path)
         .with_context(|| format!("opening the blob pack of {}", path.display()))?;
     let tail = match report.tail {

@@ -187,8 +187,8 @@ fn an_open_skipping_analysis_verifies_and_lists_the_skipped_fields() {
     let path = dir.path().join("app.persia");
     database(&path);
     let ro = ReadOnlyDatabase::open_skipping_analysis(&path, &AnalyzerRegistry::new()).unwrap();
-    let skipped: Vec<_> = ro
-        .skipped_analysis()
+    let found = ro.skipped_analysis();
+    let skipped: Vec<_> = found
         .iter()
         .map(|s| (s.collection.as_str(), s.field.as_str(), s.analyzer.as_str()))
         .collect();

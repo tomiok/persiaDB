@@ -705,8 +705,9 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyBlobDatabase<F> {
         vfs: Arc<dyn Vfs<File = F>>,
         pack: impl AsRef<Path>,
     ) -> Result<Self, Error> {
-        let container = db.container().path().ok_or(Error::NoContainerPath)?;
-        let lease = ReaderLease::take_in(&vfs, pack.as_ref(), container).map_err(lease_error)?;
+        let container = db.container();
+        let path = container.path().ok_or(Error::NoContainerPath)?;
+        let lease = ReaderLease::take_in(&vfs, pack.as_ref(), path).map_err(lease_error)?;
         Self::with_lease_in(lease, db, vfs, pack)
     }
 
@@ -766,7 +767,9 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyBlobDatabase<F> {
         self.lease.is_held().then_some(&self.lease)
     }
 
-    /// The read-only database.
+    /// The read-only database. Refresh through [`ReadOnlyBlobDatabase::refresh`], not its
+    /// [`ReadOnlyDatabase::refresh`]: that one advances the documents without the pack and the reader lease, so a blob
+    /// bound since reads as not found (ADR-0060).
     pub fn database(&self) -> &ReadOnlyDatabase<F> {
         &self.db
     }
@@ -776,10 +779,11 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyBlobDatabase<F> {
         &self.blobs
     }
 
-    /// Catches up with the writer: `reopened`, a newer read-only open of the same database (the engine's read-only
-    /// open does not follow later commits, SPEC §8.4), then the pack is refreshed ([`PackStore::refresh`]), which
-    /// opens a pack the writer has created since (SPEC §9.3). The documents change only together with that refresh:
-    /// the writer binds a blob before it logs a document that references it (SPEC §9.5), so every document
+    /// Catches up with the writer: `reopened`, a newer read-only open of the same database (taken here instead of
+    /// [`ReadOnlyDatabase::refresh`], which would advance the documents before this pairing, ADR-0060), then the
+    /// pack is refreshed ([`PackStore::refresh`]), which opens a pack the writer has created since (SPEC §9.3).
+    /// The documents change only together with that refresh: the writer binds a blob before it logs a document that
+    /// references it (SPEC §9.5), so every document
     /// `reopened` shows was logged after its blob was bound, and the refresh finds the blob.
     ///
     /// `reopened` must be this database, opened again: the same `db_uuid`, at the same canonical path (a copy
@@ -826,7 +830,8 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyBlobDatabase<F> {
         if found != self.db.container().header().db_uuid {
             return Err(persia_blob::Error::PackOfAnotherDatabase { found }.into());
         }
-        let (current, other) = (self.db.container().path(), reopened.container().path());
+        let (current, other) = (self.db.container(), reopened.container());
+        let (current, other) = (current.path(), other.path());
         if current != other {
             return Err(Error::RefreshedElsewhere {
                 current: current.map(Path::to_path_buf),

@@ -84,7 +84,7 @@ pub use objects::ContainerObjects;
 use obsolete::Pin;
 pub use obsolete::{ObsoleteKind, ObsoleteObject};
 pub use policy::{CommitPolicy, CommitReason, MemtableState};
-pub use read_only::{ReadOnlyDatabase, SkippedAnalysis};
+pub use read_only::{ReadOnlyDatabase, Refreshed, SkippedAnalysis};
 pub use relaxed::{
     Correction, Relaxation, RelaxedHit, RelaxedQuery, RelaxedResults, RelaxedSearchError,
 };
@@ -227,6 +227,21 @@ pub enum DatabaseError {
         field: String,
         /// The analyzer, `name@version`.
         analyzer: String,
+    },
+    /// [`ReadOnlyDatabase::refresh`] found another database in the container (another `db_uuid`: a file put at the
+    /// path), or an older commit of this one (`found` below `current`: a restore), so it kept the state it had
+    /// (ROADMAP 6.6.6, ADR-0060). Not corruption; open the reader again to follow the file.
+    #[error(
+        "refresh refused: the container holds {} (seq {found}; the reader shows seq {current})",
+        if *other_database { "another database" } else { "an older commit" }
+    )]
+    RefreshRefused {
+        /// Whether its `db_uuid` differs; otherwise its committed `seq` is older.
+        other_database: bool,
+        /// The `seq` the reader shows.
+        current: u64,
+        /// The committed `seq` found.
+        found: u64,
     },
     /// Building a segment failed: nothing was written.
     #[error(transparent)]
