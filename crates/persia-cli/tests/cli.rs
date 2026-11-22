@@ -119,7 +119,8 @@ fn container_sweep_keeps_quarantine_unless_asked() {
 #[test]
 fn container_sweep_removes_the_packs_stale_temporary_files_unless_its_writer_lives() {
     const PACK_TMP: &str = "app.persia.blobs.tmp.0123456789abcdef.2";
-    const NOT_OURS: &str = "app.persia.blobs.tmp.0123456789ABCDEF.2";
+    // Not the pack's name (`g` is not hex). Uppercase alone is the same file on a case-insensitive volume.
+    const NOT_OURS: &str = "app.persia.blobs.tmp.0123456789abcdeg.2";
     let _serial = serial();
     let (_dir, path) = container();
     let leases = path.with_file_name("app.persia.blobs.leases");
