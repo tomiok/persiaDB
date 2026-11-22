@@ -374,6 +374,17 @@ impl TermScorer {
     }
 }
 
+/// `score` saturated at `f64::MAX` (SPEC §7.2, ROADMAP 8.1.12): a `bool`'s sum, a `boost`'s product or any other
+/// score that overflows to `+∞` is `f64::MAX`, so no hit, rank score or explanation carries `+∞`, and JSON, which has
+/// no `Infinity`, states every score as a plain number. Every node of a query saturates its own score: a `bool` the
+/// sum of its clauses' (each already saturated), a `boost` its query's times the boost, so a `boost` below 1 of an
+/// overflowing `bool` scales `f64::MAX` down. Scores are never negative, so a sum's partial sums never decrease: one
+/// saturated at the end equals one saturated at every addition. Saturating never raises a score, so each upper bound
+/// of the score (SPEC §7.3) still holds, and it is monotonic, so it never reorders two scores (ties them at most).
+pub(crate) fn saturate(score: f64) -> f64 {
+    if score > f64::MAX { f64::MAX } else { score }
+}
+
 /// `idf(t) = ln(1 + (N − df + 0.5)/(df + 0.5))` (SPEC §7.2), with `df` at most `N`: always positive.
 pub fn idf(doc_count: u64, df: u64) -> f64 {
     let df = df.min(doc_count);
