@@ -12,8 +12,8 @@
 //!    (`prefix:last`) when another word is expanded too, so a document holding the other words exactly ranks above one
 //!    that needs them completed, whatever their scores (checked against the oracle of 1).
 //!
-//! A field whose analyzer stacks tokens is not expanded (SPEC §6.3.1): schemas name built-in analyzers only, none of
-//! which stacks, so `db::relaxed`'s unit tests give a collection's memtable such an analyzer instead.
+//! A field whose analyzer stacks tokens is not expanded (SPEC §6.3.1): `tests/relax_stacking.rs` checks it through a
+//! schema naming a registered `edge_ngram` analyzer (ROADMAP 8.1.23).
 
 #![allow(clippy::unwrap_used, clippy::indexing_slicing, missing_docs)] // Tests: inputs are fixed.
 
