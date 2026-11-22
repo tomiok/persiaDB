@@ -316,13 +316,15 @@ fn with_pack_side_files() -> SimFs {
     fs
 }
 
-fn listed(fs: &SimFs) -> Vec<(String, SideFileKind, InUse)> {
+// Paths, not their display strings: `scan` joins with `Path::join`, and on Windows that writes `\`
+// into a SimFs path the tests spell with `/`. Component equality still requires each name.
+fn listed(fs: &SimFs) -> Vec<(PathBuf, SideFileKind, InUse)> {
     Container::side_files_in(fs, DB)
         .unwrap()
         .into_iter()
         .map(|f| {
             assert!(!f.removed);
-            (f.path.to_string_lossy().into_owned(), f.kind, f.in_use)
+            (f.path, f.kind, f.in_use)
         })
         .collect()
 }
@@ -336,11 +338,19 @@ fn the_packs_stale_temporary_files_are_listed_and_swept_and_its_lock_and_leases_
     let before = names(&fs);
     let want = |lock: Option<InUse>| {
         let mut want = vec![
-            (PACK_STALE[0].to_owned(), SideFileKind::Temporary, InUse::No),
-            (PACK_STALE[1].to_owned(), SideFileKind::Temporary, InUse::No),
-            (LEASES.to_owned(), SideFileKind::Leases, InUse::Unknown),
+            (
+                PathBuf::from(PACK_STALE[0]),
+                SideFileKind::Temporary,
+                InUse::No,
+            ),
+            (
+                PathBuf::from(PACK_STALE[1]),
+                SideFileKind::Temporary,
+                InUse::No,
+            ),
+            (PathBuf::from(LEASES), SideFileKind::Leases, InUse::Unknown),
         ];
-        want.extend(lock.map(|l| (PACK_LOCK.to_owned(), SideFileKind::Lock, l)));
+        want.extend(lock.map(|l| (PathBuf::from(PACK_LOCK), SideFileKind::Lock, l)));
         want.sort_by(|a, b| a.0.cmp(&b.0));
         want
     };
@@ -383,8 +393,8 @@ fn the_packs_stale_temporary_files_are_listed_and_swept_and_its_lock_and_leases_
     assert_eq!(
         listed(&fs),
         [
-            (LEASES.to_owned(), SideFileKind::Leases, InUse::Unknown),
-            (PACK_LOCK.to_owned(), SideFileKind::Lock, InUse::No),
+            (PathBuf::from(LEASES), SideFileKind::Leases, InUse::Unknown),
+            (PathBuf::from(PACK_LOCK), SideFileKind::Lock, InUse::No),
         ]
     );
     assert_eq!(
@@ -411,20 +421,20 @@ fn a_held_pack_lock_keeps_the_packs_temporary_files() {
     assert_eq!(
         listed(&fs),
         [
-            (LEASES.to_owned(), SideFileKind::Leases, InUse::Unknown),
-            (PACK_LOCK.to_owned(), SideFileKind::Lock, InUse::Yes),
+            (PathBuf::from(LEASES), SideFileKind::Leases, InUse::Unknown),
+            (PathBuf::from(PACK_LOCK), SideFileKind::Lock, InUse::Yes),
             (
-                PACK_STALE[0].to_owned(),
+                PathBuf::from(PACK_STALE[0]),
                 SideFileKind::Temporary,
                 InUse::Yes
             ),
             (
-                PACK_STALE[1].to_owned(),
+                PathBuf::from(PACK_STALE[1]),
                 SideFileKind::Temporary,
                 InUse::Yes
             ),
             (
-                container_stale.to_owned(),
+                PathBuf::from(container_stale),
                 SideFileKind::Temporary,
                 InUse::No
             ),

@@ -398,7 +398,10 @@ fn a_pack_rewrite_stopped_before_its_rename_is_kept_while_alive_and_swept_once_k
         for outcome in [Outcome::Go, Outcome::KillThenOpen, Outcome::KillThenSweep] {
             let ctx = format!("store_only {store_only}, {outcome:?}");
             let dir = KeptOnFailure(Some(tempfile::tempdir().unwrap()));
-            let dir_path = dir.0.as_ref().unwrap().path().to_owned();
+            // `open`, `side_files` and `sweep_stale_files` report the container's canonical path
+            // (macOS: `/var` is a symlink to `/private/var`). The temporary `read_dir` finds is the
+            // same file only when this directory is that path too.
+            let dir_path = std::fs::canonicalize(dir.0.as_ref().unwrap().path()).unwrap();
             let path = dir_path.join("app.persia");
             let corpus = create(&path, &mut rng);
             let pack = path.with_file_name("app.persia.blobs");
