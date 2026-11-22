@@ -51,6 +51,12 @@ pub struct PutBlobOptions {
     pub user_meta: BTreeMap<String, String>,
     /// The id the caller expects the bytes to hash to; a mismatch is [`Error::BlobIdMismatch`] and binds nothing.
     pub expected_id: Option<BlobId>,
+    /// The length in bytes the caller expects the whole blob to have; a mismatch is [`Error::BlobSizeMismatch`] and
+    /// binds nothing. The reader is read at most one byte past it: a longer reader is that mismatch as soon as the
+    /// extra byte is read, and nothing past the blob is staged; a shorter one is checked when it ends, after
+    /// `expected_id`. A resume needs this or `expected_id` ([`Error::ResumeUnchecked`]): a reader that ends where the
+    /// kept run ends would otherwise bind that shorter blob (ROADMAP 9.3.7).
+    pub expected_size: Option<u64>,
     /// The chunk size to store a new blob with, at least [`ChunkSize::MIN`] (SPEC §9.2); 4 MiB by default. A
     /// duplicate keeps the bound blob's.
     pub chunk_size: ChunkSize,
@@ -59,8 +65,9 @@ pub struct PutBlobOptions {
     /// most [`MAX_BIND_BUDGET`].
     pub bind_budget: Duration,
     /// The upload to resume (SPEC §9.4, ROADMAP 9.3.4, ADR-0053): the token of an [`Error::UploadInterrupted`], with
-    /// a reader that yields the blob from its start. `None` (the default) starts a new upload. A store that cannot
-    /// resume (the pack) fails with [`Error::ResumeUnsupported`] before any byte is read. A token is not checked
+    /// a reader that yields the blob from its start, and `expected_id` or `expected_size` set
+    /// ([`Error::ResumeUnchecked`] otherwise, ROADMAP 9.3.7). `None` (the default) starts a new upload. A store that
+    /// cannot resume (the pack) fails with [`Error::ResumeUnsupported`] before any byte is read. A token is not checked
     /// against the store: one of an unknown upload, or of another prefix or bucket, stages the blob under its upload
     /// id, or under a new one when chunks there conflict ([`ResumeToken`]).
     pub resume: Option<ResumeToken>,
@@ -72,6 +79,7 @@ impl Default for PutBlobOptions {
             mime: DEFAULT_MIME.to_owned(),
             user_meta: BTreeMap::new(),
             expected_id: None,
+            expected_size: None,
             chunk_size: ChunkSize::DEFAULT,
             bind_budget: DEFAULT_BIND_BUDGET,
             resume: None,
@@ -141,13 +149,16 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     ///
     /// The upload id is pinned before any byte is read. A blob of at most [`SMALL_BLOB_MAX`] bytes is hashed whole,
     /// then stored and bound by [`BlobStore::bind_small`]; a larger one is cut by a [`Chunker`](persia_blob::Chunker) and staged a window
-    /// at a time ([`WINDOW_BYTES`]). Once the reader ends the id is checked against `expected_id`, pinned, and bound;
+    /// at a time ([`WINDOW_BYTES`]). Once the reader ends the id is checked against `expected_id` and the size against
+    /// `expected_size`, the id pinned, and the blob bound;
     /// a bind whose outcome is unknown is retried with the same manifest (with `bind_small` for a small blob), with
     /// backoff, within `bind_budget`, and its upload is never discarded. A duplicate's chunks, and a mismatched upload's, are discarded best-effort.
     ///
     /// **Resuming** (SPEC §9.4, ROADMAP 9.3.4, ADR-0053). On a store that can resume ([`BlobStore::resumable`]: the
     /// remote layout), a blob that fails after its upload staged chunks fails with [`Error::UploadInterrupted`],
-    /// whose token a later call passes as [`PutBlobOptions::resume`] with a reader of the whole blob from its start.
+    /// whose token a later call passes as [`PutBlobOptions::resume`] with a reader of the whole blob from its start
+    /// and the whole blob's `expected_id` or `expected_size` (ROADMAP 9.3.7: a reader that ends where the kept run
+    /// ends is otherwise a shorter blob nothing tells from the one staged).
     /// That call pins the token's upload before listing it ([`BlobStore::resume`]), reads past the bytes of the run
     /// of chunks it kept without uploading them (each checked against the staged chunk's CRC32C), and stages the
     /// rest under the same upload. The token's chunk size is the blob's, whatever `chunk_size` says. A chunk staged
@@ -175,6 +186,8 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     /// - [`Error::ChunkSizeBelowMin`] for a chunk size below [`ChunkSize::MIN`], however it was built (the token's
     ///   when resuming), and [`Error::InvalidBlobRef`] for an invalid `mime` or `user_meta`, and
     ///   [`Error::BindBudgetAboveMax`] for a `bind_budget` above [`MAX_BIND_BUDGET`], before any byte is read;
+    /// - [`Error::ResumeUnchecked`] for a `resume` with neither `expected_id` nor `expected_size`, before any byte is
+    ///   read or written and before the store is asked to resume (ROADMAP 9.3.7);
     /// - [`Error::ResumeUnsupported`] for a `resume` on a store that cannot resume, before any byte is read;
     /// - [`Error::UploadInterrupted`], on a store that can resume, for a reader failure ([`Error::Read`]) or a store
     ///   error ([`Error::Storage`], [`Error::StagedChunkConflict`], [`Error::Corrupt`] while staging or restaging)
@@ -184,18 +197,17 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     /// - [`Error::Read`] when the reader fails, [`Error::InvalidChunking`] for a blob of more than `u32::MAX` chunks;
     /// - [`Error::InvalidResume`] when the reader of a resume ends inside the kept run or is not the blob the upload
     ///   staged there (nothing staged);
-    /// - [`Error::BlobIdMismatch`] when the bytes do not hash to `expected_id` (nothing bound);
+    /// - [`Error::BlobSizeMismatch`] when the reader yields more than `expected_size` bytes (found at the extra byte,
+    ///   which is the last one read), else [`Error::BlobIdMismatch`] when the bytes do not hash to `expected_id`, then
+    ///   [`Error::BlobSizeMismatch`] when they are fewer than `expected_size`; both are checked before the last window
+    ///   is staged and before a resume's restage, and nothing is bound either way;
     /// - an error with [`Error::is_bind_outcome_unknown`] when the outcome stayed unknown for the whole `bind_budget`: the blob may be
     ///   bound later, and nothing references it (its upload is left to GC). Also before the budget runs out when the
     ///   store refuses every write until it is reopened: that error has [`Error::is_store_poisoned`] too, and only
     ///   reopening the store tells whether the blob was bound (ROADMAP 9.4.7);
     /// - [`Error::Corrupt`] when the manifest bound under the id does not name it or another size;
     /// - the store's errors, after which nothing this call returned references the blob.
-    pub fn put_blob(
-        &self,
-        mut reader: impl Read,
-        options: &PutBlobOptions,
-    ) -> Result<(BlobRef, Pins)> {
+    pub fn put_blob(&self, reader: impl Read, options: &PutBlobOptions) -> Result<(BlobRef, Pins)> {
         // A resumed blob keeps the chunk size it was staged with: the chunk objects do not record it (SPEC §9.4).
         let chunk_size = options
             .resume
@@ -215,12 +227,19 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         // The rules of `mime` and `user_meta` checked on an empty blob, so a bad option reads and stages nothing.
         reference(blob_id_of(&[]), 0, chunk_size, options)?;
         if let Some(token) = options.resume {
+            // ROADMAP 9.3.7: a reader that ends where the kept run ends is a whole, shorter blob; only the caller's
+            // id or size tells it from the one the upload staged.
+            if options.expected_id.is_none() && options.expected_size.is_none() {
+                return Err(Error::ResumeUnchecked);
+            }
             return self.put_resumed(reader, token, options);
         }
         let upload_id = UploadId::new(self.next_upload_id());
         // SPEC §9.5: pinned before the first chunk write.
         let mut pins = self.pins.pin([Pinned::Upload(upload_id)]);
 
+        // ROADMAP 9.3.7: a reader longer than `expected_size` is read one byte past it, never further.
+        let mut reader = reader.take(size_bound(options));
         let mut head = Vec::new();
         (&mut reader)
             .take(SMALL_BLOB_MAX.saturating_add(1))
@@ -229,7 +248,9 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         let small = u64::try_from(head.len()).is_ok_and(|len| len <= SMALL_BLOB_MAX);
         let (manifest, outcome) = if small {
             let (crcs, blob) = chunk_crcs(&head[..], chunk_size, |_| Ok(()))?;
-            let manifest = self.checked_manifest(blob, upload_id, crcs, options, false)?;
+            self.check_expected(&blob, upload_id, options, false)?;
+            let manifest =
+                BlobManifest::new(blob.blob_id, blob.size, blob.chunk_size, upload_id, crcs)?;
             pins.add(Pinned::Blob(manifest.blob_id()));
             // An unknown outcome is retried with `bind_small` and the same bytes, never `bind` (the contract).
             let outcome = self.bind(upload_id, options, || {
@@ -248,6 +269,10 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
             let mut staged: Vec<Chunk> = Vec::new();
             let bytes = io::Cursor::new(head).chain(reader);
             let (crcs, blob) = chunk_crcs(bytes, chunk_size, |chunk| {
+                // Nothing past the blob the caller expects is staged.
+                if let Some(e) = past_expected(&chunk, chunk_size, options) {
+                    return Err(e);
+                }
                 staged.push(chunk);
                 if staged.len() >= window {
                     attempted = true;
@@ -255,12 +280,20 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
                 }
                 Ok(())
             })
-            .map_err(|e| interrupted(token.filter(|_| attempted), e))?;
+            .map_err(|e| {
+                if matches!(e, Error::BlobSizeMismatch { .. }) {
+                    self.discard(upload_id);
+                }
+                interrupted(token.filter(|_| attempted), e)
+            })?;
+            // Checked before the last window is staged: a mismatch stages nothing more.
+            self.check_expected(&blob, upload_id, options, true)?;
             // The last window: a chunk write is attempted only when it holds a chunk.
             let attempted = attempted || !staged.is_empty();
             self.stage(upload_id, &mut staged)
                 .map_err(|e| interrupted(token.filter(|_| attempted), e))?;
-            let manifest = self.checked_manifest(blob, upload_id, crcs, options, true)?;
+            let manifest =
+                BlobManifest::new(blob.blob_id, blob.size, blob.chunk_size, upload_id, crcs)?;
             pins.add(Pinned::Blob(manifest.blob_id()));
             let outcome = self.bind(upload_id, options, || self.store.bind(&manifest));
             (manifest, bind_interrupted(token, outcome))
@@ -355,29 +388,22 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         Ok(())
     }
 
-    /// The blob's manifest once its id is checked against `expected_id`; a mismatch discards the upload when it
-    /// `staged` chunks this call owns (the small path stages nothing before `bind_small`; a resume passes `false`
-    /// for the token's upload, which may be bound to another blob, ADR-0053).
-    fn checked_manifest(
+    /// Checks the blob read against `expected_id` and `expected_size` ([`expected`]), before the last window is staged
+    /// or anything restaged; a mismatch discards the upload when it `staged` chunks this call owns (the small path
+    /// stages nothing before `bind_small`; a resume passes `false` for the token's upload, which may be bound to
+    /// another blob, ADR-0053).
+    fn check_expected(
         &self,
-        blob: persia_blob::ChunkedBlob,
+        blob: &persia_blob::ChunkedBlob,
         upload_id: UploadId,
-        crcs: Vec<u32>,
         options: &PutBlobOptions,
         staged: bool,
-    ) -> Result<BlobManifest> {
-        if let Some(expected) = options.expected_id
-            && expected != blob.blob_id
-        {
+    ) -> Result<()> {
+        expected(blob, options).inspect_err(|_| {
             if staged {
                 self.discard(upload_id);
             }
-            return Err(Error::BlobIdMismatch {
-                expected,
-                actual: blob.blob_id,
-            });
-        }
-        BlobManifest::new(blob.blob_id, blob.size, blob.chunk_size, upload_id, crcs)
+        })
     }
 
     /// `bind` called until its outcome is known (SPEC §9.4, ADR-0051 item 3), with whether an outcome was ever
@@ -563,6 +589,57 @@ fn chunk_crcs(
         sink(chunk)
     })?;
     Ok((crcs, blob))
+}
+
+/// How many bytes `put_blob` reads of its reader: one past `expected_size` when one is given (ROADMAP 9.3.7), so a
+/// longer reader is found without reading or staging the rest.
+fn size_bound(options: &PutBlobOptions) -> u64 {
+    options
+        .expected_size
+        .map_or(u64::MAX, |size| size.saturating_add(1))
+}
+
+/// The blob read against `expected_id` and `expected_size` (SPEC §9.6, ROADMAP 9.3.7). A reader longer than
+/// `expected_size` was cut one byte past it ([`size_bound`]), so its id is a prefix's: that is a size mismatch, found
+/// first. Otherwise the id is checked first, then the size.
+fn expected(blob: &persia_blob::ChunkedBlob, options: &PutBlobOptions) -> Result<()> {
+    let size_mismatch = |expected| Error::BlobSizeMismatch {
+        expected,
+        actual: blob.size,
+    };
+    if let Some(expected) = options.expected_size
+        && blob.size > expected
+    {
+        return Err(size_mismatch(expected));
+    }
+    if let Some(expected) = options.expected_id
+        && expected != blob.blob_id
+    {
+        return Err(Error::BlobIdMismatch {
+            expected,
+            actual: blob.blob_id,
+        });
+    }
+    match options.expected_size {
+        Some(expected) if expected != blob.size => Err(size_mismatch(expected)),
+        _ => Ok(()),
+    }
+}
+
+/// [`Error::BlobSizeMismatch`] when `chunk` ends past `expected_size`: the reader is longer than the blob the caller
+/// expects, and nothing from here on is staged. `actual` is what was read, at most one byte past `expected_size`.
+fn past_expected(chunk: &Chunk, chunk_size: ChunkSize, options: &PutBlobOptions) -> Option<Error> {
+    let expected = options.expected_size?;
+    let end = u64::from(chunk.index())
+        .checked_mul(u64::from(chunk_size.get()))
+        .and_then(|start| start.checked_add(u64::try_from(chunk.bytes().len()).ok()?));
+    match end {
+        Some(end) if end <= expected => None,
+        end => Some(Error::BlobSizeMismatch {
+            expected,
+            actual: end.unwrap_or(u64::MAX),
+        }),
+    }
 }
 
 /// The `BlobRef` of the blob `blob_id` with `options`' `mime` and `user_meta`.

@@ -1158,3 +1158,107 @@ fn a_bind_budget_above_the_cap_reads_nothing() {
     };
     assert!(blobs.put_blob(&b"ok"[..], &opts).is_ok());
 }
+
+/// ROADMAP 9.3.7 (SPEC §9.6): an `expected_size` the bytes are not binds nothing and discards the upload (a small blob
+/// staged none to discard); one they are stores the blob. `expected_id` is checked first.
+#[test]
+fn an_expected_size_that_differs_binds_nothing_and_one_that_matches_stores_the_blob() {
+    let small = SMALL_BLOB_MAX as usize;
+    for len in [0, 100, small, small + 1, 3 * MIN as usize + 7] {
+        let data = bytes(len, 40);
+        let actual = len as u64;
+        for expected in [actual + 1, actual.saturating_sub(1), 0, u64::MAX] {
+            if expected == actual {
+                continue;
+            }
+            let (store, blobs) = faulty(Faults::default());
+            let opts = PutBlobOptions {
+                expected_size: Some(expected),
+                ..options(MIN)
+            };
+            let e = blobs.put_blob(&data[..], &opts).unwrap_err();
+            // A longer reader is read one byte past `expected` (what it reports); a shorter one, whole.
+            let read = if expected < actual {
+                expected + 1
+            } else {
+                actual
+            };
+            assert!(
+                matches!(e, Error::BlobSizeMismatch { expected: x, actual: a } if x == expected && a == read),
+                "{len}, {expected}: {e:?}"
+            );
+            assert!(!e.is_corruption());
+            assert!(store.inner.bound_ids().is_empty(), "{len}, {expected}");
+            // Only a read past the small-blob bound staged chunks, which are discarded; nothing past `expected` was.
+            let discarded = store.calls().iter().any(|c| matches!(c, Call::Discard(_)));
+            assert_eq!(discarded, read > SMALL_BLOB_MAX, "{len}, {expected}");
+            let staged_past = store.calls().iter().any(
+                |c| matches!(c, Call::Stage { index, .. } if u64::from(*index) * u64::from(MIN) >= expected),
+            );
+            assert!(
+                !staged_past || expected >= actual,
+                "{len}, {expected}: staged past the blob"
+            );
+            // A shorter reader is checked before its last window is staged: one window here, so nothing is staged.
+            if expected > actual {
+                let staged = store
+                    .calls()
+                    .iter()
+                    .any(|c| matches!(c, Call::Stage { .. }));
+                assert!(
+                    !staged,
+                    "{len}, {expected}: staged before the size was checked"
+                );
+            }
+            assert!(blobs.pin_set().pinned().is_empty());
+        }
+        let (store, blobs) = faulty(Faults::default());
+        let opts = PutBlobOptions {
+            expected_size: Some(actual),
+            ..options(MIN)
+        };
+        let (r, _pins) = blobs.put_blob(&data[..], &opts).unwrap();
+        assert_eq!(r.size(), actual);
+        assert!(store.contains(&r).unwrap());
+        assert_eq!(blobs.get_blob_range(&r, 0..actual).unwrap(), data);
+
+        let (_, blobs) = faulty(Faults::default());
+        let opts = PutBlobOptions {
+            expected_id: Some(blob_id_of(b"not these bytes")),
+            expected_size: Some(actual + 1),
+            ..options(MIN)
+        };
+        let e = blobs.put_blob(&data[..], &opts).unwrap_err();
+        assert!(matches!(e, Error::BlobIdMismatch { .. }), "{len}: {e:?}");
+    }
+}
+
+/// ROADMAP 9.3.7: a blob bound already, put again with `expected_size`. A wrong size is `BlobSizeMismatch`, never the
+/// bound reference (the size is checked before the bind finds the duplicate); the right size returns the bound
+/// reference, as a duplicate does.
+#[test]
+fn a_duplicate_is_checked_against_expected_size_before_its_bound_reference_is_returned() {
+    for len in [100, 3 * MIN as usize + 7] {
+        let data = bytes(len, 41);
+        let (store, blobs) = faulty(Faults::default());
+        let (bound, _pins) = blobs.put_blob(&data[..], &options(MIN)).unwrap();
+        for wrong in [len as u64 - 1, len as u64 + 1] {
+            let opts = PutBlobOptions {
+                expected_size: Some(wrong),
+                ..options(MIN)
+            };
+            let e = blobs.put_blob(&data[..], &opts).unwrap_err();
+            assert!(
+                matches!(e, Error::BlobSizeMismatch { expected, .. } if expected == wrong),
+                "{len}, {wrong}: {e:?}"
+            );
+        }
+        let opts = PutBlobOptions {
+            expected_size: Some(len as u64),
+            ..options(MIN)
+        };
+        let (again, _pins) = blobs.put_blob(&data[..], &opts).unwrap();
+        assert_eq!(again, bound, "{len}");
+        assert_eq!(store.inner.bound_ids().len(), 1, "{len}: still one blob");
+    }
+}

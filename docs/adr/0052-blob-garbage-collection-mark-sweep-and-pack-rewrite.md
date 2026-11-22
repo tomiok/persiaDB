@@ -65,6 +65,9 @@ past a ratio of dead bytes; the writer's view as the snapshot set; no grace loca
    (`unknown_age`); a time after `now` counts as young. An unreadable manifest, marked or kept, skips the chunk phase
    (`uploads_skipped`): the upload it names is unknown. Manifests go first, so a crash leaves chunks without a
    manifest, never the reverse. The first storage error stops the sweep.
+   Amended (ROADMAP 9.5.10): under that lock, before deleting, the upload's chunks are listed again
+   (`blobs/uploads/<id>/`); they go only when that listing equals the first (index, size, `last_modified`), and any
+   difference keeps the upload that round (`SweepReport::changed`).
 5. **A pinned blob's manifest keeps its upload** (ROADMAP 9.5.8, ADR-0051 item 5). Inside the chunk delete's
    `unless_pinned`, every pinned blob is looked at: a marked one's upload is kept already, a kept manifest's upload was
    learned by the listing, and any other's manifest is read there, under the lock (it may have been bound after the
@@ -111,7 +114,8 @@ past a ratio of dead bytes; the writer's view as the snapshot set; no grace loca
 ## Consequences
 
 - A GC reads every live segment's `BlobRefs` (one record per document), the WAL from `wal_start`, and, remotely, every
-  kept manifest (one `get` each) plus 257 listings, the last of all staged chunks. Memory is one id per referenced
+  kept manifest (one `get` each) plus 257 listings, the last of all staged chunks (amended, ROADMAP 9.5.10: plus one
+  listing per expired upload, under the pin set's lock). Memory is one id per referenced
   blob and one entry per unkept upload's chunk. Fine for v1; a remote listing that streams pages, and parallel manifest
   reads, are later work.
 - The pack rewrite copies every kept byte while holding the writer mutex: `put_blob` waits for it. The ratio keeps it

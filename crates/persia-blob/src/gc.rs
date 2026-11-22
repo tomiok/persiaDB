@@ -37,6 +37,7 @@ pub struct SweepOptions {
 /// What a sweep did (SPEC §9.5). Counts are of objects: remotely, blob manifests and staged chunk objects; in the
 /// pack, blobs and chunk frames the rewrite dropped.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SweepReport {
     /// Unmarked blobs deleted: their manifests (remote) or their index and chunk frames (pack).
     pub blobs_deleted: u64,
@@ -53,6 +54,10 @@ pub struct SweepReport {
     /// Unmarked remote objects kept because the backend cannot tell their age (`last_modified` is `None`, SPEC
     /// §10.1): never taken for expired (an upload counts once).
     pub unknown_age: u64,
+    /// Expired remote uploads kept because their listing under the pin set's lock differs from the sweep's listing
+    /// of `blobs/uploads/`: a chunk added, gone, or of another size or age (ROADMAP 9.5.10). The next sweep decides
+    /// again.
+    pub changed: u64,
     /// Remote manifests that could not be read, the mark's and those a kept manifest's read failed on (never both for
     /// the same blob: the listing skips blobs the mark already resolved): the upload each names is unknown.
     pub unreadable: u64,
@@ -105,6 +110,16 @@ pub trait Sweep {
         pins: &P,
         options: &SweepOptions,
     ) -> Result<SweepReport>;
+
+    /// The writer's scan of the store's reader leases (SPEC §9.5, ROADMAP 9.2.16, ADR-0054), which GC judges against
+    /// its committed seq before it sweeps. `None` (the default) for a store without them: the remote layout, whose
+    /// readers the grace period covers (ROADMAP 13.2.4).
+    ///
+    /// # Errors
+    /// The store's: [`PackStore::reader_leases`](crate::PackStore::reader_leases).
+    fn reader_leases(&self) -> Result<Option<crate::pack::lease::LeaseScan>> {
+        Ok(None)
+    }
 }
 
 /// What a pin protects from GC (SPEC §9.5): the writer's `Pinned`, as this crate names it.

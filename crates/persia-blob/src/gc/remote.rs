@@ -7,10 +7,13 @@
 //! deleted unless it is pinned at its check. Manifests go first, so a crash mid-sweep leaves chunks without a
 //! manifest, never a manifest without chunks. An upload's chunks are deleted in one step under the lock, not one
 //! chunk per step: a pin taken midway (a blob bound late naming the upload, ROADMAP 9.5.8) must find the upload whole,
-//! at the cost of holding the lock for one request per chunk. Every key is parsed (`RemoteKey::parse`); one that
-//! does not parse was not written by Persia and is ignored, never deleted.
+//! at the cost of holding the lock for one request per chunk. Under that lock the upload is listed again first
+//! (ROADMAP 9.5.10): a resume may have staged a new chunk under it and bound it, its pins dropped, after the first
+//! listing, and a listing without `strong_list` may have missed a fresh chunk. Any difference between the two
+//! listings keeps the upload this round. Every key is parsed (`RemoteKey::parse`); one that does not parse was not
+//! written by Persia and is ignored, never deleted.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::SystemTime;
 
 use persia_format::BlobId;
@@ -42,6 +45,10 @@ fn age(written: Option<SystemTime>, options: &SweepOptions) -> Age {
     }
 }
 
+/// One staged chunk object as a listing shows it: its index, size and time. Two listings of an upload agree when they
+/// show the same set (ROADMAP 9.5.10).
+type Listed = (u32, u64, Option<SystemTime>);
+
 /// One upload's staged chunks, as listed.
 #[derive(Debug, Default)]
 struct Upload {
@@ -49,7 +56,18 @@ struct Upload {
     newest: Option<SystemTime>,
     /// Whether a chunk's time is unknown: then so is the upload's age.
     unknown: bool,
-    indices: Vec<u32>,
+    /// Every chunk listed (a backend may list one twice, SPEC §10.1: the set holds it once).
+    chunks: BTreeSet<Listed>,
+}
+
+/// What became of an expired upload at its check under the pin set's lock.
+enum Checked {
+    /// A pin, or a pinned blob's manifest, names it.
+    Pinned,
+    /// Its listing under the lock differs from the sweep's first listing (ROADMAP 9.5.10).
+    Changed,
+    /// Its chunks were deleted: this many.
+    Deleted(u64),
 }
 
 impl<S: Storage> Sweep for RemoteBlobStore<S> {
@@ -119,13 +137,28 @@ impl<S: Storage> Sweep for RemoteBlobStore<S> {
                         // ADR-0051 item 5: a blob is pinned before the manifest naming this upload is read, and the
                         // upload right after, so between the two only the blob's pin protects these chunks.
                         if self.named_by_pinned_blob(upload_id, view, mark, &mut named)? {
-                            return Ok(None);
+                            return Ok(Checked::Pinned);
                         }
-                        self.delete_chunks(upload_id, &upload.indices).map(Some)
+                        // ROADMAP 9.5.10: what the first listing aged may have changed since. A resume that pinned
+                        // the upload, staged a new chunk under it, bound it and dropped its pins after that listing
+                        // left a blob that names these chunks; without `strong_list` the listing may also have missed
+                        // a fresh chunk. Any difference keeps the upload this round; the next sweep decides again.
+                        if self.relist(upload_id)? != upload.chunks {
+                            tracing::debug!(
+                                upload = %upload_id,
+                                "an expired upload changed since the sweep listed it: kept this round"
+                            );
+                            return Ok(Checked::Changed);
+                        }
+                        self.delete_chunks(upload_id, &upload.chunks)
+                            .map(Checked::Deleted)
                     });
-                    match swept.transpose()?.flatten() {
-                        None => report.pinned = report.pinned.saturating_add(1),
-                        Some(deleted) => {
+                    match swept.transpose()? {
+                        None | Some(Checked::Pinned) => {
+                            report.pinned = report.pinned.saturating_add(1);
+                        }
+                        Some(Checked::Changed) => report.changed = report.changed.saturating_add(1),
+                        Some(Checked::Deleted(deleted)) => {
                             report.chunks_deleted = report.chunks_deleted.saturating_add(deleted);
                             report.uploads_deleted = report.uploads_deleted.saturating_add(1);
                         }
@@ -215,7 +248,7 @@ impl<S: Storage> RemoteBlobStore<S> {
                 continue;
             }
             let upload = uploads.entry(upload_id).or_default();
-            upload.indices.push(index);
+            upload.chunks.insert((index, meta.size, meta.last_modified));
             match meta.last_modified {
                 // SPEC §9.5: an upload is aged from its newest chunk, so an idle upload stays resumable that long.
                 Some(t) => upload.newest = upload.newest.max(Some(t)),
@@ -225,10 +258,29 @@ impl<S: Storage> RemoteBlobStore<S> {
         Ok(uploads)
     }
 
-    /// Deletes chunks `indices` of `upload_id`; returns how many. Stops at the first error.
-    fn delete_chunks(&self, upload_id: UploadId, indices: &[u32]) -> Result<u64> {
+    /// The chunks staged under `upload_id` now, from a listing of `blobs/uploads/<upload_id>/` (ROADMAP 9.5.10).
+    fn relist(&self, upload_id: UploadId) -> Result<BTreeSet<Listed>> {
+        let listed = self
+            .storage()
+            .list(&keys::upload_prefix(upload_id)?)
+            .map_err(storage)?;
+        Ok(listed
+            .into_iter()
+            .filter_map(|meta| match RemoteKey::parse(&meta.key) {
+                Some(RemoteKey::Chunk {
+                    upload_id: u,
+                    index,
+                }) if u == upload_id => Some((index, meta.size, meta.last_modified)),
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// Deletes the listed `chunks` of `upload_id`; returns how many indices. Stops at the first error.
+    fn delete_chunks(&self, upload_id: UploadId, chunks: &BTreeSet<Listed>) -> Result<u64> {
+        let indices: BTreeSet<u32> = chunks.iter().map(|&(index, _, _)| index).collect();
         let mut deleted = 0_u64;
-        for &index in indices {
+        for index in indices {
             let key = RemoteKey::Chunk { upload_id, index }.key()?;
             self.storage().delete(&key).map_err(storage)?;
             deleted = deleted.saturating_add(1);

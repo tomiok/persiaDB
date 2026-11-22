@@ -108,9 +108,11 @@ fn options() -> PutBlobOptions {
     }
 }
 
-fn resume(token: ResumeToken) -> PutBlobOptions {
+/// A resume of `token` checked by the whole blob's size (ROADMAP 9.3.7: a resume needs that or `expected_id`).
+fn resume(token: ResumeToken, blob: &[u8]) -> PutBlobOptions {
     PutBlobOptions {
         resume: Some(token),
+        expected_size: Some(blob.len() as u64),
         ..options()
     }
 }
@@ -305,7 +307,7 @@ fn recover(
             assert_eq!(token.chunk_size.get(), CHUNK, "{what}");
             let staged = listed(after, token.upload_id);
             let (r, pins) = after
-                .put_blob(data, &resume(*token))
+                .put_blob(data, &resume(*token, data))
                 .unwrap_or_else(|e| panic!("{what}: resume: {e:?}"));
             assert_eq!(r, *reference, "{what}");
             let bound = check_bound(after, &r, data, what);
@@ -455,7 +457,7 @@ fn crash_anywhere_twice(seed: u64, every_loss: bool) -> Tally {
             tally.listings += 1;
             let first_what = format!("seed {seed}, first {at}, {loss:?}, listed {listing:?}");
             let mut bind_started = false;
-            let resumed = |blobs: &Blobs<Local>| blobs.put_blob(&data[..], &resume(token));
+            let resumed = |blobs: &Blobs<Local>| blobs.put_blob(&data[..], &resume(token, &data));
             every_fault(&crashed, !seed, &resumed, &mut |k, at, fs, second| {
                 let losses = if every_loss {
                     rng.losses(2)

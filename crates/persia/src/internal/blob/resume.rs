@@ -16,9 +16,11 @@
 
 use std::io::Read;
 
-use persia_blob::{BlobRef, BlobStore, Chunk, Error, Result, ResumeToken, UploadId};
+use persia_blob::{BlobManifest, BlobRef, BlobStore, Chunk, Error, Result, ResumeToken, UploadId};
 
-use super::{Blobs, PutBlobOptions, bind_interrupted, interrupted, window_chunks};
+use super::{
+    Blobs, PutBlobOptions, bind_interrupted, interrupted, past_expected, size_bound, window_chunks,
+};
 use crate::internal::pins::{Pinned, Pins};
 
 /// Where a resumed upload stands.
@@ -59,8 +61,20 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         resumed
             .skip_kept(&mut reader)
             .map_err(|e| interrupted(Some(token), e))?;
+        // ROADMAP 9.3.7: a kept run already longer than the blob the caller expects; nothing is staged.
+        let kept = resumed.offset();
+        if let Some(expected) = options.expected_size
+            && kept > expected
+        {
+            return Err(Error::BlobSizeMismatch {
+                expected,
+                actual: kept,
+            });
+        }
         let listed = resumed.listed().to_vec();
         let was_listed = |index: u32| listed.binary_search(&index).is_ok();
+        // A reader longer than `expected_size` is read one byte past it, never further.
+        let reader = reader.take(size_bound(options).saturating_sub(kept));
         let (mut chunker, mut crcs) = resumed.into_chunker(reader)?;
         let mut upload = Upload {
             from: token,
@@ -74,6 +88,13 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
             let Some(chunk) = next.map_err(|e| interrupted(Some(upload.current), e))? else {
                 break;
             };
+            // Nothing past the blob the caller expects is staged under the token's upload.
+            if let Some(e) = past_expected(&chunk, token.chunk_size, options) {
+                if upload.owned() {
+                    self.discard(upload.current.upload_id);
+                }
+                return Err(e);
+            }
             crcs.push(chunk.crc32c());
             staged.push(chunk);
             if staged.len() >= window {
@@ -81,6 +102,8 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
             }
         }
         let blob = chunker.summary().ok_or(Error::ChunkerFailed)?;
+        // ROADMAP 9.3.7: checked before the 9.3.6 restage and the last window, so a mismatch stages nothing more.
+        self.check_expected(&blob, upload.current.upload_id, options, upload.owned())?;
         // ROADMAP 9.3.6: nothing this call stages would be new, so the chunks move to a new upload before the bind.
         if !upload.fresh && staged.iter().all(|chunk| was_listed(chunk.index())) {
             let before = staged
@@ -92,12 +115,12 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
             self.restage_resumed(&mut upload, copied, false, &mut pins)?;
         }
         self.stage_resumed(&mut upload, &crcs, &mut staged, &was_listed, &mut pins)?;
-        let manifest = self.checked_manifest(
-            blob,
+        let manifest = BlobManifest::new(
+            blob.blob_id,
+            blob.size,
+            blob.chunk_size,
             upload.current.upload_id,
             crcs,
-            options,
-            upload.owned(),
         )?;
         pins.add(Pinned::Blob(manifest.blob_id()));
         let outcome = self.bind(upload.current.upload_id, options, || {

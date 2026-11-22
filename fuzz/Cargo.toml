@@ -250,3 +250,10 @@ path = "fuzz_targets/pack_reader.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "reader_lease"
+path = "fuzz_targets/reader_lease.rs"
+test = false
+doc = false
+bench = false

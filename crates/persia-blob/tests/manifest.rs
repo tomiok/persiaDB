@@ -1302,6 +1302,28 @@ fn is_corruption_is_true_for_corrupt_only() {
             false,
         ),
         (Error::ResumeUnsupported, false),
+        // -- resume checks (9.3.7) --
+        (Error::ResumeUnchecked, false),
+        (
+            Error::BlobSizeMismatch {
+                expected: 2,
+                actual: 1,
+            },
+            false,
+        ),
+        // -- reader leases (9.2.16) --
+        (Error::LeaseContended { attempts: 3 }, false),
+        // An empty file is not a container: corruption, as the container classifies it.
+        (
+            Error::Container(
+                persia_storage::container::Container::open_on(
+                    persia_storage::container::sim::SimFile::new(),
+                    persia_storage::container::Mode::ReadOnly,
+                )
+                .unwrap_err(),
+            ),
+            true,
+        ),
     ];
     for (e, corrupt) in &cases {
         assert_eq!(e.is_corruption(), *corrupt, "{e:?}");
@@ -1338,6 +1360,10 @@ fn is_corruption_is_true_for_corrupt_only() {
             Error::CorruptAt { .. } => "followups",
             Error::PackLocked => "wiring",
             Error::UploadInterrupted { .. } | Error::ResumeUnsupported => "resume",
+            // -- resume checks (9.3.7) --
+            Error::ResumeUnchecked | Error::BlobSizeMismatch { .. } => "resume checks",
+            // -- reader leases (9.2.16) --
+            Error::LeaseContended { .. } | Error::Container(_) => "reader leases",
             Error::BlobNotFound { .. }
             | Error::RangeOutOfBounds { .. }
             | Error::StagedChunkConflict { .. }

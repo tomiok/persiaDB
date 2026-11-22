@@ -16,6 +16,10 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// A read-only handle's reader lease (SPEC §9.3, ROADMAP 9.2.16, ADR-0054): [`ReaderLease::take_beside`], then
+/// [`ReadOnlyBlobDatabase::with_lease`].
+pub use persia_blob::pack::lease::ReaderLease;
+use persia_blob::pack::lease::leases_dir;
 use persia_blob::pack::{ContainerFile, Vfs};
 use persia_blob::{BlobId, BlobRef, BlobStore, PackStore, pack_path};
 use persia_engine::db::{Database, DatabaseError, DatabaseOptions, ReadOnlyDatabase};
@@ -111,6 +115,35 @@ pub enum Error {
         /// End of the WAL the reopened one replayed.
         reopened_end: u64,
     },
+    // -- reader leases (9.2.16) --
+    /// The documents given to [`ReadOnlyBlobDatabase::with_lease`] are older than the container's committed seq
+    /// when the reader lease was taken ([`ReaderLease::taken_seq`]): a GC may have swept a blob they show before the
+    /// lease existed (SPEC §9.3, ADR-0054 item 4). Nothing was opened; open the documents again.
+    #[error(
+        "the documents (seq {opened}) were opened before the reader lease (taken at seq {taken}): open them again"
+    )]
+    OpenedBeforeLease {
+        /// The documents' seq.
+        opened: u64,
+        /// The container's committed seq once the reader lease was held.
+        taken: u64,
+    },
+    /// The reader lease is in another leases directory than the one beside the pack these documents use (another
+    /// database, or a symbolic link retargeted between the lease and the documents' open). The paths are compared
+    /// exactly, both derived from canonical container paths (or the pack path given to `with_lease_in`). Nothing was
+    /// opened.
+    #[error("the reader lease is in {lease}, not {expected}")]
+    LeaseElsewhere {
+        /// The lease's directory.
+        lease: PathBuf,
+        /// The leases directory of the documents' pack.
+        expected: PathBuf,
+    },
+    /// [`ReadOnlyBlobDatabase::with_pack_in`] was given documents of a container opened without a path
+    /// ([`ReadOnlyDatabase::open_on`]): a reader lease must reopen the container at its path to read its committed seq,
+    /// or [`Error::OpenedBeforeLease`] could not be checked. Nothing was opened.
+    #[error("the documents' container has no path, so no reader lease can be taken for them")]
+    NoContainerPath,
 }
 
 /// The blob of a [`BlobDatabase::put`] (SPEC §9.6).
@@ -447,6 +480,15 @@ fn pack_beside(container: Option<&Path>, given: &Path) -> PathBuf {
     pack_path(container.unwrap_or(given))
 }
 
+/// A reader lease's error as a read-only open reports it: the container's failure as [`Error::Database`], with its
+/// classification ([`Error::is_corruption`]), as [`ReadOnlyDatabase::open`] would have reported it.
+fn lease_error(error: persia_blob::Error) -> Error {
+    match error {
+        persia_blob::Error::Container(e) => Error::Database(Box::new(DatabaseError::from(e))),
+        other => Error::Blob(other),
+    }
+}
+
 impl BlobDatabase<PackStore> {
     /// Creates a database in a new container file at `path` ([`Database::create`]) with its blob pack at
     /// [`pack_path`] of it, `<name>.persia.blobs`, opened read-write with the database's writer proof, so the pack
@@ -587,55 +629,141 @@ pub struct ReadOnlyBlobDatabase<F: ContainerFile = File> {
     /// Declared first, so the pack drops before the container (as in [`BlobDatabase`]).
     blobs: Blobs<PackStore<F>>,
     db: ReadOnlyDatabase<F>,
+    /// Declared last, so it drops after the documents and the pack (ADR-0054 item 4).
+    lease: ReaderLease<F>,
 }
 
 impl ReadOnlyBlobDatabase<File> {
     /// Opens the database in the container file at `path` read-only ([`ReadOnlyDatabase::open`], analyzing replayed
     /// `text` fields with `options.registry`) and its pack read-only, beside the container's canonical path (as
-    /// [`BlobDatabase::open`] finds it).
+    /// [`BlobDatabase::open`] finds it). A reader lease is taken first, beside the pack ([`ReaderLease::take_beside`],
+    /// SPEC §9.3), so a GC never sweeps a blob these documents show while the handle lives; where the directory
+    /// refuses writes the handle opens without one ([`ReadOnlyBlobDatabase::lease`] is `None`, a warning is logged).
     ///
     /// # Errors
-    /// [`Error::Database`] as [`ReadOnlyDatabase::open`]; [`Error::Blob`] as [`PackStore::open`] (a damaged pack, or
-    /// one of another database).
+    /// [`Error::Database`] when the container cannot be opened (a file that is not one, a damaged one: corruption, as
+    /// [`ReadOnlyDatabase::open`] reports it), also while the lease is taken; [`Error::Blob`] when the reader lease
+    /// cannot be taken ([`persia_blob::Error::LeaseContended`], an I/O error); then as [`ReadOnlyDatabase::open`] and
+    /// [`ReadOnlyBlobDatabase::with_lease`].
     pub fn open(path: impl AsRef<Path>, options: &DatabaseOptions) -> Result<Self, Error> {
         let path = path.as_ref();
-        Self::with_pack_beside(ReadOnlyDatabase::open(path, &options.registry)?, path)
+        let lease = ReaderLease::take_beside(path).map_err(lease_error)?;
+        Self::with_lease(
+            lease,
+            ReadOnlyDatabase::open(path, &options.registry)?,
+            path,
+        )
     }
 
-    /// `db`, opened read-only from the container at `path`, with its pack opened read-only beside the container's
-    /// canonical path, as [`ReadOnlyBlobDatabase::open`] finds it: for a caller that opened the documents itself.
-    /// The CLI's `verify` runs [`ReadOnlyDatabase::verify`] on them before this, so a document error is reported
+    /// `db`, opened read-only from the container at `path`, with a reader lease taken now and its pack opened
+    /// read-only beside the container's canonical path: [`ReaderLease::take_beside`], then
+    /// [`ReadOnlyBlobDatabase::with_lease`]. The lease comes after the documents, so this fails with
+    /// [`Error::OpenedBeforeLease`] when a writer committed in between; take the lease first and use `with_lease`
+    /// to leave no window.
+    ///
+    /// # Errors
+    /// As [`ReaderLease::take_beside`] and [`ReadOnlyBlobDatabase::with_lease`].
+    pub fn with_pack_beside(db: ReadOnlyDatabase, path: impl AsRef<Path>) -> Result<Self, Error> {
+        let path = path.as_ref();
+        let lease =
+            ReaderLease::take_beside(db.container().path().unwrap_or(path)).map_err(lease_error)?;
+        Self::with_lease(lease, db, path)
+    }
+
+    /// `db`, opened read-only from the container at `path` after `lease` was taken ([`ReaderLease::take_beside`]),
+    /// with its pack opened read-only beside the container's canonical path. The CLI's `verify` takes the lease, opens
+    /// and verifies the documents ([`ReadOnlyDatabase::verify`]), then calls this, so a document error is reported
     /// before the pack is opened. The pack open bounds each frame's length by its kind before reading it, as the scan
     /// does (ROADMAP 9.2.14).
     ///
     /// # Errors
-    /// As [`PackStore::open`].
-    pub fn with_pack_beside(db: ReadOnlyDatabase, path: impl AsRef<Path>) -> Result<Self, Error> {
+    /// [`Error::OpenedBeforeLease`] when `db` is older than the lease's taken seq; [`Error::LeaseElsewhere`] when the
+    /// lease is not beside this pack; then as [`PackStore::open`].
+    pub fn with_lease(
+        lease: ReaderLease,
+        db: ReadOnlyDatabase,
+        path: impl AsRef<Path>,
+    ) -> Result<Self, Error> {
         let pack = pack_beside(db.container().path(), path.as_ref());
-        let store = PackStore::open(pack, db.container().header().db_uuid)?;
-        Ok(Self {
-            blobs: Blobs::new(Arc::new(store)),
-            db,
+        Self::leased(lease, db, &pack, |pack, db_uuid| {
+            PackStore::open(pack, db_uuid)
         })
     }
 }
 
 impl<F: ContainerFile + Sync + 'static> ReadOnlyBlobDatabase<F> {
     /// `db` with the pack at `pack` on `vfs`, opened read-only with the `db_uuid` of `db`'s container
-    /// ([`PackStore::open_in`]).
+    /// ([`PackStore::open_in`]), after a reader lease taken now in `<pack>.leases` ([`ReaderLease::take_in`], which
+    /// reads the committed seq of `db`'s container again at its path, through `vfs`: the documents and the pack must
+    /// be on that one file system).
     ///
     /// # Errors
-    /// As [`PackStore::open_in`].
+    /// [`Error::NoContainerPath`] for documents of a container opened without a path; then as [`ReaderLease::take_in`]
+    /// (a container error as [`Error::Database`]) and [`ReadOnlyBlobDatabase::with_lease_in`].
     pub fn with_pack_in(
         db: ReadOnlyDatabase<F>,
         vfs: Arc<dyn Vfs<File = F>>,
         pack: impl AsRef<Path>,
     ) -> Result<Self, Error> {
-        let store = PackStore::open_in(vfs, pack, db.container().header().db_uuid)?;
+        let container = db.container().path().ok_or(Error::NoContainerPath)?;
+        let lease = ReaderLease::take_in(&vfs, pack.as_ref(), container).map_err(lease_error)?;
+        Self::with_lease_in(lease, db, vfs, pack)
+    }
+
+    /// [`ReadOnlyBlobDatabase::with_lease`] with the pack at `pack` on `vfs`.
+    ///
+    /// # Errors
+    /// [`Error::OpenedBeforeLease`], [`Error::LeaseElsewhere`] (the lease is not in `<pack>.leases`), then as
+    /// [`PackStore::open_in`].
+    pub fn with_lease_in(
+        lease: ReaderLease<F>,
+        db: ReadOnlyDatabase<F>,
+        vfs: Arc<dyn Vfs<File = F>>,
+        pack: impl AsRef<Path>,
+    ) -> Result<Self, Error> {
+        Self::leased(lease, db, pack.as_ref(), |pack, db_uuid| {
+            PackStore::open_in(vfs, pack, db_uuid)
+        })
+    }
+
+    /// The checks of [`ReadOnlyBlobDatabase::with_lease`] (ADR-0054 item 4), then the pack opened by `open`, then
+    /// the record says which documents the handle holds.
+    fn leased(
+        mut lease: ReaderLease<F>,
+        db: ReadOnlyDatabase<F>,
+        pack: &Path,
+        open: impl FnOnce(&Path, [u8; 16]) -> persia_blob::Result<PackStore<F>>,
+    ) -> Result<Self, Error> {
+        // Equal is safe: every GC before the lease had a mark seq at most the taken seq, and one whose mark is not
+        // newer than a reader's documents sweeps no blob they show.
+        if db.seq() < lease.taken_seq() {
+            return Err(Error::OpenedBeforeLease {
+                opened: db.seq(),
+                taken: lease.taken_seq(),
+            });
+        }
+        let expected = leases_dir(pack);
+        if lease.dir() != expected {
+            return Err(Error::LeaseElsewhere {
+                lease: lease.dir().to_path_buf(),
+                expected,
+            });
+        }
+        let db_uuid = db.container().header().db_uuid;
+        let store = open(pack, db_uuid)?;
+        lease.set_open(db_uuid, db.seq());
         Ok(Self {
             blobs: Blobs::new(Arc::new(store)),
             db,
+            lease,
         })
+    }
+
+    /// The reader lease this handle holds (SPEC §9.3); `None` when the directory refused writes and the handle opened
+    /// without one: then GC in another process may sweep a blob a document it shows references, which reads as
+    /// [`persia_blob::Error::BlobNotFound`], never as other bytes.
+    pub fn lease(&self) -> Option<&ReaderLease<F>> {
+        self.lease.is_held().then_some(&self.lease)
     }
 
     /// The read-only database.
@@ -677,11 +805,11 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyBlobDatabase<F> {
     /// taken (the documents are replaced by the same state) and returns `false` when the pack is unchanged too. The
     /// documents are replaced only when the pack refresh succeeds, or when a replaced pack is reopened.
     ///
-    /// The pack may be newer than `reopened`: one taken before the writer deleted a document and GC swept its blob
-    /// (SPEC §9.5) still shows that document, and [`ReadOnlyBlobDatabase::get_blob`] then fails with
-    /// [`persia_blob::Error::BlobNotFound`] for its blob, while every other blob reads on. Open `reopened` just
-    /// before the refresh to keep that window short; a local reader lease that GC respects will close it (ROADMAP
-    /// 9.2.16).
+    /// The handle's reader lease (SPEC §9.3, ROADMAP 9.2.16) keeps naming the documents it held until this succeeds,
+    /// then names `reopened`'s: no GC sweeps a blob the documents of either show meanwhile. A handle without a
+    /// lease ([`ReadOnlyBlobDatabase::lease`] is `None`), and a snapshot taken from [`ReadOnlyBlobDatabase::database`]
+    /// and kept across this refresh, are not protected: a blob GC swept after a delete reads as
+    /// [`persia_blob::Error::BlobNotFound`], never as other bytes.
     ///
     /// # Errors
     /// Nothing changes on these: [`persia_blob::Error::PackOfAnotherDatabase`] if `reopened` is another database,
@@ -707,24 +835,29 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyBlobDatabase<F> {
         }
         self.check_not_older(&reopened)?;
         let previous = std::mem::replace(&mut self.db, reopened);
-        match self.blobs.store().refresh() {
-            Ok(found) => Ok(found),
+        let found = match self.blobs.store().refresh() {
+            Ok(found) => found,
             Err(persia_blob::Error::PackReplaced { .. }) => match self.blobs.store().reopen() {
                 Ok(store) => {
                     // `&mut self`: no blob stream still borrows the old pack. A fresh handle drops that file.
                     self.blobs = Blobs::new(Arc::new(store));
-                    Ok(true)
+                    true
                 }
                 Err(error) => {
                     self.db = previous;
-                    Err(error.into())
+                    return Err(error.into());
                 }
             },
             Err(error) => {
                 self.db = previous;
-                Err(error.into())
+                return Err(error.into());
             }
-        }
+        };
+        // Only now: the previous documents are dropped, so the older seq no longer protects anything (ADR-0054 item 4).
+        drop(previous);
+        let db_uuid = self.db.container().header().db_uuid;
+        self.lease.set_open(db_uuid, self.db.seq());
+        Ok(found)
     }
 
     /// [`ReadOnlyBlobDatabase::refresh`]'s order check (the table there).
@@ -801,7 +934,10 @@ impl Error {
             | Self::PackExists { .. }
             | Self::RefreshedElsewhere { .. }
             | Self::RefreshedOlder { .. }
-            | Self::RefreshDiverged { .. } => false,
+            | Self::RefreshDiverged { .. }
+            | Self::OpenedBeforeLease { .. }
+            | Self::LeaseElsewhere { .. }
+            | Self::NoContainerPath => false,
         }
     }
 }

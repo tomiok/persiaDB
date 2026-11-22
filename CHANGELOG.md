@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-blob` / `persia` (internal API): reader leases on the local pack (ROADMAP 9.2.16, ADR-0054). Every
+  `ReadOnlyBlobDatabase` holds a 64-byte locked lease in `<name>.persia.blobs.leases/` naming the seq of the documents
+  it holds; `refresh` advances it. `ReaderLease::take_beside`, `ReadOnlyBlobDatabase::with_lease` / `with_lease_in` /
+  `lease()`; errors `OpenedBeforeLease`, `LeaseElsewhere`, `LeaseContended`. `GcReport::readers` reports the leases
+  and whether they held the sweep back.
+- `persia` (internal API): `PutBlobOptions::expected_size`, which bounds the reader one byte past it
+  (`Error::BlobSizeMismatch`, binds nothing; ROADMAP 9.3.7).
 - `persia-storage` (breaking: `SideFileKind` gains `Lock` and `Leases` and is now `#[non_exhaustive]`) / `persia container
   files`, `sweep`: the blob pack's stale temporary files are listed and removed
   (only while the pack's writer lock is free), and its lock file and lease directory are listed, never removed
@@ -203,6 +210,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- `persia` (internal API, breaking): a resume needs `expected_id` or `expected_size`; neither fails with
+  `Error::ResumeUnchecked` before anything is read (ROADMAP 9.3.7).
+- `persia` (internal API, breaking): `BlobDatabase::gc` on the pack does not sweep while any reader lease is behind the
+  committed seq (or opening, ahead, unreadable); every commit and compaction puts readers behind until they refresh.
+  `with_pack_beside` / `with_pack_in` can fail with `OpenedBeforeLease`, and `with_pack_in` with `NoContainerPath`.
+  `persia_blob::Error` gains `Container`, and `Error::is_corruption` is no longer `const`. `GcReport` is `#[non_exhaustive]`;
+  `BlobReferences` gains `committed_seq` (ROADMAP 9.2.16).
+- `persia verify` takes a reader lease before it opens the documents (ROADMAP 9.2.16).
 - `persia-blob`: the blob pack's writer lock is `<name>.persia.blobs.lock` beside the pack on every platform, held from
   the first read-write open, so a second writer fails with `PackLocked` even before any blob is stored (ROADMAP
   9.2.15).
@@ -410,6 +425,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   7.67 ms → 5.84 ms on the calling thread (ROADMAP 7.5.5). Results are unchanged.
 
 ### Format
+- Reader lease record (SPEC §9.3, ADR-0054): a new file kind `<name>.persia.blobs.leases/<id>.lease`, magic `PRLS`,
+  version 1, 64 bytes with a CRC32C. Golden files in `tests/fixtures/blob-lease/v1/` (ROADMAP 9.2.16).
 - Blob manifest (SPEC §9.1.1): `flags` bit 0, `INLINE`, is now set on an inline blob's manifest, which holds the
   one-chunk blob's bytes: `80 + size` bytes, `upload_id` 0 (ROADMAP 9.3.3, ADR-0050). Readers built before this
   change reject such a manifest with `UnsupportedFlags`.
@@ -418,6 +435,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   skip like unknown kinds. Golden files in `tests/fixtures/blob-pack/v1/`.
 
 ### Fixed
+- `persia-blob`: the remote GC sweep lists an expired upload again under the pin set's lock and keeps it when that
+  listing differs from the first (a resume that staged and bound meanwhile, or a listing without `strong_list` that
+  missed a fresh chunk); counted in `SweepReport::changed` (breaking: a new field; `SweepReport` is now
+  `#[non_exhaustive]`; ROADMAP 9.5.10).
 - `persia-storage`: `Container::side_files` no longer creates `<name>.persia.blobs.lock` when that file is absent. On
   Windows the pack lock is taken with `Vfs::lock_beside`, which creates the file; a listing now skips that call unless
   a regular lock file is already there. `sweep_stale_files` still creates it (ROADMAP 9.2.10, 9.2.15).

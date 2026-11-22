@@ -440,7 +440,9 @@ the bytes behind it: each reference is dangling, `get_blob` fails for it, and `v
 database that never stored a blob has no `.persia.blobs` file (§9.3), and is copied whole by copying `<name>.persia`.
 Until `backup` copies both files consistently (ROADMAP 10.1.8), a manual copy is safe in these ways:
 - **Closed.** Copy both files while no process has the database open read-write (read-only opens may stay: they
-  write nothing). This is the recommended way. `<name>.lock` (Windows, ADR-0016) holds no data and is not copied.
+  write nothing to either file). This is the recommended way. `<name>.lock` (Windows, ADR-0016) holds no data and is
+  not copied. A copy need not take `<name>.persia.blobs.leases/` either: a copied reader lease is unlocked, so the
+  copy's writer removes it as stale (§9.3).
 - **A snapshot of the volume** (LVM, ZFS, a cloud disk snapshot) that takes both files at one instant, even with
   the writer open: it is the state a crash would leave, and an open recovers it as it recovers a crash (§4.5.1, §8.6).
 - **With the writer open,** copy the **container first, then the pack**, each read once from its start to its end,
@@ -2330,7 +2332,9 @@ The open sequence (ROADMAP 6.6.1, ADR-0033), the same for a writer and a read-on
 5. Ready: the first snapshot shows the segments and the replayed memtables. Replayed operations count as written at
    the open (§8.2).
 
-Nothing before step 4 writes but the container's tail repair (§4.4); a read-only open writes nothing. One
+Nothing before step 4 writes but the container's tail repair (§4.4); a read-only open writes nothing (the engine's;
+a `ReadOnlyBlobDatabase`, and `persia verify`, also create `<name>.persia.blobs.leases/` and one reader lease file
+beside the pack, §9.3). One
 collection's unflushed record holds `wal_start` back for every collection (§8.2.1), so a backlog can be larger than a memtable: a **writer's replay flushes** (ROADMAP 6.6.5). Before applying a
 record it commits if the record's memtable reached its size threshold (as a write does, §8.2 step 3), and when a
 memtable has no room left for the record (no docid, operation or id left: `SegmentError::Full` or `TooLarge`, which
@@ -2634,9 +2638,10 @@ mutably, so no stream still borrows the old pack). Any other pack error, and a r
 replacement, or the pack of another database), restores the previous documents and keeps the old pack handle, so the
 documents and the pack stay paired. The pack may be newer than the reopened documents: if the writer deletes a
 document and GC sweeps its blob between the documents' open and the refresh, the reader shows the document and
-`get_blob` fails with `BlobNotFound` for its blob, while every other blob reads on; a local reader lease (ROADMAP
-9.2.16) will close this window.
-`PackStore::refresh` itself needs no reopen or remap: the file it opened, and the bytes it mapped, stay valid until it is dropped (ROADMAP 9.2.13). The pack is found beside the container's canonical path, so a database opened through a symlink uses
+`get_blob` fails with `BlobNotFound` for its blob, while every other blob reads on. That happens only to a reader
+without a lease, or to a writer that ignores leases (one from before ADR-0054): a reader lease (below) holds GC back
+while the reader holds those documents.
+`PackStore::refresh` itself does not reopen or remap (ROADMAP 9.2.13). The pack is found beside the container's canonical path, so a database opened through a symlink uses
 the pack beside the real file. Creating it is durable before the first blob is bound: the
 file with its header and superblock synced, then its directory synced (§4.5.2). A read-write open first removes the stale
 temporary files a crashed creation or pack rewrite left beside the pack (`<name>.persia.blobs.tmp.<nonce>.<n>`), then
@@ -2655,6 +2660,55 @@ not fail the open (ROADMAP 9.2.6). The next open does not retry that directory s
 a crash brings back, is swept again. A blob is durable per bind, before any
 document that references it is logged (§18.9). A reader learns that the pack was replaced from its
 `(pack_id, generation)` (§18.10). A copy of the database takes both files (§4.8); the lock file need not be copied.
+
+**Reader leases** (ROADMAP 9.2.16, ADR-0054). A read-only handle (`ReadOnlyBlobDatabase`) holds a reader lease from
+before it opens its documents until it is dropped: the file `<lease_id>.lease` (`lease_id` a random `u128`, 32
+lowercase hex digits) in `<pack>.leases/` (`<name>.persia.blobs.leases/` beside the pack found from the container's
+canonical path), which a reader creates if missing and nothing removes. The handle holds the file's lock for its life,
+with the container's primitive (§4.5.1): the file itself on Unix; on Windows, where a lock is mandatory, the sidecar
+`<lease_id>.lease.lock` (`lock_beside`), so the record stays readable. The file is one record, little-endian:
+```
+0   4   magic         bytes "PRLS" (0x50 0x52 0x4C 0x53)
+4   4   version       u32 = 1
+8   4   flags         u32 = 0 (no bit assigned)
+12  4   pid           u32: the holder's process id, for operators only (never trusted)
+16  16  db_uuid       the container's db_uuid; all zero while the handle opens its documents
+32  16  lease_id      u128, the id in the file's name
+48  8   manifest_seq  u64: the committed seq of the documents the handle holds; 0 while it opens them
+56  4   reserved      u32 = 0
+60  4   crc32c        u32 over bytes 0..60
+```
+**Opening** is a zero `db_uuid` with `manifest_seq` 0; **open** is any other `db_uuid` with the seq of its documents,
+which may be 0. A zero `db_uuid` with another seq is corruption, so each state has one encoding. Decoding checks, in
+this order: at least 8 bytes, the magic, `version` (0 is corruption, above 1 unsupported: a later version may be
+longer), exactly 64 bytes, the CRC32C, `flags` (any bit unsupported), `reserved` zero, the opening rule; then
+`lease_id` against the name and an open `db_uuid` against the pack's. Anything else is corruption. The writer reads at
+most 4096 bytes of one.
+
+A take first opens the container (its canonical path; nothing is created beside a file that is not a container, and
+that failure is the container's, reported by `ReadOnlyBlobDatabase` as the documents' open would report it), creates
+the file, writes the opening record, takes the lock, checks that the lease's path (and, on Windows, the sidecar's)
+still names the locked file, then reopens the container to read its committed seq (the **taken seq**), through the pack's
+file system: the documents and the pack share one. A refused lock, a sidecar or name that is delete pending (Windows
+`PermissionDenied`), or a name removed before the lock, starts it again under a new id; a failed attempt removes what
+it created before releasing its lock. At most 3 attempts; then it fails with `LeaseContended`. `open`
+takes the lease, opens the documents, then writes the open record. Documents given to `with_lease` (and
+`with_pack_beside`, which takes its lease after them) must not be older than the taken seq (`OpenedBeforeLease`; equal
+is safe) and must use the pack beside which the lease lies (`LeaseElsewhere`, also after `open`, against a symbolic
+link retargeted in between). A `refresh` rewrites the record in place (one 64-byte write at offset 0) only after it
+succeeded. A drop removes the name(s), then unlocks explicitly. Nothing about a lease is synced: a machine crash ends
+every reader.
+
+A `<pack>.leases` that is not a directory fails the take. Only when creating the directory or the lease file fails
+with permission denied or a read-only file system does the handle open
+without a lease and logs a warning naming the path. GC may then sweep a blob a document it shows references, which
+reads as `BlobNotFound`, never as other bytes.
+
+A lease's lock can be judged only where locks belong to the handle (`locks_per_handle`; on Linux ext2/3/4, XFS, Btrfs,
+F2FS, ZFS, bcachefs, JFS, ReiserFS, NILFS, tmpfs, ramfs). Everywhere else (overlayfs in a Docker container, vfat,
+exFAT, 9p such as WSL2's `/mnt/c`, virtiofs, NFS, CIFS, FUSE) every lease counts as live, and one left by a crashed
+reader holds GC back until an operator removes it; a directory listing cached by another client may also miss a new
+lease. Remote readers are ROADMAP 13.2.4 and 13.2.5.
 
 ### 9.4 Remote layout
 ```
@@ -2687,7 +2741,9 @@ returns; a repeated index whose listed lengths differ ends the kept run before i
 re-hashes their bytes and continues after them; hasher state is never persisted. Chunk writes are `put_if_absent`, so
 a chunk already there with other bytes (`AlreadyExists`, e.g. the short last chunk of an upload that was already
 bound) is never replaced: the resume restarts under a new `upload_id`. The id is computed from the stored bytes, so a
-resuming client should pass `expected_id` (§9.6). A token is not checked against the store: it holds only the
+reader that ends exactly where the kept run ends is a whole, shorter blob, so a resume must carry the whole blob's
+`expected_id` or `expected_size` (§9.6): one with neither fails with `ResumeUnchecked` before any byte is read or
+written, and before the store is asked to resume (ROADMAP 9.3.7). A token is not checked against the store: it holds only the
 `upload_id` and the `chunk_size`, so a token of an unknown upload, or of another prefix or bucket, cannot be told from
 an upload whose chunks were swept. Its empty listing starts the blob from chunk 0 under the token's `upload_id` (an
 empty blob writes no chunk, so the ROADMAP 9.3.6 rule below binds it under a new one). A chunk under that id that the
@@ -2701,7 +2757,7 @@ chunk, the writer copies the chunks it has (the kept run and those staged since,
 under the new `upload_id` and continues there, so the client never rewinds (ADR-0050). A caller gets the token from
 the error of a `put_blob` that failed once it attempted a chunk write, or while resuming
 (`UploadInterrupted { token, source }`); its pins drop with the error, and the grace period keeps the upload resumable
-(§9.5). It passes the token as `PutBlobOptions::resume` with a reader of the whole blob, from its start: `put_blob`
+(§9.5). It passes the token as `PutBlobOptions::resume` with a reader of the whole blob, from its start, and its `expected_id` or `expected_size`: `put_blob`
 pins the old `upload_id` before listing, skips the bytes of the kept run without uploading them, pins the new
 `upload_id` before restaging, and rejects a token whose chunk size is below the floor (§9.2; ROADMAP 9.3.4). The
 token's chunk size is the blob's: `PutBlobOptions::chunk_size` is ignored on a resume. Each kept chunk the reader
@@ -2711,7 +2767,7 @@ as a missing chunk does, so the resume does not fail with that corruption wrappe
 staging that index conflicts when the stored bytes differ, and the upload restarts under a new id. `UploadInterrupted`
 wraps a reader error, or a staging, restaging or listing error of the store, once the upload attempted a chunk write
 (it may have staged none) or, on a resume, while listing and skipping the kept run, and a bind's backend error whose
-outcome is known; never an unknown outcome, `BlobIdMismatch`, a caller's error or a small blob. It is not itself
+outcome is known; never an unknown outcome, `BlobIdMismatch`, `BlobSizeMismatch`, a caller's error or a small blob. It is not itself
 corruption (`is_corruption` is false, and `corrupt_offset` is none) even when its source is: the upload can be
 resumed, and the source carries the cause. A resume that fails again returns the token of the upload it was staging:
 after a restage that followed a conflict, the new one. A resume that writes no chunk its listing did not show (it may
@@ -2768,15 +2824,39 @@ the same process that runs `put_blob`, and keeps a **pin set** with it:
   manifest kept for any reason is read, so its upload's chunks stay; an unreadable one leaves every staged chunk.
   Before deleting an upload's chunks, under the lock, the sweep checks every pinned blob's manifest (reading those it
   has not seen, including a marked blob whose manifest the mark did not resolve) and keeps the chunks one names. It ages an
-  upload from its listing: a resume that stages a new chunk under an old upload, binds and drops its pins between that
-  listing and the locked check, then is referenced by `BlobRef`, can lose the old chunks until the sweep re-lists the
-  upload under the lock (ROADMAP 9.5.10).
+  upload from its listing of `blobs/uploads/`, then, under the lock, lists that upload's chunks again
+  (`blobs/uploads/<upload_id>/`) and deletes them only when that listing shows exactly the chunks of the first (each
+  index, size and `last_modified`): a resume may have staged a new chunk under the upload, bound it and dropped its
+  pins between the two, and without `strong_list` the first listing may have missed a fresh chunk. Any difference (a
+  chunk added, gone, or of another size or age, an unknown one included) keeps the upload that round, with no retry;
+  the next sweep decides again (`SweepReport::changed`, ROADMAP 9.5.10). A backend whose two listings both miss a
+  just-written chunk is not covered.
   Readers in other processes are not in the writer's view. `PackStore::refresh` keeps the pack file it opened, and
   the bytes it mapped, until it is dropped; after `PackReplaced` it needs no reopen or remap of its own (ROADMAP 9.2.13).
   `ReadOnlyBlobDatabase::refresh` reopens a read-only pack at the same path on that error, and on any other pack
-  error restores the documents it had, so a long-lived reader stays paired after a GC rewrite. A reader in another process is not in the mark: documents it
-  opened before a delete whose blob the sweep then collected show a blob that is gone (`BlobNotFound`) once its refresh
-  reopens the rewritten pack, until a local reader lease (ROADMAP 9.2.16). Remotely one that lags may find the blob of a document the writer deleted gone after the grace
+  error restores the documents it had, so a long-lived reader stays paired after a GC rewrite. A read-only handle, in
+  another process or this one, is not in the mark. After the mark, and before the sweep, GC on the pack scans the
+  reader leases (§9.3), holding the pack's writer lock. Where locks cannot be judged (asked of the pack file first),
+  every lease counts live, none is opened, none is removed. Elsewhere each regular file `<id>.lease` is judged by its
+  lock, never by its record, and its kind is checked again right before its open (anything but a regular file is
+  skipped):
+  - one the writer is granted is stale: removed with its sidecar, then unlocked, whatever its record says, unread
+    (garbage, any version or length);
+  - one held elsewhere is live, and its record is read (at most 4096 bytes);
+  - a name gone since the listing is skipped;
+  - a sidecar whose lease is gone is removed only if its lease does not exist once the sidecar's lock is granted;
+  - a leases path that cannot be listed (one that is not a directory included) holds GC back;
+  - an open or lock error, or a record that does not decode (torn, another version, another database or id), is live
+    and unreadable.
+
+  None of these fails GC. **GC does not sweep the pack (no rewrite, nothing dropped) while any live reader lease is
+  opening, unreadable, behind the writer's committed seq, or ahead of it** (logged with its path). Only a lease open
+  at exactly the committed seq lets the sweep run. Every commit, and every container compaction (§4.6 step 3), puts
+  every read-only handle in another process behind until it refreshes, so a writer that deletes, commits and runs
+  `gc` does not sweep while such a reader lives and has not refreshed. `GcReport::readers` reports the counts and
+  whether the sweep was held back. A snapshot taken from a read-only handle and kept across its `refresh` is not
+  protected: the handle's reader lease names its newer documents only, so after a GC a blob only that snapshot shows
+  reads as `BlobNotFound`, never as other bytes. Remotely one that lags may find the blob of a document the writer deleted gone after the grace
   period (ROADMAP 13.2.5, which extends 13.2.4).
 The grace period covers a crashed or replaced writer's uploads; the pins are what keeps a blob that a not-yet-committed
 document references. A referenced blob must never be missing. `verify` (ROADMAP 9.5.3) **fails** on one: a live document,
@@ -2801,13 +2881,25 @@ it logs or commits a document (it does not depend on `persia-blob`); the public 
 (§9.6).
 
 ### 9.6 API
-`put_blob(reader, &PutBlobOptions { mime, user_meta, expected_id, chunk_size, bind_budget, resume }) -> BlobRef`,
+`put_blob(reader, &PutBlobOptions { mime, user_meta, expected_id, expected_size, chunk_size, bind_budget, resume }) -> BlobRef`,
 `get_blob(blob_ref) -> Stream`, `get_blob_range(blob_ref, range)` (by reference: a read checks the manifest against it,
 `check_ref`, and a stream reads by that manifest, looked up once), `delete` via document delete + GC.
 `expected_id` (optional) is checked against the computed id when the reader ends; a mismatch is
 `BlobIdMismatch { expected, actual }` (a caller error, not corruption) and binds nothing (ADR-0034). Over gRPC it is
 `expected_blob_id` (32 bytes) in the first message of the `PutBlob` stream; over HTTP the `Repr-Digest:
-sha-256=:<base64>:` header (RFC 9530).
+sha-256=:<base64>:` header (RFC 9530). `expected_size` (optional, the whole blob's length in bytes) bounds the
+reader at one byte past it: a longer reader is `BlobSizeMismatch { expected, actual }` at that byte (`actual` =
+`expected_size + 1`; a resume whose kept run is already longer reports the kept run), before anything past the blob
+is staged. Otherwise `expected_id` is checked first, then the size. Both are checked before the last window is
+staged and before a resume's restage. A mismatch is a caller error, not corruption, and binds nothing. A resume
+needs one of the two (§9.4).
+A read-only handle holds a reader lease (§9.3): `ReaderLease::take_beside(path)` (or `take_in`), then
+`ReadOnlyBlobDatabase::with_lease(lease, db, path)` (or `with_lease_in`). `ReadOnlyBlobDatabase::open` does both
+around its document open; `with_pack_beside` and `with_pack_in` take the lease after the given documents. `lease()`
+is `None` when the directory refused writes. Errors: `OpenedBeforeLease { opened, taken }`, `LeaseElsewhere { lease,
+expected }`, `LeaseContended { attempts }` when the take's 3 attempts were refused, and `NoContainerPath` when
+`with_pack_in` is given documents of a container opened without a path. A container failure while taking the lease
+is `Error::Database` from `ReadOnlyBlobDatabase` and `persia_blob::Error::Container` from `ReaderLease`.
 Convenience: `put(doc, blob: Blob::from_path(..))` performs both steps in the right order: it logs the document only
 after the blob is durable (`put_blob` returned) or, for a given `BlobRef`, pinned and found bound, at every WAL
 durability (ADR-0051).
@@ -3244,6 +3336,6 @@ Comparison against other engines is reported with methodology, never cherry-pick
     only until `refresh` returns `PackReplaced` and does not reopen it. `ReadOnlyBlobDatabase::refresh` reopens the pack
     at that path.
     The mark keeps every blob a reader in the writer process can still name (§9.5), including one a non-durable
-    `Buffered` or `Async` delete or replace would revive after a crash. A reader in another process, or a remote
-    reader lagging the writer, is ROADMAP 13.2.4: readers pin old manifests while queries run, and GC respects reader
+    `Buffered` or `Async` delete or replace would revive after a crash. A read-only handle in another process holds a
+    reader lease (§9.3, ADR-0054); a remote reader lagging the writer is ROADMAP 13.2.4: readers pin old manifests while queries run, and GC respects reader
     leases and the grace period. Remote blob GC under those nodes is ROADMAP 13.2.5.

@@ -73,9 +73,11 @@ fn options(chunk: u32) -> PutBlobOptions {
     }
 }
 
-fn resume(chunk: u32, token: ResumeToken) -> PutBlobOptions {
+/// A resume of `token` checked by the whole blob's size (ROADMAP 9.3.7: a resume needs that or `expected_id`).
+fn resume(chunk: u32, token: ResumeToken, blob: &[u8]) -> PutBlobOptions {
     PutBlobOptions {
         resume: Some(token),
+        expected_size: Some(blob.len() as u64),
         ..options(chunk)
     }
 }
@@ -290,7 +292,7 @@ fn run_case(
             fail_at,
             step,
         };
-        let opts = token.map_or_else(|| options(chunk), |t| resume(chunk, t));
+        let opts = token.map_or_else(|| options(chunk), |t| resume(chunk, t, &data));
         let resuming = token.is_some();
         match blobs.put_blob(reader, &opts) {
             Ok((r, pins)) => {
@@ -631,7 +633,9 @@ fn store_errors_while_staging_a_new_upload_are_wrapped_with_its_token() {
             }
             assert_eq!(token.chunk_size.get(), MIN);
             // The token resumes to the blob.
-            let (r, _pins) = blobs.put_blob(&data[..], &resume(MIN, token)).unwrap();
+            let (r, _pins) = blobs
+                .put_blob(&data[..], &resume(MIN, token, &data))
+                .unwrap();
             assert_eq!(r, uninterrupted(&data, MIN), "{is} at {index}");
         }
     }
@@ -645,7 +649,11 @@ fn errors_while_resuming_are_wrapped_with_the_upload_being_staged() {
         let (store, blobs) = remote_store();
         let token = interrupted_upload(&store, &blobs, &data);
         store.once(Call::Resume, error);
-        let (again, _) = wrapped(blobs.put_blob(&data[..], &resume(MIN, token)).unwrap_err());
+        let (again, _) = wrapped(
+            blobs
+                .put_blob(&data[..], &resume(MIN, token, &data))
+                .unwrap_err(),
+        );
         assert_eq!(again, token);
     }
     // The reader fails inside the kept run (while skipping it), and after it (while cutting the rest).
@@ -658,7 +666,11 @@ fn errors_while_resuming_are_wrapped_with_the_upload_being_staged() {
             fail_at: Some(fail_at),
             step: usize::MAX,
         };
-        let (again, source) = wrapped(blobs.put_blob(reader, &resume(MIN, token)).unwrap_err());
+        let (again, source) = wrapped(
+            blobs
+                .put_blob(reader, &resume(MIN, token, &data))
+                .unwrap_err(),
+        );
         assert!(matches!(source, Error::Read(_)), "{source:?}");
         assert_eq!(again, token, "at {fail_at}");
     }
@@ -667,7 +679,11 @@ fn errors_while_resuming_are_wrapped_with_the_upload_being_staged() {
         let (store, blobs) = remote_store();
         let token = interrupted_upload(&store, &blobs, &data);
         store.once(Call::Stage(2), error);
-        let (again, _) = wrapped(blobs.put_blob(&data[..], &resume(MIN, token)).unwrap_err());
+        let (again, _) = wrapped(
+            blobs
+                .put_blob(&data[..], &resume(MIN, token, &data))
+                .unwrap_err(),
+        );
         assert_eq!(again, token);
     }
 }
@@ -683,9 +699,15 @@ fn a_failed_restage_is_wrapped_with_the_upload_that_holds_the_chunks() {
         let (token, source) = wrapped(blobs.put_blob(&data[..], &options(MIN)).unwrap_err());
         assert!(matches!(source, Error::Storage(_)), "{source:?}");
         store.once(Call::Restage, error);
-        let (again, _) = wrapped(blobs.put_blob(&data[..], &resume(MIN, token)).unwrap_err());
+        let (again, _) = wrapped(
+            blobs
+                .put_blob(&data[..], &resume(MIN, token, &data))
+                .unwrap_err(),
+        );
         assert_eq!(again, token, "the token's upload is whole");
-        let (r, _pins) = blobs.put_blob(&data[..], &resume(MIN, again)).unwrap();
+        let (r, _pins) = blobs
+            .put_blob(&data[..], &resume(MIN, again, &data))
+            .unwrap();
         assert_eq!(r, uninterrupted(&data, MIN));
     }
     // A conflict on the token's upload: the copy goes to a new upload, and a failed copy resumes from that one.
@@ -696,7 +718,11 @@ fn a_failed_restage_is_wrapped_with_the_upload_that_holds_the_chunks() {
         .stage_chunk(token.upload_id, 2, &bytes(MIN as usize, 99))
         .unwrap();
     store.once(Call::Restage, corrupt);
-    let (again, source) = wrapped(blobs.put_blob(&data[..], &resume(MIN, token)).unwrap_err());
+    let (again, source) = wrapped(
+        blobs
+            .put_blob(&data[..], &resume(MIN, token, &data))
+            .unwrap_err(),
+    );
     assert!(matches!(source, Error::Corrupt { .. }), "{source:?}");
     assert_ne!(again.upload_id, token.upload_id, "the new upload");
     assert!(blobs.pin_set().pinned().is_empty());
@@ -710,7 +736,11 @@ fn a_bind_error_is_wrapped_only_when_its_outcome_is_known() {
     let (token, _) = wrapped(blobs.put_blob(&data[..], &options(MIN)).unwrap_err());
     // On a resume too.
     store.once(Call::Bind, storage_error);
-    let (again, _) = wrapped(blobs.put_blob(&data[..], &resume(MIN, token)).unwrap_err());
+    let (again, _) = wrapped(
+        blobs
+            .put_blob(&data[..], &resume(MIN, token, &data))
+            .unwrap_err(),
+    );
     assert_ne!(
         again.upload_id, token.upload_id,
         "9.3.6: restaged before binding"
@@ -732,6 +762,7 @@ fn a_bind_error_is_wrapped_only_when_its_outcome_is_known() {
             let token = interrupted_upload(&store, &blobs, &data);
             PutBlobOptions {
                 resume: Some(token),
+                expected_id: Some(blob_id_of(&data)),
                 ..zero.clone()
             }
         } else {
@@ -797,7 +828,7 @@ fn callers_errors_are_never_wrapped() {
     for resuming in [false, true] {
         let base = || {
             if resuming {
-                resume(MIN, token)
+                resume(MIN, token, &data)
             } else {
                 options(MIN)
             }
@@ -858,7 +889,9 @@ fn callers_errors_are_never_wrapped() {
     let token = interrupted_upload(&store, &blobs, &data);
     let mut other = data.clone();
     other[0] ^= 1;
-    let e = blobs.put_blob(&other[..], &resume(MIN, token)).unwrap_err();
+    let e = blobs
+        .put_blob(&other[..], &resume(MIN, token, &data))
+        .unwrap_err();
     assert!(matches!(e, Error::InvalidResume { .. }), "{e:?}");
 }
 
@@ -897,7 +930,9 @@ fn never_wrapped_on<S: BlobStore + 'static>(inner: S) {
         upload_id: UploadId::new(1),
         chunk_size: ChunkSize::new(MIN).unwrap(),
     };
-    let e = blobs.put_blob(Unread, &resume(MIN, token)).unwrap_err();
+    let e = blobs
+        .put_blob(Unread, &resume(MIN, token, &[]))
+        .unwrap_err();
     assert!(matches!(e, Error::ResumeUnsupported), "{e:?}");
     // A reader that fails after a whole window was written (64 chunks at the floor).
     let big = bytes(65 * MIN as usize, 2);

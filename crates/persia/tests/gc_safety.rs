@@ -119,6 +119,9 @@ impl BlobReferences for Log {
     fn referenced_blobs(&self) -> Result<HashSet<BlobId>, DatabaseError> {
         self.0.referenced_blobs()
     }
+    fn committed_seq(&self) -> u64 {
+        self.0.seq()
+    }
 }
 
 impl Log {
