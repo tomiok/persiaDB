@@ -80,6 +80,8 @@ error; `Unsupported` trait defaults; a restage that makes the chunks young.
    A staged chunk whose read reports corruption is not part of that run: the run ends there instead of failing the
    resume. The object stays, so staging the index conflicts when the stored bytes differ and the upload restarts under
    a new id. The listing is sorted by index first; a repeated index whose lengths differ ends the run before it.
+   Amended (ROADMAP 9.3.7): a resume also carries the whole blob's `expected_id` or `expected_size`
+   (`ResumeUnchecked` otherwise, before anything is read).
    It pins a new upload before any chunk is copied to it. The token's chunk size wins over `chunk_size`, because chunk
    objects do not record their size, and it is checked against the floor before anything is read. A network client
    that wants to send only the rest needs an offset query, which M11 adds if it needs one.
@@ -117,6 +119,8 @@ error; `Unsupported` trait defaults; a restage that makes the chunks young.
   the grace period or was not in its first listing. A resume that pins, lists, stages a new chunk under the old
   upload, binds and drops its pins between the sweep's upload listing and its locked check, and is referenced later
   by `BlobRef`, can lose the old chunks. Without `strong_list` the first listing can also miss a fresh chunk.
+  Closed by ROADMAP 9.5.10: the sweep re-lists an expired upload under the pin set's lock and keeps it when the
+  listing changed.
 
 ## Alternatives considered
 

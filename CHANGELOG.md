@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-blob` / `persia` (internal API): reader leases on the local pack (ROADMAP 9.2.16, ADR-0054). Every
+  `ReadOnlyBlobDatabase` holds a 64-byte locked lease in `<name>.persia.blobs.leases/` naming the seq of the documents
+  it holds; `refresh` advances it. `ReaderLease::take_beside`, `ReadOnlyBlobDatabase::with_lease` / `with_lease_in` /
+  `lease()`; errors `OpenedBeforeLease`, `LeaseElsewhere`, `LeaseContended`. `GcReport::readers` reports the leases
+  and whether they held the sweep back.
+- `persia` (internal API): `PutBlobOptions::expected_size`, checked after `expected_id` (`Error::BlobSizeMismatch`,
+  binds nothing; ROADMAP 9.3.7).
 - Roadmap: M35 Formal verification (v1.1), after M34. TLA+ for the remote commit (SPEC §10.4), the writer lease (SPEC §11.3), and blob GC (SPEC §9.5, ADR-0053); Kani on `MmapFile::map` and the M1 encodings; Loom on snapshot publish, pack reopen, and `PinSet`. M0–M15 stay the MVP. The progress percentage still counts only those leaves.
 - `persia-engine`: `ReadOnlyDatabase::wal_end`, the end of the last WAL chunk a read-only open replayed.
 - `persia` (internal API): `BlobDatabase::create` / `open` open a database with its blob pack `<name>.persia.blobs`,
@@ -198,6 +205,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- `persia` (internal API, breaking): a resume needs `expected_id` or `expected_size`; neither fails with
+  `Error::ResumeUnchecked` before anything is read (ROADMAP 9.3.7).
+- `persia` (internal API, breaking): `BlobDatabase::gc` on the pack does not sweep while any reader lease is behind the
+  committed seq (or opening, ahead, unreadable); every commit and compaction puts readers behind until they refresh.
+  `with_pack_beside` / `with_pack_in` can fail with `OpenedBeforeLease`. `GcReport` is `#[non_exhaustive]`;
+  `BlobReferences` gains `committed_seq` (ROADMAP 9.2.16).
+- `persia verify` takes a reader lease before it opens the documents (ROADMAP 9.2.16).
 - `persia-blob` / `persia`: on the remote layout, `put_blob` failures after staging come wrapped in
   `Error::UploadInterrupted`, with the original error as `source` (ROADMAP 9.3.4). `Error::is_corruption` and
   `Error::corrupt_offset` are false / `None` for that wrapper, even when the source is corruption: the upload can be
@@ -400,6 +414,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   7.67 ms → 5.84 ms on the calling thread (ROADMAP 7.5.5). Results are unchanged.
 
 ### Format
+- Reader lease record (SPEC §9.3, ADR-0054): a new file kind `<name>.persia.blobs.leases/<id>.lease`, magic `PRLS`,
+  version 1, 64 bytes with a CRC32C. Golden files in `tests/fixtures/blob-lease/v1/` (ROADMAP 9.2.16).
 - Blob manifest (SPEC §9.1.1): `flags` bit 0, `INLINE`, is now set on an inline blob's manifest, which holds the
   one-chunk blob's bytes: `80 + size` bytes, `upload_id` 0 (ROADMAP 9.3.3, ADR-0050). Readers built before this
   change reject such a manifest with `UnsupportedFlags`.
@@ -408,6 +424,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   skip like unknown kinds. Golden files in `tests/fixtures/blob-pack/v1/`.
 
 ### Fixed
+- `persia-blob`: the remote GC sweep lists an expired upload again under the pin set's lock and keeps it when that
+  listing differs from the first (a resume that staged and bound meanwhile, or a listing without `strong_list` that
+  missed a fresh chunk); counted in `SweepReport::changed` (ROADMAP 9.5.10).
 - `persia-engine` (breaking: a new `DatabaseError` variant): a `put_batch` (or `put`) that ends early (a rejected
   document or record, or a flush that fails without poisoning) and whose sync of the documents before it then fails too
   reports the first failure with the sync failure added (`DatabaseError::ThenFailed`, its `source` and
