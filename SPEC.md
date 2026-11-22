@@ -2683,10 +2683,10 @@ longer), exactly 64 bytes, the CRC32C, `flags` (any bit unsupported), `reserved`
 `lease_id` against the name and an open `db_uuid` against the pack's. Anything else is corruption. The writer reads at
 most 4096 bytes of one.
 
-A take opens the container once (its canonical path; nothing is created beside a file that is not a container, and
+A take first opens the container (its canonical path; nothing is created beside a file that is not a container, and
 that failure is the container's, reported by `ReadOnlyBlobDatabase` as the documents' open would report it), creates
 the file, writes the opening record, takes the lock, checks that the lease's path (and, on Windows, the sidecar's)
-still names the locked file, then reads the container's committed seq again (the **taken seq**), through the pack's
+still names the locked file, then reopens the container to read its committed seq (the **taken seq**), through the pack's
 file system: the documents and the pack share one. A refused lock, a sidecar or name that is delete pending (Windows
 `PermissionDenied`), or a name removed before the lock, starts it again under a new id; a failed attempt removes what
 it created before releasing its lock. At most 3 attempts; then it fails with `LeaseContended`. `open`
@@ -2884,9 +2884,12 @@ it logs or commits a document (it does not depend on `persia-blob`); the public 
 `expected_id` (optional) is checked against the computed id when the reader ends; a mismatch is
 `BlobIdMismatch { expected, actual }` (a caller error, not corruption) and binds nothing (ADR-0034). Over gRPC it is
 `expected_blob_id` (32 bytes) in the first message of the `PutBlob` stream; over HTTP the `Repr-Digest:
-sha-256=:<base64>:` header (RFC 9530). `expected_size` (optional, the whole blob's length in bytes) is checked when
-the reader ends, after `expected_id`; a mismatch is `BlobSizeMismatch { expected, actual }` (a caller error, not
-corruption) and binds nothing. A resume needs one of the two (§9.4).
+sha-256=:<base64>:` header (RFC 9530). `expected_size` (optional, the whole blob's length in bytes) bounds the
+reader at one byte past it: a longer reader is `BlobSizeMismatch { expected, actual }` at that byte (`actual` =
+`expected_size + 1`; a resume whose kept run is already longer reports the kept run), before anything past the blob
+is staged. Otherwise `expected_id` is checked first, then the size. Both are checked before the last window is
+staged and before a resume's restage. A mismatch is a caller error, not corruption, and binds nothing. A resume
+needs one of the two (§9.4).
 A read-only handle holds a reader lease (§9.3): `ReaderLease::take_beside(path)` (or `take_in`), then
 `ReadOnlyBlobDatabase::with_lease(lease, db, path)` (or `with_lease_in`). `ReadOnlyBlobDatabase::open` does both
 around its document open; `with_pack_beside` and `with_pack_in` take the lease after the given documents. `lease()`

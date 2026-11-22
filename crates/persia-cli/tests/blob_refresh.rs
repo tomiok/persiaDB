@@ -63,6 +63,7 @@ use persia_engine::db::{DatabaseOptions, ReadOnlyDatabase};
 use persia_engine::document::Document;
 use persia_engine::schema::SchemaBuilder;
 use persia_engine::wal::Durability;
+use persia_storage::container::ContainerFile;
 
 #[cfg(not(feature = "slow"))]
 const FILES: u64 = 1;
@@ -872,6 +873,23 @@ fn a_reader_refreshes_beside_a_gc_writer_that_is_killed_and_recovers() {
     );
 }
 
+/// Whether the file system under `dir` lets the writer judge a reader lease by its lock (`locks_per_handle`, ADR-0054
+/// item 13); where it does not, every lease holds GC back, and the reason is printed.
+fn locks_judged(dir: &Path) -> bool {
+    let probe = dir.join("locks-probe");
+    let file = std::fs::File::create(&probe).unwrap();
+    let judged = ContainerFile::locks_per_handle(&file);
+    drop(file);
+    std::fs::remove_file(&probe).unwrap();
+    if !judged {
+        eprintln!(
+            "skipped: locks cannot be judged on the file system under {}",
+            dir.display()
+        );
+    }
+    judged
+}
+
 /// Invariant 4, step by step across processes: the reader holds an open that shows `gone` and `kept`; the writer
 /// deletes `gone` and commits, and its GC is held back by the reader's lease (it deletes nothing, no rewrite); the
 /// refresh with the held open is taken and shows `gone`, whose blob still reads. Once the reader caught up (it no
@@ -931,7 +949,11 @@ fn a_held_open_holds_gc_back_until_the_reader_catches_up() {
     reader.catch_up(&mut model, &mut stats, "after the held-back gc");
     assert_eq!(reader.last_ids, BTreeSet::from(["kept".to_owned()]));
     assert!(reader.missing.is_empty());
-    assert_eq!(step(&mut writer, &mut model, "gc"), "ok gc 1 true");
+    let gc = step(&mut writer, &mut model, "gc");
+    // Where the writer cannot judge leases by their lock, every lease holds GC back (ADR-0054 item 13).
+    if locks_judged(dir.path()) {
+        assert_eq!(gc, "ok gc 1 true");
+    }
 
     // The free-running schedule may never refuse an older open or rewrite the pack. This does both: the second `gc`
     // above reported a rewrite, and this open was taken before `newer` was committed, so catching up refuses it.

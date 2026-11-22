@@ -112,7 +112,7 @@ text, its own magic and version, this ADR, and golden files (item 17).
      is an `Arc` that can outlive the `ReadOnlyDatabase` a refresh replaced, and the record then names the newer
      documents only. A GC may then sweep a blob only such a snapshot still shows: reading it fails with
      `BlobNotFound`; it never returns other bytes. The handle does not track those snapshots (no weak references, as
-     the writer keeps, ADR-0052 item 2); a follow-up leaf may.
+     the writer keeps, ADR-0052 item 2); ROADMAP 13.7.4 may.
    - *Drop*: the reader lease is declared after the documents and the pack, so it drops last. It removes its
      name(s), then releases the lock explicitly (`ContainerFile::unlock`, not only `close`: a forked child's copy of
      the descriptor would keep a `flock`, SPEC §4.5.1). A failed removal is logged; the unlocked file left is stale
@@ -185,7 +185,7 @@ text, its own magic and version, this ADR, and golden files (item 17).
    commits a new seq without dropping a document (SPEC §4.6 step 3; also at merge steps when automatic). A writer that
    runs delete, commit, `gc` therefore does not sweep while such a reader lives and has not refreshed; `GcReport`
    says the sweep was held back by reader leases. A sweep over two GC rounds (remembering what the first round would
-   drop) is a follow-up leaf.
+   drop) is ROADMAP 13.7.2.
 10. **The pin set and the mark are unchanged.** A reader lease is not a pin: it holds back the whole sweep, not one
     blob. In-process readers stay in the mark (ADR-0052 item 2); a read-only handle in the writer's process takes a
     reader lease like any other (on a local disk `flock` excludes another open file description of the same process).
@@ -218,7 +218,7 @@ text, its own magic and version, this ADR, and golden files (item 17).
     vfat and exFAT, 9p (WSL2's `/mnt/c`), virtiofs, NFS, CIFS and FUSE. There (item 8) every reader lease counts as
     live: **one reader that crashed holds GC back for good**, until an operator removes its file. A directory listing
     cached by another client may also miss a reader lease just created. The operator path is a CLI command (a
-    ROADMAP leaf to add): it runs in a process of its own that holds no reader lease, so a lock it is granted does
+    ROADMAP 13.7.1): it runs in a process of its own that holds no reader lease, so a lock it is granted does
     show that no other process holds it, and it can remove stale reader leases there; it can also remove one by id.
 14. **Remote stores** are out of scope: there is no pack, readers of the remote layout are covered by the grace
     period, and their leases are ROADMAP 13.2.4 and 13.2.5.
@@ -271,7 +271,7 @@ text, its own magic and version, this ADR, and golden files (item 17).
       is left alone; a stale lease of garbage, version 2 or over 4096 bytes is removed unread, and a live one that
       long is read only up to the bound; a `<pack>.leases` that is a regular file fails the take and holds GC back.
       The GC tests on real files print why they skip where locks cannot be judged. The lease code runs on real
-      Windows only once CI runs `persia-blob` there (a follow-up leaf).
+      Windows only once CI runs `persia-blob` there (ROADMAP 13.7.5).
 
 ## Consequences
 

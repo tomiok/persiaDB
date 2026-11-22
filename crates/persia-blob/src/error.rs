@@ -230,12 +230,13 @@ pub enum Error {
     #[error("a resume needs an expected id or an expected size")]
     ResumeUnchecked,
     /// The blob's bytes are not `expected_size` long (SPEC §9.6, ROADMAP 9.3.7): a caller's error, not corruption,
-    /// found when the reader ends. Nothing was bound.
+    /// found when the reader ends, or as soon as it yields one byte more. Nothing was bound.
     #[error("the blob is {actual} bytes long, not the expected {expected}")]
     BlobSizeMismatch {
         /// The size the caller expected.
         expected: u64,
-        /// The bytes read.
+        /// The bytes read: at most one past `expected` (a longer reader is not read further), or the kept run of a
+        /// resume already longer than `expected`.
         actual: u64,
     },
     // -- reader leases (9.2.16) --

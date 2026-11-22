@@ -1084,3 +1084,50 @@ fn one_object_of_unknown_age_keeps_its_upload_or_its_manifest_and_chunks() {
     assert!(store.staged_chunks(gone.upload_id()).unwrap().is_empty());
     assert!(store.staged_chunks(UploadId::new(4)).unwrap().is_empty());
 }
+
+/// ROADMAP 9.5.10: a locked re-list that differs from the first listing only in one chunk's size (its time unchanged)
+/// still keeps the upload this round.
+#[test]
+fn a_relisting_that_differs_only_in_a_chunks_size_keeps_the_upload() {
+    let clock = Arc::new(ManualClock::new(at(0)));
+    let store = Arc::new(RemoteBlobStore::new(MemoryStorage::with_clock(
+        Arc::clone(&clock) as Arc<dyn Clock>,
+    )));
+    let staged = stage(&*store, b"an unbound upload", 4, 1);
+    let upload = staged.upload_id();
+    clock.set(at(100));
+    let pins = Pins::default();
+    let (hooked, hook_clock) = (Arc::clone(&store), Arc::clone(&clock));
+    let mut done = false;
+    pins.on_check(move |_| {
+        if std::mem::replace(&mut done, true) {
+            return;
+        }
+        // Rewritten at the chunk's own time: only its size differs.
+        let key = RemoteKey::Chunk {
+            upload_id: upload,
+            index: 1,
+        }
+        .key()
+        .unwrap();
+        hook_clock.set(at(0));
+        hooked
+            .storage()
+            .put(&key, Bytes::from_static(b"longer bytes"))
+            .unwrap();
+        hook_clock.set(at(100));
+    });
+    let report = store
+        .sweep(&Mark::default(), &pins, &options(at(100)))
+        .unwrap();
+    assert_eq!(
+        (
+            report.uploads_deleted,
+            report.chunks_deleted,
+            report.changed
+        ),
+        (0, 0, 1),
+        "{report:?}"
+    );
+    assert_eq!(store.staged_chunks(upload).unwrap().len(), 5);
+}

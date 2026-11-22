@@ -427,7 +427,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Fixed
 - `persia-blob`: the remote GC sweep lists an expired upload again under the pin set's lock and keeps it when that
   listing differs from the first (a resume that staged and bound meanwhile, or a listing without `strong_list` that
-  missed a fresh chunk); counted in `SweepReport::changed` (ROADMAP 9.5.10).
+  missed a fresh chunk); counted in `SweepReport::changed` (breaking: a new field; `SweepReport` is now
+  `#[non_exhaustive]`; ROADMAP 9.5.10).
 - `persia-engine` (breaking: a new `DatabaseError` variant): a `put_batch` (or `put`) that ends early (a rejected
   document or record, or a flush that fails without poisoning) and whose sync of the documents before it then fails too
   reports the first failure with the sync failure added (`DatabaseError::ThenFailed`, its `source` and

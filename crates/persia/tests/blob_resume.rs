@@ -968,3 +968,78 @@ fn a_resume_whose_new_chunks_the_upload_listing_misses_keeps_the_upload() {
     assert_eq!(r, uninterrupted(&data));
     referenced_later(&*store, &clock, &mut db, &r, &data);
 }
+
+// -- 9.3.7: `expected_size` is checked before anything more is staged --
+
+/// A resume checked by `expected_size` whose reader ends where the kept run ends: `BlobSizeMismatch`, found before the
+/// 9.3.6 restage and the last window, so nothing is staged or copied; and one whose reader runs past the blob is read
+/// one byte past it and stages no chunk.
+#[test]
+fn a_size_mismatch_is_found_before_the_restage_and_stages_nothing() {
+    let data = bytes(5 * CHUNK_LEN, 30);
+    for (what, reader, actual) in [
+        (
+            "ends at the kept run",
+            data[..3 * CHUNK_LEN].to_vec(),
+            3 * CHUNK_LEN as u64,
+        ),
+        (
+            "runs past the blob",
+            [&data[..], &[7; 100]].concat(),
+            data.len() as u64 + 1,
+        ),
+    ] {
+        let (store, blobs) = remote();
+        store.fail_when(once(Fault::Fail, stage_of(3)));
+        let (token, _) = interruption(blobs.put_blob(&data[..], &options()).unwrap_err());
+        store.heal();
+        assert_eq!(store.chunks(token.upload_id), [0, 1, 2], "{what}");
+        store.clear();
+        let checked = PutBlobOptions {
+            expected_size: Some(data.len() as u64),
+            ..options()
+        };
+        let sized = PutBlobOptions {
+            resume: Some(token),
+            ..checked
+        };
+        let e = blobs.put_blob(&reader[..], &sized).unwrap_err();
+        assert!(
+            matches!(e, Error::BlobSizeMismatch { expected, actual: a }
+                if expected == data.len() as u64 && a == actual),
+            "{what}: {e:?}"
+        );
+        let events = store.events();
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::Restage { .. })),
+            "{what}: restaged: {events:?}"
+        );
+        assert!(stages(&events).is_empty(), "{what}: staged: {events:?}");
+        assert_eq!(store.chunks(token.upload_id), [0, 1, 2], "{what}");
+        assert!(blobs.pin_set().pinned().is_empty(), "{what}");
+    }
+}
+
+/// A new upload whose reader runs past `expected_size` stages nothing past the blob: the window holding the extra
+/// byte is never staged, and the upload is discarded.
+#[test]
+fn a_new_upload_longer_than_its_expected_size_stages_nothing_past_it() {
+    let (store, blobs) = remote();
+    let data = bytes(5 * CHUNK_LEN, 31);
+    let reader = [&data[..], &[7; 100]].concat();
+    let sized = PutBlobOptions {
+        expected_size: Some(data.len() as u64),
+        ..options()
+    };
+    let e = blobs.put_blob(&reader[..], &sized).unwrap_err();
+    assert!(
+        matches!(e, Error::BlobSizeMismatch { actual, .. } if actual == data.len() as u64 + 1),
+        "{e:?}"
+    );
+    assert!(stages(&store.events()).is_empty(), "{:?}", store.events());
+    let id = persia_blob::blob_id_of(&data);
+    assert!(
+        store.inner().manifest(id).unwrap().is_none(),
+        "nothing bound"
+    );
+}

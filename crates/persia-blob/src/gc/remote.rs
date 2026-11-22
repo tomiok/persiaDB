@@ -144,6 +144,10 @@ impl<S: Storage> Sweep for RemoteBlobStore<S> {
                         // left a blob that names these chunks; without `strong_list` the listing may also have missed
                         // a fresh chunk. Any difference keeps the upload this round; the next sweep decides again.
                         if self.relist(upload_id)? != upload.chunks {
+                            tracing::debug!(
+                                upload = %upload_id,
+                                "an expired upload changed since the sweep listed it: kept this round"
+                            );
                             return Ok(Checked::Changed);
                         }
                         self.delete_chunks(upload_id, &upload.chunks)

@@ -37,6 +37,7 @@ pub struct SweepOptions {
 /// What a sweep did (SPEC §9.5). Counts are of objects: remotely, blob manifests and staged chunk objects; in the
 /// pack, blobs and chunk frames the rewrite dropped.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SweepReport {
     /// Unmarked blobs deleted: their manifests (remote) or their index and chunk frames (pack).
     pub blobs_deleted: u64,

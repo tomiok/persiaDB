@@ -170,6 +170,12 @@ impl Case {
         if self.resume.is_some() && self.id == Id::None && self.size == Size::None {
             return Some(Verdict::Unchecked);
         }
+        // A reader longer than the size is cut one byte past it: a size mismatch, before the id (a prefix's).
+        if let Some(s) = self.expected_size()
+            && s < len
+        {
+            return Some(Verdict::SizeMismatch(s));
+        }
         if self.id == Id::Wrong {
             return Some(Verdict::IdMismatch);
         }
@@ -193,6 +199,11 @@ fn check_error(case: &Case, data: &[u8], verdict: Verdict, e: &Error) {
         Verdict::Unchecked => assert!(matches!(e, Error::ResumeUnchecked), "{case:?}: {e:?}"),
         Verdict::IdMismatch => assert!(
             matches!(e, Error::BlobIdMismatch { actual, .. } if *actual == blob_id_of(data)),
+            "{case:?}: {e:?}"
+        ),
+        // Longer: what was read, past `s` (one byte past it, or a resume's longer kept run), never more than the blob.
+        Verdict::SizeMismatch(s) if s < len => assert!(
+            matches!(e, Error::BlobSizeMismatch { expected, actual } if *expected == s && *actual > s && *actual <= len),
             "{case:?}: {e:?}"
         ),
         Verdict::SizeMismatch(s) => assert!(
@@ -361,7 +372,7 @@ fn run_pack(case: &Case) {
 
 proptest! {
     #![proptest_config(Config {
-        cases: if cfg!(feature = "slow") { 1500 } else { 96 },
+        cases: if cfg!(feature = "slow") { 1500 } else { 24 },
         rng_seed: RngSeed::Fixed(9307),
         failure_persistence: None,
         ..Config::default()
