@@ -243,8 +243,8 @@ fn with_lease_takes_equal_and_newer_documents_and_refuses_older_ones() {
 fn a_symbolic_link_retargeted_after_the_lease_is_lease_elsewhere() {
     let dir = tempfile::tempdir().unwrap();
     // macOS puts the temp dir under `/var`, a symlink to `/private/var`. `take_beside` records the
-    // canonical leases directory (`Container` canonicalizes the path). Canonicalize this directory
-    // too, and both sides of the comparison, so the equality stays exact on that path.
+    // canonical leases directory (`Container` canonicalizes the path), so this test works under the
+    // canonical directory and compares the recorded path exactly.
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let (a, b) = (root.join("a.persia"), root.join("b.persia"));
     drop(create(&a));
@@ -252,10 +252,7 @@ fn a_symbolic_link_retargeted_after_the_lease_is_lease_elsewhere() {
     let link = root.join("link.persia");
     std::os::unix::fs::symlink(&a, &link).unwrap();
     let lease = ReaderLease::take_beside(&link).unwrap();
-    assert_eq!(
-        std::fs::canonicalize(lease.dir()).unwrap(),
-        std::fs::canonicalize(leases_dir(&pack_path(&a))).unwrap()
-    );
+    assert_eq!(lease.dir(), leases_dir(&pack_path(&a)));
     std::fs::remove_file(&link).unwrap();
     std::os::unix::fs::symlink(&b, &link).unwrap();
     assert!(matches!(
