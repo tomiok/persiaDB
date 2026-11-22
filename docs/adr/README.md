@@ -74,6 +74,6 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0049](./0049-blob-pack-layout-and-durability.md) | Blob pack: layout, per-blob durable bind, recovery with roll-forward, pack generation | proposed |
 | [0050](./0050-remote-blob-layout-transfers-resume-and-inline-blobs.md) | Remote blob layout: keys, parallel transfers, resume, inline small blobs, object times | accepted |
 | [0051](./0051-blobs-with-documents-internal-api-pins-and-ordering.md) | Blobs with documents: the internal put_blob/put API, the pin set, and the blob-before-document order | accepted |
-| [0052](./0052-blob-garbage-collection-mark-sweep-and-pack-rewrite.md) | Blob garbage collection: the mark, the sweep and the pack rewrite | proposed |
-| [0053](./0053-blob-wiring-writer-proof-and-resume-api.md) | Blob wiring, writer proof and resume API: the pack opens read-write with the container's `WriterProof`, a read-only database opens it read-only, `verify` scans checksums by default, a resume token comes from `put_blob`'s error | proposed |
+| [0052](./0052-blob-garbage-collection-mark-sweep-and-pack-rewrite.md) | Blob garbage collection: the mark, the sweep and the pack rewrite | accepted |
+| [0053](./0053-blob-wiring-writer-proof-and-resume-api.md) | Blob wiring, writer proof and resume API: the pack opens read-write with the container's `WriterProof`, a read-only database opens it read-only, `verify` scans checksums by default, a resume token comes from `put_blob`'s error | accepted |
 | [0054](./0054-blob-pack-reader-leases.md) | Reader leases on the local blob pack: one locked 64-byte lease per read-only handle in `<name>.persia.blobs.leases/`; GC does not sweep while a live lease is not at the committed seq | accepted |

@@ -1,6 +1,6 @@
 # ADR-0052: Blob garbage collection: the mark, the sweep and the pack rewrite
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-11-19
 - Related: SPEC §4.6, §8.4, §8.5, §9.3, §9.4, §9.5, §10.1, §18.10; ROADMAP 9.5.1, 9.5.2, 9.5.4, 9.5.7, 9.5.8; ADR-0016,
   ADR-0049, ADR-0050, ADR-0051
