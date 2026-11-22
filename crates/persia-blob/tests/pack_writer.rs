@@ -357,3 +357,36 @@ fn the_container_sweep_keeps_the_packs_temporary_files_while_its_writer_lives() 
     drop(kept);
     assert_eq!(next.sweep_stale_files().unwrap(), [PathBuf::from(stale)]);
 }
+
+/// ROADMAP 9.2.15: a symbolic link at `<name>.persia.blobs.lock` is followed, so the lock is its target's and still
+/// allows one writer; a link to nothing fails the open with a clear I/O error, not a retry loop.
+#[cfg(unix)]
+#[test]
+fn a_lock_link_is_followed_and_a_link_to_nothing_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let db = dir.path().join("app.persia");
+    let container = Container::create(&db).unwrap();
+    let proof = container.writer_proof().unwrap();
+    let lock = dir.path().join("app.persia.blobs.lock");
+    let target = outside.path().join("lock");
+    std::fs::write(&target, b"").unwrap();
+    std::os::unix::fs::symlink(&target, &lock).unwrap();
+    let first = PackStore::open_writer(pack_path(&db), &proof).unwrap();
+    assert!(matches!(
+        PackStore::open_writer(pack_path(&db), &proof),
+        Err(Error::PackLocked)
+    ));
+    let other = std::fs::File::open(&target).unwrap();
+    assert!(other.try_lock().is_err(), "the target holds the lock");
+    drop((first, other));
+
+    std::fs::remove_file(&target).unwrap();
+    let err = PackStore::open_writer(pack_path(&db), &proof).unwrap_err();
+    assert!(
+        matches!(&err, Error::PackIo { op: "open the lock file", source }
+            if source.kind() == std::io::ErrorKind::NotFound
+                && source.to_string().contains("symbolic link to nothing")),
+        "{err:?}"
+    );
+}

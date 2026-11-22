@@ -9,7 +9,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
-- `persia-storage` / `persia container files`, `sweep`: the blob pack's stale temporary files are listed and removed
+- `persia-storage` (breaking: `SideFileKind` gains `Lock` and `Leases` and is now `#[non_exhaustive]`) / `persia container
+  files`, `sweep`: the blob pack's stale temporary files are listed and removed
   (only while the pack's writer lock is free), and its lock file and lease directory are listed, never removed
   (`SideFileKind::Lock`, `SideFileKind::Leases`; ROADMAP 9.2.10).
 - Roadmap: M35 Formal verification (v1.1), after M34. TLA+ for the remote commit (SPEC §10.4), the writer lease (SPEC §11.3), and blob GC (SPEC §9.5, ADR-0053); Kani on `MmapFile::map` and the M1 encodings; Loom on snapshot publish, pack reopen, and `PinSet`. M0–M15 stay the MVP. The progress percentage still counts only those leaves.

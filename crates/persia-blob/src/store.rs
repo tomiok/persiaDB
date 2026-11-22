@@ -131,13 +131,14 @@ pub trait BlobStore: Send + Sync {
     /// [`Error::Corrupt`] when the chunk is missing or damaged, or the store's errors.
     fn read_chunk(&self, manifest: &BlobManifest, index: u32) -> Result<Vec<u8>>;
 
-    /// Chunk `index` of the blob `manifest` describes, checked against it (its length and its CRC32C): what
-    /// [`read_chunk_checked`] returns, which calls it.
+    /// Chunk `index` of the blob `manifest` describes, checked against it (its length and its CRC32C). Callers use the
+    /// free [`read_chunk_checked`], which calls this and also enforces the length.
     ///
     /// The default reads the chunk with [`BlobStore::read_chunk`] and checks it, adding no copy. A store that checks
     /// its stored chunks as it reads them may override it to read and check each byte once (the pack, ROADMAP
-    /// 9.2.11). An override must return only bytes whose length and CRC32C it checked against `manifest`
-    /// ([`read_chunk_checked`] also refuses bytes of another length, as `Corrupt`).
+    /// 9.2.11). An override must return a chunk of exactly the manifest's length for `index`, whose CRC32C it
+    /// checked against `manifest` ([`read_chunk_checked`] refuses another length as `Corrupt`; the CRC32C is the
+    /// override's to check).
     ///
     /// # Errors
     /// As [`read_chunk_checked`].

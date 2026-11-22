@@ -184,7 +184,8 @@ pub struct PackStore<F: ContainerFile = File> {
     writer: Mutex<WriterState>,
     inner: RwLock<Inner<F>>,
     /// The writer lock beside the pack, `<name>.persia.blobs.lock`, held for a read-write handle's life (ROADMAP
-    /// 9.2.7, 9.2.15); `None` for a read-only handle.
+    /// 9.2.7, 9.2.15); `None` for a read-only handle. The last field, so it drops last: the pack file and everything
+    /// else of this handle are gone before another writer can take the lock.
     _lock: Option<lock::Held<F>>,
 }
 

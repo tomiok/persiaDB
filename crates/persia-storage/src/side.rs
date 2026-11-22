@@ -24,6 +24,7 @@ pub struct SideFile {
 
 /// What a [`SideFile`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SideFileKind {
     /// The temporary file of a write: a local store's `put` (`@tmp.*`, SPEC §10.1.1), a container's create or
     /// compaction (`<name>.tmp.*`, `<name>.compact.*`, SPEC §4.5.1, §4.6), or its blob pack's creation or rewrite

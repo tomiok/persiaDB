@@ -24,8 +24,10 @@ enum Side {
     Container(SideFileKind),
     /// `<container>.blobs.tmp.<16 lowercase hex>.<n>`: a pack creation's or rewrite's temporary file.
     PackTemporary,
-    /// `<container>.blobs.lock`: the pack's writer lock (ROADMAP 9.2.15).
-    PackLock,
+    /// `<container>.blobs.lock`: the pack's writer lock (ROADMAP 9.2.15). `regular`: a regular file, as a pack writer
+    /// creates it. Anything else there (a symbolic link, a directory) is never opened here: a pack writer follows a
+    /// link, so whether one holds the lock cannot be told without following it.
+    PackLock { regular: bool },
     /// `<container>.blobs.leases`: the pack's reader lease directory (ROADMAP 9.2.16).
     PackLeases,
 }
@@ -35,7 +37,7 @@ impl Side {
         match self {
             Self::Container(kind) => kind,
             Self::PackTemporary => SideFileKind::Temporary,
-            Self::PackLock => SideFileKind::Lock,
+            Self::PackLock { .. } => SideFileKind::Lock,
             Self::PackLeases => SideFileKind::Leases,
         }
     }
@@ -59,13 +61,16 @@ fn kind_of(name: &str, container: &str) -> Option<SideFileKind> {
 /// What the entry `name` of type `file_type` is beside the container named `container`: one of its own names
 /// ([`kind_of`], regular files only) or one of its blob pack's (ROADMAP 9.2.10). The pack's temporary names are
 /// matched as strictly as the pack's own open-time sweep matches them (regular files, lowercase hex only, the exact
-/// name the pack makes); its lock is a regular file and its lease directory a directory.
+// name the pack makes); its lock is listed whatever it is (a pack writer follows a link there), and its lease
+/// directory only as a directory.
 fn side_of(name: &str, file_type: FileType, container: &str) -> Option<Side> {
     let pack = name
         .strip_prefix(container)
         .and_then(|rest| rest.strip_prefix(PACK_SUFFIX));
     match (pack, file_type) {
-        (Some(".lock"), FileType::File) => Some(Side::PackLock),
+        (Some(".lock"), kind) => Some(Side::PackLock {
+            regular: kind == FileType::File,
+        }),
         (Some(".leases"), FileType::Dir) => Some(Side::PackLeases),
         (Some(rest), FileType::File) => rest
             .strip_prefix(".tmp.")
@@ -132,53 +137,57 @@ fn pack_path(path: &Path) -> PathBuf {
 /// The blob pack's writer lock beside the pack at `pack` (SPEC §9.3, ROADMAP 9.2.15), taken for a moment as a pack
 /// writer takes it: on Windows through [`Vfs::lock_beside`], elsewhere on `<pack>.lock` with
 /// [`ContainerFile::try_lock`]. Whether a pack writer holds it and, if this call took it, the locked file, to release
-/// with [`side::unlock_kept`]. Without `create`, a missing lock file is [`InUse::No`]: a pack writer creates it before
-/// it creates or rewrites anything, and nothing removes it.
+/// with [`release_pack_lock`]. `found` is what [`scan`] saw at `<pack>.lock`: `None`, nothing (a pack writer creates the
+/// file before it creates or rewrites anything, and nothing removes it, so without `create` that is [`InUse::No`]);
+/// `Some(true)`, a regular file; `Some(false)`, anything else, which is never opened ([`InUse::Unknown`]: a pack
+/// writer follows a link there, so only following it would tell, and the target may be anything).
+///
+/// While this call holds the lock, a pack writer opening at that instant fails with its `PackLocked` and may retry.
 fn take_pack_lock<F: ContainerFile>(
     vfs: &dyn Vfs<File = F>,
     pack: &Path,
+    found: Option<bool>,
     create: bool,
-) -> io::Result<(InUse, Option<F>)> {
+) -> Result<(InUse, Option<F>)> {
+    match found {
+        Some(false) => return Ok((InUse::Unknown, None)),
+        None if !create => return Ok((InUse::No, None)),
+        _ => {}
+    }
     let mut lock = pack.as_os_str().to_owned();
     lock.push(".lock");
     let lock = PathBuf::from(lock);
-    // Checked first: on Windows `lock_beside` creates the file.
-    if !create {
-        match vfs.entry_kind(&lock) {
-            Ok(_) => {}
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                ) =>
-            {
-                return Ok((InUse::No, None));
-            }
-            Err(e) => return Err(e),
-        }
-    }
     match vfs.lock_beside(pack) {
         // A lock file's lock is the handle's on Windows (`LockFileEx`).
         Ok(Some(file)) => return Ok((InUse::No, Some(file))),
         Ok(None) => {}
         Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok((InUse::Yes, None)),
-        Err(e) => return Err(e),
+        Err(e) => return Err(Error::io("lock the pack's lock file")(e)),
     }
-    let file = if create {
+    let opened = if create {
         match vfs.create_new(&lock) {
-            Ok(file) => file,
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => vfs.open(&lock, true)?,
-            Err(e) => return Err(e),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => vfs.open(&lock, true),
+            other => other,
         }
     } else {
-        match vfs.open(&lock, false) {
-            Ok(file) => file,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((InUse::No, None)),
-            Err(e) => return Err(e),
-        }
+        vfs.open(&lock, false)
     };
-    let (in_use, took) = side::in_use(&file)?;
+    let file = match opened {
+        Ok(file) => file,
+        // Removed since the scan (not by Persia): no pack writer can hold it.
+        Err(e) if !create && e.kind() == io::ErrorKind::NotFound => return Ok((InUse::No, None)),
+        Err(e) => return Err(Error::io("open the pack's lock file")(e)),
+    };
+    let (in_use, took) = side::in_use(&file).map_err(Error::io("lock the pack's lock file"))?;
     Ok((in_use, took.then_some(file)))
+}
+
+/// What [`scan`] found at the pack's lock path: `None`, nothing; `Some(regular)`, an entry.
+fn pack_lock_found(found: &[(PathBuf, Side)]) -> Option<bool> {
+    found.iter().find_map(|(_, side)| match side {
+        Side::PackLock { regular } => Some(*regular),
+        _ => None,
+    })
 }
 
 /// Releases a pack lock [`take_pack_lock`] took, then returns `result`.
@@ -210,8 +219,11 @@ impl<F: ContainerFile + 'static> Container<F> {
     /// Windows files are not locked (SPEC §4.5.1), so whether one is in use is [`InUse::Unknown`]. A quarantine copy is
     /// never in use outside a recovery, which holds the container's writer lock. The pack's lock file and temporary
     /// files are in use while a pack writer holds the pack's writer lock (ROADMAP 9.2.15), found by taking it for a
-    /// moment (on Windows too); with no lock file, no pack writer has run since it would have been created. Whether the
-    /// lease directory is in use is never checked ([`InUse::Unknown`]).
+    /// moment (on Windows too); with no lock file, no pack writer has run since it would have been created. A pack
+    /// writer opening at that moment fails with `PackLocked`: retry it. A lock path that is not a regular file (a
+    /// symbolic link, which a pack writer follows) is listed but never opened, and it and the pack's temporary files
+    /// are [`InUse::Unknown`] (the sweep keeps them). Whether the lease directory is in use is never checked
+    /// ([`InUse::Unknown`]).
     ///
     /// ```
     /// use persia_storage::container::Container;
@@ -239,13 +251,13 @@ impl<F: ContainerFile + 'static> Container<F> {
             Err(err) => return Err(Error::io("canonicalize")(err)),
         };
         let (_, found) = scan(vfs, &path)?;
+        let lock = pack_lock_found(&found);
         let pack_files = found
             .iter()
-            .any(|(_, side)| matches!(side, Side::PackTemporary | Side::PackLock));
+            .any(|(_, side)| matches!(side, Side::PackTemporary | Side::PackLock { .. }));
         let pack_in_use = if pack_files {
-            let (in_use, held) =
-                take_pack_lock(vfs, &pack_path(&path), false).map_err(Error::io("lock"))?;
-            release_pack_lock(held, Ok(in_use)).map_err(Error::io("unlock"))?
+            let (in_use, held) = take_pack_lock(vfs, &pack_path(&path), lock, false)?;
+            release_pack_lock(held, Ok(in_use)).map_err(Error::io("unlock the pack's lock file"))?
         } else {
             InUse::No
         };
@@ -264,7 +276,7 @@ impl<F: ContainerFile + 'static> Container<F> {
                     Err(err) => return Err(Error::io("open temporary file")(err)),
                 },
                 Side::Container(_) => InUse::No,
-                Side::PackTemporary | Side::PackLock => pack_in_use,
+                Side::PackTemporary | Side::PackLock { .. } => pack_in_use,
                 Side::PackLeases => InUse::Unknown,
             };
             files.push(SideFile {
@@ -289,7 +301,9 @@ impl<F: ContainerFile + 'static> Container<F> {
     /// it here and then fail with an I/O error instead. The pack's temporary files are removed only while this call
     /// holds the pack's writer lock (creating its file if missing), as a pack writer's open removes them: while a pack
     /// writer holds it (a handle that outlived its database), or where it proves nothing (Windows aside, a lock that
-    /// belongs to the process, ADR-0019), they are all kept. One directory sync covers every removal.
+    /// belongs to the process, ADR-0019, or a lock path that is not a regular file), they are all kept. A pack writer
+    /// opening while this call holds the lock fails with `PackLocked`: retry it. One directory sync covers every
+    /// removal.
     ///
     /// # Errors
     /// [`Error::ReadOnly`], [`Error::Poisoned`], [`Error::InvalidInput`] without a path, or [`Error::Io`] listing the
@@ -368,7 +382,12 @@ impl<F: ContainerFile + 'static> Container<F> {
         // The pack's under its writer lock, held through the directory sync (ROADMAP 9.2.10, 9.2.15).
         let mut pack_lock = None;
         if result.is_ok() && !pack_temps.is_empty() {
-            match take_pack_lock(vfs, &pack_path(&location.path), true) {
+            match take_pack_lock(
+                vfs,
+                &pack_path(&location.path),
+                pack_lock_found(&found),
+                true,
+            ) {
                 Ok((InUse::No, Some(held))) => {
                     pack_lock = Some(held);
                     for path in pack_temps {
@@ -385,9 +404,10 @@ impl<F: ContainerFile + 'static> Container<F> {
                 }
                 // A pack writer lives, or the lock proves nothing here: every pack temporary file is kept.
                 Ok((_, held)) => {
-                    result = release_pack_lock(held, Ok(())).map_err(Error::io("unlock"));
+                    result = release_pack_lock(held, Ok(()))
+                        .map_err(Error::io("unlock the pack's lock file"));
                 }
-                Err(err) => result = Err(Error::io("lock")(err)),
+                Err(err) => result = Err(err),
             }
         }
         // Even after an error: what was removed stays removed across a crash.
@@ -415,7 +435,7 @@ impl<F: ContainerFile + 'static> Container<F> {
         // A failed release of the pack's lock is the error, or is added to the one before it.
         match (outcome, released) {
             (outcome, Ok(())) => outcome,
-            (Ok(_), Err(unlock)) => Err(Error::io("unlock")(unlock)),
+            (Ok(_), Err(unlock)) => Err(Error::io("unlock the pack's lock file")(unlock)),
             (Err(Error::Io { op, source }), Err(unlock)) => Err(Error::Io {
                 op,
                 source: side::then_failed(source, "unlocking the pack's writer lock", unlock),
@@ -529,8 +549,16 @@ mod pack_tests {
         );
         assert_eq!(
             side_of("app.persia.blobs.lock", File, c),
-            Some(Side::PackLock)
+            Some(Side::PackLock { regular: true })
         );
+        // Listed whatever it is, but only a regular file is ever opened.
+        for kind in [Dir, Other] {
+            assert_eq!(
+                side_of("app.persia.blobs.lock", kind, c),
+                Some(Side::PackLock { regular: false }),
+                "{kind:?}"
+            );
+        }
         assert_eq!(
             side_of("app.persia.blobs.leases", Dir, c),
             Some(Side::PackLeases)
@@ -549,8 +577,6 @@ mod pack_tests {
             ("app.persia.blobs.tmp.0123456789abcdef0.1", File),
             ("app.persia.blobs.tmp.0123456789abcdef.", File),
             ("app.persia.blobs.tmp.0123456789abcdef.1x", File),
-            ("app.persia.blobs.lock", Dir),
-            ("app.persia.blobs.lock", Other),
             ("app.persia.blobs.lock.1", File),
             ("app.persia.blobs.leases", File),
             ("app.persia.blobs.leases", Other),

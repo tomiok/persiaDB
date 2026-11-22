@@ -2790,9 +2790,9 @@ live, and every put of the WAL chunks the read-only open replayed, replaced sinc
 chunk frames GC's mark keeps (every WAL chunk frame, not only the ones a read-only open replayed): verify checks no
 reference GC would drop. The
 scan reads only the committed frames `12288..log_end` and bounds each frame's length before reading it; that bound
-applies after the pack is opened. The open bounds each frame by its kind too, before any read: a committed frame
-longer than any frame of its kind is corruption, and an oversize tail frame ends the roll-forward unread and is
-truncated (ROADMAP 9.2.14). An orphan chunk is one no bound blob names, counted and never
+applies after the pack is opened. The open bounds each frame by its kind too, before reading it into memory: a
+committed frame longer than any frame of its kind is corruption, and an oversize tail frame ends the roll-forward and
+is truncated, never read into memory whole (only the checksum pass streams it, in bounded pieces; ROADMAP 9.2.14). An orphan chunk is one no bound blob names, counted and never
 an error. `persia verify` checks the documents before it opens the pack, so a document error is reported without
 opening the pack. A dangling reference found once the container's
 committed seq has moved since the documents were opened is reported as "changed during verify, rerun" (exit status 1), not as damage (exit

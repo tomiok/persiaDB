@@ -429,6 +429,8 @@ fn print_files(action: &str, files: &[SideFile]) {
             SideFileKind::Quarantine => "quarantine",
             SideFileKind::Lock => "lock",
             SideFileKind::Leases => "leases",
+            // A kind a newer persia-storage lists: printed, never mistaken for one of these.
+            _ => "other",
         };
         let state = match f.in_use {
             InUse::No => "free",

@@ -105,7 +105,8 @@ pub(super) fn recover<F: ContainerFile>(
 /// committed by the caller. That is a bind cut after its data sync and before its slot (an orphan blob, harmless), or
 /// one whose synced slot was lost (a damaged newer slot: its blob was acknowledged, and documents may reference it).
 /// Everything after it is left for the caller to truncate: a torn tail, staged chunks, garbage, and a frame longer than
-/// any frame of its kind, which ends the run unread (ROADMAP 9.2.14). The frames are taken as the scan yields them,
+/// any frame of its kind, which ends the run without ever being read into memory whole (ROADMAP 9.2.14): only the
+/// scanner's checksum pass streams it, in 64 KiB pieces. The frames are taken as the scan yields them,
 /// so memory holds the offsets of the tail's chunk frames, never a list of its frames.
 fn roll_forward<F: ContainerFile>(
     pack: &mut Pack<F>,

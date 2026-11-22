@@ -12,6 +12,8 @@
 //!   name any file while the writer lives, and the lock stays where it is.
 //! - It is held until the handle is dropped, however long other owners (an `Arc` clone that outlives the container)
 //!   keep the handle alive, and released before the close (a forked copy of the descriptor would keep it otherwise).
+//! - A symbolic link at that name is followed (the lock is its target's); one to nothing is an error. The listing
+//!   and sweep of the container's side files never open such a link, and keep the pack's temporary files.
 //! - The file is created if missing and never removed by Persia: removing it would let a second writer lock a new file
 //!   of that name while the first holds the old one. It holds no data, so its creation is not synced: a crash that
 //!   loses it loses no lock (locks do not survive the process).
@@ -19,7 +21,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use persia_storage::vfs::Vfs;
+use persia_storage::vfs::{EntryKind, Vfs};
 
 use super::{ContainerFile, Error, Result, io, io_err};
 
@@ -78,8 +80,19 @@ fn open_or_create<F: ContainerFile>(vfs: &dyn Vfs<File = F>, path: &Path) -> Res
         }
         match vfs.open(path, true) {
             Ok(file) => return Ok(file),
-            // Removed between the two calls: create it again.
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                // The name exists (the create said so) but opens to nothing: a symbolic link to nothing, which the
+                // create will never replace. Anything else was removed between the two calls: create it again.
+                if matches!(vfs.entry_kind(path), Ok(EntryKind::Other)) {
+                    return Err(Error::PackIo {
+                        op: "open the lock file",
+                        source: io::Error::new(
+                            io::ErrorKind::NotFound,
+                            format!("{} is a symbolic link to nothing", path.display()),
+                        ),
+                    });
+                }
+            }
             Err(e) => return Err(io_err("open the lock file")(e)),
         }
     }

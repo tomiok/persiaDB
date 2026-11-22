@@ -1059,10 +1059,10 @@ fn a_committed_index_frame_longer_than_its_kind_allows_is_corrupt_before_its_rea
     }
 }
 
-/// After `log_end`, such a frame ends the roll-forward unread (ADR-0049 item 9): the read-write open truncates it,
-/// reading it only in the checksum pass's bounded pieces (64 KiB).
+/// After `log_end`, such a frame ends the roll-forward (ADR-0049 item 9) and the read-write open truncates it. It is
+/// never read into memory whole: only the checksum pass streams it, in 64 KiB pieces.
 #[test]
-fn a_tail_index_frame_longer_than_its_kind_allows_is_truncated_unread() {
+fn a_tail_index_frame_longer_than_its_kind_allows_is_truncated_without_a_whole_read() {
     let mut bytes = empty_blob_pack();
     let log_end = bytes.len() as u64;
     bytes.extend_from_slice(&long_index_frame(log_end, 2, 1 << 20));

@@ -469,10 +469,11 @@ fn with_per_process_locks_no_pack_temporary_file_is_swept() {
     );
 }
 
-/// ROADMAP 9.2.10 on the operating system's file system: symbolic links named like the pack's temporary file, lock
-/// file and lease directory, pointing outside the directory, are none of the pack's side files. The listing leaves them
-/// out, the sweep removes only the real temporary file beside them, and neither a link nor what it points to is
-/// touched.
+/// ROADMAP 9.2.10 on the operating system's file system: symbolic links named like the pack's temporary file and lease
+/// directory, pointing outside the directory, are none of the pack's side files, and neither a link nor what it points
+/// to is touched. A link at the lock's name is listed as the lock (a pack writer follows it, so it may be the live
+/// lock), but never opened: it and the pack's temporary files are `Unknown`, and the sweep keeps them. A link to
+/// nothing is the same. Once the link is gone, the sweep takes a real lock and removes the stale temporary file.
 #[cfg(unix)]
 #[test]
 fn symlinks_named_like_the_packs_side_files_are_left_alone() {
@@ -488,33 +489,101 @@ fn symlinks_named_like_the_packs_side_files_are_left_alone() {
     let links = [
         ("app.persia.blobs.tmp.0123456789abcdef.1", &target_file),
         ("app.persia.blobs.tmp.0123456789abcdef.2", &target_dir),
-        ("app.persia.blobs.lock", &target_file),
         ("app.persia.blobs.leases", &target_dir),
     ];
     for (name, target) in links {
         std::os::unix::fs::symlink(target, dir.path().join(name)).unwrap();
     }
+    let lock = dir.path().join("app.persia.blobs.lock");
     let stale = dir.path().join("app.persia.blobs.tmp.fedcba9876543210.3");
     std::fs::write(&stale, b"left by a crash").unwrap();
-
-    let listed: Vec<PathBuf> = Container::side_files(&path)
-        .unwrap()
-        .into_iter()
-        .map(|f| f.path)
-        .collect();
     // The listing canonicalizes the container's path (a temporary directory may sit behind a link).
     let real_dir = std::fs::canonicalize(dir.path()).unwrap();
-    assert_eq!(listed, [real_dir.join(stale.file_name().unwrap())]);
+    let in_real = |p: &Path| real_dir.join(p.file_name().unwrap());
+
+    let nowhere = outside.path().join("nowhere");
+    for lock_target in [&target_file, &nowhere] {
+        std::os::unix::fs::symlink(lock_target, &lock).unwrap();
+        let listed: Vec<(PathBuf, SideFileKind, InUse)> = Container::side_files(&path)
+            .unwrap()
+            .into_iter()
+            .map(|f| (f.path, f.kind, f.in_use))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (in_real(&lock), SideFileKind::Lock, InUse::Unknown),
+                (in_real(&stale), SideFileKind::Temporary, InUse::Unknown),
+            ],
+            "{lock_target:?}"
+        );
+        let c = Container::open(&path, Mode::ReadWrite).unwrap();
+        assert_eq!(c.sweep_stale_files().unwrap(), Vec::<PathBuf>::new());
+        assert!(stale.exists(), "kept while the lock is a link");
+        drop(c);
+        std::fs::remove_file(&lock).unwrap();
+    }
+
     let c = Container::open(&path, Mode::ReadWrite).unwrap();
-    assert_eq!(
-        c.sweep_stale_files().unwrap(),
-        [real_dir.join(stale.file_name().unwrap())]
-    );
+    assert_eq!(c.sweep_stale_files().unwrap(), [in_real(&stale)]);
     assert!(!stale.exists());
+    assert!(
+        std::fs::symlink_metadata(&lock).unwrap().is_file(),
+        "a real lock file now"
+    );
     for (name, _) in links {
         let meta = std::fs::symlink_metadata(dir.path().join(name)).unwrap();
         assert!(meta.file_type().is_symlink(), "{name}");
     }
     assert_eq!(std::fs::read(&target_file).unwrap(), b"not the pack's");
     assert_eq!(std::fs::read(target_dir.join("kept")).unwrap(), b"kept");
+}
+
+/// ROADMAP 9.2.10, 9.2.15 on the operating system's file system, on every platform (no `cfg(unix)`): while another
+/// handle holds `<name>.persia.blobs.lock` (`flock`, or `LockFileEx` on Windows), the pack's lock and temporary files
+/// are in use and the sweep keeps them; once it is released, the sweep removes the temporary file and keeps the lock.
+#[test]
+fn a_held_pack_lock_on_a_real_file_keeps_the_packs_temporary_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let path = root.join("app.persia");
+    drop(Container::create(&path).unwrap());
+    let lock = root.join("app.persia.blobs.lock");
+    let stale = root.join("app.persia.blobs.tmp.0123456789abcdef.5");
+    std::fs::write(&stale, b"left by a crash").unwrap();
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock)
+        .unwrap();
+    held.try_lock().unwrap();
+    let listed = |path: &Path| -> Vec<(PathBuf, SideFileKind, InUse)> {
+        Container::side_files(path)
+            .unwrap()
+            .into_iter()
+            .map(|f| (f.path, f.kind, f.in_use))
+            .collect()
+    };
+    assert_eq!(
+        listed(&path),
+        [
+            (lock.clone(), SideFileKind::Lock, InUse::Yes),
+            (stale.clone(), SideFileKind::Temporary, InUse::Yes),
+        ]
+    );
+    let c = Container::open(&path, Mode::ReadWrite).unwrap();
+    assert_eq!(c.sweep_stale_files().unwrap(), Vec::<PathBuf>::new());
+    assert!(stale.exists());
+    held.unlock().unwrap();
+    drop(held);
+    assert_eq!(c.sweep_stale_files().unwrap(), std::slice::from_ref(&stale));
+    assert!(!stale.exists());
+    assert!(lock.exists(), "the lock file is never removed");
+    drop(c);
+    let after = listed(&path);
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(after[0].0, lock);
+    assert_eq!(after[0].1, SideFileKind::Lock);
 }
