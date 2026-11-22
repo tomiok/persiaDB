@@ -238,6 +238,14 @@ pub enum Error {
         /// The bytes read.
         actual: u64,
     },
+    // -- reader leases (9.2.16) --
+    /// Every attempt to take a reader lease was refused: its lock was not granted, or its new file was removed by a
+    /// writer before the lock (SPEC §9.3, ADR-0054 item 4). Nothing is held; open again.
+    #[error("could not take a reader lease after {attempts} attempts")]
+    LeaseContended {
+        /// How many attempts were made.
+        attempts: u32,
+    },
 }
 
 impl Error {

@@ -20,6 +20,7 @@ use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
 use persia_blob::gc::{GcObject, Mark, PinCheck, PinGate, Sweep, SweepOptions, SweepReport};
+use persia_blob::pack::lease::ReaderLeaseReport;
 use persia_blob::{BlobId, BlobStore};
 use persia_engine::db::{Database, DatabaseError};
 
@@ -60,6 +61,7 @@ impl Default for GcOptions {
 
 /// What [`BlobDatabase::gc`] did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GcReport {
     /// Blob ids marked: referenced or pinned.
     pub marked_blobs: usize,
@@ -67,8 +69,13 @@ pub struct GcReport {
     pub marked_uploads: usize,
     /// Referenced blobs the store has no manifest for (dangling references, which `verify` reports).
     pub missing: Vec<BlobId>,
-    /// What the sweep did.
+    /// What the sweep did: nothing (the default report) when the reader leases held it back.
     pub sweep: SweepReport,
+    /// The reader leases of the pack (SPEC §9.3, §9.5; ROADMAP 9.2.16), judged against the committed seq; `None` for
+    /// a store without them (the remote layout) or no pack yet. GC does not sweep while any reader lease is behind
+    /// the committed seq (or opening, ahead, unreadable): [`ReaderLeaseReport::held_back`]. Every commit and every
+    /// compaction puts every read-only handle of another process behind until it refreshes.
+    pub readers: Option<ReaderLeaseReport>,
 }
 
 /// Errors of [`BlobDatabase::mark`] and [`BlobDatabase::gc`].
@@ -111,12 +118,19 @@ pub trait BlobReferences {
     /// As [`Database::referenced_blobs`].
     #[allow(clippy::result_large_err)] // The engine's own error, as `Database::referenced_blobs` returns it.
     fn referenced_blobs(&self) -> Result<HashSet<BlobId>, DatabaseError>;
+
+    /// The committed seq ([`Database::seq`]): what GC judges reader leases against (SPEC §9.5, ROADMAP 9.2.16).
+    fn committed_seq(&self) -> u64;
 }
 
 impl BlobReferences for Database {
     #[allow(clippy::result_large_err)] // As the trait.
     fn referenced_blobs(&self) -> Result<HashSet<BlobId>, DatabaseError> {
         Database::referenced_blobs(self)
+    }
+
+    fn committed_seq(&self) -> u64 {
+        Database::seq(self)
     }
 }
 
@@ -197,6 +211,21 @@ impl<S: BlobStore + Sweep + ?Sized, L: DocumentLog + BlobReferences> BlobDatabas
             return Err(GcError::InvalidRewriteRatio(options.rewrite_ratio));
         }
         let mark = self.mark()?;
+        // With the log frozen (this borrow), the committed seq is the mark's (SPEC §9.5, ADR-0054 item 9).
+        let readers = self
+            .blobs()
+            .store()
+            .reader_leases()?
+            .map(|scan| scan.judge(self.log().committed_seq()));
+        if readers.as_ref().is_some_and(|r| r.held_back) {
+            return Ok(GcReport {
+                marked_blobs: mark.blobs.len(),
+                marked_uploads: mark.uploads.len(),
+                missing: mark.missing,
+                sweep: SweepReport::default(),
+                readers,
+            });
+        }
         let sweep = SweepOptions {
             grace: options.grace,
             now: options.now.unwrap_or_else(SystemTime::now),
@@ -211,6 +240,7 @@ impl<S: BlobStore + Sweep + ?Sized, L: DocumentLog + BlobReferences> BlobDatabas
             marked_uploads: mark.uploads.len(),
             missing: mark.missing,
             sweep: swept,
+            readers,
         })
     }
 }

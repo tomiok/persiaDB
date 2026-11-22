@@ -109,6 +109,16 @@ pub trait Sweep {
         pins: &P,
         options: &SweepOptions,
     ) -> Result<SweepReport>;
+
+    /// The writer's scan of the store's reader leases (SPEC §9.5, ROADMAP 9.2.16, ADR-0054), which GC judges against
+    /// its committed seq before it sweeps. `None` (the default) for a store without them: the remote layout, whose
+    /// readers the grace period covers (ROADMAP 13.2.4).
+    ///
+    /// # Errors
+    /// The store's: [`PackStore::reader_leases`](crate::PackStore::reader_leases).
+    fn reader_leases(&self) -> Result<Option<crate::pack::lease::LeaseScan>> {
+        Ok(None)
+    }
 }
 
 /// What a pin protects from GC (SPEC §9.5): the writer's `Pinned`, as this crate names it.

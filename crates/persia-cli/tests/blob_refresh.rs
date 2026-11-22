@@ -18,17 +18,17 @@
 //!    same state, else `RefreshedOlder`. No other error, never `RefreshDiverged`, never a panic.
 //! 3. A taken refresh shows exactly the open's `seq`, records and WAL end; the pack never goes back (its generation,
 //!    then its commit `seq`); a refused one changes nothing (documents, WAL position, pack).
-//! 4. Every blob a shown document references reads back byte-identical, except `BlobNotFound` for a document the
-//!    writer deleted (the documented window: a pack newer than the documents, SPEC §9.5, ROADMAP 9.2.16). A document
-//!    first shown, and every document after the pack changed, is read whole.
+//! 4. Every blob a shown document references reads back byte-identical, never `BlobNotFound`: the reader holds a
+//!    reader lease, so no GC sweeps while its documents are behind the writer's commits (SPEC §9.3, §9.5; ROADMAP
+//!    9.2.16). A document first shown, and every document after the pack changed, is read whole.
 //! 5. An open shows every `Fsync` and `Async` put acknowledged before it (SIGKILL keeps the page cache) and every
 //!    document an earlier open showed, unless the writer started deleting it; it shows no document whose delete was
 //!    acknowledged before it, and no document no writer started.
 //! 6. After every kill `persia verify` passes; at the end `--deep` passes, and a fresh open shows what the reader
 //!    shows, with no blob missing.
 //!
-//! Invariant 4's window is also driven step by step (a writer that runs one command per stdin line), so a default
-//! run always reaches it: the free-running schedule reaches it only at some interleavings. That stepped run also
+//! Invariant 4's old window (a GC between a delete and the refresh) is also driven step by step (a writer that runs
+//! one command per stdin line), so a default run always reaches it: GC is held back while the reader is behind. That stepped run also
 //! forces a pack rewrite and a `RefreshedOlder` refusal. Whether the seeded schedule reaches either is printed and
 //! does not fail the test.
 //!
@@ -770,13 +770,12 @@ fn run_file(seed: u64, kills: u64, ops: u64, stats: &mut Stats) {
         );
     }
 
-    // Invariant 4 (the window is only for deleted documents), invariant 5 (no phantoms).
-    for id in &reader.missing {
-        assert!(
-            model.del_started.contains(id),
-            "seed {seed}: {id}'s blob was not found, and no writer deleted it"
-        );
-    }
+    // Invariant 4 (no blob missing: the reader lease holds GC back), invariant 5 (no phantoms).
+    assert!(
+        reader.missing.is_empty(),
+        "seed {seed}: blobs not found {:?}",
+        reader.missing
+    );
     for id in &reader.shown_ids {
         assert!(
             model.put_started.contains(id),
@@ -873,13 +872,13 @@ fn a_reader_refreshes_beside_a_gc_writer_that_is_killed_and_recovers() {
     );
 }
 
-/// Invariant 4's window, step by step across processes: the reader holds an open that shows `gone` and `kept`; the
-/// writer deletes `gone`, commits and rewrites the pack (GC sweeps `gone`'s blob); the refresh with the held open is
-/// taken and shows `gone` with `BlobNotFound` while `kept` reads. The next open no longer shows `gone`, and nothing
-/// is missing. An open held across the next commit is then `RefreshedOlder`. Then the writer is killed (SIGKILL)
+/// Invariant 4, step by step across processes: the reader holds an open that shows `gone` and `kept`; the writer
+/// deletes `gone` and commits, and its GC is held back by the reader's lease (it deletes nothing, no rewrite); the
+/// refresh with the held open is taken and shows `gone`, whose blob still reads. Once the reader caught up (it no
+/// longer shows `gone`), the next GC sweeps `gone`'s blob and rewrites the pack, and nothing is missing. An open held across the next commit is then `RefreshedOlder`. Then the writer is killed (SIGKILL)
 /// between a put and its commit, and the reader's refresh is taken.
 #[test]
-fn a_held_open_refreshed_after_a_gc_rewrite_misses_only_the_deleted_blob() {
+fn a_held_open_holds_gc_back_until_the_reader_catches_up() {
     if child_env().is_some() {
         return;
     }
@@ -920,18 +919,22 @@ fn a_held_open_refreshed_after_a_gc_rewrite_misses_only_the_deleted_blob() {
     for line in ["del gone", "commit"] {
         step(&mut writer, &mut model, line);
     }
-    assert_eq!(step(&mut writer, &mut model, "gc"), "ok gc 1 true");
+    assert_eq!(
+        step(&mut writer, &mut model, "gc"),
+        "ok gc 0 false",
+        "held back by the reader's lease"
+    );
     reader.refresh(true, &mut model, &mut stats, "the held open");
-    assert_eq!(reader.missing, BTreeSet::from(["gone".to_owned()]));
+    assert!(reader.missing.is_empty(), "{:?}", reader.missing);
     assert!(reader.last_ids.contains("gone"));
-    assert_eq!(stats.missing_window, 1);
-    reader.missing.clear();
-    reader.catch_up(&mut model, &mut stats, "after the gc");
+    assert_eq!(stats.missing_window, 0);
+    reader.catch_up(&mut model, &mut stats, "after the held-back gc");
     assert_eq!(reader.last_ids, BTreeSet::from(["kept".to_owned()]));
     assert!(reader.missing.is_empty());
+    assert_eq!(step(&mut writer, &mut model, "gc"), "ok gc 1 true");
 
-    // The free-running schedule may never refuse an older open or rewrite the pack. This does both: the `gc` above
-    // reported a rewrite, and this open was taken before `newer` was committed, so catching up refuses it.
+    // The free-running schedule may never refuse an older open or rewrite the pack. This does both: the second `gc`
+    // above reported a rewrite, and this open was taken before `newer` was committed, so catching up refuses it.
     reader.open(&model, &mut stats, "held before the later commit");
     for line in ["put newer", "commit"] {
         step(&mut writer, &mut model, line);

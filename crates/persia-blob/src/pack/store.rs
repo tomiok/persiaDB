@@ -1095,6 +1095,8 @@ mod scan;
 pub use scan::PackScan;
 // The pack's writer lock (ROADMAP 9.2.7, ADR-0053).
 mod lock;
+// The writer's scan of the reader leases (ROADMAP 9.2.16, ADR-0054).
+mod leases;
 // -- end wiring --
 
 use mapped::Mapper;

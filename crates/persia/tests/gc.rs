@@ -237,6 +237,9 @@ impl BlobReferences for Poisoned {
     fn referenced_blobs(&self) -> Result<HashSet<BlobId>, DatabaseError> {
         Err(DatabaseError::Poisoned)
     }
+    fn committed_seq(&self) -> u64 {
+        self.0.seq()
+    }
 }
 
 #[test]

@@ -65,18 +65,20 @@ text, its own magic and version, this ADR, and golden files (item 17).
 
 4. **Life cycle.** A `ReadOnlyBlobDatabase` holds one reader lease from before it opens its documents until it is
    dropped:
-   - *Take* (`ReaderLease::take`): create the directory if missing; `create_new` `<id>.lease`; write the opening
-     record; take the lock (item 5); then check that the path still names this file (`Vfs::same_file`). Then open the
-     container read-only at its path and read its committed seq from the superblock (as `persia verify` does: a
-     compaction renames a new file over the path, SPEC §4.6), and keep it as the lease's **taken seq**. If the lock is
-     not granted, its sidecar cannot be opened (Windows: a stale removal's delete pending, item 12), or the name is
-     gone (the writer judged the new file stale before the lock was taken and removed it), the handle drops that file
-     and starts again with a new id, at most 3 times; then the take fails with `Error::LeaseContended`. The lock is
-     taken after the record is written, so a reader lease a writer finds locked always holds a whole record.
+   - *Take* (`ReaderLease::take_in`, or `take_beside` for a container path on the real file system): open the
+     container once first (nothing is created beside a file that is not one); create the directory if missing;
+     `create_new` `<id>.lease`; write the opening record; take the lock (item 5); then check that the path still
+     names this file (`Vfs::same_file`). Then open the container read-only at its path and read its committed seq
+     from the superblock (as `persia verify` does: a compaction renames a new file over the path, SPEC §4.6), and
+     keep it as the lease's **taken seq**. If the lock is not granted, its sidecar cannot be opened (Windows: a
+     stale removal's delete pending, item 12), or the name is gone (the writer judged the new file stale before
+     the lock was taken and removed it), the handle drops that file and starts again with a new id, at most 3
+     times; then the take fails with `Error::LeaseContended`. The lock is taken after the record is written, so a
+     reader lease a writer finds locked always holds a whole record.
    - *Open*: `ReadOnlyBlobDatabase::open(path)` canonicalizes `path`, takes the reader lease beside its pack, opens
      the documents, checks them (below), then writes the open record (`db_uuid`, `manifest_seq`).
-   - *Given documents*: `with_lease(lease, db, path)` (and `with_pack_beside`, `with_pack_in`, which take a lease
-     first and then call it) checks, before anything else:
+   - *Given documents*: `with_lease(lease, db, path)` and `with_lease_in(lease, db, vfs, pack)` (and
+     `with_pack_beside`, `with_pack_in`, which take a lease first and then call them) checks, before anything else:
      - `db.seq() >= taken seq`, else `Error::OpenedBeforeLease { opened, taken }`: a GC may have swept a blob those
        documents show between their open and the lease. **Equal is safe** whenever the documents were opened: every
        GC that ran before the lease existed had a mark seq at most the taken seq, which is the documents' seq, and a
@@ -148,8 +150,8 @@ text, its own magic and version, this ADR, and golden files (item 17).
    or ahead (above it: not this writer's history, a restored or copied database, so not trusted; logged with the
    lease's path, `tracing::warn`). When any live reader lease holds GC back, the sweep does not run: no pack
    rewrite, nothing dropped. The report says so: `GcReport` (made `#[non_exhaustive]`) gains the reader lease
-   counts (live, opening, behind, ahead, unreadable, stale removed, the oldest `manifest_seq`), and the rewrite is
-   reported as held back by readers. The next `gc` decides again.
+   counts (`GcReport::readers`: live, current, opening, behind, ahead, unreadable, stale removed, the oldest
+   `manifest_seq`) and `held_back`, and its `sweep` is the empty report (no rewrite). The next `gc` decides again.
    **Why one seq is enough**: a reader whose documents are at the writer's committed seq shows only documents the
    mark keeps (the segments and tombstones of that seq, and WAL records from its `wal_start`, which the mark keeps
    whole, SPEC §9.5); a document committed later can only reference a blob bound or pinned after that GC.

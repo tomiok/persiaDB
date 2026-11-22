@@ -7,6 +7,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 pub mod layout;
+// Reader leases beside the pack (ROADMAP 9.2.16, ADR-0054).
+pub mod lease;
 mod store;
 
 pub use store::{PackMode, PackRecovery, PackScan, PackStore};

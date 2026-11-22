@@ -6,6 +6,7 @@ use persia_storage::container::ContainerFile;
 use super::{Mark, PinGate, Sweep, SweepOptions, SweepReport};
 use crate::error::Result;
 use crate::pack::PackStore;
+use crate::pack::lease::LeaseScan;
 
 impl<F: ContainerFile + 'static> Sweep for PackStore<F> {
     /// Rewrites the pack without what the mark and the pins do not keep, when enough is dropped
@@ -20,5 +21,9 @@ impl<F: ContainerFile + 'static> Sweep for PackStore<F> {
         options: &SweepOptions,
     ) -> Result<SweepReport> {
         self.rewrite(mark, pins, options.rewrite_ratio)
+    }
+
+    fn reader_leases(&self) -> Result<Option<LeaseScan>> {
+        PackStore::reader_leases(self)
     }
 }

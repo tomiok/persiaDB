@@ -638,8 +638,19 @@ fn a_symlinked_container_finds_its_pack_beside_the_real_file() {
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
+    // The reader leases directory, beside the real pack, is empty once every reader has gone (SPEC §9.3).
     assert_eq!(
         names,
-        BTreeSet::from(["app.persia".to_owned(), "app.persia.blobs".to_owned()])
+        BTreeSet::from([
+            "app.persia".to_owned(),
+            "app.persia.blobs".to_owned(),
+            "app.persia.blobs.leases".to_owned()
+        ])
+    );
+    assert_eq!(
+        std::fs::read_dir(real.join("app.persia.blobs.leases"))
+            .unwrap()
+            .count(),
+        0
     );
 }

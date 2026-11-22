@@ -14,7 +14,8 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use persia::internal::documents::ReadOnlyBlobDatabase;
+use persia::internal::documents::{ReadOnlyBlobDatabase, ReaderLease};
+
 use persia::internal::verify::{Scan, VerifyError};
 use persia_engine::db::{DatabaseOptions, ReadOnlyDatabase, Tail};
 use persia_storage::container::{Container, Mode};
@@ -28,6 +29,11 @@ pub fn verify(out: &mut dyn Write, path: &Path, scan: Scan) -> Result<()> {
     // The built-in analyzers: replay analyzes the `text` fields of the logged documents, and a schema names only
     // built-in analyzers (SPEC §6.2.2); one this build lacks, from a newer build, fails the open as unsupported.
     let options = DatabaseOptions::default();
+    // The container first, so a file that is not one is reported as such (exit 4) and nothing is created beside it.
+    Container::open(path, Mode::ReadOnly).with_context(|| format!("opening {}", path.display()))?;
+    // Then the reader lease, so a writer's GC cannot sweep a blob these documents show while this runs (SPEC §9.3).
+    let lease = ReaderLease::take_beside(path)
+        .with_context(|| format!("taking a reader lease beside {}", path.display()))?;
     let docs = ReadOnlyDatabase::open(path, &options.registry)
         .with_context(|| format!("opening {}", path.display()))?;
     // Document checks before the pack is opened, so a damaged container is reported without opening the pack.
@@ -35,7 +41,7 @@ pub fn verify(out: &mut dyn Write, path: &Path, scan: Scan) -> Result<()> {
     let report = docs
         .verify()
         .with_context(|| format!("verifying {}", path.display()))?;
-    let db = ReadOnlyBlobDatabase::with_pack_beside(docs, path)
+    let db = ReadOnlyBlobDatabase::with_lease(lease, docs, path)
         .with_context(|| format!("opening the blob pack of {}", path.display()))?;
     let tail = match report.tail {
         Tail::Clean => "clean".to_owned(),
@@ -145,7 +151,9 @@ mod tests {
 
     /// A reference found dangling because the documents were opened before a writer deleted their document,
     /// committed and collected its blob, and the pack after: "changed during verify" (status 1), never a dangling
-    /// reference (status 3). With no commit since the documents' open, it is a dangling reference.
+    /// reference (status 3). With no commit since the documents' open, it is a dangling reference. The reader's
+    /// lease would hold that GC back (SPEC §9.3), so the GC runs with the leases moved aside, as a writer from
+    /// before ADR-0054 (which ignores them) would.
     #[test]
     fn a_dangling_reference_after_a_commit_since_the_documents_open_asks_for_a_rerun() {
         let dir = tempfile::tempdir().unwrap();
@@ -165,12 +173,16 @@ mod tests {
             )
             .unwrap();
         writer.commit().unwrap();
+        let lease = ReaderLease::take_beside(&path).unwrap();
         let docs = ReadOnlyDatabase::open(&path, &options.registry).unwrap();
         writer
             .log_mut()
             .delete("c", "a", Durability::Fsync)
             .unwrap();
         writer.commit().unwrap();
+        let leases = dir.path().join("app.persia.blobs.leases");
+        let aside = dir.path().join("leases.aside");
+        std::fs::rename(&leases, &aside).unwrap();
         assert_eq!(
             writer
                 .gc(&GcOptions::default())
@@ -179,7 +191,8 @@ mod tests {
                 .blobs_deleted,
             1
         );
-        let db = ReadOnlyBlobDatabase::with_pack_beside(docs, &path).unwrap();
+        std::fs::rename(&aside, &leases).unwrap();
+        let db = ReadOnlyBlobDatabase::with_lease(lease, docs, &path).unwrap();
         assert!(matches!(
             db.verify_blobs(Scan::Quick),
             Err(VerifyError::Dangling { .. })

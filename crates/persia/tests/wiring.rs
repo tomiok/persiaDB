@@ -17,8 +17,10 @@
 //! 7. A GC rewrite (`PackReplaced`) reopens the pack; the reader then sees every blob, including one bound after
 //!    the rewrite. Any other pack error, and a reopen that fails (a damaged replacement, a pack of another database),
 //!    leaves the documents and the pack as they were: the same `seq`, records and WAL end, the old blobs readable.
-//! 8. A pack newer than the documents (GC swept a blob between the documents' open and the refresh) shows a document
-//!    whose blob is gone: `BlobNotFound`, never a panic, and every other blob reads on (ROADMAP 9.2.16 closes it).
+//! 8. A reader whose documents are behind a delete holds GC back (its reader lease, ROADMAP 9.2.16): the blob stays
+//!    until the reader refreshes past the delete, and the next GC sweeps it. A writer that ignores reader leases (one
+//!    from before ADR-0054) leaves a pack newer than the documents: a document whose blob is gone reads as
+//!    `BlobNotFound`, never a panic, and every other blob reads on.
 #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)] // Tests: inputs are fixed.
 
 use std::io::Read;
@@ -41,6 +43,18 @@ fn create(path: &Path) -> BlobDatabase<PackStore> {
         .create_collection(SchemaBuilder::new("c").build().unwrap())
         .unwrap();
     db
+}
+
+/// Runs `f` with the reader leases beside the pack of `path` moved aside: a GC then sees none, as a writer from
+/// before ADR-0054 (which ignores them, item 16) would. For tests of what such a GC leaves a reader.
+fn ignoring_reader_leases<T>(path: &Path, f: impl FnOnce() -> T) -> T {
+    let leases = persia_blob::pack::lease::leases_dir(&pack_path(path));
+    let mut aside = leases.as_os_str().to_owned();
+    aside.push(".aside");
+    std::fs::rename(&leases, &aside).unwrap();
+    let out = f();
+    std::fs::rename(&aside, &leases).unwrap();
+    out
 }
 
 fn read_all(db: &ReadOnlyBlobDatabase, blob: &persia_blob::BlobRef) -> Vec<u8> {
@@ -696,13 +710,16 @@ fn a_reopen_of_another_databases_pack_leaves_the_reader_paired() {
 #[test]
 fn a_reopen_of_a_damaged_replacement_leaves_the_reader_paired() {
     let lagging = lagging();
-    let report = lagging
-        .writer
-        .gc(&GcOptions {
-            rewrite_ratio: 0.0,
-            ..GcOptions::default()
-        })
-        .unwrap();
+    // The lagging reader's lease would hold this GC back; the rewrite is what this test needs.
+    let report = ignoring_reader_leases(&lagging.path, || {
+        lagging
+            .writer
+            .gc(&GcOptions {
+                rewrite_ratio: 0.0,
+                ..GcOptions::default()
+            })
+            .unwrap()
+    });
     assert!(
         matches!(report.sweep.rewrite, Some(Rewrite::Done { .. })),
         "{report:?}"
@@ -716,9 +733,9 @@ fn a_reopen_of_a_damaged_replacement_leaves_the_reader_paired() {
     lagging.refresh_fails(Error::is_corruption);
 }
 
-/// Invariant 8 (SPEC §9.5): the documents were opened before the writer deleted `gone` and GC swept its blob; the
-/// refresh then reopens the rewritten pack. The reader shows `gone`, whose blob is not bound: `BlobNotFound`, and
-/// the other blob reads on. A local reader lease will close this window (ROADMAP 9.2.16).
+/// Invariant 8 (SPEC §9.5): the documents were opened before the writer deleted `gone`, and a GC that ignores reader
+/// leases (a writer from before ADR-0054) swept its blob; the refresh then reopens the rewritten pack. The reader
+/// shows `gone`, whose blob is not bound: `BlobNotFound`, and the other blob reads on.
 #[test]
 fn a_pack_newer_than_the_documents_misses_a_swept_blob() {
     let dir = tempfile::tempdir().unwrap();
@@ -747,12 +764,14 @@ fn a_pack_newer_than_the_documents_misses_a_swept_blob() {
         .unwrap();
     writer.release_durable();
     writer.commit().unwrap();
-    let report = writer
-        .gc(&GcOptions {
-            rewrite_ratio: 0.0,
-            ..GcOptions::default()
-        })
-        .unwrap();
+    let report = ignoring_reader_leases(&path, || {
+        writer
+            .gc(&GcOptions {
+                rewrite_ratio: 0.0,
+                ..GcOptions::default()
+            })
+            .unwrap()
+    });
     assert!(
         matches!(report.sweep.rewrite, Some(Rewrite::Done { .. })),
         "{report:?}"

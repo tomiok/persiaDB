@@ -1311,6 +1311,8 @@ fn is_corruption_is_true_for_corrupt_only() {
             },
             false,
         ),
+        // -- reader leases (9.2.16) --
+        (Error::LeaseContended { attempts: 3 }, false),
     ];
     for (e, corrupt) in &cases {
         assert_eq!(e.is_corruption(), *corrupt, "{e:?}");
@@ -1349,6 +1351,8 @@ fn is_corruption_is_true_for_corrupt_only() {
             Error::UploadInterrupted { .. } | Error::ResumeUnsupported => "resume",
             // -- resume checks (9.3.7) --
             Error::ResumeUnchecked | Error::BlobSizeMismatch { .. } => "resume checks",
+            // -- reader leases (9.2.16) --
+            Error::LeaseContended { .. } => "reader leases",
             Error::BlobNotFound { .. }
             | Error::RangeOutOfBounds { .. }
             | Error::StagedChunkConflict { .. }
