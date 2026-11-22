@@ -11,6 +11,10 @@
 //! The headline percentage, the burn-up, and `docs/progress-history.csv` count milestones M0–M15 only.
 //! Those are the MVP and ship as v1.0. Later milestones render in their own section, so adding them does
 //! not move that percentage.
+//!
+//! A leaf of an MVP milestone labelled with a later version (`(v1.1)`, `(v2.0)`, `(post-v1)`: right after its id,
+//! or at the end of its text, before any "Done as: ..." remark) is post-MVP too: it counts with the post-MVP
+//! leaves, is listed in their section, and does not hold its milestone, or the milestones depending on it, open.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -54,7 +58,10 @@ pub(crate) struct Milestone {
     pub(crate) key: String,
     title: String,
     pub(crate) deps: Vec<String>,
+    /// The leaves that make the milestone's state and counts.
     pub(crate) leaves: Vec<Leaf>,
+    /// An MVP milestone's leaves labelled with a later version (`later_label`): post-MVP work filed under it.
+    later: Vec<Leaf>,
 }
 
 impl Milestone {
@@ -98,6 +105,65 @@ fn milestone_number(key: &str) -> Option<u32> {
 /// `true` for M0–M15. A key that is not `M` plus a number is not part of the MVP percentage.
 fn is_mvp(ms: &Milestone) -> bool {
     milestone_number(&ms.key).is_some_and(|n| n <= MVP_LAST)
+}
+
+/// The version the MVP ships as: a leaf label above it is later work.
+const MVP_VERSION: (u32, u32) = (1, 0);
+
+/// `true` for a version label after the MVP's: `v1.1`, `v2`, `v2.0.1`, `post-v1`. `v1.0`, `v0.9` and other
+/// text are not.
+fn is_later_version(label: &str) -> bool {
+    if label.starts_with("post-v") {
+        return true;
+    }
+    let Some(version) = label.strip_prefix('v') else {
+        return false;
+    };
+    let parts: Vec<&str> = version.split('.').collect();
+    if parts.is_empty()
+        || parts
+            .iter()
+            .any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return false;
+    }
+    let number = |i: usize| parts.get(i).map_or(Some(0), |p| p.parse::<u32>().ok());
+    match (number(0), number(1)) {
+        (Some(major), Some(minor)) => (major, minor) > MVP_VERSION,
+        _ => false,
+    }
+}
+
+/// `true` when a leaf's text carries a later version label: `(v1.1) Text`, or `Text (v1.1)` before an optional
+/// ` Done as: ...` remark (appended when the leaf is ticked, so ticking it must not move it into the MVP).
+fn later_label(text: &str) -> bool {
+    fn label_of(s: &str) -> Option<&str> {
+        s.strip_prefix('(')?.strip_suffix(')')
+    }
+    let leading = text.split_once(' ').map_or(text, |(head, _)| head);
+    let body = text
+        .split_once(" Done as:")
+        .map_or(text, |(b, _)| b)
+        .trim_end();
+    let trailing = body
+        .rsplit_once(" (")
+        .map(|(_, tail)| tail.strip_suffix(')'));
+    label_of(leading).is_some_and(is_later_version)
+        || trailing.flatten().is_some_and(is_later_version)
+}
+
+/// Totals of the post-MVP work: the later milestones' leaves and the later-labelled leaves of MVP ones.
+fn post_mvp_totals(milestones: &[Milestone]) -> (usize, usize, usize) {
+    let (mut done, mut doing, mut total) = totals(milestones.iter().filter(|ms| !is_mvp(ms)));
+    for leaf in milestones.iter().flat_map(|ms| &ms.later) {
+        total += 1;
+        match leaf.status {
+            Status::Done => done += 1,
+            Status::Doing => doing += 1,
+            Status::Todo => {}
+        }
+    }
+    (done, doing, total)
 }
 
 /// Milestone states. Icon + word always accompany the color (never color alone).
@@ -249,6 +315,7 @@ pub(crate) fn parse_roadmap(text: &str) -> Result<Vec<Milestone>> {
                 title: title.to_owned(),
                 deps: Vec::new(),
                 leaves: Vec::new(),
+                later: Vec::new(),
             });
         } else if let (Some(raw), Some(ms)) = (line.strip_prefix("Deps:"), milestones.last_mut()) {
             ms.deps = parse_deps(raw.trim_start());
@@ -276,9 +343,15 @@ pub(crate) fn parse_roadmap(text: &str) -> Result<Vec<Milestone>> {
                 }
                 (true, true, Some(_)) => {
                     if let (Some(ms), Some(status)) = (milestones.last_mut(), status) {
-                        ms.leaves.push(Leaf {
+                        let text = rest.trim().to_owned();
+                        let list = if is_mvp(ms) && later_label(&text) {
+                            &mut ms.later
+                        } else {
+                            &mut ms.leaves
+                        };
+                        list.push(Leaf {
                             id: id.to_owned(),
-                            text: rest.trim().to_owned(),
+                            text,
                             status,
                         });
                     }
@@ -342,7 +415,8 @@ fn dependency_cycle(milestones: &[Milestone]) -> Option<Vec<String>> {
 
 fn milestone_state(ms: &Milestone, by_key: &BTreeMap<&str, &Milestone>, depth: usize) -> State {
     let (total, done) = (ms.leaves.len(), ms.count(Status::Done));
-    if total > 0 && done == total {
+    // A milestone whose every leaf is labelled later has nothing left for the MVP: done, so it blocks nothing.
+    if (total > 0 || !ms.later.is_empty()) && done == total {
         return State::Done;
     }
     if done > 0 || ms.count(Status::Doing) > 0 {
@@ -552,7 +626,7 @@ pub(crate) fn render(milestones: &[Milestone], history: &[Snapshot]) -> String {
             .unwrap_or(State::Blocked)
     };
     let (done, doing, total) = totals(milestones.iter().filter(|ms| is_mvp(ms)));
-    let (post_done, post_doing, post_total) = totals(milestones.iter().filter(|ms| !is_mvp(ms)));
+    let (post_done, post_doing, post_total) = post_mvp_totals(milestones);
     let last = history
         .last()
         .map_or("never (run with --record)", |r| r.date.as_str());
@@ -645,8 +719,38 @@ pub(crate) fn render(milestones: &[Milestone], history: &[Snapshot]) -> String {
         for ms in milestones.iter().filter(|ms| !is_mvp(ms)) {
             out.push(milestone_table_row(ms, state_of(ms)));
         }
+        let later: Vec<(&Milestone, &Leaf)> = milestones
+            .iter()
+            .flat_map(|ms| ms.later.iter().map(move |leaf| (ms, leaf)))
+            .collect();
+        if !later.is_empty() {
+            out.extend(
+                [
+                    "",
+                    "### Later-version leaves in MVP milestones",
+                    "",
+                    "Labelled with a version after v1.0, so they count here and do not hold their milestone open.",
+                    "",
+                ]
+                .map(String::from),
+            );
+            out.extend(later.iter().map(|(ms, leaf)| {
+                let mark = match leaf.status {
+                    Status::Todo => ' ',
+                    Status::Doing => '~',
+                    Status::Done => 'x',
+                };
+                format!("- [{mark}] `{}` {} ({})", leaf.id, leaf.text, ms.key)
+            }));
+        }
         out.extend(["", "### In progress (post-MVP)", ""].map(String::from));
-        let post_doing_leaves = doing_lines(milestones, |ms| !is_mvp(ms));
+        let mut post_doing_leaves = doing_lines(milestones, |ms| !is_mvp(ms));
+        post_doing_leaves.extend(
+            later
+                .iter()
+                .filter(|(_, leaf)| leaf.status == Status::Doing)
+                .map(|(ms, leaf)| format!("- `{}` {} ({})", leaf.id, leaf.text, ms.key)),
+        );
         if post_doing_leaves.is_empty() {
             out.push("_Nothing in progress._".into());
         }
@@ -898,7 +1002,7 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
         Err(e) => return Err(e).context("reading docs/progress-history.csv"),
     };
     let (done, doing, total) = totals(milestones.iter().filter(|ms| is_mvp(ms)));
-    let (post_done, _post_doing, post_total) = totals(milestones.iter().filter(|ms| !is_mvp(ms)));
+    let (post_done, _post_doing, post_total) = post_mvp_totals(&milestones);
 
     if record {
         let date = match date {
@@ -1142,6 +1246,137 @@ Deps: M0–M1
                 "{out}"
             );
         }
+    }
+
+    #[test]
+    fn version_labels() {
+        for later in [
+            "v1.1",
+            "v1.2",
+            "v2",
+            "v2.0",
+            "v10.0",
+            "v1.1.3",
+            "post-v1",
+            "post-v2.0",
+        ] {
+            assert!(is_later_version(later), "{later}");
+        }
+        for not in [
+            "v1.0",
+            "v1",
+            "v0.9",
+            "v1.0.5",
+            "v",
+            "v1.",
+            "v.1",
+            "v1.x",
+            "1.1",
+            "V1.1",
+            "found in 6.1",
+        ] {
+            assert!(!is_later_version(not), "{not}");
+        }
+        assert!(later_label("(v1.1) A leaf"));
+        assert!(later_label("(post-v1) A leaf"));
+        assert!(later_label("A leaf (found in 6.1) (v1.1)"));
+        assert!(later_label(
+            "A leaf (v1.1) Done as: deferred work, see 6.1.8."
+        ));
+        assert!(!later_label("(v1.0) A leaf"));
+        assert!(!later_label("A leaf (v1.0)"));
+        assert!(!later_label("A leaf (v1.1, found in 6.1)"));
+        assert!(!later_label("A leaf named after v1.1 (found in 6.1)"));
+        assert!(!later_label("A (v1.1) label in the middle of the text"));
+        assert!(!later_label("A leaf (v1.1) and more text"));
+    }
+
+    #[test]
+    fn later_labelled_leaves_do_not_hold_their_milestone_open() {
+        let text = "\
+# M0 — Bootstrap
+Deps: none.
+- [x] 0.1 Done leaf
+- [ ] 0.2 (v1.1) Deferred by its leading label
+- [~] 0.3 Deferred by its trailing label (post-v1)
+- [x] 0.4 Done later (v2.0) Done as: shipped early.
+
+# M1 — Format
+Deps: M0.
+- [ ] 1.1 Todo leaf
+- [ ] 1.2 (v1.0) An MVP label keeps the leaf in the MVP
+
+# M2 — Labels only
+Deps: none.
+- [ ] 2.1 (v1.1) Every leaf is later
+
+# M3 — Needs M2
+Deps: M2.
+- [ ] 3.1 Todo leaf
+
+# M16 — Later (target: v1.1)
+Deps: M1.
+- [ ] 16.1 Not yet
+";
+        let ms = parse_roadmap(text).unwrap();
+        let ids = |leaves: &[Leaf]| leaves.iter().map(|l| l.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&ms[0].leaves), ["0.1"]);
+        assert_eq!(ids(&ms[0].later), ["0.2", "0.3", "0.4"]);
+        assert_eq!(ids(&ms[1].leaves), ["1.1", "1.2"]);
+        assert!(
+            ms[4].later.is_empty(),
+            "a post-MVP milestone files nothing as later"
+        );
+        assert_eq!(totals(ms.iter().filter(|m| is_mvp(m))), (1, 0, 4));
+        assert_eq!(post_mvp_totals(&ms), (1, 1, 5));
+
+        let by_key: BTreeMap<&str, &Milestone> = ms.iter().map(|m| (m.key.as_str(), m)).collect();
+        let state = |key: &str| milestone_state(by_key[key], &by_key, 0);
+        assert_eq!(state("M0"), State::Done);
+        assert_eq!(state("M1"), State::Ready);
+        assert_eq!(
+            state("M2"),
+            State::Done,
+            "a milestone of later leaves only blocks nothing"
+        );
+        assert_eq!(state("M3"), State::Ready);
+
+        let out = render(&ms, &[]);
+        assert!(out.contains("**1/4 leaves done (25%)**"), "{out}");
+        assert!(
+            out.contains("Post-MVP: **1/5 leaves done (20%)** · 1 in progress"),
+            "{out}"
+        );
+        let later = out
+            .split("### Later-version leaves in MVP milestones")
+            .nth(1)
+            .unwrap();
+        let later = later.split("### In progress (post-MVP)").next().unwrap();
+        assert!(
+            later.contains("- [ ] `0.2` (v1.1) Deferred by its leading label (M0)"),
+            "{later}"
+        );
+        assert!(later.contains("- [~] `0.3`"), "{later}");
+        assert!(later.contains("- [x] `0.4`"), "{later}");
+        assert!(later.contains("`2.1`"), "{later}");
+        let post_doing = out.split("### In progress (post-MVP)").nth(1).unwrap();
+        let post_doing = post_doing.split("### Ready (post-MVP)").next().unwrap();
+        assert!(post_doing.contains("`0.3`"), "{post_doing}");
+        let mvp_doing = out.split("## In progress (MVP)").nth(1).unwrap();
+        let mvp_doing = mvp_doing.split("## Ready next").next().unwrap();
+        assert!(!mvp_doing.contains("`0.3`"), "{mvp_doing}");
+        let ready = out.split("## Ready next").nth(1).unwrap();
+        let ready = ready.split("## Burn-up").next().unwrap();
+        assert!(
+            ready.contains("`1.1`") && ready.contains("`3.1`"),
+            "{ready}"
+        );
+        assert!(
+            !ready.contains("`0.2`") && !ready.contains("`2.1`"),
+            "{ready}"
+        );
+        let table = out.split("## Milestones").nth(1).unwrap();
+        assert!(table.contains("| **M0** Bootstrap | ✅ done |"), "{table}");
     }
 
     #[test]

@@ -8,7 +8,10 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
 
-use super::{COMMAND, Milestone, Snapshot, State, Status, is_mvp, milestone_state, pct, totals};
+use super::{
+    COMMAND, Milestone, Snapshot, State, Status, is_mvp, milestone_state, pct, post_mvp_totals,
+    totals,
+};
 
 /// The marker pairs, in the order they appear in the README.
 const BLOCKS: [&str; 2] = ["summary", "milestones"];
@@ -23,7 +26,7 @@ fn end(name: &str) -> String {
 
 fn summary(milestones: &[Milestone], history: &[Snapshot]) -> String {
     let (done, doing, total) = totals(milestones.iter().filter(|ms| is_mvp(ms)));
-    let (post_done, _, post_total) = totals(milestones.iter().filter(|ms| !is_mvp(ms)));
+    let (post_done, _, post_total) = post_mvp_totals(milestones);
     let snapshot = history.last().map_or_else(
         || "no snapshot recorded yet".to_owned(),
         |r| format!("last snapshot {}", r.date),
