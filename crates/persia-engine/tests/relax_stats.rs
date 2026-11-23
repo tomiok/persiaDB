@@ -60,6 +60,7 @@ fn database_on(file: SimFile) -> Database<SimFile> {
     }
     db
 }
+
 /// `text` searched relaxed in collection `c` of the current snapshot, with `options` over the collection's settings. On
 /// the calling thread, where a test's `tracing` subscriber is.
 fn search(

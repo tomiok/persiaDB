@@ -763,10 +763,14 @@ mod tests {
                 texts.map(compile).collect()
             })
             .collect();
+        // Started together, two threads miss on each set at once: the re-check after the re-lock keeps one.
+        let start = std::sync::Barrier::new(4);
         std::thread::scope(|s| {
             for t in 0..4 {
-                let (compiler, sets, want, limits) = (&compiler, &sets, &want, &limits);
+                let (compiler, sets, want, limits, start) =
+                    (&compiler, &sets, &want, &limits, &start);
                 s.spawn(move || {
+                    start.wait();
                     for i in 0..50 {
                         let set = (t + i) % sets.len();
                         let text = i % texts.len();
@@ -776,5 +780,12 @@ mod tests {
                 });
             }
         });
+        // One cached set per set of default fields, however the misses raced.
+        let cached: Vec<DefaultFields> = {
+            let held = compiler.alternatives.sets.lock().unwrap();
+            held.iter().map(|s| s.fields.clone()).collect()
+        };
+        assert_eq!(cached.len(), sets.len(), "{cached:?}");
+        assert!(sets.iter().all(|f| cached.contains(f)), "{cached:?}");
     }
 }
