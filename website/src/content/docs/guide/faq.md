@@ -87,7 +87,7 @@ head:
             "name": "Is Persia DB crash-safe?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "The single-file container commit is implemented and crash-tested. SPEC §4.5 orders the writes: data frames, then the manifest frame, then the inactive superblock slot, with an fdatasync at each step. A crash before the new superblock is durable leaves the previous commit. Opening the container runs recovery, keeps that commit, and truncates a torn tail. Create and compaction are specified to leave either no new file or a complete one. Tests inject faults at those steps and kill the process. Recovery must return the old state or the new state, and not a mix of the two.\n\n%%WRITE_PATH_NOW%% Checksums cover the bytes that exist, and fuzz targets cover the parsers that exist."
+              "text": "The single-file container commit is implemented and crash-tested. SPEC §4.5 orders the writes: data frames, then the manifest frame, then the inactive superblock slot, with an fdatasync at each step. A crash before the new superblock is durable leaves the previous commit. Opening the container runs recovery, keeps that commit, and truncates a torn tail. Create and compaction are specified to leave either no new file or a complete one. Tests inject faults at those steps and kill the process. Recovery must return the old state or the new state, and not a mix of the two.\n\n%%WRITE_PATH_NOW%% Checksums cover the bytes that exist, and fuzz targets cover the parsers that exist. The WAL, commit, writer lock, and persia verify are described at https://tomiok.github.io/persiaDB/guide/durability/."
             }
           },
           {
@@ -180,7 +180,7 @@ Implemented today: the container header, superblock, frames (including the strea
 
 The single-file container commit is implemented and crash-tested. SPEC §4.5 orders the writes: data frames, then the manifest frame, then the inactive superblock slot, with an fdatasync at each step. A crash before the new superblock is durable leaves the previous commit. Opening the container runs recovery, keeps that commit, and truncates a torn tail. Create and compaction are specified to leave either no new file or a complete one. Tests inject faults at those steps and kill the process. Recovery must return the old state or the new state, and not a mix of the two.
 
-%%WRITE_PATH_NOW%% Checksums cover the bytes that exist, and fuzz targets cover the parsers that exist.
+%%WRITE_PATH_NOW%% Checksums cover the bytes that exist, and fuzz targets cover the parsers that exist. The WAL, commit, writer lock, and `persia verify` are [Durability and crash recovery](/guide/durability/).
 
 ## What license is Persia DB under?
 

@@ -29,7 +29,8 @@ path) and stays the place for that detail.
 Three rules shape the rest of the design:
 
 1. **Immutable segments and append-only metadata.** Crash recovery, caching, and replication all
-   read a snapshot instead of locking a mutable index.
+   read a snapshot instead of locking a mutable index. The local WAL, commit, writer lock, and
+   `persia verify` are [Durability and crash recovery](/guide/durability/).
 2. **The same logical objects everywhere.** A segment, manifest, WAL chunk, or blob is a named
    object. Locally they are frames in one file; remotely they are one object each. The segment
    bytes do not change between the two.
