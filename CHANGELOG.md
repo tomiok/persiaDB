@@ -118,7 +118,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   the filters and the excluded clauses. The response's `level` is `filters` once built, `applied` ends with `filters`, and the new flag
   `Relaxation::filters_dropped` (`"filters_dropped": true`) is set when the step found the hits; each such hit's
   `level` is `filters`, and its explanation's `relaxed` node names the step. Superseded by ROADMAP 8.2.13 (under
-  Changed): the step now drops only the request's `soft_filter`, and `filter` is always hard.
+  Changed): the step now drops only the request's `soft_filter` (less a filter the caller's own root holds) or, of a
+  programmatic query, the root filters marked with `RelaxedQuery::with_soft_filter`; `filter` is always hard.
   `"never"` (the default) is unchanged: same plan, steps, indices and `applied`. Benchmarks
   `search_relaxed/filters/never` and `search_relaxed/filters/last_resort`.
 - `persia-engine`: a request's `relax` options (ROADMAP 8.3.1, 8.3.2; SPEC §6.2.3, §7.6; ADR-0045). `RelaxOptions::from_json`
@@ -274,9 +275,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `into_query()`, and replace it with the new `Compiled::with_query`, which joins the request filter (`Compiled::filter`)
   to the new query again. So `filters: "never"` holds whatever query a caller puts in: before, a query that did not
   hold the clauses' parts made L5 `fallback` search `match_all` without the filter. L5 now keeps the request filter
-  beside the root `bool`'s `must_not` and `filter`; the filter step (`last_resort`) drops the request filter alone and
-  keeps a filter the caller's own root holds (since ROADMAP 8.2.13 it drops only the request's soft filters, and a
-  filter the caller's own root holds stays hard even when it equals one, in place or wrapped). A query put
+  beside the root `bool`'s `must_not` and `filter`; the filter step (`last_resort`) keeps a filter the caller's
+  own root holds. Superseded by ROADMAP 8.2.13 (under Changed): the step drops only the request's soft filters, and a
+  filter the caller's own root holds stays hard even when it equals one, in place or wrapped. A query put
   in place of a compilation of several parts keeps its clauses only while its root's `must` is theirs exactly and its
   `must_not` holds theirs at the same indexes, else `Compiled::parts` and `Compiled::root` are `None` from then on
   (before, any root `bool` was read as the clauses' root, and a required clause added beside them was relaxed away).
