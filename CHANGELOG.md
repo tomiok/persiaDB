@@ -210,6 +210,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- `persia-engine`: a relaxed response's `truncated` states whether the budget cut a step of the page only. When it
+  passes in a step a `fill` page with facets searches only to count them, the page is whole (`truncated: false`) and
+  its facet counts miss the later steps, with nothing flagging it yet (ROADMAP 8.1.31); such counts are not kept for
+  later pages (SPEC §7.5, §7.6).
 - A `fuzzy` query over more qualifying terms than its `max_expansions` keeps the ones with the fewest edits first,
   then the most frequent (SPEC §7.1), so L4's `fuzzy:1` tier step keeps only terms its `fuzzy` step keeps; L4's
   `corrected` for a word of 8 characters or more names the closest term rather than the most frequent within two
