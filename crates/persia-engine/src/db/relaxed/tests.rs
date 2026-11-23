@@ -1589,13 +1589,14 @@ fn with_fill_each_page_states_the_steps_it_built() {
         ..request(2)
     };
     let red = term(body, "red");
-    // Page 1 (window 2) is full at L0: it builds nothing more, and counts red's documents only.
+    // Page 1 (window 2) is full at L0: it builds and states nothing more, but it counts the synonyms step a page of every
+    // hit builds (SPEC §7.5, ROADMAP 8.1.9), past its own.
     let first = views.search_relaxed(&red, &base, &relax, &exec()).unwrap();
     assert_eq!(first.relaxation.applied.len(), 0);
     let count =
         |out: &super::RelaxedResults| -> u64 { out.facets[0].values.iter().map(|v| v.count).sum() };
-    assert_eq!(count(&first), 2);
-    // Page 2, by cursor or by offset, needs more: it builds synonyms and counts its documents too.
+    assert_eq!(count(&first), 4);
+    // Page 2, by cursor or by offset, needs more: it builds and states synonyms, and counts the same.
     let by_cursor = SearchRequest {
         search_after: Some(first.hits[1].cursor()),
         ..base.clone()
@@ -2563,6 +2564,7 @@ fn l3_does_not_expand_a_field_whose_analyzer_stacks_tokens() {
 mod effective;
 mod explain;
 mod extra_must;
+mod facets;
 mod fill;
 mod filters;
 mod options;

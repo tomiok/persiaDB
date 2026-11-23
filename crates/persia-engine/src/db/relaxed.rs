@@ -268,7 +268,8 @@ impl<'a> From<&'a Compiled> for RelaxedQuery<'a> {
 pub struct RelaxedResults {
     /// The page, best first: the hits of each step in step order.
     pub hits: Vec<RelaxedHit>,
-    /// One per requested facet, in request order, over the matches of every step built.
+    /// One per requested facet, in request order, over the matches of every step a page holding every hit builds (SPEC
+    /// §7.5, ROADMAP 8.1.9): the same on every page of the query.
     pub facets: Vec<FacetCounts>,
     /// What the cascade did.
     pub relaxation: Relaxation,
@@ -312,6 +313,10 @@ struct Ran {
     text: StepText,
     /// Not searched: it does not fit the limits (SPEC §7.1.3), and later steps do not exclude it.
     skipped: bool,
+    /// Built for the page. `false` for a step a `fill` page with facets builds past its own only to count it (SPEC
+    /// §7.5, ROADMAP 8.1.9): it collects no hit, is not listed in `applied` or `level`, and is not the cascade's last
+    /// step a cursor records.
+    page: bool,
 }
 
 /// The steps the cascade built so far, and what each excludes from the next.
@@ -374,7 +379,7 @@ impl<'q, 's> Built<'q, 's> {
         self.ran
             .iter()
             .enumerate()
-            .rfind(|(_, r)| !r.skipped)
+            .rfind(|(_, r)| !r.skipped && r.page)
             .map_or((RelaxLevel::Exact, false), |(i, r)| (r.level, i > 0))
     }
 
@@ -406,7 +411,11 @@ impl<'q, 's> Built<'q, 's> {
             |r| (core::mem::take(&mut r.text), r.level),
         );
         // The cursor's page built at least its last step; with fewer steps now (another plan), the page ends sooner.
-        let last = ran.len().saturating_sub(1).max(start.last.unwrap_or(0));
+        let last = ran
+            .iter()
+            .rposition(|r| r.page)
+            .unwrap_or(0)
+            .max(start.last.unwrap_or(0));
         let at = PageSteps {
             first: start.step,
             last,
@@ -436,18 +445,22 @@ impl<'q, 's> Built<'q, 's> {
         self.level_start = self.earlier.len();
     }
 
-    /// A step of `level` that does not fit: listed, not searched, excluded from none.
-    fn skip(&mut self, level: RelaxLevel, label: String) {
-        self.applied.push(label);
+    /// A step of `level` that does not fit: listed (when it is the `page`'s), not searched, excluded from none.
+    fn skip(&mut self, level: RelaxLevel, label: String, page: bool) {
+        if page {
+            self.applied.push(label);
+        }
         self.ran.push(Ran {
             level,
             searched: None,
             text: (None, Vec::new()),
             skipped: true,
+            page,
         });
     }
 
-    /// A step of `level` built (and `searched`, unless no hit or facet was wanted of it): excluded from every later one.
+    /// A step of `level` built (and `searched`, unless no hit or facet was wanted of it), for the `page` or only to count
+    /// its facets: excluded from every later one.
     /// One that `covers` its level's earlier steps (a nested level's step as built, ROADMAP 8.2.2.4) or every earlier
     /// step (L5's, ADR-0047) matches every document they match, so it replaces them in what the later steps exclude.
     fn push(
@@ -457,10 +470,10 @@ impl<'q, 's> Built<'q, 's> {
         label: String,
         text: StepText,
         searched: Option<Searched>,
-        covers: Covers,
+        (covers, page): (Covers, bool),
     ) {
         let first = self.ran.is_empty();
-        if !first {
+        if !first && page {
             self.applied.push(label);
         }
         self.ran.push(Ran {
@@ -468,6 +481,7 @@ impl<'q, 's> Built<'q, 's> {
             searched,
             text,
             skipped: false,
+            page,
         });
         let from = match covers {
             Covers::Itself => None,
@@ -630,6 +644,10 @@ impl CollectionViews<'_> {
     /// ([`RelaxPlan::settings`]): a plain search's ([`SearchHit::cursor`]) pages a plan of L0 alone (`relax: false`).
     /// An explained hit has a root [`Explanation::Relaxed`] naming its step (ROADMAP 8.3.4).
     ///
+    /// Facets count every step a page holding every hit builds (SPEC §7.5, ROADMAP 8.1.9): with `fill`, a page that has
+    /// its hits builds the remaining steps of the levels that fill and searches them only to count them, without
+    /// listing them in [`Relaxation::applied`] or recording them in its cursors.
+    ///
     /// `query` is a [`Query`] or a [`Compiled`] one ([`RelaxedQuery`]); only a compiled query has the user text the
     /// response's [`Relaxation::original`] and [`Relaxation::effective`] state.
     ///
@@ -704,12 +722,7 @@ impl CollectionViews<'_> {
         let builds = |i: usize, found: usize, fills: bool| start.builds(i, found, fills, reach);
         let counting = !request.facets.is_empty();
 
-        // The plan's limits, else those the query was compiled with (SPEC §7.1.3).
-        let limits = relax
-            .limits()
-            .copied()
-            .or_else(|| compiled.map(|c| c.limits))
-            .unwrap_or_default();
+        let limits = step_limits(relax, compiled);
         let expands = |field: FieldId| self.expands(field);
         let mut built = Built::new(collection.schema(), limits);
         let mut found = 0usize;
@@ -718,8 +731,12 @@ impl CollectionViews<'_> {
         let clock = exec.relax_clock();
         let mut truncated = false;
         'levels: for planned in relax.planned() {
+            let fills = planned.transform.fills();
+            // A page holding every hit builds every step of the levels that fill (SPEC §7.5, ROADMAP 8.1.9): with `fill`
+            // and facets, a page counts those past its own too, only to count them.
+            let counts_past = counting && relax.fill() && fills;
             // Checked before a level builds its steps: one the cascade does not reach builds nothing.
-            if !builds(built.ran.len(), found, planned.transform.fills()) {
+            if !builds(built.ran.len(), found, fills) && !counts_past {
                 break;
             }
             if budget.is_some_and(|end| clock.now() >= end) {
@@ -740,7 +757,8 @@ impl CollectionViews<'_> {
             built.begin_level();
             for (step, label, text, alternatives) in steps {
                 let i = built.ran.len();
-                if !builds(i, found, planned.transform.fills()) {
+                let page = builds(i, found, fills);
+                if !page && !counts_past {
                     break 'levels;
                 }
                 if budget.is_some_and(|end| clock.now() >= end) {
@@ -750,23 +768,18 @@ impl CollectionViews<'_> {
                 let Held { step, label, cut } =
                     built.fit(query, step, label, alternatives.as_ref())?;
                 let Some(step) = step else {
-                    built.skip(planned.level, label);
+                    built.skip(planned.level, label, page);
                     continue;
                 };
-                // Hits this step is to collect: none before the cursor's step, or once the page is full.
-                let wanted = if i >= start.step {
+                // Hits this step is to collect: none before the cursor's step, or once the page is full (a step built only
+                // to count its facets collects none).
+                let wanted = if page && i >= start.step {
                     reach.need.saturating_sub(found)
                 } else {
                     0
                 };
                 let searched = if wanted > 0 || counting {
-                    let part = Part {
-                        sort: &request.sort,
-                        after: request.search_after.as_ref().filter(|_| i == start.step),
-                        facets: &request.facets,
-                        explain: request.explain,
-                        window: wanted,
-                    };
+                    let part = part(request, i == start.step, wanted, counting);
                     let Some(searched) = self.budgeted_step(
                         StepSearch {
                             step: &step,
@@ -790,7 +803,7 @@ impl CollectionViews<'_> {
                 // A cut step matches less than its level built (SPEC §7.1.3): it stands for no earlier step, which an
                 // uncut later one does again (a cut step's matches are its uncut ones', which the later step holds).
                 let covers = Covers::of(relax, planned, cut);
-                built.push(planned.level, step, label, text, searched, covers);
+                built.push(planned.level, step, label, text, searched, (covers, page));
                 if budget.is_none() {
                     budget = clock.now().checked_add(relax.budget());
                 }
@@ -1152,6 +1165,28 @@ fn is_deadline(e: &RelaxedSearchError) -> bool {
         RelaxedSearchError::Plan(SearchError::Interrupted(Interrupt::DeadlineExceeded))
             | RelaxedSearchError::Request(RequestError::Interrupted(Interrupt::DeadlineExceeded))
     )
+}
+
+/// The limits a plan's steps are held to (SPEC §7.1.3): the plan's, else those the query was compiled with, else the
+/// defaults.
+fn step_limits(relax: &RelaxPlan, compiled: Option<&Compiled>) -> QueryLimits {
+    relax
+        .limits()
+        .copied()
+        .or_else(|| compiled.map(|c| c.limits))
+        .unwrap_or_default()
+}
+
+/// What a step collects of `request`: `wanted` hits by its sort, after its cursor when the step is the cursor's
+/// (`at_cursor`), each explained when asked, and its facets when `counting`.
+fn part(request: &SearchRequest, at_cursor: bool, wanted: usize, counting: bool) -> Part<'_> {
+    Part {
+        sort: &request.sort,
+        after: request.search_after.as_ref().filter(|_| at_cursor),
+        facets: if counting { &request.facets } else { &[] },
+        explain: request.explain,
+        window: wanted,
+    }
 }
 
 /// The filters the filter step may drop (ROADMAP 8.2.13): a compiled query's `soft_filter`, then those a caller `marked`.

@@ -1,7 +1,7 @@
 //! `fill` as a request option, end to end (ROADMAP 8.3.2, SPEC §7.6): through a query's `relax` over the engine's own
 //! levels, pages by cursor and by offset are slices of one ranking; the budget truncates a filling page and the next
-//! one tries again, while the request's deadline stays an error; `fill` reaches L5; and facets count the steps each
-//! page built, so a deeper page may count more (the interim rule of ROADMAP 8.1.9, and 8.1.11's cost).
+//! one tries again, while the request's deadline stays an error; and `fill` reaches L5. Facets under `fill` are
+//! `tests/facets.rs`'s (ROADMAP 8.1.9: every page counts the same).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +16,7 @@ use crate::relax::{
     FallbackOrder, LevelInput, LevelTransform, RelaxLevel, RelaxOptions, RelaxPlan, Step,
 };
 use crate::schema::{FieldId, Level, Levels};
-use crate::search::{FacetRequest, Interrupt, RequestError};
+use crate::search::{Interrupt, RequestError};
 use crate::segment::ReadError;
 
 fn all_of(body: FieldId, words: &[&str]) -> Query {
@@ -210,64 +210,4 @@ fn the_budget_truncates_a_filling_page_and_the_next_one_tries_again() {
         ),
         "{err}"
     );
-}
-
-#[test]
-fn under_fill_a_deeper_page_counts_the_facets_of_more_steps() {
-    let (db, body, tag) = database();
-    let snapshot = db.snapshot();
-    let c = snapshot.collection("c").unwrap();
-    let memtable = c.memtable();
-    let views = c.views(&memtable).unwrap();
-    let relax = plan(&views, r#"{"fill": true}"#);
-    let red_shoes = all_of(body, &["red", "shoes"]);
-    let faceted = |page: SearchRequest| SearchRequest {
-        facets: vec![FacetRequest::new(tag, 10, c.schema()).unwrap()],
-        ..page
-    };
-    let counts = |out: &RelaxedResults| -> Vec<(Vec<u8>, u64)> {
-        out.facets[0]
-            .values
-            .iter()
-            .map(|v| (v.value.clone(), v.count))
-            .collect()
-    };
-    // One hit: L0's `a` fills it, so only L0 is built and counted (`a` is `x`).
-    let first = search(&views, &red_shoes, &faceted(request(1)), &relax);
-    assert_eq!(counts(&first), [(b"x".to_vec(), 1)]);
-    // The page after it fills from L2 (`b` is `y`, `c` is `x`): it counts L0 again and L2, so its counts differ from the
-    // first page's. SPEC §7.5's interim rule (ROADMAP 8.1.9) counts the steps a page built; ROADMAP 8.1.11 is the cost
-    // of a cursor page searching the steps before the cursor's again to count them.
-    let second = search(
-        &views,
-        &red_shoes,
-        &faceted(SearchRequest {
-            search_after: Some(first.hits[0].cursor()),
-            ..request(2)
-        }),
-        &relax,
-    );
-    assert_eq!(counts(&second), [(b"x".to_vec(), 2), (b"y".to_vec(), 1)]);
-    // An offset page as deep builds and counts the same steps as the cursor page.
-    let by_offset = search(
-        &views,
-        &red_shoes,
-        &faceted(SearchRequest {
-            offset: 1,
-            ..request(2)
-        }),
-        &relax,
-    );
-    assert_eq!(counts(&by_offset), counts(&second));
-    // The last page reaches L5, which counts every document left: the counts of the whole collection.
-    let last = search(
-        &views,
-        &red_shoes,
-        &faceted(SearchRequest {
-            offset: 4,
-            ..request(1)
-        }),
-        &relax,
-    );
-    assert_eq!(counts(&last), [(b"x".to_vec(), 3), (b"y".to_vec(), 2)]);
 }

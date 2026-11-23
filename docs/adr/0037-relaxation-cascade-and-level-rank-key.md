@@ -46,7 +46,8 @@ cascade return?
    request's. The `search_relaxed` benchmarks (`docs/benchmarks.md`) check that.
 4. **Facets count the union of the steps run.** Each step counts its own matches. They are disjoint (item 2), so the
    sum counts every document the response can return once, the same on every page without `fill`. This is the interim rule ROADMAP
-   8.1.9 confirms or replaces.
+   8.1.9 confirms or replaces. (Superseded by ADR-0055: a facet counts the steps a page holding every hit builds,
+   the same on every page with `fill` too, and the counts are kept once per query.)
 5. **The page is the steps' hits in step order**, each step's in the request's sort, from `offset`. A hit carries
    its step and level. An explained hit is explained by its step's plan: L0's by the query's own plan, as a plain
    search explains it, and a later step's by a `bool` whose one `must` clause is the step's query (its `must_not`
