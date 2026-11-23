@@ -214,8 +214,10 @@ impl<'a> RelaxedQuery<'a> {
     /// `filters: "last_resort"` may drop (SPEC §7.6, ROADMAP 8.2.13, ADR-0056): a root filter equal to one of them is
     /// soft, and every other one hard. A programmatic query's root filters are hard unless marked, so without marks it
     /// builds no filter step. A compiled query's soft filters are its request's `soft_filter`
-    /// ([`Compiled::with_soft_filter`]), and these beside them; its request's `filter` ([`Compiled::filter`]) stays hard
-    /// even if marked. Marking a filter the root does not hold changes nothing: the query is searched as it is.
+    /// ([`Compiled::with_soft_filter`]) and nothing else (SPEC §7.6): marks are ignored, so its request's `filter`
+    /// ([`Compiled::filter`]) and the filters the root of a query a caller put in holds itself
+    /// ([`Compiled::with_query`]) stay hard even if marked. Marking a filter the root does not hold changes nothing:
+    /// the query is searched as it is.
     ///
     /// ```
     /// use persia_engine::db::RelaxedQuery;
@@ -1279,15 +1281,15 @@ fn part(request: &SearchRequest, at_cursor: bool, wanted: usize, counting: bool)
     }
 }
 
-/// The filters the filter step may drop (ROADMAP 8.2.13): a compiled query's `soft_filter` but those a caller's own root
-/// holds ([`Compiled::droppable`]), then those a caller `marked`.
+/// The filters the filter step may drop (SPEC §7.6, ROADMAP 8.2.13): of a compiled query, its request's `soft_filter`
+/// but those a caller's own root holds ([`Compiled::droppable`]), and nothing else, so a filter a caller `marked` is
+/// ignored (its request's `filter` and the caller's own root filters are hard); of a programmatic query, those a
+/// caller `marked`.
 fn soft_filters(compiled: Option<&Compiled>, marked: &[Filter]) -> Vec<Filter> {
-    compiled
-        .into_iter()
-        .flat_map(Compiled::droppable)
-        .chain(marked)
-        .cloned()
-        .collect()
+    match compiled {
+        Some(compiled) => compiled.droppable().cloned().collect(),
+        None => marked.to_vec(),
+    }
 }
 
 /// The plan of a step's `query` with the `earlier` steps' queries excluded (SPEC §7.6): a document they match is

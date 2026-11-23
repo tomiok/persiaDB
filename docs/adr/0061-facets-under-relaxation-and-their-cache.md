@@ -34,13 +34,21 @@ first page's work, and its budget, so it could be truncated before any hit.
    last step. They are excluded from the later ones as any step, and held to the limits alike, so they are the steps
    the page of every hit builds.
 3. **The budget.** Counting runs under the budget as every step does. A page the budget truncates (`truncated: true`)
-   counts the steps it completed, as its hits are those of the steps it completed.
+   counts the steps it completed, as its hits are those of the steps it completed. The budget can also pass in a
+   step a page searches only to count it (item 2): the page's own steps are done, so it stays whole
+   (`truncated: false`, its hits, `level` and `applied` complete), but its counts cover only the steps searched before
+   that one. They are partial, they are not kept (item 4), and nothing in the response flags them yet (ROADMAP
+   8.1.31).
 4. **The counts are kept once per query** (ROADMAP 8.1.11). A collection's snapshot keeps a small cache of facet counts
-   keyed by the memtable view's version, the query and its compilation, the filters marked soft, the relaxation
-   settings (ADR-0045), the step limits, and the facets asked for: what the counts follow from beside the snapshot.
-   A page that counted every step of item 1 without being truncated keeps its counts there; a later page of the same
-   query, by offset or cursor, reads them, and then searches only its own steps for hits, pruned, without counting:
-   it no longer searches the steps before its cursor's, nor those past its own. The cache holds at most 32 counts and
+   keyed by the memtable view's version, the query and its compilation, the soft filters the filter step may drop,
+   the relaxation settings (ADR-0045), the step limits, and the facets asked for: what the counts follow from beside
+   the snapshot. Only a page from the top (without a cursor) keeps its counts there, and only when it counted every
+   step of item 1 with the budget passing in none of them: neither in one of its own steps (`truncated: true`) nor in
+   one it searched only to count it (item 3). A cursor page never keeps its counts, even untruncated: its cursor may
+   come from a page the budget truncated, whose last step stops short of the steps a page from the top builds, so it
+   may count fewer. A later page of the same query, by offset or cursor, reads the kept counts, and then searches only
+   its own steps for hits, pruned, without counting: it no longer searches the steps before its cursor's, nor those
+   past its own. The cache holds at most 32 counts and
    1 MiB (keys included, as estimated), evicts the least recently used first by a counter of uses (no clock), and
    goes with its snapshot at the next publish. A plan whose level transforms are not the engine's own (tests) is
    not cached.
@@ -48,11 +56,18 @@ first page's work, and its budget, so it could be truncated before any hit.
 ## Consequences
 
 - Every page of a query states the same facets, `fill` or not. A `fill` page with facets pays for the steps past its
-  own once, L5 included (which matches every document the filters keep), and the next pages read the cache.
+  own once, L5 included (which matches every document the filters keep), and the next pages read the cache. Measured:
+  bench `search_relaxed/facets/fill`, a first `fill` page of 10 with facets that reads no kept counts, went from
+  1.39 ms to 12.8 ms (docs/benchmarks.md); the same page without facets is unchanged.
+- A possible optimization within the same rule (not done): since L5 `covers_earlier`, the union of the steps through
+  L5 equals L5's selection, so a page whose item-1 steps reach L5 could count that selection once, unscored, for
+  identical counts instead of searching every step past its own.
 - A deep cursor page with facets costs what a page without facets costs, plus a cache lookup: bench
   `search_relaxed/facets/deep` (docs/benchmarks.md). A page whose counts are cached is no longer truncated by
   counting.
-- Counts of a truncated page are not kept: the next page counts again.
+- Counts of a truncated page are not kept: the next page counts again. Nor are those of a whole page whose budget
+  passed in a counts-only step (item 3): the page reads `truncated: false` while its facets are partial, and until
+  ROADMAP 8.1.31 nothing tells the client so.
 - The cache is per snapshot, so a write that publishes drops it; a cursor of the old snapshot is an error anyway
   (SPEC §7.4).
 

@@ -204,9 +204,9 @@ pub(crate) struct LevelInput<'a> {
     /// several terms) or a plan without L2 leaves it false.
     pub(crate) drops_terms: bool,
     /// The filters the filter step may drop (ROADMAP 8.2.13, ADR-0056): a compiled query's `soft_filter` but those a
-    /// caller's own root holds ([`Compiled::droppable`]), and those a caller marked soft
-    /// ([`crate::db::RelaxedQuery::with_soft_filter`]). None by default ([`Self::new`]): every filter is hard and the
-    /// filter step builds nothing; the search sets them ([`Self::softening`]).
+    /// caller's own root holds ([`Compiled::droppable`]), and nothing else; a programmatic query's, those its caller
+    /// marked soft ([`crate::db::RelaxedQuery::with_soft_filter`]). None by default ([`Self::new`]): every filter is
+    /// hard and the filter step builds nothing; the search sets them ([`Self::softening`]).
     pub(crate) soft: &'a [Filter],
 }
 

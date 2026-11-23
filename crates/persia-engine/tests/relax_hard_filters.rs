@@ -5,8 +5,8 @@
 //! and only L6: every earlier level applies them as filters. A filter given as both is hard. With `last_resort` and
 //! no soft filter there is no L6 step. A programmatic query's root filters are hard unless the caller marks them soft
 //! (`RelaxedQuery::with_soft_filter`); a compiled query's `filter` stays hard even if marked. A filter the root of a
-//! query a caller put in (`Compiled::with_query`) holds itself is hard too, also one equal to a soft filter, and L5
-//! keeps every filter L0 applies or builds no step.
+//! query a caller put in (`Compiled::with_query`) holds itself is hard too, also one equal to a soft filter or marked
+//! soft, and L5 keeps every filter L0 applies or builds no step.
 //!
 //! Invariants, checked over random corpora (puts, upserts, deletes and commits, so the documents are spread over
 //! segments and the memtable), random user text (words of a small vocabulary with a synonym group, typos, prefixes,
@@ -401,8 +401,9 @@ enum CallerFilter {
 struct Caller {
     must: Vec<usize>,
     should: Vec<usize>,
-    /// Its root's own filters: hard, whatever they equal.
-    filters: Vec<CallerFilter>,
+    /// Its root's own filters, and whether the caller also marks each soft (`RelaxedQuery::with_soft_filter`):
+    /// hard, whatever they equal, marked or not.
+    filters: Vec<(CallerFilter, bool)>,
     /// Put in before the filters are joined, or after.
     before: bool,
 }
@@ -479,15 +480,18 @@ fn text_form(f: Fields) -> impl Strategy<Value = Form> {
         any::<bool>(),
         prop::collection::vec(prop::bool::weighted(0.2), 3),
         prop::option::weighted(
-            0.2,
+            0.35,
             (
                 prop::collection::vec(0..WORDS.len(), 0..3),
                 prop::collection::vec(0..WORDS.len(), 0..3),
                 prop::collection::vec(
-                    prop_oneof![
-                        1 => filter(f).prop_map(CallerFilter::Own),
-                        2 => (0..3_usize).prop_map(CallerFilter::Soft),
-                    ],
+                    (
+                        prop_oneof![
+                            1 => filter(f).prop_map(CallerFilter::Own),
+                            2 => (0..3_usize).prop_map(CallerFilter::Soft),
+                        ],
+                        prop::bool::weighted(0.4),
+                    ),
                     0..3,
                 ),
                 any::<bool>(),
@@ -659,14 +663,19 @@ fn build(
                 cover("soft filter equal to a hard one");
             }
             // The caller's own root filters (ROADMAP 8.2.13): hard, a copy of a soft filter included.
-            let own: Vec<Filter> = caller.as_ref().map_or_else(Vec::new, |c| {
-                dedup(c.filters.iter().filter_map(|x| match x {
-                    CallerFilter::Own(x) => Some(x.clone()),
-                    CallerFilter::Soft(i) => {
-                        (!soft.is_empty()).then(|| soft[i % soft.len()].clone())
-                    }
-                }))
+            // With each, whether the caller also marks it soft.
+            let own_marked: Vec<(Filter, bool)> = caller.as_ref().map_or_else(Vec::new, |c| {
+                c.filters
+                    .iter()
+                    .filter_map(|(x, m)| match x {
+                        CallerFilter::Own(x) => Some((x.clone(), *m)),
+                        CallerFilter::Soft(i) => {
+                            (!soft.is_empty()).then(|| (soft[i % soft.len()].clone(), *m))
+                        }
+                    })
+                    .collect()
             });
+            let own = dedup(own_marked.iter().map(|(x, _)| x.clone()));
             let caller = caller.as_ref().map(|c| {
                 let query = Query::Bool(BoolQuery {
                     must: c.must.iter().map(|&w| term(f, WORDS[w])).collect(),
@@ -699,16 +708,29 @@ fn build(
             // The compilation keeps each kind beside its query, in the order joined, a filter of both kinds hard.
             prop_assert_eq!(compiled.filter(), &want_hard[..]);
             prop_assert_eq!(compiled.soft_filter(), &want_soft[..]);
-            // A hard filter marked soft by the caller stays hard.
-            let marked: Vec<Filter> = want_hard
+            // A hard filter marked soft by the caller stays hard, and so does a filter of the caller's own root: a
+            // compiled query's soft filters are its request's `soft_filter` and nothing else (SPEC §7.6).
+            let marked_hard: Vec<Filter> = want_hard
                 .iter()
                 .zip(marks.iter().cycle())
                 .filter(|(_, m)| **m)
                 .map(|(x, _)| x.clone())
                 .collect();
-            if !marked.is_empty() {
+            let marked_own: Vec<Filter> = own_marked
+                .into_iter()
+                .filter_map(|(x, m)| m.then_some(x))
+                .collect();
+            if !marked_hard.is_empty() {
                 cover("hard filter marked soft");
             }
+            if !marked_own.is_empty() {
+                cover(if wraps {
+                    "caller filter marked soft (wrapped)"
+                } else {
+                    "caller filter marked soft (in place)"
+                });
+            }
+            let marked = dedup(marked_hard.into_iter().chain(marked_own));
             if want_soft.iter().any(|s| own.contains(s)) {
                 cover(if wraps {
                     "caller filter equal to a soft one (wrapped)"
@@ -1141,6 +1163,8 @@ fn hard_filters_hold_at_every_level() {
             "last_resort without a soft filter (query)",
             "soft filter equal to a hard one",
             "hard filter marked soft",
+            "caller filter marked soft (in place)",
+            "caller filter marked soft (wrapped)",
             "caller filter equal to a soft one (in place)",
             "caller filter equal to a soft one (wrapped)",
         ] {
@@ -1478,6 +1502,86 @@ fn a_callers_own_root_filter_stays_even_when_it_equals_a_soft_one() {
                 "{caller:?} {before}"
             );
             assert!(out.relaxation.filters_dropped);
+        }
+    }
+}
+
+/// ROADMAP 8.2.13 (re-review 2): a compiled query's soft filters are its request's `soft_filter` and nothing else
+/// (SPEC §7.6). A filter of the caller's own root that the caller also marks soft through
+/// `RelaxedQuery::with_soft_filter` stays hard, in place as where the join wrapped it: without a request soft filter
+/// there is no filter step, and with one the step drops it alone, so no hit breaks the caller's filter.
+#[test]
+fn a_callers_own_root_filter_stays_hard_when_marked_soft() {
+    let db = shop();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let schema = c.schema();
+    let f = fields(schema);
+    let qc = QueryCompiler::new(schema, &AnalyzerRegistry::builtin()).unwrap();
+    let (tenant, nike, asics) = (
+        keyword(f.tenant, "t1"),
+        keyword(f.brand, "nike"),
+        keyword(f.brand, "asics"),
+    );
+    let plan = shop_plan(
+        schema,
+        r#"{"min_results": 6, "filters": "last_resort", "fallback": "none"}"#,
+    );
+    let page = request(schema, &f, 10, false);
+    let in_place = Query::Bool(BoolQuery {
+        must: vec![term(&f, "red"), term(&f, "shoes")],
+        filter: vec![asics.clone()],
+        ..BoolQuery::default()
+    });
+    let wrapped = Query::Bool(BoolQuery {
+        must: vec![term(&f, "red")],
+        should: vec![term(&f, "shoes")],
+        filter: vec![asics.clone()],
+        ..BoolQuery::default()
+    });
+    let marks = [asics.clone(), tenant.clone()];
+    for caller in [&in_place, &wrapped] {
+        for before in [false, true] {
+            for soft in [None, Some(&nike)] {
+                let mut compiled = qc.compile(
+                    "red shoes",
+                    &DefaultFields::all(schema),
+                    &QueryLimits::default(),
+                );
+                if before {
+                    compiled = compiled.with_query(caller.clone());
+                }
+                compiled = compiled
+                    .with_filter([tenant.clone()])
+                    .with_soft_filter(soft.cloned());
+                if !before {
+                    compiled = compiled.with_query(caller.clone());
+                }
+                let what = format!("{caller:?} {before} {soft:?}");
+                let out = views
+                    .search_relaxed(
+                        RelaxedQuery::from(&compiled).with_soft_filter(&marks),
+                        &page,
+                        &plan,
+                        &exec(),
+                    )
+                    .unwrap();
+                // t1's asics `red shoes` alone, never `a` or `b` (t1, other brands): by its words without a soft
+                // filter, which leaves nothing to drop; by the filter step dropping `nike` alone with one.
+                let (level, dropped) = match soft {
+                    None => (RelaxLevel::Exact, false),
+                    Some(_) => (RelaxLevel::Filters, true),
+                };
+                assert_eq!(levels(&out), [("f", level)], "{what}");
+                assert_eq!(out.relaxation.filters_dropped, dropped, "{what}");
+                assert_eq!(
+                    out.relaxation.applied.iter().any(|a| a == "filters"),
+                    dropped,
+                    "{what}"
+                );
+            }
         }
     }
 }

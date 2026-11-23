@@ -2,11 +2,12 @@
 //! `filters: "last_resort"`.
 //!
 //! Its query is L0's with the request's *soft* filters dropped (ROADMAP 8.2.13, ADR-0056): a compiled query's
-//! `soft_filter`, which the compilation keeps beside its query ([`Compiled::droppable`]), and the filters of a
-//! programmatic root `bool` its caller marked soft ([`crate::db::RelaxedQuery::with_soft_filter`]). A request's
-//! `filter` ([`Compiled::filter`]) is hard and never dropped, nor is an unmarked filter of a programmatic root, nor a
-//! filter the root of a query a caller put in place of a compiled one holds itself ([`Compiled::with_query`]), even one
-//! equal to a soft filter: with no soft filter left to drop there is no step. Everything else stays as L0 has it,
+//! `soft_filter`, which the compilation keeps beside its query ([`Compiled::droppable`]), and nothing else; of a
+//! programmatic root `bool`, the filters its caller marked soft ([`crate::db::RelaxedQuery::with_soft_filter`]). A
+//! request's `filter` ([`Compiled::filter`]) is hard and never dropped, nor is an unmarked filter of a programmatic
+//! root, nor a filter the root of a query a caller put in place of a compiled one holds itself
+//! ([`Compiled::with_query`]), even one equal to a soft filter or marked soft: with no soft filter left to drop there
+//! is no step. Everything else stays as L0 has it,
 //! excluded clauses (`must_not`) and any filter deeper in the query included. The cascade builds it only while the
 //! earlier steps found fewer than `min_results` hits, never to fill a page ([`LevelTransform::fills`]), and excludes
 //! the earlier steps from it as from any step, so its hits are the documents L0's words match that the soft filters
@@ -48,13 +49,13 @@ impl LevelTransform for Filters {
 /// L0's query with the soft filters ([`LevelInput::soft`], ROADMAP 8.2.13) dropped from its root `bool`, `None` when it
 /// holds none, or the root has no word to match. A compiled query's soft filters are its request's `soft_filter`
 /// ([`Compiled::droppable`]), which `Compiled::query` holds at its root `bool` whatever query a caller put in
-/// (ROADMAP 8.2.14), with any a caller marked; a programmatic query's are those its caller marked. A hard filter (the
-/// request's `filter`, [`Compiled::filter`], even if marked soft too, or an unmarked filter of a programmatic root) is
-/// never dropped, nor a filter the root of a query a caller put in holds itself: [`Compiled::droppable`] leaves out
-/// a soft filter equal to one of those, as the join does not add it twice and the two cannot be told apart. When the
-/// join wrapped the caller's query (a root with `should` clauses, `Compiled::wrapped`), that root holds the caller's
-/// own filters alone, and stays whole. The step keeps the rest of the root as L0 has it, a compiled query's clauses'
-/// parts included.
+/// (ROADMAP 8.2.14), and nothing else (a caller's marks are not read for it); a programmatic query's are those its
+/// caller marked. A hard filter (the request's `filter`, [`Compiled::filter`], or an unmarked filter of a programmatic
+/// root) is never dropped, nor a filter the root of a query a caller put in holds itself: [`Compiled::droppable`]
+/// leaves out a soft filter equal to one of those, as the join does not add it twice and the two cannot be told
+/// apart. When the join wrapped the caller's query (a root with `should` clauses, `Compiled::wrapped`), that root holds
+/// the caller's own filters alone, and stays whole. The step keeps the rest of the root as L0 has it, a compiled
+/// query's clauses' parts included.
 ///
 /// A root that searches no word builds no step. A clause searches a word when it is a `term`, `combined`, `phrase`,
 /// `prefix` or `fuzzy`, or a `bool`, `boost` or `constant_score` that holds such a clause in `must` or `should`.
