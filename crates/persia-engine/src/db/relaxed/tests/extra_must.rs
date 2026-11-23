@@ -77,6 +77,10 @@ fn with_extra(compiled: Compiled, extra: Query) -> Compiled {
     let query = match compiled.query() {
         Query::Bool(b) if b.should.is_empty() && b.minimum_should_match == 0 => {
             let mut b = b.clone();
+            // Without the request filters, which the join adds back: kept in the root, they would be the caller's own,
+            // and hard (ROADMAP 8.2.13).
+            b.filter
+                .retain(|f| !compiled.filter().contains(f) && !compiled.soft_filter().contains(f));
             b.must.push(extra);
             Query::Bool(b)
         }

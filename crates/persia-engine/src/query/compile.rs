@@ -193,13 +193,18 @@ pub struct Compiled {
     /// none of them a [`Self::filter`]: the filters L6 under `filters: "last_resort"` may drop, kept beside the query as
     /// the hard ones are.
     soft_filter: Vec<Filter>,
+    /// The filters of the root `bool` of the query a caller put in ([`Self::with_query`]), as it held them before the
+    /// request's filters joined it (of the `bool` the join wrapped, when it wrapped one): the caller's own, which no
+    /// level drops (ROADMAP 8.2.13). One equal to a [`Self::soft_filter`] cannot be told apart from it in the joined
+    /// root, so the filter step drops neither ([`Self::droppable`]). Empty until a query is put in.
+    own_filter: Vec<Filter>,
     /// Whether a query put in place of a compilation of other than one part ([`Self::with_query`]) no longer holds
     /// its clauses' parts where they were: its root is then not the clauses' ([`Self::root`]). A one-part compilation
     /// checks its query against [`Self::part`] instead.
     detached: bool,
     /// Whether the last join of the request filter wrapped the query, `bool { must: [query], filter }`, rather than
     /// adding to its root ([`join`]): the query wrapped is then a root of its own (a caller's with `should` clauses, or a
-    /// one-part compilation's part), and the filter step drops the request filter from it too ([`Self::wrapped`]).
+    /// one-part compilation's part), whose own `must_not` and `filter` L5 `fallback` keeps too ([`Self::wrapped`]).
     wrapped: bool,
 }
 
@@ -312,8 +317,13 @@ impl Compiled {
     /// [`Self::root`]'s `must` after the clauses' own, which a query put in place ([`Self::with_query`]) may append.
     /// Every relaxation step carries them unchanged (SPEC §7.6): the word levels rebuild their steps from the clauses
     /// and add these after them, L5 `fallback` requires them, and the filter step keeps them. They have no source text,
-    /// so no `effective` renders them. Empty for a query as compiled, and when the clauses describe no root.
+    /// so no `effective` renders them. Empty for a query as compiled, and when the clauses describe no root. Empty for a
+    /// compilation of no clause too (empty or stopword-only text): the `match_all` a filter's join puts in its root is
+    /// the query as compiled, not a clause a caller added (and a query put in its place detaches, [`Self::with_query`]).
     pub fn extra_must(&self) -> &[Query] {
+        if self.clauses.is_empty() {
+            return &[];
+        }
         let Some(root) = self.root() else {
             return &[];
         };
@@ -360,15 +370,27 @@ impl Compiled {
     /// The request's soft filter joined to the query ([`Self::with_soft_filter`], SPEC §7.1.2, ROADMAP 8.2.13): the
     /// filters the filter step under `filters: "last_resort"` drops, and the only ones (SPEC §7.6). Every other level
     /// keeps them, as it keeps [`Self::filter`]. None of them is a hard filter: one given as both is hard. Empty when
-    /// none was given, and then no filter step is built.
+    /// none was given, and then no filter step is built. One that the root of a query a caller put in holds itself
+    /// ([`Self::with_query`]) is the caller's filter too, and the filter step keeps it.
     pub fn soft_filter(&self) -> &[Filter] {
         &self.soft_filter
     }
 
-    /// The query the request filter's join wrapped (`bool { must: [query], filter }`), when it wrapped one: a root of
-    /// its own below [`Self::query`]'s, which the filter step drops the request filter from too (SPEC §7.6, ROADMAP
-    /// 8.2.14). A caller's root with `should` clauses that holds the request filter (a clone of [`Self::query`] with
-    /// `should` clauses added) keeps it there. `None` when the filter was added to the query's own root, or none joined.
+    /// The soft filters the filter step drops (SPEC §7.6, ROADMAP 8.2.13): [`Self::soft_filter`], but those the root
+    /// `bool` of a query a caller put in holds itself ([`Self::with_query`]), in place or where the join wrapped it. A
+    /// caller's own filter is hard, and one equal to a soft filter cannot be told apart from it in the joined root, so
+    /// neither is dropped.
+    pub(crate) fn droppable(&self) -> impl Iterator<Item = &Filter> {
+        self.soft_filter
+            .iter()
+            .filter(|f| !self.own_filter.contains(f))
+    }
+
+    /// The query the request filters' join wrapped (`bool { must: [query], filter }`), when it wrapped one: a root of
+    /// its own below [`Self::query`]'s (a caller's with `should` clauses, or a one-part compilation's part), whose
+    /// `must_not` and `filter` L5 `fallback` keeps beside the outer root's (SPEC §7.6, ROADMAP 8.2.13). Its filters are
+    /// the caller's own, which the filter step keeps. `None` when the filters were added to the query's own root, or
+    /// none joined.
     pub(crate) fn wrapped(&self) -> Option<&Query> {
         match &self.query {
             Query::Bool(root) if self.wrapped => root.must.first(),
@@ -507,8 +529,10 @@ impl Compiled {
     /// This compilation searching `query` in place of [`Self::query`], joined to the request filters ([`Self::filter`],
     /// then [`Self::soft_filter`]) as [`Self::with_filter`] joins them (SPEC §7.1.1, ROADMAP 8.2.13, 8.2.14): a caller
     /// cannot drop a request filter by replacing the query, so no relaxation level searches without the hard ones, and
-    /// none before the filter step without the soft ones. Pass a query without the request filters: a root filter equal
-    /// to one of them is not added again, and counts as that one (the filter step drops it when it is soft).
+    /// none before the filter step without the soft ones. Pass a query without the request filters: a filter its root
+    /// `bool` holds is the caller's own, and hard (ROADMAP 8.2.13): one equal to a request filter is not added again,
+    /// and the filter step keeps it even when it equals a soft one ([`Self::droppable`]), so passing [`Self::query`]
+    /// back pins its soft filters too.
     ///
     /// The clauses keep describing the new query only while it holds their parts where they were ([`Self::parts`]): a
     /// one-part compilation's part as itself or as the first `must` clause of a `bool` without `should` clauses, or, for
@@ -518,9 +542,10 @@ impl Compiled {
     /// ROADMAP 8.2.15), which every step carries unchanged beside the ones it rebuilds from the clauses. Otherwise
     /// [`Self::parts`] and [`Self::root`] are `None`, and the word levels of the cascade build no step from the clauses: a one-part
     /// compilation's again once a query holds its part, any other's from then on. L5 `fallback` keeps the request
-    /// filters beside the new root `bool`'s `must_not` and `filter`, and the filter step drops the soft ones alone
-    /// (SPEC §7.6). The text, the clauses' spans and [`Self::effective`] still state what the user wrote. The new query
-    /// is not checked against [`Self::limits`]: a search checks it as it checks any query (SPEC §7.1.3).
+    /// filters beside the new root `bool`'s `must_not` and `filter` (and the wrapped one's), and the filter step drops
+    /// the soft ones alone, but those the caller's root holds (SPEC §7.6). The text, the clauses' spans and
+    /// [`Self::effective`] still state what the user wrote. The new query is not checked against [`Self::limits`]: a
+    /// search checks it as it checks any query (SPEC §7.1.3).
     ///
     /// ```
     /// use persia_analysis::AnalyzerRegistry;
@@ -552,6 +577,11 @@ impl Compiled {
         if self.part.is_none() && !self.holds_parts(&query) {
             self.detached = true;
         }
+        // The caller's own root filters, before the join: hard, whatever they equal (ROADMAP 8.2.13).
+        self.own_filter = match &query {
+            Query::Bool(root) => root.filter.clone(),
+            _ => Vec::new(),
+        };
         // The hard filters, then the soft ones (ROADMAP 8.2.13), as they were joined.
         let filters: Vec<Filter> = self
             .filter
@@ -987,6 +1017,7 @@ fn finish(
         synonyms,
         filter: Vec::new(),
         soft_filter: Vec::new(),
+        own_filter: Vec::new(),
         detached: false,
         wrapped: false,
     }

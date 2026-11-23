@@ -1879,6 +1879,61 @@ mod limits {
         }
     }
 
+    /// A nested level of fixed steps (ROADMAP 8.2.2.4): a later step built uncut stands for the earlier ones.
+    #[derive(Debug)]
+    struct Nested(Vec<Step>);
+
+    impl LevelTransform for Nested {
+        fn steps(&self, _input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
+            Ok(self.0.clone())
+        }
+
+        fn nested(&self) -> bool {
+            true
+        }
+    }
+
+    /// SPEC §7.1.3, §7.6 by hand (ROADMAP 8.1.19, 8.2.2.4): a cut step of a nested level stands for no earlier step of
+    /// it, so those stay excluded and count in full against the limits of the later steps. The nested level's steps
+    /// hold prefixes of different bytes (`sh`, `bl`), so no expansion a step excludes is one it holds (no credit,
+    /// ROADMAP 8.2.12). Under 90 expansions: `sh` (50) fits; `bl` (50) beside `sh` (50) is cut to the 40 left; `gr`
+    /// (30) then counts `sh` and the cut `bl` (90) and is skipped, where it would fit had the cut `bl` replaced `sh`.
+    /// Under 100, `bl` fits uncut and stands for `sh`, so `gr` counts `bl` alone (80) and fits. (Since 8.2.12 an engine
+    /// L2 rung is never cut: every expansion it holds is L0's at the same cap, and is credited.)
+    #[test]
+    fn a_cut_step_of_a_nested_level_leaves_its_earlier_steps_excluded() {
+        let (db, body, _) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let nested: Arc<dyn LevelTransform> = Arc::new(Nested(vec![
+            step(prefix(body, "sh", 50), "sh"),
+            step(prefix(body, "bl", 50), "bl"),
+        ]));
+        let later = Stub::new(vec![step(prefix(body, "gr", 30), "gr")]);
+        let relax = |max_expansions| {
+            plan(&min(10), &[(RelaxLevel::Prefix, &later)])
+                .with_level(RelaxLevel::DropTerms, Arc::clone(&nested))
+                .with_limits(QueryLimits {
+                    max_expansions,
+                    ..QueryLimits::default()
+                })
+        };
+        let purple = term(body, "purple");
+        let cut = views
+            .search_relaxed(&purple, &request(10), &relax(90), &exec())
+            .unwrap();
+        assert_eq!(cut.relaxation.applied, ["sh", "bl:cut", "gr:skipped"]);
+        // `c` holds `shoes` and `blue`: `sh`'s, not again `bl`'s.
+        assert_eq!(sorted(&cut), [("a", 1), ("c", 1), ("e", 2)]);
+        let uncut = views
+            .search_relaxed(&purple, &request(10), &relax(100), &exec())
+            .unwrap();
+        assert_eq!(uncut.relaxation.applied, ["sh", "bl", "gr"]);
+        assert_eq!(sorted(&uncut), [("a", 1), ("c", 1), ("d", 3), ("e", 2)]);
+    }
+
     #[test]
     fn a_step_over_the_limits_is_skipped_listed_and_not_excluded() {
         let (db, body, _) = database();

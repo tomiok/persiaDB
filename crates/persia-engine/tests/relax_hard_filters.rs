@@ -4,7 +4,9 @@
 //! filter step (L6, `filters: "last_resort"`) keeps it too. The request's `soft_filter` holds the filters L6 may drop,
 //! and only L6: every earlier level applies them as filters. A filter given as both is hard. With `last_resort` and
 //! no soft filter there is no L6 step. A programmatic query's root filters are hard unless the caller marks them soft
-//! (`RelaxedQuery::with_soft_filter`); a compiled query's `filter` stays hard even if marked.
+//! (`RelaxedQuery::with_soft_filter`); a compiled query's `filter` stays hard even if marked. A filter the root of a
+//! query a caller put in (`Compiled::with_query`) holds itself is hard too, also one equal to a soft filter, and L5
+//! keeps every filter L0 applies or builds no step.
 //!
 //! Invariants, checked over random corpora (puts, upserts, deletes and commits, so the documents are spread over
 //! segments and the memtable), random user text (words of a small vocabulary with a synonym group, typos, prefixes,
@@ -385,11 +387,22 @@ enum Soft {
     Hard(usize),
 }
 
-/// A query a caller puts in place of the compiled one (`Compiled::with_query`): a root `bool` of `body` words.
+/// A filter of a caller's root: one of its own, or the soft filter at this index (modulo their count), which the
+/// caller's root then holds itself, so it is hard (ROADMAP 8.2.13).
+#[derive(Debug, Clone)]
+enum CallerFilter {
+    Own(Filter),
+    Soft(usize),
+}
+
+/// A query a caller puts in place of the compiled one (`Compiled::with_query`): a root `bool` of `body` words, with
+/// filters of its own.
 #[derive(Debug, Clone)]
 struct Caller {
     must: Vec<usize>,
     should: Vec<usize>,
+    /// Its root's own filters: hard, whatever they equal.
+    filters: Vec<CallerFilter>,
     /// Put in before the filters are joined, or after.
     before: bool,
 }
@@ -470,11 +483,19 @@ fn text_form(f: Fields) -> impl Strategy<Value = Form> {
             (
                 prop::collection::vec(0..WORDS.len(), 0..3),
                 prop::collection::vec(0..WORDS.len(), 0..3),
+                prop::collection::vec(
+                    prop_oneof![
+                        1 => filter(f).prop_map(CallerFilter::Own),
+                        2 => (0..3_usize).prop_map(CallerFilter::Soft),
+                    ],
+                    0..3,
+                ),
                 any::<bool>(),
             )
-                .prop_map(|(must, should, before)| Caller {
+                .prop_map(|(must, should, filters, before)| Caller {
                     must,
                     should,
+                    filters,
                     before,
                 }),
         ),
@@ -637,14 +658,27 @@ fn build(
             if soft.iter().any(|s| hard.contains(s)) {
                 cover("soft filter equal to a hard one");
             }
+            // The caller's own root filters (ROADMAP 8.2.13): hard, a copy of a soft filter included.
+            let own: Vec<Filter> = caller.as_ref().map_or_else(Vec::new, |c| {
+                dedup(c.filters.iter().filter_map(|x| match x {
+                    CallerFilter::Own(x) => Some(x.clone()),
+                    CallerFilter::Soft(i) => {
+                        (!soft.is_empty()).then(|| soft[i % soft.len()].clone())
+                    }
+                }))
+            });
             let caller = caller.as_ref().map(|c| {
                 let query = Query::Bool(BoolQuery {
                     must: c.must.iter().map(|&w| term(f, WORDS[w])).collect(),
                     should: c.should.iter().map(|&w| term(f, WORDS[w])).collect(),
+                    filter: own.clone(),
                     ..BoolQuery::default()
                 });
                 (query, c.before)
             });
+            let wraps = caller
+                .as_ref()
+                .is_some_and(|(q, _)| matches!(q, Query::Bool(b) if !b.should.is_empty()));
             if let Some((query, true)) = &caller {
                 compiled = compiled.with_query(query.clone());
             }
@@ -675,10 +709,23 @@ fn build(
             if !marked.is_empty() {
                 cover("hard filter marked soft");
             }
+            if want_soft.iter().any(|s| own.contains(s)) {
+                cover(if wraps {
+                    "caller filter equal to a soft one (wrapped)"
+                } else {
+                    "caller filter equal to a soft one (in place)"
+                });
+            }
+            // The oracle's hard filters: the request's and the caller's own; its soft ones, the rest.
+            let soft = want_soft
+                .iter()
+                .filter(|s| !own.contains(s))
+                .cloned()
+                .collect();
             Ok(Built {
                 query: Owned::Compiled(Box::new(compiled), marked),
-                hard: want_hard,
-                soft: want_soft,
+                hard: dedup(want_hard.into_iter().chain(own)),
+                soft,
             })
         }
         Form::Query {
@@ -1094,6 +1141,8 @@ fn hard_filters_hold_at_every_level() {
             "last_resort without a soft filter (query)",
             "soft filter equal to a hard one",
             "hard filter marked soft",
+            "caller filter equal to a soft one (in place)",
+            "caller filter equal to a soft one (wrapped)",
         ] {
             assert!(coverage.get(key).is_some_and(|&n| n > 0), "never: {key}");
         }
@@ -1338,4 +1387,201 @@ fn a_programmatic_root_drops_only_the_filters_marked_soft() {
         ]
     );
     assert!(marked.relaxation.filters_dropped);
+}
+
+/// ROADMAP 8.2.13 (batch review): a filter the root of a query a caller put in place of a compiled one holds itself is
+/// the caller's, and hard: the filter step keeps it even when it equals the request's soft filter (the join does not
+/// add it twice), in place or in the root the join wrapped, the query put in before the filters joined or after. A
+/// caller filter of another value stays beside it, and the soft filter alone is dropped.
+#[test]
+fn a_callers_own_root_filter_stays_even_when_it_equals_a_soft_one() {
+    let db = shop();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let schema = c.schema();
+    let f = fields(schema);
+    let qc = QueryCompiler::new(schema, &AnalyzerRegistry::builtin()).unwrap();
+    let (tenant, nike, asics) = (
+        keyword(f.tenant, "t1"),
+        keyword(f.brand, "nike"),
+        keyword(f.brand, "asics"),
+    );
+    let plan = shop_plan(
+        schema,
+        r#"{"min_results": 6, "filters": "last_resort", "fallback": "none"}"#,
+    );
+    let page = request(schema, &f, 10, false);
+    // In place: a root `bool` without `should` clauses. Wrapped: one with them, which the join wraps.
+    let in_place = |filter: Vec<Filter>| {
+        Query::Bool(BoolQuery {
+            must: vec![term(&f, "red"), term(&f, "shoes")],
+            filter,
+            ..BoolQuery::default()
+        })
+    };
+    let wrapped = |filter: Vec<Filter>| {
+        Query::Bool(BoolQuery {
+            must: vec![term(&f, "red")],
+            should: vec![term(&f, "shoes")],
+            filter,
+            ..BoolQuery::default()
+        })
+    };
+    let build = |caller: &Query, before: bool| {
+        let compiled = qc.compile(
+            "red shoes",
+            &DefaultFields::all(schema),
+            &QueryLimits::default(),
+        );
+        if before {
+            compiled
+                .with_query(caller.clone())
+                .with_filter([tenant.clone()])
+                .with_soft_filter([nike.clone()])
+        } else {
+            compiled
+                .with_filter([tenant.clone()])
+                .with_soft_filter([nike.clone()])
+                .with_query(caller.clone())
+        }
+    };
+    for caller in [in_place(vec![nike.clone()]), wrapped(vec![nike.clone()])] {
+        for before in [false, true] {
+            let compiled = build(&caller, before);
+            assert_eq!(compiled.soft_filter(), std::slice::from_ref(&nike));
+            let out = views
+                .search_relaxed(&compiled, &page, &plan, &exec())
+                .unwrap();
+            // t1's nike `red shoes`, never `b` or `f` (t1, other brands): nothing is left to drop, so no filter step.
+            assert_eq!(
+                levels(&out),
+                [("a", RelaxLevel::Exact)],
+                "{caller:?} {before}"
+            );
+            assert!(!out.relaxation.filters_dropped);
+            assert!(!out.relaxation.applied.iter().any(|a| a == "filters"));
+        }
+    }
+    // The caller's own `asics` beside the soft `nike`: L0 finds none of both; the filter step drops `nike` alone and
+    // finds t1's asics `red shoes`, `f`.
+    for caller in [in_place(vec![asics.clone()]), wrapped(vec![asics.clone()])] {
+        for before in [false, true] {
+            let compiled = build(&caller, before);
+            let out = views
+                .search_relaxed(&compiled, &page, &plan, &exec())
+                .unwrap();
+            assert_eq!(
+                levels(&out),
+                [("f", RelaxLevel::Filters)],
+                "{caller:?} {before}"
+            );
+            assert!(out.relaxation.filters_dropped);
+        }
+    }
+}
+
+/// ROADMAP 8.2.13 (batch review): L5 keeps the `must_not` and `filter` of a caller's root the join wrapped, and builds
+/// no step when L0 holds a filter in a clause it drops (a programmatic `boost` of a filtered `bool`, or a filtered
+/// `bool` a caller put in as its query's `must`): `match_all` would not apply that filter.
+#[test]
+fn fallback_never_selects_a_document_l0s_filters_reject() {
+    let db = shop();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let schema = c.schema();
+    let f = fields(schema);
+    let compile = || {
+        QueryCompiler::new(schema, &AnalyzerRegistry::builtin())
+            .unwrap()
+            .compile(
+                "red shoes",
+                &DefaultFields::all(schema),
+                &QueryLimits::default(),
+            )
+    };
+    let (tenant, nike, puma) = (
+        keyword(f.tenant, "t1"),
+        keyword(f.brand, "nike"),
+        keyword(f.brand, "puma"),
+    );
+    let plan = shop_plan(schema, r#"{"min_results": 6}"#);
+    let page = request(schema, &f, 10, false);
+    let brand = |out: &RelaxedResults| -> Vec<String> {
+        let mut ids: Vec<String> = out
+            .hits
+            .iter()
+            .map(|h| h.hit.document.id().to_owned())
+            .collect();
+        ids.sort_unstable();
+        ids
+    };
+
+    // A wrapped caller root: `red`, `shoes` optional, `puma`, not `hat`. L0 finds `b`; L5 selects t1's puma documents
+    // without `hat`, `b` alone, already L0's. Before, L5 kept t1 alone and found `a`, `e` and `f`.
+    let caller = Query::Bool(BoolQuery {
+        must: vec![term(&f, "red")],
+        should: vec![term(&f, "shoes")],
+        must_not: vec![term(&f, "hat")],
+        filter: vec![puma],
+        ..BoolQuery::default()
+    });
+    let compiled = compile().with_filter([tenant.clone()]).with_query(caller);
+    let out = views
+        .search_relaxed(&compiled, &page, &plan, &exec())
+        .unwrap();
+    assert_eq!(levels(&out), [("b", RelaxLevel::Exact)]);
+    assert!(out.relaxation.applied.iter().any(|a| a == "fallback"));
+
+    // Programmatic: a `boost` of a `bool` filtered to t1. L5 builds no step; every hit is t1's `red shoes`.
+    let filtered = |filter: Filter| {
+        Query::Bool(BoolQuery {
+            must: vec![term(&f, "red"), term(&f, "shoes")],
+            filter: vec![filter],
+            ..BoolQuery::default()
+        })
+    };
+    let boosted = Query::Boost(persia_engine::query::BoostQuery {
+        query: Box::new(filtered(tenant.clone())),
+        boost: 2.0,
+    });
+    let out = views
+        .search_relaxed(&boosted, &page, &plan, &exec())
+        .unwrap();
+    assert_eq!(brand(&out), ["a", "b", "f"]);
+    assert!(out.hits.iter().all(|h| h.level != RelaxLevel::Fallback));
+    assert!(!out.relaxation.applied.iter().any(|a| a == "fallback"));
+    assert_eq!(out.relaxation.fallback, None);
+
+    // Programmatic, a filtered `bool` as a root `must` clause: L2 does not drop it, L5 builds no step.
+    let nested = Query::Bool(BoolQuery {
+        must: vec![filtered(tenant.clone()), term(&f, "red")],
+        ..BoolQuery::default()
+    });
+    let out = views
+        .search_relaxed(&nested, &page, &plan, &exec())
+        .unwrap();
+    assert_eq!(brand(&out), ["a", "b", "f"]);
+    assert!(
+        !out.relaxation
+            .applied
+            .iter()
+            .any(|a| a.starts_with("drop_terms") || a == "fallback")
+    );
+
+    // Compiled, a caller's query whose one `must` is filtered to nike, beside the hard t1: `a` alone, no L5 step.
+    let compiled = compile()
+        .with_filter([tenant])
+        .with_query(Query::Bool(BoolQuery {
+            must: vec![filtered(nike)],
+            ..BoolQuery::default()
+        }));
+    let out = views
+        .search_relaxed(&compiled, &page, &plan, &exec())
+        .unwrap();
+    assert_eq!(levels(&out), [("a", RelaxLevel::Exact)]);
+    assert!(!out.relaxation.applied.iter().any(|a| a == "fallback"));
 }

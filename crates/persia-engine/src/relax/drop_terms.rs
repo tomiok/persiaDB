@@ -254,7 +254,8 @@ impl<'a> Root<'a> {
     }
 
     /// How many terms `input`'s query has: its required clauses, or a programmatic root `bool`'s `must` clauses.
-    /// `None` for any other programmatic query, which L2 does not relax.
+    /// `None` for any other programmatic query, which L2 does not relax, one whose `must` clauses hold a filter
+    /// included.
     fn count(input: &LevelInput<'_>) -> Option<usize> {
         match (input.compiled, input.original) {
             // The compiler builds no `should` at the root: a root changed since has requirements L2 would drop.
@@ -266,8 +267,12 @@ impl<'a> Root<'a> {
                 None
             }
             (Some(compiled), _) => Some(compiled.clauses.iter().filter(|c| !c.negated).count()),
+            // A `must` clause that holds a filter is not a term to drop (ROADMAP 8.2.13): a step without it would match
+            // documents that filter rejects. Such a root is not relaxed.
             (None, Query::Bool(root))
-                if root.should.is_empty() && root.minimum_should_match == 0 =>
+                if root.should.is_empty()
+                    && root.minimum_should_match == 0
+                    && !root.must.iter().any(super::fallback::holds_filter) =>
             {
                 Some(root.must.len())
             }

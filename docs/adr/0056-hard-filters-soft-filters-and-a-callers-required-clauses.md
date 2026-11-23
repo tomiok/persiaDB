@@ -27,9 +27,11 @@ may.
    filter step under `filters: "last_resort"` drops. Both join the compiled query as filter clauses of its root `bool`,
    hard first (`Compiled::with_filter`, `Compiled::with_soft_filter`), so a plain search and every level apply both;
    the compilation keeps each list beside its query (ADR-0048 item 1), and a query put in place is joined to both again.
-   A filter given as both is hard. The filter step drops the soft filters alone: from the root, and from a caller's
-   root the join wrapped (ADR-0048 item 5). With `last_resort` and no soft filter the level builds no step. L5 keeps
-   both, as every word level does.
+   A filter given as both is hard. The filter step drops the soft filters alone, from the root. A filter the root of a
+   query a caller put in holds itself (in place, or in the root the join wrapped, ADR-0048 item 5) is the caller's and
+   hard, also when it equals a soft filter, which the join then does not add twice: the step keeps it, and keeps a
+   wrapped caller root whole. With `last_resort` and no soft filter left to drop the level builds no step. L5 keeps
+   both, as every word level does (item 5).
 2. **A programmatic query's root filters are hard unless marked soft.** A query built in code has no request keys:
    every filter of its root `bool` is hard, so the filter step drops none of them, unless the caller marks some soft
    (`RelaxedQuery::with_soft_filter`): a root filter equal to a marked one is soft. Before, the filter step dropped
@@ -45,6 +47,13 @@ may.
    they rewrite (they are not rewritten, and the last term stays the last clause's), L5 selects only documents that
    match them, and the filter step keeps them with L0's root. They have no source text, so no step's `effective`
    renders them. A required clause put before the clauses' parts moves them, and still detaches.
+5. **L5 keeps every filter L0 applies, or builds no step** (ROADMAP 8.2.13). Its `match_all` keeps the root's
+   `must_not` and `filter`, the request's filters (hard and soft, read from the compilation too), the `must_not` and
+   `filter` of a caller's root the join wrapped, and a caller's required clauses. A filter L0 holds in a clause L5
+   drops (below the root: a programmatic `boost` or `constant_score` of a filtered `bool`, a filtered `bool` as a
+   `must` or `should` clause) would not apply under `match_all`, so L5 builds no step for such a query; for the same
+   reason L2 does not drop a programmatic root's `must` clause that holds a filter (it builds no step for that root).
+   A filter inside an exclusion is kept with it.
 
 ## Consequences
 
@@ -58,8 +67,11 @@ may.
   unchanged.
 - `Compiled::extra_must` is new public API; a caller who used to see a detached compilation (no word step) now gets
   every level with the clause kept.
-- L5's `covers_earlier` still holds: every earlier step keeps the root's `must_not`, both filter lists and the extra
-  `must` entries, and L5 requires all of them.
+- L5's `covers_earlier` still holds: every earlier step keeps the root's `must_not`, both filter lists, a wrapped
+  caller root's `must_not` and `filter` and the extra `must` entries, and L5 requires all of them; a query with a
+  filter L5 cannot carry has no L5 step.
+- `Compiled::with_query` is safe for access filters: a query put in cannot drop a request filter (ADR-0048), its own
+  root filters are hard, and no level loosens a filter it holds deeper (L5 and L2 build no step instead).
 
 ## Alternatives considered
 

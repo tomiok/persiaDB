@@ -7,7 +7,8 @@
 //! 2. The steps a `fill` page searches only to count them are not its own: its `applied`, `level`, hits and cursors are
 //!    those of the same page without facets.
 //! 3. The counts are kept once per query (8.1.11): a later page of the query reads them and searches no step only to
-//!    count it, and gives the counts it would have counted.
+//!    count it, and gives the counts it would have counted. Only a page from the top whose counting steps the budget
+//!    did not cut keeps them; the budget passing in a step searched only to count it does not truncate the page.
 
 use std::collections::BTreeMap;
 
@@ -318,8 +319,8 @@ fn a_later_page_reads_the_kept_counts_and_searches_no_step_only_to_count_them() 
         assert_eq!(cached, plain);
         assert_eq!(counts(&with), want);
         assert_eq!(strip(&with.hits), strip(&without.hits));
-        // Another facet request (`size` 9) is not kept yet: that page searches the steps before its cursor's too, and
-        // keeps its own counts.
+        // Another facet request (`size` 9) is not kept yet: that page searches the steps before its cursor's too. A
+        // cursor page keeps no counts (its cursor may come from a truncated page): only a page from the top does.
         let nine = SearchRequest {
             facets: vec![FacetRequest::new(tag, 9, c.schema()).unwrap()],
             ..deep.clone()
@@ -327,6 +328,16 @@ fn a_later_page_reads_the_kept_counts_and_searches_no_step_only_to_count_them() 
         let (other, counted) = searches(|| search(&views, &red_shoes, &nine, &relax));
         assert!(counted > cached, "{counted} steps against {cached}");
         assert_eq!(counts(&other), want);
+        assert_eq!(kept(&views), 1);
+        search(
+            &views,
+            &red_shoes,
+            &SearchRequest {
+                search_after: None,
+                ..nine
+            },
+            &relax,
+        );
         assert_eq!(kept(&views), 2);
     }
     // A write: a new memtable view, whose counts are its own.
@@ -386,4 +397,101 @@ fn a_truncated_page_keeps_no_counts() {
         .unwrap();
     assert!(out.relaxation.truncated);
     assert_eq!(kept(&views), 0);
+}
+
+/// ROADMAP 8.1.11 (batch review): a cursor page keeps no counts. Its cursor may come from a page the budget truncated,
+/// whose last step stops short of those a page from the top builds, so it counts fewer steps: kept, those counts would
+/// serve every later page of the query, a page from the top included.
+#[test]
+fn a_cursor_page_after_a_truncated_page_keeps_no_counts() {
+    let (db, body, tag) = database();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let relax = RelaxPlan::new(
+        c.schema().relaxation(),
+        &RelaxOptions::from_json(r#"{"min_results": 5, "budget_ms": 1}"#).unwrap(),
+    )
+    .unwrap();
+    let red_shoes = all_of(body, &["red", "shoes"]);
+    let want = of_every_hit(&views, &red_shoes, &relax, tag);
+    // Page 1 on a clock past the budget after L0: truncated, its cursor's cascade stops at L0.
+    let ticking = exec().budget_clock(std::sync::Arc::new(Ticking::default()));
+    let first = views
+        .search_relaxed(
+            &red_shoes,
+            &faceted(request(1), tag, &views),
+            &relax,
+            &ticking,
+        )
+        .unwrap();
+    assert!(first.relaxation.truncated);
+    assert_eq!(kept(&views), 0);
+    // Page 2 by its cursor, with time to spare: whole, but it builds L0 alone, so it counts L0's matches alone.
+    let next = SearchRequest {
+        search_after: Some(first.hits[0].cursor()),
+        ..request(1)
+    };
+    let second = search(&views, &red_shoes, &faceted(next, tag, &views), &relax);
+    assert!(!second.relaxation.truncated);
+    assert_ne!(counts(&second), want);
+    assert_eq!(kept(&views), 0, "a cursor page keeps no counts");
+    // Page 1 again from the top counts every step, and keeps that.
+    let top = search(
+        &views,
+        &red_shoes,
+        &faceted(request(1), tag, &views),
+        &relax,
+    );
+    assert_eq!(counts(&top), want);
+    assert_eq!(kept(&views), 1);
+}
+
+/// SPEC §7.5, §7.6 (batch review): with `fill`, the budget passing in a step a page searches only to count its facets
+/// does not truncate the page: its hits, steps and `truncated` are those of the same page without facets. Its counts
+/// miss the steps not counted, and are not kept: a later page counts every step.
+#[test]
+fn a_budget_passing_in_a_counting_step_leaves_the_page_whole_and_keeps_no_counts() {
+    let (db, body, tag) = database();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    // `min_results` 1: L0's `a` fills a page of 1, so every later step is searched only to count it.
+    let relax = RelaxPlan::new(
+        c.schema().relaxation(),
+        &RelaxOptions::from_json(r#"{"fill": true, "budget_ms": 1}"#).unwrap(),
+    )
+    .unwrap();
+    let red_shoes = all_of(body, &["red", "shoes"]);
+    let ticking = || exec().budget_clock(std::sync::Arc::new(Ticking::default()));
+    let out = views
+        .search_relaxed(
+            &red_shoes,
+            &faceted(request(1), tag, &views),
+            &relax,
+            &ticking(),
+        )
+        .unwrap();
+    let plain = views
+        .search_relaxed(&red_shoes, &request(1), &relax, &ticking())
+        .unwrap();
+    assert!(!out.relaxation.truncated);
+    assert_eq!(out.relaxation, plain.relaxation);
+    assert_eq!(strip(&out.hits), strip(&plain.hits));
+    // L0's `a` alone was counted.
+    assert_eq!(counts(&out), [(b"x".to_vec(), 1)]);
+    assert_eq!(kept(&views), 0);
+    let whole = search(
+        &views,
+        &red_shoes,
+        &faceted(request(1), tag, &views),
+        &relax,
+    );
+    assert_eq!(
+        counts(&whole),
+        of_every_hit(&views, &red_shoes, &relax, tag)
+    );
+    assert_eq!(kept(&views), 1);
 }

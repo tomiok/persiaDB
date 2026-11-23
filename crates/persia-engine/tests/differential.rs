@@ -2952,7 +2952,10 @@ impl Reference<'_> {
                         .collect::<Vec<_>>()
                         .join(" ")
                 });
-                vec![built(reference_fallback(root), "fallback", excluded)]
+                reference_fallback(root)
+                    .map(|q| built(q, "fallback", excluded))
+                    .into_iter()
+                    .collect()
             }
             RelaxLevel::Filters => reference_unfiltered(root)
                 .map(|q| built(q, "filters", l0_text()))
@@ -3715,7 +3718,8 @@ fn drop_terms_steps(q: &RefQuery) -> Vec<(RefQuery, String, usize)> {
     else {
         return steps;
     };
-    if !should.is_empty() {
+    // A `must` clause that holds a filter is not a term to drop (ROADMAP 8.2.13): no step.
+    if !should.is_empty() || must.iter().any(holds_filter) {
         return steps;
     }
     let n = must.len();
@@ -3743,19 +3747,37 @@ fn drop_terms_steps(q: &RefQuery) -> Vec<(RefQuery, String, usize)> {
 
 /// L5 `fallback`'s step as SPEC §7.6 builds it from `q`: `match_all` beside the root `bool`'s `must_not` and `filter`,
 /// so excluded clauses stay excluded and filters are not relaxed; `match_all` alone without either, or for a root of
-/// another kind. A deeper filter is not kept.
-fn reference_fallback(q: &RefQuery) -> RefQuery {
+/// another kind. `None` when a clause it drops (the root's `must` and `should`, or a root of another kind) holds a
+/// filter, which `match_all` would not apply (ROADMAP 8.2.13).
+fn reference_fallback(q: &RefQuery) -> Option<RefQuery> {
     match q {
+        RefQuery::Bool { must, should, .. } if must.iter().chain(should).any(holds_filter) => None,
         RefQuery::Bool {
             must_not, filter, ..
-        } if !must_not.is_empty() || !filter.is_empty() => RefQuery::Bool {
+        } if !must_not.is_empty() || !filter.is_empty() => Some(RefQuery::Bool {
             must: vec![RefQuery::All],
             should: Vec::new(),
             must_not: must_not.clone(),
             filter: filter.clone(),
             minimum_should_match: 0,
-        },
-        _ => RefQuery::All,
+        }),
+        RefQuery::Bool { .. } => Some(RefQuery::All),
+        other => (!holds_filter(other)).then_some(RefQuery::All),
+    }
+}
+
+/// Whether `q` holds a filter at any depth (its `must_not` included).
+fn holds_filter(q: &RefQuery) -> bool {
+    match q {
+        RefQuery::Bool {
+            must,
+            should,
+            must_not,
+            filter,
+            ..
+        } => !filter.is_empty() || must.iter().chain(should).chain(must_not).any(holds_filter),
+        RefQuery::Boost(inner, _) | RefQuery::Constant(inner, _) => holds_filter(inner),
+        _ => false,
     }
 }
 

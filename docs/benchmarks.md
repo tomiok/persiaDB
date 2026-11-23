@@ -682,6 +682,25 @@ Before, the deep page searched every step before its cursor's again with every m
 searches its own steps, pruned, without counting. The first page still collects `min_results` hits from the top in
 each step, which is most of its cost either way.
 
+ROADMAP 8.1.9 (facets count the steps a page of every hit builds), its cost on a first page with `fill`:
+`search_relaxed/facets/fill` is the first page of 10 of the same query under `fill` and the default `min_results`
+(L0 finds nothing, L2's rungs fill the page), with facets on `tag`, each iteration asking another facet `size` (64
+sizes, more than the cache's 32 counts) so that none reads counts an earlier one kept; `facets/fill/plain` is the same
+page without facets. Command: `cargo bench -p persia-engine --bench search -- 'search_relaxed/facets/fill'`, the
+default build; "before" is the same bench added to a copy of the commit before ROADMAP 8.1.9 (4541c36), "after" the
+batch's fix-up (2026-11-23, rustc 1.99.0, 12 threads, Linux).
+
+| | before | after | change |
+|---|--:|--:|--:|
+| `search_relaxed/facets/fill` | 1.39 ms | 12.8 ms | +820% (×9.2) |
+| `search_relaxed/facets/fill/plain` | 1.47 ms | 1.36 ms | within noise |
+
+Before 8.1.9 a `fill` page counted only the steps it built (L0 and the rungs that filled it), so its facets differed
+from a deeper page's. Since, it also searches the steps past its own (L2's later rungs, L3, L4, L5) once its hits are
+in, each with every match visited, only to count them: that is the whole difference, paid by the first page of each
+query on a snapshot (later pages of the query read the kept counts, `facets/deep` above). A page without facets pays
+nothing.
+
 ## `persia-engine` relevance
 
 `cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2, 7.8.4): 18 user-text queries with graded judgments over

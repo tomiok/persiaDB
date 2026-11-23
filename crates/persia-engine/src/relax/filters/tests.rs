@@ -8,9 +8,10 @@
 //!    `should` through `bool`, `boost` and `constant_score`. `match_all`, an empty `bool` and exclusions alone are not.
 //! 3. Its `effective` is L0's text; it corrects nothing, has no synonym alternatives and reads no statistics.
 //! 4. It never fills a page, and covers no earlier step; L5 covers every earlier step.
-//! 5. Of a compiled query it drops the request filter alone (`Compiled::filter`, ROADMAP 8.2.14), whatever query a
-//!    caller put in: a filter the caller's root holds stays unless it equals a request filter, which counts as the
-//!    request's and is dropped, also from a caller root the join wrapped; without a request filter no step is built.
+//! 5. Of a compiled query it drops the request's soft filter alone (`Compiled::droppable`, ROADMAP 8.2.13, 8.2.14),
+//!    whatever query a caller put in: a filter the caller's root holds stays, also one equal to a soft filter (it is
+//!    the caller's own, ROADMAP 8.2.13), and a caller root the join wrapped stays whole; with nothing to drop no step
+//!    is built.
 
 #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)] // Tests: inputs are fixed.
 
@@ -61,11 +62,11 @@ impl StatisticsProvider for NoStats {
     }
 }
 
-/// The filter step of `query`: a compiled query's soft filters are its own; every root filter of a programmatic one is
-/// marked soft (the caller's `RelaxedQuery::with_soft_filter`, ROADMAP 8.2.13).
+/// The filter step of `query`: a compiled query's soft filters are those it may drop (`Compiled::droppable`); every
+/// root filter of a programmatic one is marked soft (the caller's `RelaxedQuery::with_soft_filter`, ROADMAP 8.2.13).
 fn steps(query: &Query, compiled: Option<&Compiled>) -> Vec<Step> {
     let soft: Vec<Filter> = match (compiled, query) {
-        (Some(c), _) => c.soft_filter().to_vec(),
+        (Some(c), _) => c.droppable().cloned().collect(),
         (None, Query::Bool(root)) => root.filter.clone(),
         (None, _) => Vec::new(),
     };
@@ -198,8 +199,8 @@ fn a_replaced_query_drops_the_request_filter_alone() {
     };
     assert_eq!(root.filter, [own.clone(), acme.clone()]);
     assert_eq!(one(replaced.query(), Some(&replaced)).query, caller);
-    // So does one that already held the request filter, which is not joined twice: a root filter equal to the request
-    // filter counts as the request's, and is dropped.
+    // One whose root already held the request's soft filter, which is not joined twice: that filter is the caller's
+    // too, so it is hard (ROADMAP 8.2.13). Nothing is left to drop: no step.
     let holding = Query::Bool(BoolQuery {
         must: vec![term(&schema, "hat")],
         filter: vec![acme.clone(), own.clone()],
@@ -210,14 +211,13 @@ fn a_replaced_query_drops_the_request_filter_alone() {
         panic!()
     };
     assert_eq!(root.filter, [acme.clone(), own.clone()]);
-    assert_eq!(
-        one(replaced.query(), Some(&replaced)).query,
-        Query::Bool(BoolQuery {
-            must: vec![term(&schema, "hat")],
-            filter: vec![own.clone()],
-            ..BoolQuery::default()
-        })
-    );
+    assert_eq!(replaced.soft_filter(), std::slice::from_ref(&acme));
+    assert_eq!(replaced.droppable().count(), 0);
+    assert_eq!(steps(replaced.query(), Some(&replaced)), []);
+    // Another query put in after it, without the filter, makes it droppable again: the caller's filters are those of
+    // the query put in last.
+    let again = replaced.with_query(term(&schema, "hat"));
+    assert_eq!(again.droppable().collect::<Vec<_>>(), [&acme]);
     // Without a request filter, a caller's own root filter is part of the query: nothing to relax.
     let unfiltered = compile(&schema, "red shoes").with_query(caller);
     assert_eq!(steps(unfiltered.query(), Some(&unfiltered)), []);
@@ -227,10 +227,11 @@ fn a_replaced_query_drops_the_request_filter_alone() {
 }
 
 #[test]
-fn a_request_filter_the_wrapped_caller_root_holds_is_dropped_there_too() {
+fn a_wrapped_caller_root_keeps_its_own_filters() {
     // A caller clones the compiled query (which holds the request filter) and adds `should` clauses: the join wraps it,
-    // as a filter beside `should` clauses would make them optional, so the caller's root holds the request filter one
-    // level down. The step drops it there too, or it would search L0's filtered matches again and find nothing.
+    // as a filter beside `should` clauses would make them optional, so the caller's root holds the request's soft
+    // filter one level down. That filter is the caller's own there (ROADMAP 8.2.13): the step keeps it, so there is
+    // nothing to drop, and no step.
     let schema = schema();
     let acme = brand_is(&schema, "acme");
     let filtered = compile(&schema, "red shoes").with_soft_filter([acme.clone()]);
@@ -243,15 +244,10 @@ fn a_request_filter_the_wrapped_caller_root_holds_is_dropped_there_too() {
         panic!()
     };
     assert_eq!(wrapper.must, [Query::Bool(caller.clone())]);
-    caller.filter.clear();
-    assert_eq!(
-        one(replaced.query(), Some(&replaced)).query,
-        Query::Bool(BoolQuery {
-            must: vec![Query::Bool(caller.clone())],
-            ..BoolQuery::default()
-        })
-    );
-    // A filter of the caller's own beside it stays; so does a request filter deeper than the caller's root.
+    assert_eq!(wrapper.filter, std::slice::from_ref(&acme));
+    assert_eq!(steps(replaced.query(), Some(&replaced)), []);
+    // A caller root without it: the step drops the soft filter from the wrap alone and keeps the caller's root whole,
+    // its own filter and a request filter deeper than it included.
     let own = brand_is(&schema, "other");
     let deeper = Query::Bool(BoolQuery {
         must: vec![term(&schema, "red")],
@@ -259,19 +255,16 @@ fn a_request_filter_the_wrapped_caller_root_holds_is_dropped_there_too() {
         ..BoolQuery::default()
     });
     let caller = BoolQuery {
-        must: vec![deeper.clone()],
+        must: vec![deeper],
         should: vec![term(&schema, "hat")],
-        filter: vec![own.clone(), acme.clone()],
+        filter: vec![own],
         ..BoolQuery::default()
     };
     let replaced = filtered.with_query(Query::Bool(caller.clone()));
     assert_eq!(
         one(replaced.query(), Some(&replaced)).query,
         Query::Bool(BoolQuery {
-            must: vec![Query::Bool(BoolQuery {
-                filter: vec![own],
-                ..caller
-            })],
+            must: vec![Query::Bool(caller)],
             ..BoolQuery::default()
         })
     );

@@ -1959,3 +1959,35 @@ fn a_query_put_in_place_keeps_the_clauses_only_while_it_holds_their_parts() {
         assert_eq!(back.query(), compiled.query());
     }
 }
+
+/// ROADMAP 8.2.15 (batch review): a compilation of no clause (empty or stopword-only text) has no required clause a
+/// caller added: the `match_all` a filter's join puts beside its filters is the query as compiled.
+#[test]
+fn a_compilation_of_no_clause_has_no_added_required_clause() {
+    let schema = SchemaBuilder::new("c")
+        .field(
+            "body",
+            FieldKind::Text(TextOptions {
+                analyzer: AnalyzerRef::builtin("en").unwrap(),
+                ..TextOptions::default()
+            }),
+        )
+        .field("brand", FieldKind::Keyword(KeywordOptions::default()))
+        .build()
+        .unwrap();
+    let nike = Filter::Term {
+        field: schema.field("brand").unwrap().id(),
+        value: FilterValue::Keyword("nike".into()),
+    };
+    for text in ["", "the", "the a"] {
+        let compiled = compiler(&schema)
+            .compile(text, &DefaultFields::all(&schema), &QueryLimits::default())
+            .with_filter([nike.clone()]);
+        assert!(compiled.clauses.is_empty(), "{text:?}");
+        let Query::Bool(root) = compiled.query() else {
+            panic!("{text:?}")
+        };
+        assert_eq!(root.must, [Query::MatchAll], "{text:?}");
+        assert_eq!(compiled.extra_must(), [], "{text:?}");
+    }
+}

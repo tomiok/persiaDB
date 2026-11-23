@@ -269,7 +269,8 @@ pub struct RelaxedResults {
     /// The page, best first: the hits of each step in step order.
     pub hits: Vec<RelaxedHit>,
     /// One per requested facet, in request order, over the matches of every step a page holding every hit builds (SPEC
-    /// §7.5, ROADMAP 8.1.9): the same on every page of the query.
+    /// §7.5, ROADMAP 8.1.9): the same on every page of the query, but on a page the budget truncated, or one where it
+    /// passed in a step searched only to count it (the page is then whole, its counts miss that step and later ones).
     pub facets: Vec<FacetCounts>,
     /// What the cascade did.
     pub relaxation: Relaxation,
@@ -730,18 +731,21 @@ impl CollectionViews<'_> {
         // The end of the budget, read from when L0 finishes (SPEC §7.6): L0 itself is never cut by it.
         let mut budget: Option<Instant> = None;
         let clock = exec.relax_clock();
-        let mut truncated = false;
+        // Whether the budget passed in a step of the page (SPEC §7.6 `truncated`), or in one searched only to count its
+        // facets: then the page is whole but its counts are not (ROADMAP 8.1.9), and no later page reads them.
+        let mut passed = Passed::default();
         'levels: for planned in relax.planned() {
             let fills = planned.transform.fills();
             // A page holding every hit builds every step of the levels that fill (SPEC §7.5, ROADMAP 8.1.9): with `fill`
             // and facets, a page counts those past its own too, only to count them.
             let counts_past = counting && relax.fill() && fills;
             // Checked before a level builds its steps: one the cascade does not reach builds nothing.
-            if !builds(built.ran.len(), found, fills) && !counts_past {
+            let page = builds(built.ran.len(), found, fills);
+            if !page && !counts_past {
                 break;
             }
             if budget.is_some_and(|end| clock.now() >= end) {
-                truncated = true;
+                passed.mark(page);
                 break;
             }
             let first = built.ran.is_empty().then_some(query);
@@ -752,7 +756,7 @@ impl CollectionViews<'_> {
                 .dropping(built.drops_terms())
                 .softening(&soft);
             let Some(steps) = self.budgeted_level(planned, first, input, exec, budget)? else {
-                truncated = true;
+                passed.mark(page);
                 break;
             };
             built.begin_level();
@@ -763,7 +767,7 @@ impl CollectionViews<'_> {
                     break 'levels;
                 }
                 if budget.is_some_and(|end| clock.now() >= end) {
-                    truncated = true;
+                    passed.mark(page);
                     break 'levels;
                 }
                 let Held { step, label, cut } =
@@ -793,7 +797,7 @@ impl CollectionViews<'_> {
                         budget,
                     )?
                     else {
-                        truncated = true;
+                        passed.mark(page);
                         break 'levels;
                     };
                     found = found.saturating_add(searched.collected.ranked.len());
@@ -810,21 +814,24 @@ impl CollectionViews<'_> {
                 }
             }
         }
-        let facets = Facets { key, cached };
-        self.respond(built, start, request, exec, (compiled, truncated, facets))
+        let facets = Facets {
+            key: key.filter(|_| start.last.is_none() && !passed.page && !passed.counts),
+            cached,
+        };
+        self.respond(built, start, request, exec, (compiled, passed.page, facets))
     }
 
     /// The response of the cascade `built` from `start`: its page of `request` and what it did, for a query
     /// `compiled` from text (or not) and `truncated` by the budget (or not). Its facets are those `facets` read, else
-    /// those its steps counted, which the snapshot keeps for later pages unless the budget truncated them (ROADMAP
-    /// 8.1.11).
+    /// those its steps counted, which the snapshot keeps for later pages when `facets` has a key: a page from the top
+    /// that counted every step it builds, without the budget passing (ROADMAP 8.1.11).
     fn respond(
         &self,
         built: Built<'_, '_>,
         start: Start,
         request: &SearchRequest,
         exec: &Execution,
-        (compiled, truncated, kept): (Option<&Compiled>, bool, Facets),
+        (compiled, truncated, kept): (Option<&Compiled>, bool, Facets<'_>),
     ) -> Result<RelaxedResults, RelaxedSearchError> {
         let level = built.last_level();
         let Finished {
@@ -841,8 +848,10 @@ impl CollectionViews<'_> {
                 ..
             } => cached,
             Facets { key, cached: None } => {
-                if let Some(key) = key.filter(|_| !truncated) {
-                    self.facet_cache().insert(key, counted.clone());
+                if let Some(key) = key {
+                    // Copied and sized before the cache is locked.
+                    let kept = facet_cache::Kept::new(key.to_key(), counted.clone());
+                    self.facet_cache().insert(kept);
                 }
                 counted
             }
@@ -861,25 +870,25 @@ impl CollectionViews<'_> {
 
     /// The key of `request`'s facets for `query` (its compilation and soft filters) under `relax` and `limits`, and the
     /// counts the snapshot kept for it (ROADMAP 8.1.11, SPEC §7.5). No key without facets, or for a plan whose levels
-    /// are not this version's.
-    fn kept_facets(
+    /// are not this version's. The key borrows the query: it is copied only to keep new counts.
+    fn kept_facets<'k>(
         &self,
-        request: &SearchRequest,
+        request: &'k SearchRequest,
         relax: &RelaxPlan,
-        (query, compiled, soft): (&Query, Option<&Compiled>, &[Filter]),
+        (query, compiled, soft): (&'k Query, Option<&'k Compiled>, &'k [Filter]),
         limits: QueryLimits,
-    ) -> (Option<facet_cache::Key>, Option<Vec<FacetCounts>>) {
+    ) -> (Option<facet_cache::KeyRef<'k>>, Option<Vec<FacetCounts>>) {
         if request.facets.is_empty() || !relax.cacheable() {
             return (None, None);
         }
-        let key = facet_cache::Key {
+        let key = facet_cache::KeyRef {
             version: self.memtable().version(),
-            query: query.clone(),
-            compiled: compiled.cloned(),
-            soft: soft.to_vec(),
+            query,
+            compiled,
+            soft,
             settings: relax.settings(),
             limits,
-            facets: request.facets.clone(),
+            facets: &request.facets,
         };
         let cached = self.facet_cache().get(&key);
         (Some(key), cached)
@@ -1127,10 +1136,32 @@ struct PageSteps {
     relax: Option<RelaxSettings>,
 }
 
-/// A search's facets as the snapshot keeps them (ROADMAP 8.1.11): the key to keep them under, and the counts kept.
-struct Facets {
-    key: Option<facet_cache::Key>,
+/// A search's facets as the snapshot keeps them (ROADMAP 8.1.11): the key to keep them under, `None` when the page's
+/// counts are not to be kept, and the counts kept.
+struct Facets<'a> {
+    key: Option<facet_cache::KeyRef<'a>>,
     cached: Option<Vec<FacetCounts>>,
+}
+
+/// Where the budget passed (SPEC §7.6): in a step of the page, which truncates it, or in a step searched only to count
+/// its facets (ROADMAP 8.1.9), which leaves the page whole and its counts partial.
+#[derive(Debug, Default, Clone, Copy)]
+struct Passed {
+    /// In a step of the page, or before a level of the page's steps: the response's `truncated`.
+    page: bool,
+    /// In a step built only to count its facets: the counts miss it and the steps after it.
+    counts: bool,
+}
+
+impl Passed {
+    /// The budget passed at a step of the `page` (or one searched only to count it).
+    fn mark(&mut self, page: bool) {
+        if page {
+            self.page = true;
+        } else {
+            self.counts = true;
+        }
+    }
 }
 
 /// A step's text (SPEC §7.6 `effective`) and the words it corrected (`corrected`).
@@ -1248,11 +1279,12 @@ fn part(request: &SearchRequest, at_cursor: bool, wanted: usize, counting: bool)
     }
 }
 
-/// The filters the filter step may drop (ROADMAP 8.2.13): a compiled query's `soft_filter`, then those a caller `marked`.
+/// The filters the filter step may drop (ROADMAP 8.2.13): a compiled query's `soft_filter` but those a caller's own root
+/// holds ([`Compiled::droppable`]), then those a caller `marked`.
 fn soft_filters(compiled: Option<&Compiled>, marked: &[Filter]) -> Vec<Filter> {
     compiled
-        .map_or(&[][..], Compiled::soft_filter)
-        .iter()
+        .into_iter()
+        .flat_map(Compiled::droppable)
         .chain(marked)
         .cloned()
         .collect()

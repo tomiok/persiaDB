@@ -344,18 +344,21 @@ fn a_query_put_in_place_never_loses_the_request_filter() {
         ]
     );
     // A clone of the compiled query (which holds the request filter) with a `should` clause added: the join wraps it,
-    // and the filter step drops the request filter from the clone's root too, so it finds what the filter rejected.
+    // and the clone's root holds the request filter itself, so the filter is the caller's own there, and hard (ROADMAP
+    // 8.2.13): the filter step drops nothing, and is not built. Without the filter in the clone, the step drops it from
+    // the wrap and finds what it rejected.
     let Query::Bool(mut clone) = red_shoes.query().clone() else {
         panic!()
     };
     clone.should.push(term("again"));
+    let last_resort = r#"{"min_results": 7, "filters": "last_resort"}"#;
+    let cloned = red_shoes.clone().with_query(Query::Bool(clone.clone()));
+    let last = run(&views, &cloned, &request(10), last_resort);
+    assert!(ids(&last).iter().all(|&(id, _)| kept.contains(&id)));
+    assert!(!last.relaxation.applied.iter().any(|a| a == "filters"));
+    clone.filter.clear();
     let cloned = red_shoes.clone().with_query(Query::Bool(clone));
-    let last = run(
-        &views,
-        &cloned,
-        &request(10),
-        r#"{"min_results": 7, "filters": "last_resort"}"#,
-    );
+    let last = run(&views, &cloned, &request(10), last_resort);
     let dropped: Vec<(&str, RelaxLevel)> = ids(&last)
         .into_iter()
         .filter(|&(_, level)| level == RelaxLevel::Filters)
@@ -1187,6 +1190,12 @@ impl L0 {
                         Query::Bool(mut root)
                             if root.should.is_empty() && root.minimum_should_match == 0 =>
                         {
+                            // Without the request filters, which the join adds back: kept in the root, they would
+                            // be the caller's own, and hard (ROADMAP 8.2.13).
+                            root.filter.retain(|f| {
+                                !compiled.filter().contains(f)
+                                    && !compiled.soft_filter().contains(f)
+                            });
                             root.must_not.push(excluded);
                             Query::Bool(root)
                         }

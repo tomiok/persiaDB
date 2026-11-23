@@ -1200,6 +1200,45 @@ fn relaxed_facets(c: &mut Criterion) {
             });
         });
     }
+    // `facets/fill` (ROADMAP 8.1.9): the first page with `fill` and facets, under the default `min_results` (L0 finds
+    // nothing, `zz`; L2's rungs fill the page). Since 8.1.9 it also searches every step past its own only to count it.
+    // Each iteration asks another facet `size` (more sizes than the cache holds counts), so none reads counts an
+    // earlier one kept: each pays a first page. `facets/fill/plain` is the same page without facets.
+    let fill = RelaxPlan::new(
+        schema.relaxation(),
+        &RelaxOptions {
+            fill: Some(true),
+            ..RelaxOptions::default()
+        },
+    )
+    .unwrap();
+    let sized: Vec<SearchRequest> = (10..10 + 2 * 32)
+        .map(|size| SearchRequest {
+            facets: vec![FacetRequest::new(tag, size, schema).unwrap()],
+            ..request.clone()
+        })
+        .collect();
+    let mut next = sized.iter().cycle();
+    group.bench_function("facets/fill", |b| {
+        b.iter(|| {
+            let page = next.next().unwrap();
+            let out = views.search_relaxed(&query, page, &fill, &exec).unwrap();
+            assert_eq!(out.hits.len(), 10);
+            assert_ne!(out.facets.first().map(|f| f.values.len()), Some(0));
+            black_box(out)
+        });
+    });
+    let plain = SearchRequest {
+        facets: Vec::new(),
+        ..request.clone()
+    };
+    group.bench_function("facets/fill/plain", |b| {
+        b.iter(|| {
+            let out = views.search_relaxed(&query, &plain, &fill, &exec).unwrap();
+            assert_eq!(out.hits.len(), 10);
+            black_box(out)
+        });
+    });
     group.finish();
 }
 
