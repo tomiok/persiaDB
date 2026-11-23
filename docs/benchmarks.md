@@ -685,6 +685,23 @@ a local change), and the rest is per alternative: a clone of the cached query an
 ones. `l0` and `l1` compile once, outside the loop, so the cache does not change their work; they moved by −3% and
 +1%, the drift of unchanged code.
 
+With the cache's slots allocated per group, on first use (ROADMAP 8.1.16 review, ADR-0058 "Memory"), 2026-11-23, same
+machine and command. Before is the branch at 067702e, run just before the change. A set used to allocate one 112-byte
+slot per synonym term at its first compilation (up to 640 000 terms, about 72 MB); it now allocates one 24-byte cell
+per group (at most 240 KB), and a group's 16-byte slots when a run first draws on it. These benches hit the cache
+after their first iteration, so they measure the lookup, not the miss.
+
+| Recorded | `compile/plain` | `compile/synonyms` | `l0` | `l0/compiled` | `l0/compiled_synonyms` | `l1` |
+|---|--:|--:|--:|--:|--:|--:|
+| 8.1.16 (067702e) | 2.33 µs | 19.7 µs | 453 µs | 453 µs | 467 µs | 890 µs |
+| 8.1.16 review | 2.27 µs | 19.5 µs | 478 µs | 480 µs | 493 µs | 931 µs |
+
+`compile/synonyms` holds (−1.3%), and the synonyms' share of the L0 search compiled each time (`l0/compiled_synonyms`
+less `l0/compiled`) is 13.3 µs against 14.3 µs. `l0`, `l0/compiled` and `l1` do not reach the cache in their loop
+(they compile once, or without synonyms), yet moved +4–6%, the same on a second run of each build and with the
+review's other change (the metrics' `fetch_add`) left out, while 067702e run again moved +0.2% to +2.2%: likely a
+placement effect of the rebuilt binary on code this change does not touch, not work it adds.
+
 ## `persia-engine` relevance
 
 `cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2, 7.8.4): 18 user-text queries with graded judgments over

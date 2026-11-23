@@ -706,12 +706,16 @@ fn the_gate_fails_on_the_suite_without_a_level_or_below_its_baseline() {
         v.report
     );
     // What the suite cannot see: it has no synonyms (L1), and L4 corrects every query L3 would complete, so leaving
-    // either out measures the same. A broken L3 that matched the wrong terms would still move the precision.
+    // either out measures the same. A broken L3 that matched the wrong terms would still move the precision. These
+    // pin today's blind spots, not a property the gate wants: ROADMAP 8.4.6 adds the queries that see them, and turns
+    // both assertions into failures (update them then).
     for level in [Level::Synonyms, Level::Prefix] {
         let v = evaluate("fast", &suite, &levels_without(level), &committed);
         assert_eq!(v.row, ok.row, "without {level:?}\n{}", v.report);
     }
-    // No query reaches L5 with the default levels (L2's one-word rung always finds a hit), so (b) measures as (a).
+    // No query reaches L5 with the default levels (L2's one-word rung always finds a hit), so (b) measures as (a):
+    // with the default levels check (b) never fails today, only with a level left out (above). Also a blind spot that
+    // 8.4.6's queries only L5 answers turn into a failure.
     assert_eq!(ok.no_fallback, ok.defaults);
     // The baseline not met: a row 2 points above the measure passes, 2.01 fails; another query count fails.
     let at = |precision: f64, queries| {

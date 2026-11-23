@@ -3,8 +3,8 @@
 //! Invariants:
 //! 1. Every relaxed search without a cursor counts one query: `relaxed` when its response's `level` is not `exact`,
 //!    `empty` when no step found a hit, else one at the level of its hit step. So the per-level counts add up to
-//!    `queries − empty`. A cursor's page counts nowhere; a page by `offset` counts as a query; a plain search counts
-//!    nowhere.
+//!    `queries − empty`. A cascade the budget truncated counts the same way, by the steps it ran. A cursor's page
+//!    counts nowhere; a page by `offset` counts as a query; a plain search counts nowhere.
 //! 2. A collection's snapshots share its counters (across commits); the database's are the sum over its collections,
 //!    and a dropped collection's counts stay in it. A reopened database counts from 0.
 //! 3. Searches on several threads each count once.
@@ -14,10 +14,13 @@
 
 #![allow(clippy::unwrap_used, clippy::indexing_slicing, missing_docs)] // Tests: inputs are fixed.
 
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use persia_analysis::AnalyzerRegistry;
 use persia_engine::db::{
-    CollectionSnapshot, Database, DatabaseOptions, Execution, RelaxationStats, RelaxedResults,
-    SearchRequest, Threads,
+    Clock, CollectionSnapshot, Database, DatabaseOptions, Execution, ManualClock, RelaxationStats,
+    RelaxedResults, SearchRequest, Threads,
 };
 use persia_engine::document::{Document, Value};
 use persia_engine::query::{DefaultFields, QueryCompiler, QueryLimits};
@@ -57,7 +60,6 @@ fn database_on(file: SimFile) -> Database<SimFile> {
     }
     db
 }
-
 /// `text` searched relaxed in collection `c` of the current snapshot, with `options` over the collection's settings. On
 /// the calling thread, where a test's `tracing` subscriber is.
 fn search(
@@ -65,6 +67,17 @@ fn search(
     text: &str,
     request: &SearchRequest,
     options: &RelaxOptions,
+) -> RelaxedResults {
+    search_on(c, text, request, options, &Execution::default())
+}
+
+/// [`search`] under `exec`, on the calling thread.
+fn search_on(
+    c: &CollectionSnapshot,
+    text: &str,
+    request: &SearchRequest,
+    options: &RelaxOptions,
+    exec: &Execution,
 ) -> RelaxedResults {
     let compiler = QueryCompiler::new(c.schema(), &AnalyzerRegistry::builtin()).unwrap();
     let query = compiler.compile(
@@ -80,7 +93,7 @@ fn search(
             &query,
             request,
             &relax,
-            &Execution::default().threads(Threads::Current),
+            &exec.clone().threads(Threads::Current),
         )
         .unwrap()
 }
@@ -163,6 +176,112 @@ fn the_hit_step_is_the_last_step_that_found_a_hit_whatever_the_page_shows() {
     assert_eq!(out.hits.len(), 1);
     assert_eq!(out.hits[0].level, RelaxLevel::Exact);
     assert_eq!(levels(&a.relaxation_stats()), [(RelaxLevel::Fallback, 1)]);
+}
+
+/// A [`ManualClock`] that moves `by` at every read: the relaxation budget passes after as many reads as the cascade
+/// makes, the same at every run, whatever the machine.
+#[derive(Debug)]
+struct Advancing {
+    clock: ManualClock,
+    by: Duration,
+}
+
+impl Advancing {
+    fn new(by_ms: u64) -> Arc<Self> {
+        Arc::new(Self {
+            clock: ManualClock::new(0),
+            by: Duration::from_millis(by_ms),
+        })
+    }
+}
+
+impl Clock for Advancing {
+    fn now(&self) -> Instant {
+        self.clock.advance(self.by);
+        self.clock.now()
+    }
+
+    fn unix_micros(&self) -> i64 {
+        self.clock.unix_micros()
+    }
+}
+
+/// A cascade the budget truncates counts as any other (SPEC §7.6 "Metrics"): `empty` when no step it ran found a hit,
+/// else at the level of its hit step, and `relaxed` when its `level` is not `exact`.
+#[test]
+fn a_cascade_the_budget_truncates_counts_by_the_steps_it_ran() {
+    let db = database();
+    let snapshot = db.snapshot();
+    let a = snapshot.collection("a").unwrap();
+    let request = SearchRequest::default();
+    // `min_results` above the collection's 3 documents: only the budget ends a cascade before its last level.
+    let budget = |ms| RelaxOptions {
+        budget_ms: Some(ms),
+        min_results: Some(10),
+        ..RelaxOptions::default()
+    };
+    // 10 ms a read, 1 ms of budget: past it at the first read after L0, so no later step is built.
+    let exec = Execution::default().budget_clock(Advancing::new(10));
+    let red = search_on(a, "red", &request, &budget(1), &exec);
+    assert!(red.relaxation.truncated);
+    assert_eq!(
+        (red.relaxation.level, red.hits.len()),
+        (RelaxLevel::Exact, 2)
+    );
+    let zebra = search_on(a, "zebra", &request, &budget(1), &exec);
+    assert!(zebra.relaxation.truncated);
+    assert_eq!(
+        (zebra.relaxation.level, zebra.hits.len()),
+        (RelaxLevel::Exact, 0)
+    );
+    let stats = a.relaxation_stats();
+    assert_eq!((stats.queries, stats.relaxed, stats.empty), (2, 0, 1));
+    assert_eq!(levels(&stats), [(RelaxLevel::Exact, 1)]);
+
+    // 1 ms a read, every budget up to 60 ms: each query counts as its response says, truncated or not.
+    let mut want = (stats.queries, stats.relaxed, stats.empty);
+    let mut want_levels = levels(&stats);
+    let mut seen = (false, false);
+    for ms in 1..=60 {
+        for text in ["sneakers", "red purple", "shoez", "zebra"] {
+            let exec = Execution::default().budget_clock(Advancing::new(1));
+            let out = search_on(a, text, &request, &budget(ms), &exec);
+            let r = &out.relaxation;
+            let relaxed = r.level != RelaxLevel::Exact;
+            // The page holds every hit, so its last is the hit step's.
+            let hit = out.hits.last().map(|h| h.level);
+            want.0 += 1;
+            want.1 += u64::from(relaxed);
+            match hit {
+                None => want.2 += 1,
+                Some(level) => match want_levels.iter_mut().find(|(l, _)| *l == level) {
+                    Some((_, n)) => *n += 1,
+                    None => want_levels.push((level, 1)),
+                },
+            }
+            want_levels.sort_by_key(|&(l, _)| l);
+            let stats = a.relaxation_stats();
+            let context = format!("{text:?} at {ms} ms: {r:?}");
+            assert_eq!(
+                (stats.queries, stats.relaxed, stats.empty),
+                want,
+                "{context}"
+            );
+            assert_eq!(levels(&stats), want_levels, "{context}");
+            // The cases the budget makes: relaxed and still empty, and relaxed with a hit step after L0.
+            if r.truncated && relaxed {
+                match hit {
+                    None => seen.0 = true,
+                    Some(level) => seen.1 |= level != RelaxLevel::Exact,
+                }
+            }
+        }
+    }
+    assert_eq!(
+        seen,
+        (true, true),
+        "the budgets truncate no relaxed cascade of each kind"
+    );
 }
 
 #[test]

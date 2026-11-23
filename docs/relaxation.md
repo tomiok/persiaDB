@@ -16,12 +16,13 @@ guide and the SPEC differ, the SPEC is right.
 3. Every hit of a stricter step ranks above every hit of a looser one, whatever their scores. Each hit says which
    level and step matched it (`level`, `step`), and carries a `rank_score` for clients that order by one number.
 
-A level that has nothing to do for a query (for example L2 for a one-word query) is skipped and not listed. Each
-level builds from L0's query, not from the previous level's steps.
+A level that has nothing to do for a query (for example L2 for a one-word query) builds no step, so `applied` does not
+list it (unlike a step built and then skipped for the limits, listed `:skipped`). Each level builds from L0's query,
+not from the previous level's steps.
 
 ## The levels
 
-| Level | `applied` | What it does | Skipped when |
+| Level | `applied` | What it does | Builds no step when |
 |---|---|---|---|
 | L0 `exact` | (none) | All words required, analyzed. | never |
 | L1 `synonyms` | `synonyms` | Each run of words that is a synonym term (§6.3.2) may match any term of its groups (at most 50 alternatives per run). | the text has no synonym term, or the query is programmatic |

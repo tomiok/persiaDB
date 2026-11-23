@@ -41,6 +41,11 @@ const fn index(level: RelaxLevel) -> usize {
 /// cursor: a cursor's page continues a query counted on its first page, so it counts nowhere. A page by `offset` runs
 /// the cascade from the top as its first page does, and counts as a query.
 ///
+/// Each count is its own atomic counter, added to and read one at a time: a snapshot read while a search is in
+/// flight may hold some of that query's counts and not the others (in any order). So the per-level counts add up to
+/// `queries − empty` only when no search is in flight. An exporter that subtracts counts (`queries − empty`, or the
+/// levels' sum from it) should use saturating subtraction.
+///
 /// ```
 /// use persia_engine::db::{Database, DatabaseOptions, Execution, SearchRequest};
 /// use persia_engine::document::{Document, Value};
@@ -87,7 +92,7 @@ pub struct RelaxationStats {
     pub empty: u64,
     /// Per level in cascade order, the queries whose *hit step* (SPEC §7.6: the last step that found a hit) is of that
     /// level ([`Self::hits_at`]). An empty query has no hit step and is not counted here, so these add up to
-    /// `queries − empty`.
+    /// `queries − empty` when no search is in flight (above).
     hit_steps: [u64; 7],
 }
 
@@ -152,10 +157,11 @@ impl RelaxationCounters {
     /// Counts a query whose cascade `relaxed` (or not) and whose hit step is of `hit` (`None`: no step found a hit).
     pub(crate) fn record(&self, relaxed: bool, hit: Option<RelaxLevel>) {
         // Each counter is its own: a reader may see one query counted in `queries` and not yet in the others.
+        // `fetch_add` wraps at `u64::MAX`, which is unreachable: a count (not a size or an offset) that a query per
+        // nanosecond takes 584 years to pass. One `fetch_add` costs a search less than a compare-and-swap loop that
+        // threads counting together retry.
         let add = |c: &AtomicU64| {
-            // Saturating: `Err` leaves a counter at `u64::MAX`, which a query per nanosecond takes centuries to reach.
-            c.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
-                .ok();
+            c.fetch_add(1, Ordering::Relaxed);
         };
         add(&self.queries);
         if relaxed {
@@ -249,14 +255,5 @@ mod tests {
             (two.queries, two.relaxed, two.hits_at(RelaxLevel::Prefix)),
             (2, 2, 2)
         );
-    }
-
-    #[test]
-    fn a_counter_saturates_instead_of_wrapping() {
-        let counters = RelaxationCounters::default();
-        counters.queries.store(u64::MAX, Ordering::Relaxed);
-        counters.record(false, None);
-        assert_eq!(counters.load().queries, u64::MAX);
-        assert_eq!(counters.load().empty, 1);
     }
 }

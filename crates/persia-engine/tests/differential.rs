@@ -53,10 +53,13 @@
 //!    are each field's own, merged as SPEC §6.3.2 says: the union in group then term order (a later field's term
 //!    before an earlier one's), the later field's overlapping match dropped, an alternative compiled away as a
 //!    duplicate over the fields; each is covered. Neither analyzer removes a token, so stopword gaps stay with
-//!    `tests/relax_synonyms.rs`. A run whose alternatives all compile away is unreachable through the compiler: an
-//!    alternative equals the run only as a word of the same tokens in every field, which no field reports (a phrase of
-//!    several tokens compiles to a `phrase` or to `term`s required, a run's words to `combined`s; ROADMAP 8.1.26), so
-//!    the compiler's unit test checks it alone.
+//!    `tests/relax_synonyms.rs`. A run whose alternatives all compile away is unreachable through `compile`, for any
+//!    schema and analyzer (ROADMAP 8.1.26), so the compiler's unit test checks that guard alone: (a) a run's own query
+//!    is built of `combined` leaves (each of its words, as SPEC §7.1.1 compiles a word); (b) an alternative of several
+//!    tokens in some default field compiles, per field, to a `term` (one token), a `phrase` or `term`s required, never
+//!    to a `combined`, so it is not the run's query; (c) an alternative of at most one token per field compiles as a
+//!    word, equal to the run's query only when its token is the run's in every field, and then every field's synonym
+//!    map reads it as the run's own term, so no field reports it as an alternative.
 //! 6. A sort led by the score with a later key on the `n` column (each order and `missing` pair, with the proximity
 //!    bonus and without, in turn) ranks as the score order re-sorted, among exact score ties, by the reference's `n`
 //!    values, then location: every strategy, pages walked by cursor across ties, and on the pool a page of `k` and
@@ -128,8 +131,9 @@ const VOCAB: [&str; 10] = [
     "cat", "cats", "cart", "card", "café", "cafe", "bee", "elephant", "elephnat", "elegant",
 ];
 /// Words of queries alone, which no document holds: prefixes of the documents' words (`c` shorter than L3 expands
-/// even last, ROADMAP 8.1.20, `ca` shorter than it expands other than last, `ele` not) and typos (`crat` a swap from `cart`, `elehpant` a swap from `elephant`, `elepant` one
-/// edit from both `elephant` and `elegant`, `bees` and `carts` an insertion).
+/// even last, ROADMAP 8.1.20, `ca` shorter than it expands other than last, `ele` not) and typos (`crat` a swap from
+/// `cart`, `elehpant` a swap from `elephant`, `elepant` one edit from both `elephant` and `elegant`, `bees` and `carts`
+/// an insertion).
 const TYPOS: [&str; 8] = [
     "c", "ca", "ele", "crat", "carts", "bees", "elepant", "elehpant",
 ];

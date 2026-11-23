@@ -57,47 +57,63 @@ pub struct CompiledSynonym {
 /// `fields` (SPEC §7.1) compiles over another set, and most requests use a few.
 const CACHED_FIELD_SETS: usize = 4;
 
+/// One synonym term's cached alternative: `None` within when it compiles to nothing. Boxed, so a slot not yet filled
+/// costs a pointer and its `Once`, not a whole [`Query`] (ADR-0058, Memory).
+type Slot = OnceLock<Option<Box<Query>>>;
+
 /// The collection's synonym terms compiled as alternatives (the quoted phrase `"<term>"`, [`CompiledSynonym::alternatives`])
 /// over one set of default fields, each the first time a compilation needs it (ROADMAP 8.1.16, ADR-0058). An
 /// alternative depends only on its term, the fields and their analyzers, not on the query or the limits, so a run
 /// that matches again reuses what an earlier compilation analyzed.
+///
+/// A group's slots are allocated the first time one of its terms is asked for: a new set costs one empty cell per
+/// group, not one slot per term (SPEC §6.2.1 allows 10 000 groups of 64 terms), so a client that names new `fields`
+/// with every request makes each compilation allocate what its own runs use.
 #[derive(Debug)]
 struct Alternatives {
     fields: DefaultFields,
-    /// Where each group's terms start in `terms`, and one past the last group's.
-    starts: Vec<usize>,
-    /// By group, then term: the term's alternative once compiled, `None` within when it compiles to nothing.
-    terms: Vec<OnceLock<Option<Query>>>,
+    /// By group: its terms' slots, in term order, once a term of the group was asked for.
+    groups: Box<[OnceLock<Box<[Slot]>>]>,
 }
 
 impl Alternatives {
-    fn new(groups: &[Vec<String>], fields: DefaultFields) -> Self {
-        let mut starts = Vec::with_capacity(groups.len().saturating_add(1));
-        let mut total = 0_usize;
-        starts.push(0);
-        for group in groups {
-            total = total.saturating_add(group.len());
-            starts.push(total);
-        }
+    /// An empty set over `fields` for `groups` groups.
+    fn new(groups: usize, fields: DefaultFields) -> Self {
         Self {
             fields,
-            starts,
-            terms: (0..total).map(|_| OnceLock::new()).collect(),
+            groups: (0..groups).map(|_| OnceLock::new()).collect(),
         }
     }
 
-    /// The alternative of term `index` of group `group`, compiled by `compile` the first time it is asked for. `None`
-    /// when the term compiles to nothing, or there is no such term.
+    /// The alternative of term `index` of group `group` of `groups` (the compiler's schema's, the same at every call),
+    /// compiled by `compile` the first time it is asked for. `None` when the term compiles to nothing, or there is no
+    /// such term.
     fn get(
         &self,
+        groups: &[Vec<String>],
         group: usize,
         index: usize,
         compile: impl FnOnce() -> Option<Query>,
     ) -> Option<&Query> {
-        let start = *self.starts.get(group)?;
-        let end = *self.starts.get(group.checked_add(1)?)?;
-        let at = start.checked_add(index).filter(|&at| at < end)?;
-        self.terms.get(at)?.get_or_init(compile).as_ref()
+        let len = groups.get(group)?.len();
+        if index >= len {
+            return None;
+        }
+        let slots = self
+            .groups
+            .get(group)?
+            .get_or_init(|| (0..len).map(|_| OnceLock::new()).collect());
+        slots
+            .get(index)?
+            .get_or_init(|| compile().map(Box::new))
+            .as_deref()
+    }
+
+    /// How many groups have their slots allocated, and how many slots they hold.
+    #[cfg(test)]
+    fn allocated(&self) -> (usize, usize) {
+        let filled = self.groups.iter().filter_map(OnceLock::get);
+        filled.fold((0, 0), |(groups, slots), s| (groups + 1, slots + s.len()))
     }
 }
 
@@ -113,18 +129,28 @@ impl AlternativeCache {
     /// The alternatives over `fields` of the terms of `groups` (the compiler's schema's, the same at every call).
     fn of(&self, groups: &[Vec<String>], fields: &DefaultFields) -> Arc<Alternatives> {
         // A compilation that panicked holding the lock left the list whole: each step below keeps it consistent.
-        let mut sets = self.sets.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(at) = sets.iter().position(|s| s.fields == *fields) {
+        let lock = || self.sets.lock().unwrap_or_else(PoisonError::into_inner);
+        let used = |sets: &mut Vec<Arc<Alternatives>>| {
+            let at = sets.iter().position(|s| s.fields == *fields)?;
             let set = sets.remove(at);
             sets.push(Arc::clone(&set));
+            Some(set)
+        };
+        if let Some(set) = used(&mut lock()) {
+            return set;
+        }
+        // A new set is built unlocked, so a miss does not hold up the compilations that hit.
+        let new = Arc::new(Alternatives::new(groups.len(), fields.clone()));
+        let mut sets = lock();
+        // Another compilation may have added the same set meanwhile: keep one, so both fill it.
+        if let Some(set) = used(&mut sets) {
             return set;
         }
         if sets.len() >= CACHED_FIELD_SETS {
             sets.remove(0);
         }
-        let set = Arc::new(Alternatives::new(groups, fields.clone()));
-        sets.push(Arc::clone(&set));
-        set
+        sets.push(Arc::clone(&new));
+        new
     }
 }
 
@@ -363,7 +389,8 @@ impl<'c> Scan<'c> {
             let Some(text) = groups.get(group).and_then(|g| g.get(index)) else {
                 continue;
             };
-            let Some(query) = cached.get(group, index, || self.compile(text, &mut tokens)) else {
+            let Some(query) = cached.get(groups, group, index, || self.compile(text, &mut tokens))
+            else {
                 continue;
             };
             if query != original && !alternatives.contains(query) {
@@ -436,7 +463,12 @@ mod tests {
 
     #[test]
     fn an_alternative_that_compiles_to_the_run_itself_is_left_out() {
-        // Unreachable through `compile` (terms equal in every field are one term), so checked on its own.
+        // Unreachable through `compile`, for any schema and analyzer (ROADMAP 8.1.26), so checked on its own: (a) a
+        // run's own query is built of `combined` leaves (`word()`); (b) an alternative of several tokens in some field
+        // compiles there through `text_query`, to a `term`, a `phrase` or a `bool` of required `term`s, never to a
+        // `combined`; (c) one of at most one token per field compiles as a word, equal to the run's query only when
+        // its token is the run's in every field, and then each field's `SynonymMap` reads it as the run's own term
+        // (the same term id), so `alternative_sources` never lists it.
         let schema = SchemaBuilder::new("c")
             .field("title", FieldKind::Text(TextOptions::default()))
             .synonyms(vec![vec!["tv".into(), "telly".into(), "Telly".into()]])
@@ -645,10 +677,11 @@ mod tests {
     #[test]
     fn a_cached_term_is_looked_up_within_its_group() {
         let schema = cached_schema();
-        let alternatives = Alternatives::new(schema.synonyms(), DefaultFields::all(&schema));
+        let groups = schema.synonyms();
+        let alternatives = Alternatives::new(groups.len(), DefaultFields::all(&schema));
         let term = |group, index| {
             alternatives
-                .get(group, index, || Some(Query::MatchAll))
+                .get(groups, group, index, || Some(Query::MatchAll))
                 .cloned()
         };
         assert_eq!(term(1, 1), Some(Query::MatchAll));
@@ -659,12 +692,51 @@ mod tests {
         assert_eq!(term(0, usize::MAX), None);
         // Compiled once: a later call does not compile again.
         assert_eq!(
-            alternatives.get(1, 1, || panic!("compiled twice")),
+            alternatives.get(groups, 1, 1, || panic!("compiled twice")),
             Some(&Query::MatchAll)
         );
         // A term that compiles to nothing stays nothing.
-        assert_eq!(alternatives.get(2, 0, || None), None);
-        assert_eq!(alternatives.get(2, 0, || Some(Query::MatchAll)), None);
+        assert_eq!(alternatives.get(groups, 2, 0, || None), None);
+        assert_eq!(
+            alternatives.get(groups, 2, 0, || Some(Query::MatchAll)),
+            None
+        );
+    }
+
+    /// ROADMAP 8.1.16: a new set of default fields allocates no slot per term up front, only the slots of the groups
+    /// its runs draw alternatives from, so a client naming new `fields` with every request costs each compilation
+    /// what its own runs use, not every term of a large schema (SPEC §6.2.1: up to 10 000 groups of 64 terms).
+    #[test]
+    fn a_new_set_of_default_fields_allocates_only_the_groups_its_runs_use() {
+        const GROUPS: usize = 2_000;
+        const TERMS: usize = 32;
+        let groups: Vec<Vec<String>> = (0..GROUPS)
+            .map(|g| (0..TERMS).map(|t| format!("g{g}t{t}")).collect())
+            .collect();
+        let schema = SchemaBuilder::new("c")
+            .field("title", FieldKind::Text(TextOptions::default()))
+            .synonyms(groups)
+            .build()
+            .unwrap();
+        let compiler = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+        let filled = || -> Vec<(usize, usize)> {
+            let sets = compiler.alternatives.sets.lock().unwrap();
+            sets.iter().map(|s| s.allocated()).collect()
+        };
+        let limits = QueryLimits::default();
+        // Two runs, of groups 7 and 1 999: their 2 groups' slots, 64 of the schema's 64 000 terms, in each set.
+        for w in 1..=3 {
+            let fields = DefaultFields::parse(&schema, &[format!("title^{w}")]).unwrap();
+            let out = compiler.compile("g7t0 g1999t5", &fields, &limits);
+            assert_eq!(out.synonyms.len(), 2);
+            let cached = compiler.alternatives.sets.lock().unwrap();
+            assert_eq!(cached.last().unwrap().groups.len(), GROUPS);
+        }
+        assert_eq!(filled(), [(2, 2 * TERMS); 3]);
+        // A run of another group fills its group's slots in that set alone.
+        let fields = DefaultFields::parse(&schema, &["title^3"]).unwrap();
+        compiler.compile("g42t1", &fields, &limits);
+        assert_eq!(filled(), [(2, 2 * TERMS), (2, 2 * TERMS), (3, 3 * TERMS)]);
     }
 
     /// Compilations on several threads share one cache, and each compiles what a fresh compiler does.

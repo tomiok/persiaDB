@@ -28,9 +28,10 @@ ROADMAP 8.1.16 offered two ways out: compile the alternatives lazily, when L1 bu
    fields. The runs, their sources, the dedup, the bound and `cut` are still computed per compilation.
 3. **Keyed by the default fields, the last 4 sets**: `QueryCompiler` keeps one table per set of `DefaultFields`
    (compared whole, weights included), the least recently used dropped first. A request naming its own `fields`
-   (SPEC §7.1) compiles over another set, and most requests use few. Each table holds one slot per term of the
-   schema's groups, filled once (`OnceLock`), so compilations on several threads share it; the list of tables is
-   behind a `Mutex`, locked once per run.
+   (SPEC §7.1) compiles over another set, and most requests use few. Each table holds one empty cell per group of
+   the schema; a group's slots, one per term, each filled once (`OnceLock`), are allocated the first time a
+   compilation asks for one of its terms, so compilations on several threads share them. The list of tables is behind
+   a `Mutex`, locked once per run (twice on a miss); a new table is built outside it.
 4. **The compiler owns it**, as it owns the synonym maps (built at the first compilation per field, SPEC §6.3.2): a
    compiler holds its own copy of the schema, so its groups never change under the cache; a schema change, which
    may change the groups (§6.2.4), needs a new compiler, which starts empty.
@@ -41,8 +42,13 @@ ROADMAP 8.1.16 offered two ways out: compile the alternatives lazily, when L1 bu
   enough hits, compiled each time (`search_relaxed/l0/compiled_synonyms`), costs 498 µs instead of 516 µs, against
   476 µs compiled without synonyms (docs/benchmarks.md). What is left is the scan for runs (about 5.5 µs here, over
   2 002 groups), and per alternative a clone and the dedup against the run's earlier ones.
-- Memory: per cached set, one slot per synonym term (the groups hold at most 1 MiB of terms, §6.2.1), and the
-  alternatives compiled so far: at most 4 sets.
+- Memory (x86-64, rustc 1.99): per cached set, one 24-byte cell per synonym group up front (`OnceLock<Box<[Slot]>>`;
+  at most 10 000 groups, §6.2.1, so 240 KB); per group a compilation drew alternatives from, one 16-byte slot per
+  term (`OnceLock<Option<Box<Query>>>`; at most 64 terms, 1 KiB); and the alternatives compiled so far, boxed. At
+  most 4 sets. The slots of every group (640 000 terms) take at most 10.2 MB per set, and only once compilations have
+  drawn on every group. A first version allocated one 112-byte slot (`OnceLock<Option<Query>>`) per term at a set's
+  first compilation, under the lock: up to 72 MB per set, which a client naming new `fields` weights with each request
+  would pay at every compilation, and made every other compilation wait (found in the batch review).
 - The first compilation of a run over a set of fields still analyzes its alternatives, as before.
 
 ## Alternatives considered

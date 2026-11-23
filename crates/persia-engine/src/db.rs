@@ -690,6 +690,8 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// What the relaxed searches of every collection did since the database was opened (SPEC §7.6, §12.4; ROADMAP
     /// 8.3.3): each collection's [`CollectionSnapshot::relaxation_stats`] added up, with what the collections dropped
     /// since counted, so no count goes down. A reader that searched a snapshot counts into its collection here.
+    /// What a dropped collection counted is kept as of its drop: a search made after it on a snapshot taken before
+    /// (which still holds the collection) counts in that snapshot's [`CollectionSnapshot::relaxation_stats`], not here.
     pub fn relaxation_stats(&self) -> RelaxationStats {
         self.collections
             .values()
