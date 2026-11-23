@@ -163,7 +163,7 @@ run in the background, and publish through the same commit protocol (SPEC §8.5)
 local file is reclaimed by rewriting live data into a new file and atomically replacing the old one
 (SPEC §4.6).
 
-The numbered steps above are the path in SPEC §8.2. %%WRITE_PATH_NOW%%
+The numbered steps above are the path in SPEC §8.2. %%WRITE_PATH_NOW%% [Durability and crash recovery](/guide/durability/) is that path: the WAL levels, what a reopen replays, the writer lock, and `persia verify`.
 
 ## Blobs
 
@@ -176,8 +176,7 @@ Write order is deliberate: the blob is durable first, then the document that ref
 logged (SPEC §9.5). A crash in between leaves an orphan. Garbage collection keeps anything a live
 snapshot, the WAL, or a pin still references. Remote orphans wait out a grace period (default 24
 hours). The local pack is rewritten with no grace period once enough of it is unreferenced.
-The design says `verify` fails if a referenced blob is missing. That check is not in `persia verify` yet.
+`persia verify` fails if a referenced blob is missing. `put_blob` resumes a remote upload from a `ResumeToken`.
 
 %%BLOB_NOW%% `BlobId` and `BlobRef` live in `persia-format` (ROADMAP 1.10.1): limits and binary encoding are in SPEC §9.1 and ADR-0011.
-[Blob storage](/guide/blobs/) is the pack file, the remote layout, write order, corruption checks, and garbage collection.
-`put_blob` does not take a resume token yet (ROADMAP 9.3.4). `persia verify` does not yet report a missing blob (ROADMAP 9.5.3).
+[Blob storage](/guide/blobs/) is the pack file, the remote layout, resume, reader leases, and garbage collection.

@@ -47,6 +47,7 @@ const guideOrder = [
 	'guide/features',
 	'guide/architecture',
 	'guide/file-format',
+	'guide/durability',
 	'guide/blobs',
 	'guide/code',
 	'guide/embedded-api',
