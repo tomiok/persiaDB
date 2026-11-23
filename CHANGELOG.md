@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia`: the error type of the embedded API (ROADMAP 10.1.5, ADR-0064). `persia::Error` is opaque: a stable
+  `ErrorCode` (`code()`), a message, and the engine's own error as `source()`; `persia::Result<T>` is the alias.
+  `ErrorCode` is `#[non_exhaustive]` and has the numbers (`number()`, `from_number`) and names (`as_str()`,
+  `PERSIA_NOT_FOUND`, ...) of the C ABI's error table in `docs/sdk/c-abi.md`, which gains `13 PERSIA_READ_ONLY`,
+  `14 PERSIA_POISONED` and `15 PERSIA_CANCELLED`; `6 PERSIA_UNSUPPORTED` now also covers a URL scheme this build has
+  no backend for. Codes are append-only. `9 PERSIA_BUSY` and `10 PERSIA_PANIC` are reserved for the ABI and never
+  returned from Rust.
 - `persia-engine`: relaxation metrics (ROADMAP 8.3.3; SPEC §7.6, §12.4). Each collection counts its relaxed queries
   (searches without a cursor): how many, how many relaxed past L0, how many still found nothing, and how many found
   their hits at each level. Read them as `RelaxationStats` from `CollectionSnapshot::relaxation_stats` or, summed over

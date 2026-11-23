@@ -112,26 +112,33 @@ is human-readable, not stable, and borrowed from the `persia_error` until `persi
 There is no thread-local "last error". Goroutines move between OS threads, and a thread-local would
 report the wrong call.
 
-| Code | Name | When | Closest core type today |
+| Code | Name | When | Rust (`persia::ErrorCode`) |
 |---|---|---|---|
 | 0 | `PERSIA_OK` | Success | — |
-| 1 | `PERSIA_NOT_FOUND` | Missing document, collection, or blob, or a database file this open does not create (SPEC §8.1) | `persia_storage::ErrorKind::NotFound` ([error.rs L136–L151](https://github.com/tomiok/persiaDB/blob/main/crates/persia-storage/src/error.rs#L136-L151)) |
-| 2 | `PERSIA_ALREADY_EXISTS` | Create of a collection that is already there. `persia_db_open` of an existing database opens it (SPEC §8.1); it is not this code | Container create still reports a taken name ([path.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-storage/src/container/path.rs)); `PutOutcome::AlreadyExists` is a storage primitive, not this code |
-| 3 | `PERSIA_CONFLICT` | Second writer, or a lost lease once leases exist (SPEC §8.4, §11.3) | `ErrorKind::Conflict` exists for storage and is not yet returned by a database open |
-| 4 | `PERSIA_INVALID_ARGUMENT` | Null, bad UTF-8, schema rejection, limit exceeded (SPEC §17) | Caller errors on the format reader (`OutOfBounds`, `InvalidInputLen`, [error.rs L23–L25](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/error.rs#L23-L25)) |
-| 5 | `PERSIA_CORRUPT` | Bytes on disk or from a peer failed a checksum or a format rule | `Error::Corrupt` / `CorruptBlock`; storage `ErrorKind::Corrupt` |
-| 6 | `PERSIA_UNSUPPORTED` | `format_major` or an incompat flag this build does not read (SPEC §15) | `Error::Unsupported` ([header.rs L15–L21](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/header.rs#L15-L21)) |
-| 7 | `PERSIA_IO` | Filesystem or network failure that is not a conflict | `ErrorKind::Io` |
-| 8 | `PERSIA_TRANSIENT` | Retryable storage failure (SPEC §10.1). Rare in embedded local opens; present for URL opens. | `ErrorKind::Transient`, the only retryable storage kind |
-| 9 | `PERSIA_BUSY` | Close while children are open | New at the ABI. Not a storage kind. |
-| 10 | `PERSIA_PANIC` | A Rust panic was caught. The handle is poisoned. | Must not happen on hostile input (SPEC §17). Means a bug. |
-| 11 | `PERSIA_CLOSED` | Call after close | New at the ABI. |
-| 12 | `PERSIA_LIMIT` | A SPEC §17 limit: doc size, field count, query terms, fuzzy expansions, result window | Not a type yet. 10.1.5 assigns it. |
+| 1 | `PERSIA_NOT_FOUND` | Missing document, collection, or blob, or a database file this open does not create (SPEC §8.1). In Rust a missing document is `Ok(None)` from `get`, not an error; the ABI reports it with this code | `ErrorCode::NotFound` |
+| 2 | `PERSIA_ALREADY_EXISTS` | Create of a collection that is already there. `persia_db_open` of an existing database opens it (SPEC §8.1); it is not this code | `ErrorCode::AlreadyExists` |
+| 3 | `PERSIA_CONFLICT` | Second writer, in this process or another (SPEC §8.4), or a lost lease once leases exist (SPEC §11.3); a refresh of a read-only handle that found another database, or an older state, at its path | `ErrorCode::Conflict` |
+| 4 | `PERSIA_INVALID_ARGUMENT` | Null, bad UTF-8, a malformed path or URL, a schema, document or query that is rejected, a value outside its range | `ErrorCode::InvalidArgument` |
+| 5 | `PERSIA_CORRUPT` | Bytes on disk or from a peer failed a checksum or a format rule | `ErrorCode::Corrupt` |
+| 6 | `PERSIA_UNSUPPORTED` | `format_major` or an incompat flag this build does not read (SPEC §15), an analyzer this build or this open lacks (SPEC §6.2.2), or a URL scheme this build has no backend for (`s3://`, `gs://`, `az://`, `memory://` before their backends exist, SPEC §10.2) | `ErrorCode::Unsupported` |
+| 7 | `PERSIA_IO` | Filesystem or network failure that is not a conflict. Also a failure that fits no other code: memory that could not be allocated, an internal invariant that did not hold | `ErrorCode::Io` |
+| 8 | `PERSIA_TRANSIENT` | Retryable storage failure (SPEC §10.1). Rare in embedded local opens; present for URL opens. | `ErrorCode::Transient` |
+| 9 | `PERSIA_BUSY` | Close while children are open | New at the ABI: `ErrorCode::Busy` is reserved for it and never returned from Rust |
+| 10 | `PERSIA_PANIC` | A Rust panic was caught. The handle is poisoned. | Must not happen on hostile input (SPEC §17). Means a bug. `ErrorCode::Panic` is reserved for the ABI and never returned from Rust |
+| 11 | `PERSIA_CLOSED` | Call after close | `ErrorCode::Closed` |
+| 12 | `PERSIA_LIMIT` | A SPEC §17 limit: doc size, field count, term length, query terms, fuzzy expansions, result window | `ErrorCode::Limit` |
+| 13 | `PERSIA_READ_ONLY` | A write on a database opened read-only | `ErrorCode::ReadOnly` |
+| 14 | `PERSIA_POISONED` | An earlier write, sync or commit failed and stopped the writer (SPEC §4.5, §8.2): what reached the disk is known only after a reopen. Close and open again | `ErrorCode::Poisoned` |
+| 15 | `PERSIA_CANCELLED` | The call was cancelled or ran past its deadline | `ErrorCode::Cancelled` |
 
-Codes are append-only within an ABI major. The Rust error type from 10.1.5 is the source of the mapping;
-this table is the floor the ABI will not shrink. Storage kinds that are an internal detail (a short read
-inside the container) surface as `PERSIA_CORRUPT` or `PERSIA_IO`, not as new public codes, unless 10.1.5
-makes them distinct.
+Codes are append-only: a number never changes its meaning, within an ABI major or across them. The Rust
+error type is the source of the mapping (ROADMAP 10.1.5, ADR-0064): `persia::ErrorCode` has these numbers
+(`ErrorCode::number`) and these names (`ErrorCode::as_str`), and a test in `crates/persia/src/error.rs`
+fails when this table and the enum disagree. `persia::Error` is opaque: a code, a message, and the engine's
+own error as `source()`. Storage kinds that are an internal detail (a short read inside the container)
+surface as `PERSIA_CORRUPT` or `PERSIA_IO`, not as new public codes. Which engine error gets which code is
+`crates/persia/src/error/classify.rs`. 13 to 15 were appended by 10.1.5; 6 was widened to cover a URL scheme
+this build has no backend for.
 
 `PERSIA_TRANSIENT` is the only code a caller should retry blindly. The Go and TypeScript packages do not
 retry it themselves in the embedded SDK: a local `put` that failed may have been applied or not, and the
