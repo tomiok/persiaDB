@@ -385,6 +385,9 @@ pub struct RelaxPlan {
     /// Every step excludes every earlier step, nested or not: the rule before ROADMAP 8.2.2.4, which tests compare to.
     /// Only tests set it.
     exclude_every_step: bool,
+    /// Whether a level's transform was replaced ([`Self::with_level`], tests only): its steps are not this version's, so
+    /// no count of them is kept (ROADMAP 8.1.11).
+    replaced: bool,
 }
 
 impl RelaxPlan {
@@ -444,6 +447,7 @@ impl RelaxPlan {
             budget: Duration::from_millis(u64::from(budget_ms)),
             limits: None,
             exclude_every_step: false,
+            replaced: false,
         })
     }
 
@@ -511,6 +515,12 @@ impl RelaxPlan {
         !self.exclude_every_step
     }
 
+    /// Whether a search may keep the facet counts of its steps for later pages (ROADMAP 8.1.11): its levels are this
+    /// version's and follow the rules its settings record. Always, outside tests.
+    pub(crate) fn cacheable(&self) -> bool {
+        !self.replaced && !self.exclude_every_step
+    }
+
     /// This plan with every step excluding every earlier one, nested or not: the rule ROADMAP 8.2.2.4 replaced.
     #[cfg(test)]
     pub(crate) fn excluding_every_step(mut self) -> Self {
@@ -525,6 +535,7 @@ impl RelaxPlan {
         level: RelaxLevel,
         transform: Arc<dyn LevelTransform>,
     ) -> Self {
+        self.replaced = true;
         if let Some(planned) = self.levels.iter_mut().find(|l| l.level == level) {
             planned.transform = transform;
         } else {

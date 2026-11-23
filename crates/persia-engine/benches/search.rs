@@ -1150,6 +1150,59 @@ fn compile_text(schema: &CollectionSchema, text: &str) -> Query {
         .into_query()
 }
 
+/// A deep cursor page with facets (ROADMAP 8.1.9, 8.1.11), in the `search_relaxed` group: `w3 w40 w7 w120 zz` (no
+/// document holds `zz`) under the largest `min_results`, so the cascade builds every step (L2's rungs, L3, L4 and
+/// L5), and every page counts the facets of `tag` over all of them. `facets/top` is the first page of 10;
+/// `facets/deep` the fifth, after the fourth page's last hit: before ROADMAP 8.1.11 it searched every step before its
+/// cursor's again only to count them, with every match visited; since, it reads the counts the first page that
+/// counted them kept, and searches its own steps pruned.
+fn relaxed_facets(c: &mut Criterion) {
+    let (db, [_, _, tag, _]) = collection(4, false);
+    let snapshot = db.snapshot();
+    let coll = snapshot.collection("bench").unwrap();
+    let memtable = coll.memtable();
+    let schema = coll.schema();
+    let views = coll.views(&memtable).unwrap();
+    let exec = Execution::default().threads(Threads::Current);
+    let query = QueryCompiler::new(schema, &AnalyzerRegistry::builtin())
+        .unwrap()
+        .compile(
+            "w3 w40 w7 w120 zz",
+            &DefaultFields::all(schema),
+            &QueryLimits::default(),
+        );
+    let every = RelaxPlan::new(
+        schema.relaxation(),
+        &RelaxOptions {
+            min_results: Some(*RelaxationConfig::MIN_RESULTS.end()),
+            ..RelaxOptions::default()
+        },
+    )
+    .unwrap();
+    let request = SearchRequest {
+        limit: 10,
+        facets: vec![FacetRequest::new(tag, 10, schema).unwrap()],
+        ..SearchRequest::default()
+    };
+    let mut deep = request.clone();
+    for _ in 0..4 {
+        let page = views.search_relaxed(&query, &deep, &every, &exec).unwrap();
+        deep.search_after = Some(page.hits.last().unwrap().cursor());
+    }
+    let mut group = c.benchmark_group("search_relaxed");
+    for (name, page) in [("facets/top", &request), ("facets/deep", &deep)] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let out = views.search_relaxed(&query, page, &every, &exec).unwrap();
+                assert_eq!(out.hits.len(), 10);
+                assert_ne!(out.facets.first().map(|f| f.values.len()), Some(0));
+                black_box(out)
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench,
@@ -1161,6 +1214,7 @@ criterion_group!(
     relaxed_fallback,
     relaxed_tiers,
     relaxed_filters,
+    relaxed_facets,
     compile
 );
 criterion_main!(benches);

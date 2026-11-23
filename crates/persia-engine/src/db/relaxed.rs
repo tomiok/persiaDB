@@ -720,9 +720,10 @@ impl CollectionViews<'_> {
         let start = Start::of(request.search_after.as_ref(), relax);
         let reach = Reach::new(relax, start, window);
         let builds = |i: usize, found: usize, fills: bool| start.builds(i, found, fills, reach);
-        let counting = !request.facets.is_empty();
-
         let limits = step_limits(relax, compiled);
+        // Counts a page of this query kept (ROADMAP 8.1.11): read, and no step is searched only to count it.
+        let (key, cached) = self.kept_facets(request, relax, (query, compiled, &soft), limits);
+        let counting = !request.facets.is_empty() && cached.is_none();
         let expands = |field: FieldId| self.expands(field);
         let mut built = Built::new(collection.schema(), limits);
         let mut found = 0usize;
@@ -809,18 +810,21 @@ impl CollectionViews<'_> {
                 }
             }
         }
-        self.respond(built, start, request, exec, (compiled, truncated))
+        let facets = Facets { key, cached };
+        self.respond(built, start, request, exec, (compiled, truncated, facets))
     }
 
     /// The response of the cascade `built` from `start`: its page of `request` and what it did, for a query
-    /// `compiled` from text (or not) and `truncated` by the budget (or not).
+    /// `compiled` from text (or not) and `truncated` by the budget (or not). Its facets are those `facets` read, else
+    /// those its steps counted, which the snapshot keeps for later pages unless the budget truncated them (ROADMAP
+    /// 8.1.11).
     fn respond(
         &self,
         built: Built<'_, '_>,
         start: Start,
         request: &SearchRequest,
         exec: &Execution,
-        (compiled, truncated): (Option<&Compiled>, bool),
+        (compiled, truncated, kept): (Option<&Compiled>, bool, Facets),
     ) -> Result<RelaxedResults, RelaxedSearchError> {
         let level = built.last_level();
         let Finished {
@@ -830,7 +834,19 @@ impl CollectionViews<'_> {
             at,
             hit_level,
         } = built.finish(start);
-        let (hits, facets) = self.relaxed_page(ran, &applied, request, at, exec)?;
+        let (hits, counted) = self.relaxed_page(ran, &applied, request, at, exec)?;
+        let facets = match kept {
+            Facets {
+                cached: Some(cached),
+                ..
+            } => cached,
+            Facets { key, cached: None } => {
+                if let Some(key) = key.filter(|_| !truncated) {
+                    self.facet_cache().insert(key, counted.clone());
+                }
+                counted
+            }
+        };
         let mut relaxation = Relaxation::of(level, applied, compiled, text, truncated);
         // The explicit flag (SPEC §7.6): L5 found the hits the response states.
         relaxation.fallback = (hit_level == RelaxLevel::Fallback)
@@ -841,6 +857,41 @@ impl CollectionViews<'_> {
             facets,
             relaxation,
         })
+    }
+
+    /// The key of `request`'s facets for `query` (its compilation and soft filters) under `relax` and `limits`, and the
+    /// counts the snapshot kept for it (ROADMAP 8.1.11, SPEC §7.5). No key without facets, or for a plan whose levels
+    /// are not this version's.
+    fn kept_facets(
+        &self,
+        request: &SearchRequest,
+        relax: &RelaxPlan,
+        (query, compiled, soft): (&Query, Option<&Compiled>, &[Filter]),
+        limits: QueryLimits,
+    ) -> (Option<facet_cache::Key>, Option<Vec<FacetCounts>>) {
+        if request.facets.is_empty() || !relax.cacheable() {
+            return (None, None);
+        }
+        let key = facet_cache::Key {
+            version: self.memtable().version(),
+            query: query.clone(),
+            compiled: compiled.cloned(),
+            soft: soft.to_vec(),
+            settings: relax.settings(),
+            limits,
+            facets: request.facets.clone(),
+        };
+        let cached = self.facet_cache().get(&key);
+        (Some(key), cached)
+    }
+
+    /// The snapshot's cache of facet counts (ROADMAP 8.1.11).
+    fn facet_cache(&self) -> std::sync::MutexGuard<'_, FacetCache> {
+        // A panic while it was held leaves whole entries: each is replaced or read as one.
+        self.collection()
+            .facets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The schema `boost` of `field` when L3 may prefix-expand its terms (SPEC §7.6, §6.3.1): a `text` field whose analyzer,
@@ -910,6 +961,8 @@ impl CollectionViews<'_> {
         part: &Part<'_>,
         exec: &Execution,
     ) -> Result<Searched, RelaxedSearchError> {
+        #[cfg(test)]
+        SEARCHED.with(|n| n.set(n.get() + 1));
         let terms = exec.terms(self);
         let plan = plan_step(step, earlier, self.collection().schema(), stats, &terms)?;
         // `check_request` was given `false` for every step: a step planned with the bonus would record another
@@ -1074,6 +1127,12 @@ struct PageSteps {
     relax: Option<RelaxSettings>,
 }
 
+/// A search's facets as the snapshot keeps them (ROADMAP 8.1.11): the key to keep them under, and the counts kept.
+struct Facets {
+    key: Option<facet_cache::Key>,
+    cached: Option<Vec<FacetCounts>>,
+}
+
 /// A step's text (SPEC §7.6 `effective`) and the words it corrected (`corrected`).
 type StepText = (Option<String>, Vec<Correction>);
 
@@ -1220,7 +1279,23 @@ fn plan_step(
     SearchPlan::with_terms(&excluded, schema, stats, terms)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many steps this thread searched (tests: a page whose facet counts are kept searches none only to count it,
+    /// ROADMAP 8.1.11).
+    static SEARCHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many steps this thread searched so far.
+#[cfg(test)]
+pub(crate) fn searched() -> usize {
+    SEARCHED.with(std::cell::Cell::get)
+}
+
+mod facet_cache;
 mod fallback;
+
+pub(super) use facet_cache::FacetCache;
 
 #[cfg(test)]
 mod tests;

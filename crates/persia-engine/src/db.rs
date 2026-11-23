@@ -1615,6 +1615,7 @@ fn snapshot_of(manifest: &Arc<Manifest>, collections: &BTreeMap<String, Collecti
                     memtable: c.memtable.reader(),
                     statistics: Arc::default(),
                     hidden: Arc::default(),
+                    facets: Arc::default(),
                 };
                 (name.clone(), snapshot)
             })

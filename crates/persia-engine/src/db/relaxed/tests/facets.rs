@@ -254,3 +254,136 @@ fn the_filter_step_counts_on_every_page_when_it_is_built() {
         .unwrap();
     assert_eq!(counts(&out), [(b"y".to_vec(), 1)]);
 }
+
+/// The cache's counts of `views`' snapshot.
+fn kept(views: &CollectionViews<'_>) -> usize {
+    views
+        .collection()
+        .facets
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .len()
+}
+
+/// Steps searched by `f`, on this thread.
+fn searches<T>(f: impl FnOnce() -> T) -> (T, usize) {
+    let before = crate::db::relaxed::searched();
+    let out = f();
+    (out, crate::db::relaxed::searched() - before)
+}
+
+/// Invariant 3 (ROADMAP 8.1.11): the first page that counts every step keeps its counts; a later cursor page of the
+/// query reads them, searching only the steps its page needs (as many as without facets), and states the same counts.
+/// Another facet request, or another memtable view, is another key.
+#[test]
+fn a_later_page_reads_the_kept_counts_and_searches_no_step_only_to_count_them() {
+    let (mut db, body, tag) = database();
+    let relax = RelaxPlan::new(
+        db.snapshot().collection("c").unwrap().schema().relaxation(),
+        &RelaxOptions::from_json(r#"{"min_results": 5}"#).unwrap(),
+    )
+    .unwrap();
+    let red_shoes = all_of(body, &["red", "shoes"]);
+    {
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        assert_eq!(kept(&views), 0);
+        let first = search(
+            &views,
+            &red_shoes,
+            &faceted(request(1), tag, &views),
+            &relax,
+        );
+        assert_eq!(kept(&views), 1);
+        let want = of_every_hit(&views, &red_shoes, &relax, tag);
+        assert_eq!(counts(&first), want);
+        // Three pages on, in a later step than L0's.
+        let mut deep = request(1);
+        for _ in 0..3 {
+            let page = search(&views, &red_shoes, &deep, &relax);
+            deep.search_after = Some(page.hits[0].cursor());
+        }
+        assert!(deep.search_after.as_ref().unwrap().relaxed.unwrap().step > 0);
+        let (without, plain) = searches(|| search(&views, &red_shoes, &deep, &relax));
+        let (with, cached) = searches(|| {
+            search(
+                &views,
+                &red_shoes,
+                &faceted(deep.clone(), tag, &views),
+                &relax,
+            )
+        });
+        assert_eq!(cached, plain);
+        assert_eq!(counts(&with), want);
+        assert_eq!(strip(&with.hits), strip(&without.hits));
+        // Another facet request (`size` 9) is not kept yet: that page searches the steps before its cursor's too, and
+        // keeps its own counts.
+        let nine = SearchRequest {
+            facets: vec![FacetRequest::new(tag, 9, c.schema()).unwrap()],
+            ..deep.clone()
+        };
+        let (other, counted) = searches(|| search(&views, &red_shoes, &nine, &relax));
+        assert!(counted > cached, "{counted} steps against {cached}");
+        assert_eq!(counts(&other), want);
+        assert_eq!(kept(&views), 2);
+    }
+    // A write: a new memtable view, whose counts are its own.
+    let doc = crate::document::Document::new("z")
+        .with(body, Value::String("red shoes".into()))
+        .with(tag, Value::String("y".into()));
+    db.put("c", &doc, crate::wal::Durability::Buffered).unwrap();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let out = search(
+        &views,
+        &red_shoes,
+        &faceted(request(1), tag, &views),
+        &relax,
+    );
+    assert_eq!(counts(&out), of_every_hit(&views, &red_shoes, &relax, tag));
+}
+
+/// A clock that moves a millisecond each time it is read.
+#[derive(Debug, Default)]
+struct Ticking(std::sync::atomic::AtomicU64);
+
+impl crate::db::Clock for Ticking {
+    fn now(&self) -> std::time::Instant {
+        let ms = self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        BASE.with(|b| *b) + std::time::Duration::from_millis(ms)
+    }
+    fn unix_micros(&self) -> i64 {
+        0
+    }
+}
+
+thread_local! {
+    static BASE: std::time::Instant = std::time::Instant::now();
+}
+
+/// A page the budget truncated keeps no counts: the next page counts again.
+#[test]
+fn a_truncated_page_keeps_no_counts() {
+    let (db, body, tag) = database();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    // `budget_ms` 1: L0 is never cut, and the clock has moved past the budget at the next check.
+    let relax = RelaxPlan::new(
+        c.schema().relaxation(),
+        &RelaxOptions::from_json(r#"{"min_results": 5, "budget_ms": 1}"#).unwrap(),
+    )
+    .unwrap();
+    let exec = exec().budget_clock(std::sync::Arc::new(Ticking::default()));
+    let red_shoes = all_of(body, &["red", "shoes"]);
+    let out = views
+        .search_relaxed(&red_shoes, &faceted(request(1), tag, &views), &relax, &exec)
+        .unwrap();
+    assert!(out.relaxation.truncated);
+    assert_eq!(kept(&views), 0);
+}

@@ -666,6 +666,22 @@ the default build, against a baseline saved on the commit before (2026-11-22, ru
 Planning a `fuzzy` alone costs about 2% more (the distance of each term the automaton accepted); the prefix rows, which
 compute nothing new, move as much the other way, the drift between the two runs.
 
+ROADMAP 8.1.11 (facet counts kept once per query, per snapshot): `search_relaxed/facets/top` and `facets/deep` relax
+`w3 w40 w7 w120 zz` under the largest `min_results`, so the cascade builds every step (L2's rungs, L3, L4, L5), with
+facets on `tag`; `top` is the first page of 10, `deep` the fifth, by cursor. Command:
+`cargo bench -p persia-engine --bench search -- 'search_relaxed/facets'`, the default build, against a baseline saved
+on the commit before ROADMAP 8.1.9 (2026-11-22, rustc 1.99.0, 12 threads, Linux). Each iteration after the first reads
+the counts the first one kept, as a client paging the query does.
+
+| | before | after | change |
+|---|--:|--:|--:|
+| `search_relaxed/facets/top` | 11.9 ms | 11.7 ms | −1.5% |
+| `search_relaxed/facets/deep` | 8.57 ms | 1.42 ms | −83% |
+
+Before, the deep page searched every step before its cursor's again with every match visited only to count it; now it
+searches its own steps, pruned, without counting. The first page still collects `min_results` hits from the top in
+each step, which is most of its cost either way.
+
 ## `persia-engine` relevance
 
 `cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2, 7.8.4): 18 user-text queries with graded judgments over
