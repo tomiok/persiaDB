@@ -7,6 +7,9 @@
 //!    query has none. It corrects nothing and has no synonym alternatives. The level reads no statistics.
 //! 3. A compiled query keeps its request filter (`Compiled::filter`, ROADMAP 8.2.14) whatever query a caller put in:
 //!    beside the new root `bool`'s `must_not` and `filter`, or alone around `match_all` for a root of another kind.
+//!    A caller's root the join wrapped keeps its own `must_not` and `filter` too (ROADMAP 8.2.13).
+//! 4. A filter L0 holds in a clause L5 drops (below the root, outside its `must_not`, and outside a caller's wrapped
+//!    root's `must_not` and `filter`) means no step: L5 never selects a document a filter of L0 rejects.
 
 #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)] // Tests: inputs are fixed.
 
@@ -191,14 +194,19 @@ fn a_replaced_query_keeps_the_request_filter() {
         query: Box::new(term("hat")),
         boost: 2.0,
     });
-    for caller in [term("hat"), Query::MatchAll, should, boost] {
+    for (caller, must_not) in [
+        (term("hat"), Vec::new()),
+        (Query::MatchAll, Vec::new()),
+        (should, vec![term("green")]),
+        (boost, Vec::new()),
+    ] {
         let replaced = filtered.clone().with_query(caller.clone());
         assert_eq!(replaced.root(), None, "{caller:?}");
         let step = one(replaced.query(), Some(&replaced));
-        // A wrapped root has no exclusion of its own: a `should` root's `must_not` is deeper, so it is not kept.
+        // The `should` root the join wrapped keeps its own exclusion (ROADMAP 8.2.13): it is one level down, but L0's.
         assert_eq!(
             step.query,
-            around(Vec::new(), vec![acme.clone()]),
+            around(must_not, vec![acme.clone()]),
             "{caller:?}"
         );
         // The text is still the user's: the excluded clause as written.
@@ -220,5 +228,136 @@ fn a_replaced_query_keeps_the_request_filter() {
     assert_eq!(
         one(&term("hat"), Some(&filtered)).query,
         around(Vec::new(), vec![acme])
+    );
+}
+
+/// ROADMAP 8.2.13: a caller's root the join wrapped (it has `should` clauses) keeps its own exclusions and filters at
+/// L5, beside the request's.
+#[test]
+fn a_wrapped_caller_root_keeps_its_own_exclusions_and_filters() {
+    let schema = schema();
+    let body = id(&schema, "body");
+    let term = |t: &str| {
+        Query::Term(TermQuery {
+            field: body,
+            term: t.into(),
+        })
+    };
+    let (acme, own) = (brand_is(&schema, "acme"), brand_is(&schema, "other"));
+    let filtered = compile(&schema, "red shoes").with_filter([acme.clone()]);
+    let caller = Query::Bool(BoolQuery {
+        must: vec![term("red")],
+        should: vec![term("hat")],
+        must_not: vec![term("green")],
+        filter: vec![own.clone(), acme.clone()],
+        ..BoolQuery::default()
+    });
+    let replaced = filtered.with_query(caller.clone());
+    let Query::Bool(wrap) = replaced.query() else {
+        panic!()
+    };
+    assert_eq!(wrap.must, [caller]);
+    assert_eq!(
+        one(replaced.query(), Some(&replaced)).query,
+        Query::Bool(BoolQuery {
+            must: vec![Query::MatchAll],
+            must_not: vec![term("green")],
+            filter: vec![acme, own],
+            ..BoolQuery::default()
+        })
+    );
+}
+
+/// ROADMAP 8.2.13: a filter in a clause L5 drops would not hold under `match_all`, so L5 builds no step. A filter inside
+/// an exclusion, or in a caller's required clause, is kept with it.
+#[test]
+fn a_filter_below_the_root_in_a_dropped_clause_builds_no_step() {
+    let schema = schema();
+    let body = id(&schema, "body");
+    let term = |t: &str| {
+        Query::Term(TermQuery {
+            field: body,
+            term: t.into(),
+        })
+    };
+    let acme = brand_is(&schema, "acme");
+    let filtered = |q: Query| {
+        Query::Bool(BoolQuery {
+            must: vec![q],
+            filter: vec![acme.clone()],
+            ..BoolQuery::default()
+        })
+    };
+    let boost = |q: Query| {
+        Query::Boost(crate::query::BoostQuery {
+            query: Box::new(q),
+            boost: 2.0,
+        })
+    };
+    // Programmatic: a `boost` of a filtered `bool`, a `constant_score` of one, a filtered `bool` as a `must` or a
+    // `should` clause, deeper still.
+    let nested = [
+        boost(filtered(term("red"))),
+        Query::ConstantScore(crate::query::ConstantScoreQuery {
+            query: Box::new(filtered(term("red"))),
+            score: 1.0,
+        }),
+        Query::Bool(BoolQuery {
+            must: vec![term("shoes"), filtered(term("red"))],
+            ..BoolQuery::default()
+        }),
+        Query::Bool(BoolQuery {
+            should: vec![term("shoes"), boost(filtered(term("red")))],
+            ..BoolQuery::default()
+        }),
+        Query::Bool(BoolQuery {
+            must: vec![Query::Bool(BoolQuery {
+                must: vec![boost(filtered(term("red")))],
+                ..BoolQuery::default()
+            })],
+            ..BoolQuery::default()
+        }),
+    ];
+    for query in &nested {
+        assert_eq!(steps(query, None), [], "{query:?}");
+    }
+    // Compiled, a query put in: one that holds such a filter, in place or wrapped, builds none either.
+    let compiled = compile(&schema, "red shoes").with_filter([brand_is(&schema, "tenant")]);
+    for query in &nested {
+        let replaced = compiled.clone().with_query(query.clone());
+        assert_eq!(steps(replaced.query(), Some(&replaced)), [], "{query:?}");
+    }
+    let wrapped = compiled.clone().with_query(Query::Bool(BoolQuery {
+        must: vec![filtered(term("red"))],
+        should: vec![term("hat")],
+        ..BoolQuery::default()
+    }));
+    assert_eq!(steps(wrapped.query(), Some(&wrapped)), []);
+    // A filter inside an exclusion is kept with it; so is one in a caller's required clause after the clauses.
+    let excluded = Query::Bool(BoolQuery {
+        must: vec![term("red")],
+        must_not: vec![filtered(term("blue"))],
+        ..BoolQuery::default()
+    });
+    assert_eq!(
+        one(&excluded, None).query,
+        Query::Bool(BoolQuery {
+            must: vec![Query::MatchAll],
+            must_not: vec![filtered(term("blue"))],
+            ..BoolQuery::default()
+        })
+    );
+    let Query::Bool(mut root) = compile(&schema, "red shoes").query().clone() else {
+        panic!()
+    };
+    root.must.push(filtered(term("hat")));
+    let extra = compile(&schema, "red shoes").with_query(Query::Bool(root));
+    assert_eq!(extra.extra_must(), [filtered(term("hat"))]);
+    assert_eq!(
+        one(extra.query(), Some(&extra)).query,
+        Query::Bool(BoolQuery {
+            must: vec![filtered(term("hat"))],
+            ..BoolQuery::default()
+        })
     );
 }

@@ -1891,8 +1891,9 @@ fn a_query_put_in_place_keeps_the_request_filter() {
     assert_eq!(root.filter, [nike, own]);
 }
 
-/// ROADMAP 8.2.14: a query put in place of a compilation of several parts keeps its clauses while it holds their parts
-/// where they were; once it does not, the clauses describe no query from then on.
+/// ROADMAP 8.2.14, 8.2.15: a query put in place of a compilation of several parts keeps its clauses while it holds their
+/// parts where they were, required clauses a caller added after them included; once it does not, the clauses describe
+/// no query from then on.
 #[test]
 fn a_query_put_in_place_keeps_the_clauses_only_while_it_holds_their_parts() {
     let schema = schema();
@@ -1921,8 +1922,19 @@ fn a_query_put_in_place_keeps_the_clauses_only_while_it_holds_their_parts() {
         assert_eq!(kept.parts(i), Some(p.as_slice()));
     }
     assert_eq!(kept.root(), Some(&more));
-    // Parts moved, an exclusion lost, a required clause added (the word levels would relax it away, rebuilding `must`
-    // from the clauses), `should` clauses or a `minimum_should_match` added: detached.
+    assert_eq!(kept.extra_must(), []);
+    // A required clause added after the parts (ROADMAP 8.2.15): still the clauses' root, the clause one every relaxation
+    // step carries unchanged.
+    let mut required = more.clone();
+    required.must.push(Query::MatchAll);
+    let kept = kept.with_query(Query::Bool(required.clone()));
+    for (i, p) in parts.iter().enumerate() {
+        assert_eq!(kept.parts(i), Some(p.as_slice()));
+    }
+    assert_eq!(kept.root(), Some(&required));
+    assert_eq!(kept.extra_must(), [Query::MatchAll]);
+    // Parts moved, an exclusion lost, a required clause put before the parts, `should` clauses or a
+    // `minimum_should_match` added: detached.
     let mut moved = root.clone();
     moved.must.reverse();
     let mut lost = root.clone();
@@ -1931,9 +1943,9 @@ fn a_query_put_in_place_keeps_the_clauses_only_while_it_holds_their_parts() {
     should.should.push(Query::MatchAll);
     let mut at_least = root.clone();
     at_least.minimum_should_match = 1;
-    let mut required = root.clone();
-    required.must.push(Query::MatchAll);
-    for changed in [moved, lost, required, should, at_least] {
+    let mut before = root.clone();
+    before.must.insert(0, Query::MatchAll);
+    for changed in [moved, lost, before, should, at_least] {
         let detached = compiled.clone().with_query(Query::Bool(changed.clone()));
         assert_eq!(
             (detached.root(), detached.parts(0), detached.parts(2)),
@@ -1945,5 +1957,37 @@ fn a_query_put_in_place_keeps_the_clauses_only_while_it_holds_their_parts() {
         let back = detached.with_query(Query::Bool(root.clone()));
         assert_eq!((back.root(), back.parts(0)), (None, None));
         assert_eq!(back.query(), compiled.query());
+    }
+}
+
+/// ROADMAP 8.2.15 (batch review): a compilation of no clause (empty or stopword-only text) has no required clause a
+/// caller added: the `match_all` a filter's join puts beside its filters is the query as compiled.
+#[test]
+fn a_compilation_of_no_clause_has_no_added_required_clause() {
+    let schema = SchemaBuilder::new("c")
+        .field(
+            "body",
+            FieldKind::Text(TextOptions {
+                analyzer: AnalyzerRef::builtin("en").unwrap(),
+                ..TextOptions::default()
+            }),
+        )
+        .field("brand", FieldKind::Keyword(KeywordOptions::default()))
+        .build()
+        .unwrap();
+    let nike = Filter::Term {
+        field: schema.field("brand").unwrap().id(),
+        value: FilterValue::Keyword("nike".into()),
+    };
+    for text in ["", "the", "the a"] {
+        let compiled = compiler(&schema)
+            .compile(text, &DefaultFields::all(&schema), &QueryLimits::default())
+            .with_filter([nike.clone()]);
+        assert!(compiled.clauses.is_empty(), "{text:?}");
+        let Query::Bool(root) = compiled.query() else {
+            panic!("{text:?}")
+        };
+        assert_eq!(root.must, [Query::MatchAll], "{text:?}");
+        assert_eq!(compiled.extra_must(), [], "{text:?}");
     }
 }

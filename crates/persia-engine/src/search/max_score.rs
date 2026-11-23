@@ -5,6 +5,7 @@
 //! Every bound is summed in query order, as the score is (SPEC §7.2), so a bound is at least the score exactly
 //! ([`sum_in_order`]): a document is left out only when it provably scores at most the threshold.
 
+use crate::score::saturate;
 use crate::segment::ReadError;
 
 use super::{Matcher, Pos, ScoreBound, raise, sum_in_order, union_bound};
@@ -155,7 +156,7 @@ impl<M: Matcher> MaxScore<M> {
                 sum += s;
             }
         }
-        Ok(Some(sum))
+        Ok(Some(saturate(sum)))
     }
 }
 

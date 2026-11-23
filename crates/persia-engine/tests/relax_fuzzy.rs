@@ -7,7 +7,7 @@
 //!    distance (optimal string alignment over characters: 1 for 4 to 7 characters, 2 from 8) or, for a shorter word,
 //!    the word itself, beside L0's exclusions and filters; a document L0 matches is L0's (checked against an oracle
 //!    over random corpora split between a segment and the memtable).
-//! 2. A `fuzzy` keeps at most 50 terms, those of highest collection `df` (SPEC §7.1); over `QueryLimits`, the step's
+//! 2. A `fuzzy` keeps at most 50 terms, the fewest edits first, then the highest collection `df` (SPEC §7.1); over `QueryLimits`, the step's
 //!    `fuzzy` queries are cut (`fuzzy:cut`) or the step is skipped (`fuzzy:skipped`, SPEC §7.1.3).
 //! 3. An exact term outranks a correction at the same frequency and length (the edit-distance weight, SPEC §7.1).
 //! 4. Pages by cursor are slices of the one ranking across L0 and L4.
@@ -650,16 +650,17 @@ fn tier_steps_page_by_cursor_as_one_ranking() {
     assert_eq!(hits(&out), [(1, "d0".to_owned())]);
     assert_eq!(out.relaxation.applied, ["fuzzy:1"]);
     assert_eq!(corrected(&out), [("sandalls", "sandals")]);
-    // Searched to the end, the hit step is `fuzzy`, which corrects to the most frequent term within two edits.
+    // Searched to the end, the hit step is `fuzzy`, which corrects to the term its `fuzzy` keeps first: the fewest edits,
+    // then the most frequent (ROADMAP 8.2.12), so `sandals` too, not the more frequent `scandals` two edits away.
     assert_eq!(
         corrected(&search(&db, "sandalls", None)),
-        [("sandalls", "scandals")]
+        [("sandalls", "sandals")]
     );
 }
 
-/// ROADMAP 8.2.7, SPEC §7.1.3: a tier step counts against the limits as any step, and once searched the next step
-/// excludes it in full, its expansions counted there and not cut. Two words of 8 characters or more: 100 expansions a
-/// step.
+/// ROADMAP 8.2.7, 8.2.12, SPEC §7.1.3: a tier step counts against the limits as any step, and once searched the next
+/// step excludes it, its expansions not cut; `fuzzy` keeps every term `fuzzy:1` keeps, so it counts them once, as its
+/// own. Two words of 8 characters or more: 100 expansions a step.
 #[test]
 fn tier_steps_are_held_to_the_limits_and_counted_where_excluded() {
     let db = database(&["zapatillas bolsitas", "zapatos bolsas", "botas"]);
@@ -669,12 +670,11 @@ fn tier_steps_are_held_to_the_limits_and_counted_where_excluded() {
     };
     for (max, applied) in [
         (1024, ["fuzzy:1", "fuzzy"]),
-        // `fuzzy:1` fits; `fuzzy` has 50 left beside the 100 it excludes, so it is cut.
-        (150, ["fuzzy:1", "fuzzy:cut"]),
-        // Nothing left beside `fuzzy:1`: `fuzzy` is skipped.
-        (100, ["fuzzy:1", "fuzzy:skipped"]),
-        // `fuzzy:1` is cut to 60, which `fuzzy` then excludes: nothing left.
-        (60, ["fuzzy:1:cut", "fuzzy:skipped"]),
+        // `fuzzy` beside the `fuzzy:1` it excludes counts 100, not 200 (before 8.2.12 it was cut at 150, skipped at 100).
+        (150, ["fuzzy:1", "fuzzy"]),
+        (100, ["fuzzy:1", "fuzzy"]),
+        // `fuzzy:1` is cut to 60, whose terms `fuzzy` cut to the same 30 each still keeps: cut, not skipped.
+        (60, ["fuzzy:1:cut", "fuzzy:cut"]),
         // One expansion for two `fuzzy` queries: both skipped, and a skipped step is not excluded.
         (1, ["fuzzy:1:skipped", "fuzzy:skipped"]),
     ] {
@@ -695,4 +695,55 @@ fn tier_steps_are_held_to_the_limits_and_counted_where_excluded() {
         };
         assert_eq!(hits(&out), expected, "max_expansions {max}");
     }
+}
+
+/// ROADMAP 8.2.12: L4's tier steps are nested (a `fuzzy` keeps the fewest edits first, so `fuzzy:1` keeps only terms
+/// `fuzzy` keeps), so the steps after L4 exclude `fuzzy` alone, and `fuzzy` counts the expansions of the `fuzzy:1` it
+/// excludes once, as its own (SPEC §7.1.3). Four words of 8 characters or more, none held, under `max_expansions` 200
+/// (four `fuzzy` of 50): before the tiers L4's one step fit exactly; with them each step still fits uncut, and L5,
+/// beside `fuzzy` alone, too. Before 8.2.12, `fuzzy` counted 400 and was skipped.
+#[test]
+fn tier_steps_nest_so_many_long_words_are_not_cut_sooner() {
+    let db = database(&["unrelated words", "other text here", "more of nothing"]);
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let compiled = QueryCompiler::new(c.schema(), &AnalyzerRegistry::builtin())
+        .unwrap()
+        .compile(
+            "wonderfull amazinglee fantasticoo brilliantt",
+            &DefaultFields::all(c.schema()),
+            &QueryLimits::default(),
+        );
+    let options = RelaxOptions {
+        levels: Some(Levels::Custom(vec![Level::Fuzzy])),
+        fallback: Some(Fallback::StaticRank),
+        ..RelaxOptions::default()
+    };
+    let at = |max_expansions| {
+        RelaxPlan::new(&RelaxationConfig::default(), &options)
+            .unwrap()
+            .with_limits(QueryLimits {
+                max_expansions,
+                ..QueryLimits::default()
+            })
+    };
+    let out = views
+        .search_relaxed(&compiled, &request(10), &at(200), &exec())
+        .unwrap();
+    assert_eq!(out.relaxation.applied, ["fuzzy:1", "fuzzy", "fallback"]);
+    assert_eq!(out.relaxation.level, RelaxLevel::Fallback);
+    assert_eq!(out.hits.len(), 3);
+    assert!(out.hits.iter().all(|h| h.level == RelaxLevel::Fallback));
+    // One expansion fewer: `fuzzy:1` is cut (199), and `fuzzy`, whose queries keep every term the cut ones keep, counts
+    // them once and is cut to the same 199. A cut step stands for no earlier step, so L5 counts both: skipped.
+    let out = views
+        .search_relaxed(&compiled, &request(10), &at(199), &exec())
+        .unwrap();
+    assert_eq!(
+        out.relaxation.applied,
+        ["fuzzy:1:cut", "fuzzy:cut", "fallback:skipped"]
+    );
+    assert_eq!(out.hits.len(), 0);
 }

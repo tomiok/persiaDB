@@ -23,6 +23,8 @@ enum Unit {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Expansion {
     units: Vec<Unit>,
+    /// The required clauses a caller added beside the clauses ([`Compiled::extra_must`], ROADMAP 8.2.15), after the units.
+    extra: Vec<Query>,
     must_not: Vec<Query>,
     filter: Vec<Filter>,
     /// Whether the compilation already left out some alternatives ([`crate::query::CompiledSynonym::cut`]).
@@ -90,6 +92,7 @@ impl Expansion {
         }
         Some(Self {
             units,
+            extra: compiled.extra_must().to_vec(),
             must_not,
             filter,
             cut: compiled.synonyms.iter().any(|s| s.cut),
@@ -137,6 +140,7 @@ impl Expansion {
                 }
             })
             .collect();
+        must.extend(self.extra.iter().cloned());
         if must.len() == 1 && self.must_not.is_empty() && self.filter.is_empty() {
             return must.pop().unwrap_or(Query::MatchAll);
         }

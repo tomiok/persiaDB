@@ -78,3 +78,5 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0053](./0053-blob-wiring-writer-proof-and-resume-api.md) | Blob wiring, writer proof and resume API: the pack opens read-write with the container's `WriterProof`, a read-only database opens it read-only, `verify` scans checksums by default, a resume token comes from `put_blob`'s error | accepted |
 | [0054](./0054-blob-pack-reader-leases.md) | Reader leases on the local blob pack: one locked 64-byte lease per read-only handle in `<name>.persia.blobs.leases/`; GC does not sweep while a live lease is not at the committed seq | accepted |
 | [0055](./0055-search-aggregations-and-derived-fields.md) | Search aggregations and derived fields | proposed |
+| [0056](./0056-hard-filters-soft-filters-and-a-callers-required-clauses.md) | Relaxation never drops a hard filter or a caller's required clause; `soft_filter` holds what `last_resort` may drop | proposed |
+| [0061](./0061-facets-under-relaxation-and-their-cache.md) | Facets under relaxation count the steps a page of every hit builds, once per query (a per-snapshot cache) | proposed |

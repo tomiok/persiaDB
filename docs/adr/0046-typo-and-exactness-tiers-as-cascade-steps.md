@@ -1,7 +1,7 @@
 # ADR-0046: Typo and exactness tiers are steps of the cascade, by the most edits any one word needs
 
 - Status: proposed
-- Date: 2026-11-15
+- Date: 2026-11-15 (item 7: 2026-11-22)
 - Related: SPEC §7.1, §7.1.3, §7.2, §7.3, §7.4, §7.6, §7.7, §16.1; ROADMAP 7.4.11, 7.8.4, 8.1.3, 8.1.22, 8.2.3, 8.2.4,
   8.2.7, 8.2.10, 8.2.11, 8.2.12; ADR-0037, ADR-0040, ADR-0042, ADR-0043, ADR-0045
 
@@ -58,6 +58,18 @@ steps, with exclusion, rank bands, cursors, the budget, facets and `explain` bui
    (ROADMAP 8.2.10). L1 is not: L0 took every document holding all the runs as written, so every L1 hit lacks the
    original of some run, and counting runs per hit is item 2's per-hit key (ROADMAP 8.2.11). L2 already is, by its
    rungs.
+7. **L4's tier steps are nested, and count their shared expansions once** (ROADMAP 8.2.12, 2026-11-22). A `fuzzy`
+   keeps its expansions fewest edits first, then by collection `df`, ties by bytes (SPEC §7.1), as Lucene's fuzzy
+   query ranks its expansions by edit distance before frequency. The terms within one edit then come first among those
+   within two, so each `fuzzy` of `fuzzy:1` keeps only terms the same word's `fuzzy` keeps, and `fuzzy` matches every
+   document `fuzzy:1` matches: L4 is a nested level, and the steps after it exclude `fuzzy` alone (an uncut one, ADR-0037
+   item 2). A step also counts an excluded `prefix` or `fuzzy` it subsumes once, as its own (SPEC §7.1.3: the same
+   `prefix` with no more expansions, a `fuzzy` of the same field and term at no greater distance with no more), so
+   `fuzzy` beside the `fuzzy:1` it excludes counts what L4's one step counted before the tiers. A cut that lowers the
+   subsuming query below the one it subsumes counts it again, and the step is cut with none credited. Chosen over the
+   other shape, `fuzzy` keeping `fuzzy:1`'s terms beside its own 50: that step holds up to 100 expansions a word,
+   which still counts twice, and the AST has no union of two expansions. The keep order changes `corrected` for a word
+   of 8 characters or more at the `fuzzy` step: the closest term, not the most frequent within two edits.
 
 ## Consequences
 
@@ -74,7 +86,8 @@ steps, with exclusion, rank bands, cursors, the budget, facets and `explain` bui
   layout noise: within 1.4% with one codegen unit.
   Queries that do not qualify (every rewritten word shorter than 8 characters, or L3 after L2's one-term rung) build the same steps
   as before.
-- The tier step counts in full against §7.1.3's limits in the steps that exclude it. L4's `fuzzy` then excludes
+- (Superseded for L4 by item 7, ROADMAP 8.2.12.) The tier step counts in full against §7.1.3's limits in the steps
+  that exclude it. L4's `fuzzy` then excludes
   `fuzzy:1`, whose `fuzzy` queries count their expansions again, so a query with many long words reaches
   `fuzzy:cut` or `fuzzy:skipped` sooner. The steps are not nested, since each `fuzzy` keeps its own 50 terms by
   `df`. Making them nested by construction would let the later steps exclude the latest one only (ROADMAP 8.2.12).

@@ -5,6 +5,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 use crate::schema::FieldId;
+use crate::score::saturate;
 use crate::segment::ReadError;
 use crate::view::SearchView;
 
@@ -326,7 +327,7 @@ impl<M: Matcher, B: Bonus> Matcher for Conjunction<M, B> {
                 order: &self.order,
             })?;
         }
-        Ok(sum)
+        Ok(saturate(sum))
     }
 
     fn max_score(&self) -> f64 {
@@ -565,7 +566,7 @@ impl<M: Matcher> Matcher for Disjunction<M> {
                 sum += clause.score()?;
             }
         }
-        Ok(sum)
+        Ok(saturate(sum))
     }
 
     fn max_score(&self) -> f64 {
@@ -828,7 +829,7 @@ impl<R: Matcher, O: Matcher> Matcher for Optional<R, O> {
         if self.should.advance(doc)? == Some(doc) {
             score += self.should.score()?;
         }
-        Ok(score)
+        Ok(saturate(score))
     }
 
     fn max_score(&self) -> f64 {
@@ -988,7 +989,7 @@ impl<M: Matcher> Matcher for Scaled<M> {
             return Ok(0.0);
         }
         match self.scale {
-            Scale::Boost(boost) => Ok(self.inner.score()? * boost),
+            Scale::Boost(boost) => Ok(saturate(self.inner.score()? * boost)),
             Scale::Constant(score) => Ok(score),
         }
     }

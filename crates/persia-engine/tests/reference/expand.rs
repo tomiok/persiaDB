@@ -1,6 +1,7 @@
 //! Reference `prefix` and `fuzzy` expansion (SPEC §7.1), written from the SPEC text alone: the terms a field holds in
 //! the documents the statistics count, those a query accepts, the `max_expansions` of highest collection `df` kept
-//! (ties by byte order), and the optimal string alignment distance by its textbook table, over Unicode scalar values.
+//! (ties by byte order; a `fuzzy`'s of fewest edits first, ROADMAP 8.2.12), and the optimal string alignment
+//! distance by its textbook table, over Unicode scalar values.
 //!
 //! The differential suite's terms are all valid UTF-8 (documents hold strings), so the rule for a byte that is not is
 //! checked here, by hand, alone.
@@ -84,6 +85,18 @@ impl Corpus {
         accepts: impl Fn(&str) -> bool,
         max: usize,
     ) -> Vec<(String, u64)> {
+        self.keep_by(field, accepts, |_| 0, max)
+    }
+
+    /// [`Self::keep`] with the terms of fewer `edits` first, then the highest `df`, ties by byte order: the order a
+    /// `fuzzy` keeps its terms in (SPEC §7.1, ROADMAP 8.2.12).
+    pub fn keep_by(
+        &self,
+        field: usize,
+        accepts: impl Fn(&str) -> bool,
+        edits: impl Fn(&str) -> usize,
+        max: usize,
+    ) -> Vec<(String, u64)> {
         let mut all: Vec<(String, u64)> = self
             .terms(field)
             .into_iter()
@@ -91,7 +104,9 @@ impl Corpus {
             .map(|t| (t.to_owned(), self.df(field, t)))
             .collect();
         all.sort_by(|a, b| {
-            b.1.cmp(&a.1)
+            edits(&a.0)
+                .cmp(&edits(&b.0))
+                .then_with(|| b.1.cmp(&a.1))
                 .then_with(|| a.0.as_bytes().cmp(b.0.as_bytes()))
         });
         all.truncate(max);
@@ -104,7 +119,8 @@ impl Corpus {
         self.keep(field, |t| t.as_bytes().starts_with(prefix.as_bytes()), max)
     }
 
-    /// What a `fuzzy` keeps: the terms within `distance` of `term`, each with its `df` and its distance.
+    /// What a `fuzzy` keeps: the terms within `distance` of `term`, the fewest edits first, then the highest `df`, each
+    /// with its `df` and its distance.
     pub fn fuzzy_terms(
         &self,
         field: usize,
@@ -112,9 +128,10 @@ impl Corpus {
         distance: u8,
         max: usize,
     ) -> Vec<(String, u64, usize)> {
-        self.keep(
+        self.keep_by(
             field,
             |t| osa(term, t.as_bytes()) <= usize::from(distance),
+            |t| osa(term, t.as_bytes()),
             max,
         )
         .into_iter()
@@ -207,6 +224,17 @@ mod tests {
         // Capped at 1: each is in one document, so the lowest bytes, `cart`.
         assert_eq!(c.fuzzy_terms(0, "crat", 1, 1)[0].0, "cart");
         assert_eq!(c.fuzzy_terms(0, "crat", 2, 50).len(), 4);
+        // The fewest edits first (ROADMAP 8.2.12): `card`, two edits off, is in more documents than any term one edit off,
+        // yet a `fuzzy` of distance 2 keeping one keeps `cart`, as the distance-1 one does.
+        let c = corpus(&["card", "card", "card", "cart cat"]);
+        assert_eq!(c.fuzzy_terms(0, "crat", 2, 1)[0].0, "cart");
+        assert_eq!(c.fuzzy_terms(0, "crat", 1, 1)[0].0, "cart");
+        let two: Vec<String> = c
+            .fuzzy_terms(0, "crat", 2, 3)
+            .into_iter()
+            .map(|t| t.0)
+            .collect();
+        assert_eq!(two, ["card", "cart", "cat"]);
     }
 
     #[test]

@@ -299,7 +299,9 @@ fn a_programmatic_query_relaxes_its_must_clauses_without_text() {
     );
     assert_eq!(by_step(&out), [(1, "b")]);
 
-    // A `prefix` term's expansions are cut so the step fits beside L0's 50; the next step, beside both, fits no cut.
+    // A `prefix` term every step holds as L0 does counts once (ROADMAP 8.2.12): each step fits beside L0's copy (before,
+    // the first was cut to the 10 left and the next skipped). Under a limit below its own 50, no cut keeps L0's terms and
+    // fits beside them: skipped.
     let query = Query::Bool(BoolQuery {
         must: vec![
             Query::Prefix(PrefixQuery {
@@ -320,9 +322,18 @@ fn a_programmatic_query_relaxes_its_must_clauses_without_text() {
     let out = views
         .search_relaxed(&query, &request, &relax, &exec())
         .unwrap();
+    assert_eq!(out.relaxation.applied, ["drop_terms:75%", "drop_terms:50%"]);
+    let limits = QueryLimits {
+        max_expansions: 40,
+        ..QueryLimits::default()
+    };
+    let relax = plan(10_000).with_limits(limits);
+    let out = views
+        .search_relaxed(&query, &request, &relax, &exec())
+        .unwrap();
     assert_eq!(
         out.relaxation.applied,
-        ["drop_terms:75%:cut", "drop_terms:50%:skipped"]
+        ["drop_terms:75%:skipped", "drop_terms:50%:skipped"]
     );
 }
 

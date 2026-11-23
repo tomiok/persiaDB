@@ -11,7 +11,7 @@ use roaring::RoaringBitmap;
 use crate::query::Filter;
 use crate::relax::RelaxLevel;
 use crate::schema::FieldId;
-use crate::score::TermScorer;
+use crate::score::{TermScorer, saturate};
 use crate::segment::{ReadError, norms};
 use crate::view::{KeyReader, SearchView};
 
@@ -397,7 +397,7 @@ impl<'a, V: SearchView> Explainer<'a, V> {
                 };
                 Some(match *scale {
                     Scale::Boost(boost) => Explanation::Boost {
-                        score: query.score() * boost,
+                        score: saturate(query.score() * boost),
                         boost,
                         query: Box::new(query),
                     },
@@ -581,8 +581,10 @@ fn boolean<V: SearchView, K: KeyReader>(
         None => None,
     };
     let optional = sum_in_order(shoulds.iter().map(Explanation::score));
+    // Saturated as the matchers saturate each node (ROADMAP 8.1.12): the conjunction, the disjunction and their sum.
+    let (required, optional) = (saturate(required), saturate(optional));
     let score = match (musts.is_empty(), shoulds.is_empty()) {
-        (false, false) => required + optional,
+        (false, false) => saturate(required + optional),
         (false, true) => required,
         (true, _) => optional,
     };
