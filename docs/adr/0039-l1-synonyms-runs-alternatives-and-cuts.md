@@ -82,7 +82,7 @@ The user decided items 1, 2 and 6 (2026-11-11). The others follow from §6.3.2 a
 
 - A query compiled with synonyms costs more than one without: about 41 µs against 2.5 µs for a run with 50
   alternatives (bench `compile/synonyms`). Most of that is analyzing the alternatives again, and it is paid when L0
-  already has hits. ROADMAP 8.1.16 builds them lazily or caches them.
+  already has hits. ROADMAP 8.1.16 builds them lazily or caches them: ADR-0058 caches them per set of default fields.
 - The compile-time bound uses the compilation's limits. A search held to larger limits than the compilation's
   (`RelaxPlan::with_limits`) sees only the alternatives compiled. The cascade may then find the step fits as it is,
   at equal limits too (one default field, one-word alternatives). So the cut is carried on the compiled run

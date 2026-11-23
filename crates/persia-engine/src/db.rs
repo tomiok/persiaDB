@@ -86,7 +86,8 @@ pub use obsolete::{ObsoleteKind, ObsoleteObject};
 pub use policy::{CommitPolicy, CommitReason, MemtableState};
 pub use read_only::{ReadOnlyDatabase, Refreshed, SkippedAnalysis};
 pub use relaxed::{
-    Correction, Relaxation, RelaxedHit, RelaxedQuery, RelaxedResults, RelaxedSearchError,
+    Correction, Relaxation, RelaxationStats, RelaxedHit, RelaxedQuery, RelaxedResults,
+    RelaxedSearchError,
 };
 pub use search::{
     Cursor, CursorOrigin, DEFAULT_LIMIT, SearchHit, SearchRequest, SearchResults, StepCursor,
@@ -502,6 +503,8 @@ struct Collection {
     first_write: Option<Instant>,
     /// When the memtable was last written; `None` while it is empty.
     last_write: Option<Instant>,
+    /// Its relaxed searches since the open (ROADMAP 8.3.3), which every snapshot of it counts into.
+    relaxation: Arc<relaxed::RelaxationCounters>,
 }
 
 /// A memtable flush planned before anything is written.
@@ -575,6 +578,9 @@ pub struct Database<F = File> {
     replaying: Option<u64>,
     /// What became of the compactions since the open.
     compactions: CompactionStats,
+    /// What the relaxed searches of the collections dropped since the open counted (ROADMAP 8.3.3), so that
+    /// [`Database::relaxation_stats`] never goes down.
+    relaxation_dropped: RelaxationStats,
 }
 
 impl Database<File> {
@@ -693,6 +699,7 @@ impl<F: ContainerFile + Sync> Database<F> {
             poisoned: false,
             replaying: None,
             compactions: CompactionStats::default(),
+            relaxation_dropped: RelaxationStats::default(),
         }
     }
 
@@ -745,6 +752,19 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// The latest published snapshot.
     pub fn snapshot(&self) -> Arc<Snapshot> {
         self.published.load_full()
+    }
+
+    /// What the relaxed searches of every collection did since the database was opened (SPEC §7.6, §12.4; ROADMAP
+    /// 8.3.3): each collection's [`CollectionSnapshot::relaxation_stats`] added up, with what the collections dropped
+    /// since counted, so no count goes down. A reader that searched a snapshot counts into its collection here.
+    /// What a dropped collection counted is kept as of its drop: a search made after it on a snapshot taken before
+    /// (which still holds the collection) counts in that snapshot's [`CollectionSnapshot::relaxation_stats`], not here.
+    pub fn relaxation_stats(&self) -> RelaxationStats {
+        self.collections
+            .values()
+            .fold(self.relaxation_dropped, |sum, c| {
+                sum.plus(&c.relaxation.load())
+            })
     }
 
     /// A handle that loads the latest published snapshot from any thread.
@@ -852,6 +872,7 @@ impl<F: ContainerFile + Sync> Database<F> {
             memtable,
             first_write: None,
             last_write: None,
+            relaxation: Arc::default(),
         };
         self.commit_guarded(Vec::new(), diff, Structural::Create(name, collection))
     }
@@ -1436,6 +1457,8 @@ impl<F: ContainerFile + Sync> Database<F> {
                         what: "a dropped collection is not open",
                     });
                 };
+                // Its snapshots may still count searches: those after the drop are not kept (ROADMAP 8.3.3).
+                self.relaxation_dropped = self.relaxation_dropped.plus(&c.relaxation.load());
                 for live in &c.segments {
                     let entry = entry
                         .segment(SegmentId::new(live.segment.segment_id()))
@@ -1682,6 +1705,7 @@ fn snapshot_of(manifest: &Arc<Manifest>, collections: &BTreeMap<String, Collecti
                     memtable: c.memtable.reader(),
                     statistics: Arc::default(),
                     hidden: Arc::default(),
+                    relaxation: Arc::clone(&c.relaxation),
                     facets: Arc::default(),
                 };
                 (name.clone(), snapshot)

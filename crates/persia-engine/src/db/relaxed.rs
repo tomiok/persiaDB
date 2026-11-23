@@ -386,6 +386,12 @@ impl<'q, 's> Built<'q, 's> {
             .map_or((RelaxLevel::Exact, false), |(i, r)| (r.level, i > 0))
     }
 
+    /// The level of the last step that found a hit, `None` when none did (ROADMAP 8.3.3).
+    fn hit_level(&self) -> Option<RelaxLevel> {
+        let (found, _) = self.hit_steps(None);
+        found.and_then(|i| self.ran.get(i)).map(|r| r.level)
+    }
+
     /// The cascade's hit step (SPEC §7.6, ROADMAP 8.1.22): the later of the last step whose search collected a hit
     /// (`found`) and the `carried` one a cursor recorded (its page may not search that step again), each `None` when
     /// there is none.
@@ -820,7 +826,31 @@ impl CollectionViews<'_> {
             key: key.filter(|_| start.last.is_none() && !passed.page && !passed.counts),
             cached,
         };
-        self.respond(built, start, request, exec, (compiled, passed.page, facets))
+        let hit = built.hit_level();
+        let out = self.respond(built, start, request, exec, (compiled, passed.page, facets))?;
+        self.count(request, &out, hit);
+        Ok(out)
+    }
+
+    /// Counts a query in its collection's [`RelaxationStats`] (ROADMAP 8.3.3), unless the request continues one from a
+    /// cursor, and states what a relaxed search did as one `tracing` debug event. `hit` is the level of the last step
+    /// that found a hit on the page (from the top, without a cursor), `None` when none did.
+    fn count(&self, request: &SearchRequest, out: &RelaxedResults, hit: Option<RelaxLevel>) {
+        let r = &out.relaxation;
+        let relaxed = r.level != RelaxLevel::Exact;
+        if request.search_after.is_none() {
+            self.collection().relaxation.record(relaxed, hit);
+        }
+        if relaxed {
+            tracing::debug!(
+                collection = self.collection().schema().name(),
+                level = r.level.name(),
+                applied = ?r.applied,
+                hits = out.hits.len(),
+                truncated = r.truncated,
+                "relaxed search"
+            );
+        }
     }
 
     /// The response of the cascade `built` from `start`: its page of `request` and what it did, for a query
@@ -1328,6 +1358,9 @@ pub(crate) fn searched() -> usize {
 
 mod facet_cache;
 mod fallback;
+mod stats;
+pub(crate) use stats::RelaxationCounters;
+pub use stats::RelaxationStats;
 
 pub(super) use facet_cache::FacetCache;
 

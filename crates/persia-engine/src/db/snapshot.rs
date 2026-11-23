@@ -20,6 +20,7 @@ use crate::stats::{SearchStatistics, SegmentStatistics};
 use crate::view::{SearchView, SegmentView};
 
 use super::relaxed::FacetCache;
+use super::relaxed::{RelaxationCounters, RelaxationStats};
 use super::views::HiddenCache;
 
 /// The state one commit published, plus each collection's memtable (SPEC §8.4).
@@ -65,6 +66,8 @@ pub struct CollectionSnapshot {
     pub(super) statistics: Arc<OnceLock<SegmentStatistics>>,
     /// The copies the memtable hides, as of the newest memtable view searched (ROADMAP 7.4.6).
     pub(super) hidden: HiddenCache,
+    /// The collection's relaxed searches, counted since the open (ROADMAP 8.3.3): shared by all its snapshots.
+    pub(super) relaxation: Arc<RelaxationCounters>,
     /// The facet counts of relaxed queries on this snapshot, once a page counted them (ROADMAP 8.1.11, ADR-0061): they
     /// go with the snapshot.
     pub(super) facets: Arc<Mutex<FacetCache>>,
@@ -88,6 +91,12 @@ impl CollectionSnapshot {
     /// The committed schema.
     pub fn schema(&self) -> &CollectionSchema {
         &self.schema
+    }
+
+    /// What the collection's relaxed searches did since the database was opened (SPEC §7.6, §12.4; ROADMAP 8.3.3), read
+    /// now: every snapshot of the collection counts into the same counters, so this is not as of the snapshot.
+    pub fn relaxation_stats(&self) -> RelaxationStats {
+        self.relaxation.load()
     }
 
     /// The live segments, oldest first, as the manifest lists them. Some of their documents may be deleted:

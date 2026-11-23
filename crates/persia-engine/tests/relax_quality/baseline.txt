@@ -1,0 +1,18 @@
+# First-relaxed-hit precision of the synthetic relaxation suites (ROADMAP 8.4.3), in percent: of the queries whose
+# first hit a step after L0 found, the share whose first hit holds every word the query meant, with the collection's
+# default relaxation settings. The gate in tests/relax_quality.rs fails when a suite's precision falls more than 2
+# points below its row here (and when, with the defaults, any query has no hit, or with `fallback: "none"` more than
+# 2% have none). A rise passes.
+#
+# Record it again only on purpose (a change to the cascade, the generator or the suites): run
+#   cargo test -p persia-engine --test relax_quality -- --nocapture relaxation_quality_gate
+#   cargo test -p persia-engine --test relax_quality --features slow -- --nocapture relaxation_quality_gate_slow
+# replace the rows with the "baseline row" lines they print, and say in the PR which suites moved and why.
+#
+# suite  seed              queries  precision
+fast   145144124801025   150   70.67
+slow   1                 600   61.83
+slow   2                 600   64.00
+slow   3                 600   65.67
+slow   4                 600   64.17
+slow   5                 600   63.33

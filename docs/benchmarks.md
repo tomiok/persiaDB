@@ -680,6 +680,59 @@ After the review fix that drops the request filter from a caller root the join w
 step), `filters/last_resort` with one codegen unit reads 792 µs, +0.5% on main, within noise; `filters/never`, which
 never builds the step, reads 337 µs (+1.9%) in the same run, the drift above.
 
+With L3's last term expanded from 2 characters (ROADMAP 8.1.20, ADR-0057), same collection and thread, default
+build, 2026-11-22, rustc 1.99.0, AMD Ryzen 5 3600, Linux. Before is main (6d0a7d3) with `l3/two_letters` added, run
+in the same worktree just before the change. Command: `cargo bench -p persia-engine --bench search --
+'search_relaxed/(l3|l3/two_letters|l3/tiers)$'`. `l3` is still `w3 w` with L3 alone: its one-letter last word is now
+kept exact, so L3 builds no step and the cascade reaches L5, whose recency walk reads the 10 newest documents (the
+bench asserts level `fallback` now, `prefix` before). `l3/tiers` is still `w12 w`: no tier step any more, and its one
+step, `w12` expanded beside `w` exact, finds nothing. `l3/two_letters` is new: `w3 w1` with L3 alone at the largest
+`min_results` (10 000) and no fallback, the shortest last word L3 expands, whose step is the same before and after.
+
+| Recorded | `l3` | `l3/tiers` | `l3/two_letters` |
+|---|--:|--:|--:|
+| main (6d0a7d3) | 22.6 ms | 22.7 ms | 14.5 ms |
+| ROADMAP 8.1.20 | 26.4 µs | 85.5 µs | 14.9 ms |
+
+`l3/two_letters` builds the same step on both; its 2.6% is within the drift earlier rows show on code a change does
+not touch.
+
+With L1's alternatives cached per set of default fields (ROADMAP 8.1.16, ADR-0058), default build, 2026-11-22, rustc
+1.99.0, AMD Ryzen 5 3600, Linux. Before is the branch at f3bccd2 (8.1.20, which does not touch compilation) with the
+new cases added, run in the same worktree just before the change. `compile/plain` and `compile/synonyms` compile
+`w3 w40 w7 w120 nosuch` without synonyms and with the 2 002 groups of the bench's `synonym_compiler` (`w3` has 50
+alternatives, `nosuch` 2). `search_relaxed/l0/compiled` and `l0/compiled_synonyms` are new: `w3 w40` compiled each
+iteration (with the same two compilers), then searched relaxed with the collection's levels over the 4-segment
+collection; L0 has `min_results` hits, so no later level is built, and the alternatives of `w3` go unused. Command:
+`cargo bench -p persia-engine --bench search -- 'compile/|search_relaxed/(l0|l0/compiled|l0/compiled_synonyms|l1)$'`.
+
+| Recorded | `compile/plain` | `compile/synonyms` | `l0` | `l0/compiled` | `l0/compiled_synonyms` | `l1` |
+|---|--:|--:|--:|--:|--:|--:|
+| 8.1.20 (f3bccd2) | 2.40 µs | 37.7 µs | 475 µs | 469 µs | 516 µs | 890 µs |
+| ROADMAP 8.1.16 | 2.37 µs | 19.4 µs | 459 µs | 476 µs | 498 µs | 902 µs |
+
+The synonyms' share of a compilation drops from 35.3 µs to 17.0 µs, and of the L0 search compiled each time from 47 µs
+to 22 µs. Of the 17 µs left, about 5.5 µs is the scan for runs over the groups (measured by returning no alternative,
+a local change), and the rest is per alternative: a clone of the cached query and the check against the run's earlier
+ones. `l0` and `l1` compile once, outside the loop, so the cache does not change their work; they moved by −3% and
++1%, the drift of unchanged code.
+
+With the cache's slots allocated per group, on first use (ROADMAP 8.1.16 review, ADR-0058 "Memory"), 2026-11-23, same
+machine and command. Before is the branch at 067702e, run just before the change. A set used to allocate one 112-byte
+slot per synonym term at its first compilation (up to 640 000 terms, about 72 MB); it now allocates one 24-byte cell
+per group (at most 240 KB), and a group's 16-byte slots when a run first draws on it. These benches hit the cache
+after their first iteration, so they measure the lookup, not the miss.
+
+| Recorded | `compile/plain` | `compile/synonyms` | `l0` | `l0/compiled` | `l0/compiled_synonyms` | `l1` |
+|---|--:|--:|--:|--:|--:|--:|
+| 8.1.16 (067702e) | 2.33 µs | 19.7 µs | 453 µs | 453 µs | 467 µs | 890 µs |
+| 8.1.16 review | 2.27 µs | 19.5 µs | 478 µs | 480 µs | 493 µs | 931 µs |
+
+`compile/synonyms` holds (−1.3%), and the synonyms' share of the L0 search compiled each time (`l0/compiled_synonyms`
+less `l0/compiled`) is 13.3 µs against 14.3 µs. `l0`, `l0/compiled` and `l1` do not reach the cache in their loop
+(they compile once, or without synonyms), yet moved +4–6%, the same on a second run of each build and with the
+review's other change (the metrics' `fetch_add`) left out, while 067702e run again moved +0.2% to +2.2%: likely a
+placement effect of the rebuilt binary on code this change does not touch, not work it adds.
 ROADMAP 8.2.12 (a `fuzzy` keeps the fewest edits first, so L4's tier steps nest; an excluded expansion the step
 subsumes counts once): the expansion walk now reads each accepted term's edit distance again to rank it. Command:
 `cargo bench -p persia-engine --bench search -- 'search_expansion_collection|search_top10_expansion|search_relaxed/(l4|l4/tiers)$'`,

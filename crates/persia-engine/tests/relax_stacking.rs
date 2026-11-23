@@ -176,8 +176,8 @@ fn distance(len: usize) -> Option<usize> {
 /// The reference (invariant 1): the documents L0 misses that `level`'s one step finds for the one-word query
 /// `word`, rewriting only `extra` when `rewrite_extra`. With one word and no other level, the step is the last term
 /// expanded (L3) or fuzzed (L4) in every rewritable field, any field matching. `None` when the level builds no step:
-/// no field is rewritable, or (L4) the word is too short. A field's terms are the words its documents hold; `extra`
-/// under `grams` also holds the stacked prefixes, which an exact match sees.
+/// no field is rewritable, or the word is too short (L3: 1 character, L4: under 4). A field's terms are the words its
+/// documents hold; `extra` under `grams` also holds the stacked prefixes, which an exact match sees.
 fn reference(
     docs: &[(Vec<String>, Vec<String>)],
     word: &str,
@@ -204,6 +204,10 @@ fn reference(
     let rewritable: Vec<usize> = if stacking { vec![0] } else { vec![0, 1] };
     let dist = distance(word.chars().count());
     if level == Level::Fuzzy && dist.is_none() {
+        return None;
+    }
+    // L3 expands a last term of 2 characters or more (ROADMAP 8.1.20, ADR-0057): a single letter stays exact.
+    if level == Level::Prefix && word.chars().count() < 2 {
         return None;
     }
     let exact =

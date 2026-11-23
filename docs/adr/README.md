@@ -62,7 +62,7 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0037](./0037-relaxation-cascade-and-level-rank-key.md) | The relaxation cascade, and a rank key led by the level | proposed |
 | [0038](./0038-l2-drop-terms-ladder-and-term-importance.md) | L2 `drop_terms`: a `minimum_should_match` ladder ordered by term importance | proposed |
 | [0039](./0039-l1-synonyms-runs-alternatives-and-cuts.md) | L1 `synonyms`: runs of whole clauses, phrase alternatives, one step, and cuts in group order | proposed |
-| [0040](./0040-l3-prefix-one-step-over-analyzed-terms.md) | L3 `prefix`: one step over the analyzed terms, the last one always, stacking fields exact | accepted (amended by 0046) |
+| [0040](./0040-l3-prefix-one-step-over-analyzed-terms.md) | L3 `prefix`: one step over the analyzed terms, the last one always, stacking fields exact | accepted (amended by 0046, 0057) |
 | [0041](./0041-blob-chunk-size-floor.md) | A writer's blob chunk size has a 64 KiB floor; the encodings keep `1..=64 MiB` | accepted |
 | [0042](./0042-l4-fuzzy-one-step-length-policy-and-corrections.md) | L4 `fuzzy`: one step over L3's terms, a length-based distance, and corrections of missing words | proposed (amended by 0046) |
 | [0043](./0043-relaxed-response-states-the-hit-step.md) | A relaxed response states the text of its hit step, the last step that found a hit | proposed |
@@ -79,6 +79,8 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0054](./0054-blob-pack-reader-leases.md) | Reader leases on the local blob pack: one locked 64-byte lease per read-only handle in `<name>.persia.blobs.leases/`; GC does not sweep while a live lease is not at the committed seq | accepted |
 | [0055](./0055-search-aggregations-and-derived-fields.md) | Search aggregations and derived fields | proposed |
 | [0056](./0056-hard-filters-soft-filters-and-a-callers-required-clauses.md) | Relaxation never drops a hard filter or a caller's required clause; `soft_filter` holds what `last_resort` may drop | proposed |
+| [0057](./0057-l3-last-term-minimum-length.md) | L3 expands the last term from 2 characters (amends 0040 item 4) | proposed |
+| [0058](./0058-cache-l1-alternatives-per-default-fields.md) | Cache L1's compiled alternatives per set of default fields (the last 4), not lazy: `Compiled` unchanged | proposed |
 | [0059](./0059-schemas-name-registered-analyzers.md) | Schemas name registered analyzers with the built-in naming and bytes; the open checks its registry, `verify` skips their analysis | proposed |
 | [0060](./0060-refreshing-a-read-only-database-in-place.md) | Refreshing a read-only database in place: reopen the container, replay only the WAL past the chunks already replayed while they are still the first ones found (by content past `log_end`) and no collection changed, else reload; one atomic swap | proposed |
 | [0061](./0061-facets-under-relaxation-and-their-cache.md) | Facets under relaxation count the steps a page of every hit builds, once per query (a per-snapshot cache) | proposed |

@@ -10,6 +10,7 @@
 
 use std::collections::BTreeSet;
 use std::ops::Range;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use persia_analysis::{DEFAULT_SYNONYM_EXPANSIONS, Token, TokenStream};
 
@@ -50,6 +51,107 @@ pub struct CompiledSynonym {
     /// Whether the compilation's bound on what L1's step could hold (SPEC §6.3.2) left out some of them: the cascade
     /// then lists the step as cut (`synonyms:cut`, §7.1.3), whether or not it cuts more.
     pub cut: bool,
+}
+
+/// How many sets of default fields keep their compiled alternatives ([`AlternativeCache`]): a request that names its own
+/// `fields` (SPEC §7.1) compiles over another set, and most requests use a few.
+const CACHED_FIELD_SETS: usize = 4;
+
+/// One synonym term's cached alternative: `None` within when it compiles to nothing. Boxed, so a slot not yet filled
+/// costs a pointer and its `Once`, not a whole [`Query`] (ADR-0058, Memory).
+type Slot = OnceLock<Option<Box<Query>>>;
+
+/// The collection's synonym terms compiled as alternatives (the quoted phrase `"<term>"`, [`CompiledSynonym::alternatives`])
+/// over one set of default fields, each the first time a compilation needs it (ROADMAP 8.1.16, ADR-0058). An
+/// alternative depends only on its term, the fields and their analyzers, not on the query or the limits, so a run
+/// that matches again reuses what an earlier compilation analyzed.
+///
+/// A group's slots are allocated the first time one of its terms is asked for: a new set costs one empty cell per
+/// group, not one slot per term (SPEC §6.2.1 allows 10 000 groups of 64 terms), so a client that names new `fields`
+/// with every request makes each compilation allocate what its own runs use.
+#[derive(Debug)]
+struct Alternatives {
+    fields: DefaultFields,
+    /// By group: its terms' slots, in term order, once a term of the group was asked for.
+    groups: Box<[OnceLock<Box<[Slot]>>]>,
+}
+
+impl Alternatives {
+    /// An empty set over `fields` for `groups` groups.
+    fn new(groups: usize, fields: DefaultFields) -> Self {
+        Self {
+            fields,
+            groups: (0..groups).map(|_| OnceLock::new()).collect(),
+        }
+    }
+
+    /// The alternative of term `index` of group `group` of `groups` (the compiler's schema's, the same at every call),
+    /// compiled by `compile` the first time it is asked for. `None` when the term compiles to nothing, or there is no
+    /// such term.
+    fn get(
+        &self,
+        groups: &[Vec<String>],
+        group: usize,
+        index: usize,
+        compile: impl FnOnce() -> Option<Query>,
+    ) -> Option<&Query> {
+        let len = groups.get(group)?.len();
+        if index >= len {
+            return None;
+        }
+        let slots = self
+            .groups
+            .get(group)?
+            .get_or_init(|| (0..len).map(|_| OnceLock::new()).collect());
+        slots
+            .get(index)?
+            .get_or_init(|| compile().map(Box::new))
+            .as_deref()
+    }
+
+    /// How many groups have their slots allocated, and how many slots they hold.
+    #[cfg(test)]
+    fn allocated(&self) -> (usize, usize) {
+        let filled = self.groups.iter().filter_map(OnceLock::get);
+        filled.fold((0, 0), |(groups, slots), s| (groups + 1, slots + s.len()))
+    }
+}
+
+/// A compiler's [`Alternatives`] for the last [`CACHED_FIELD_SETS`] sets of default fields it compiled runs over, the
+/// least recently used one dropped first. A set dropped while a compilation still holds it lives until that ends.
+#[derive(Debug, Default)]
+pub(super) struct AlternativeCache {
+    /// Least recently used first.
+    sets: Mutex<Vec<Arc<Alternatives>>>,
+}
+
+impl AlternativeCache {
+    /// The alternatives over `fields` of the terms of `groups` (the compiler's schema's, the same at every call).
+    fn of(&self, groups: &[Vec<String>], fields: &DefaultFields) -> Arc<Alternatives> {
+        // A compilation that panicked holding the lock left the list whole: each step below keeps it consistent.
+        let lock = || self.sets.lock().unwrap_or_else(PoisonError::into_inner);
+        let used = |sets: &mut Vec<Arc<Alternatives>>| {
+            let at = sets.iter().position(|s| s.fields == *fields)?;
+            let set = sets.remove(at);
+            sets.push(Arc::clone(&set));
+            Some(set)
+        };
+        if let Some(set) = used(&mut lock()) {
+            return set;
+        }
+        // A new set is built unlocked, so a miss does not hold up the compilations that hit.
+        let new = Arc::new(Alternatives::new(groups.len(), fields.clone()));
+        let mut sets = lock();
+        // Another compilation may have added the same set meanwhile: keep one, so both fill it.
+        if let Some(set) = used(&mut sets) {
+            return set;
+        }
+        if sets.len() >= CACHED_FIELD_SETS {
+            sets.remove(0);
+        }
+        sets.push(Arc::clone(&new));
+        new
+    }
 }
 
 /// A clause's tokens in each default field, in the order of [`DefaultFields::fields`]: each token's term and position
@@ -274,6 +376,7 @@ impl<'c> Scan<'c> {
         limit: usize,
     ) -> (Vec<Query>, bool) {
         let groups = self.compiler.schema.synonyms();
+        let cached = self.compiler.alternatives.of(groups, self.fields);
         let mut tokens = TokenStream::new();
         let mut alternatives: Vec<Query> = Vec::new();
         // Below the cap, one more source is compiled to tell a cut from duplicates that compile away.
@@ -286,31 +389,37 @@ impl<'c> Scan<'c> {
             let Some(text) = groups.get(group).and_then(|g| g.get(index)) else {
                 continue;
             };
-            let phrase = Clause {
-                negated: false,
-                field: None,
-                phrase: true,
-                text,
+            let Some(query) = cached.get(groups, group, index, || self.compile(text, &mut tokens))
+            else {
+                continue;
             };
-            let (mut parts, _, _) = self
-                .compiler
-                .clause(phrase, self.fields, &mut tokens, false);
-            let query = match parts.len() {
-                0 => continue,
-                1 => parts.pop().unwrap_or(Query::MatchAll),
-                _ => Query::Bool(BoolQuery {
-                    must: parts,
-                    ..BoolQuery::default()
-                }),
-            };
-            if query != *original && !alternatives.contains(&query) {
+            if query != original && !alternatives.contains(query) {
                 if full {
                     return (alternatives, true);
                 }
-                alternatives.push(query);
+                alternatives.push(query.clone());
             }
         }
         (alternatives, false)
+    }
+
+    /// `text` compiled as the quoted phrase `"<text>"` over the default fields: `None` when it analyzes to nothing.
+    fn compile(&self, text: &str, tokens: &mut TokenStream) -> Option<Query> {
+        let phrase = Clause {
+            negated: false,
+            field: None,
+            phrase: true,
+            text,
+        };
+        let (mut parts, _, _) = self.compiler.clause(phrase, self.fields, tokens, false);
+        match parts.len() {
+            0 => None,
+            1 => parts.pop(),
+            _ => Some(Query::Bool(BoolQuery {
+                must: parts,
+                ..BoolQuery::default()
+            })),
+        }
     }
 }
 
@@ -354,7 +463,12 @@ mod tests {
 
     #[test]
     fn an_alternative_that_compiles_to_the_run_itself_is_left_out() {
-        // Unreachable through `compile` (terms equal in every field are one term), so checked on its own.
+        // Unreachable through `compile`, for any schema and analyzer (ROADMAP 8.1.26), so checked on its own: (a) a
+        // run's own query is built of `combined` leaves (`word()`); (b) an alternative of several tokens in some field
+        // compiles there through `text_query`, to a `term`, a `phrase` or a `bool` of required `term`s, never to a
+        // `combined`; (c) one of at most one token per field compiles as a word, equal to the run's query only when
+        // its token is the run's in every field, and then each field's `SynonymMap` reads it as the run's own term
+        // (the same term id), so `alternative_sources` never lists it.
         let schema = SchemaBuilder::new("c")
             .field("title", FieldKind::Text(TextOptions::default()))
             .synonyms(vec![vec!["tv".into(), "telly".into(), "Telly".into()]])
@@ -437,5 +551,241 @@ mod tests {
         // Out of range or empty.
         assert_eq!(whole_clauses(&clause_of, 4..5), None);
         assert_eq!(whole_clauses(&clause_of, 2..2), None);
+    }
+
+    /// `title` (positions) and `body` (no positions, `en`), with groups whose terms are one word, a phrase, a term
+    /// that compiles as another does (`Telly`), and the same term in two groups.
+    fn cached_schema() -> crate::schema::CollectionSchema {
+        SchemaBuilder::new("c")
+            .field(
+                "title",
+                FieldKind::Text(TextOptions {
+                    positions: true,
+                    ..TextOptions::default()
+                }),
+            )
+            .field(
+                "body",
+                FieldKind::Text(TextOptions {
+                    analyzer: crate::schema::AnalyzerRef::builtin("en").unwrap(),
+                    ..TextOptions::default()
+                }),
+            )
+            .synonyms(vec![
+                vec![
+                    "tv".into(),
+                    "telly".into(),
+                    "Telly".into(),
+                    "television set".into(),
+                ],
+                vec!["tv".into(), "the box".into()],
+                vec!["running shoes".into(), "trainers".into()],
+            ])
+            .build()
+            .unwrap()
+    }
+
+    /// ROADMAP 8.1.16: a compiler reuses the alternatives it compiled, per set of default fields, and compiles what a
+    /// fresh compiler does: for every set of fields (weights and order included) and every limit, again and again.
+    #[test]
+    fn cached_alternatives_compile_as_a_fresh_compiler_does() {
+        let schema = cached_schema();
+        let registry = AnalyzerRegistry::builtin();
+        let compiler = QueryCompiler::new(&schema, &registry).unwrap();
+        let sets = [
+            DefaultFields::all(&schema),
+            DefaultFields::parse(&schema, &["title^3", "body"]).unwrap(),
+            DefaultFields::parse(&schema, &["body", "title^3"]).unwrap(),
+            DefaultFields::parse(&schema, &["title"]).unwrap(),
+            DefaultFields::parse(&schema, &["body^0.5"]).unwrap(),
+        ];
+        let limits = [
+            QueryLimits::default(),
+            QueryLimits {
+                max_terms: 9,
+                ..QueryLimits::default()
+            },
+        ];
+        let texts = [
+            "cheap tv",
+            "tv running shoes",
+            "TV -box",
+            "telly trainers tv",
+        ];
+        for round in 0..3 {
+            for fields in &sets {
+                for limits in &limits {
+                    for text in texts {
+                        let fresh = QueryCompiler::new(&schema, &registry).unwrap();
+                        let want = fresh.compile(text, fields, limits);
+                        let got = compiler.compile(text, fields, limits);
+                        assert_eq!(got, want, "round {round}: {text} over {fields:?}");
+                    }
+                }
+            }
+        }
+        // The weights reach the alternatives: `telly` is one token per field, a word over the fields' weights.
+        let alternatives = |fields: &DefaultFields| {
+            compiler
+                .compile("tv", fields, &QueryLimits::default())
+                .synonyms[0]
+                .alternatives
+                .clone()
+        };
+        assert_ne!(alternatives(&sets[0]), alternatives(&sets[1]));
+    }
+
+    /// ROADMAP 8.1.16: the cache keeps the last [`CACHED_FIELD_SETS`] sets of default fields, the least recently used
+    /// one dropped first, and a set compiled again after it was dropped compiles as before.
+    #[test]
+    fn the_cache_keeps_the_last_sets_of_default_fields() {
+        let schema = cached_schema();
+        let compiler = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+        let cached = || -> Vec<DefaultFields> {
+            let sets = compiler.alternatives.sets.lock().unwrap();
+            sets.iter().map(|s| s.fields.clone()).collect()
+        };
+        let weighted = |w: usize| DefaultFields::parse(&schema, &[format!("title^{w}")]).unwrap();
+        let compile =
+            |fields: &DefaultFields| compiler.compile("tv", fields, &QueryLimits::default());
+        // A text without a run compiles no alternative, and caches nothing.
+        let _ = compiler.compile("radio", &weighted(1), &QueryLimits::default());
+        assert_eq!(cached(), []);
+        let first = compile(&weighted(1));
+        for w in 2..=CACHED_FIELD_SETS {
+            compile(&weighted(w));
+        }
+        assert_eq!(
+            cached(),
+            (1..=CACHED_FIELD_SETS).map(weighted).collect::<Vec<_>>()
+        );
+        // Used again, the first set is the most recent; one more set drops the second.
+        assert_eq!(compile(&weighted(1)), first);
+        compile(&weighted(9));
+        let mut want: Vec<DefaultFields> = (3..=CACHED_FIELD_SETS).map(weighted).collect();
+        want.extend([weighted(1), weighted(9)]);
+        assert_eq!(cached(), want);
+        // Dropped, the second set compiles again as it did.
+        let fresh = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+        assert_eq!(
+            compile(&weighted(2)),
+            fresh.compile("tv", &weighted(2), &QueryLimits::default())
+        );
+    }
+
+    /// A term is looked up within its group: an index past the group's end is no term of the next group.
+    #[test]
+    fn a_cached_term_is_looked_up_within_its_group() {
+        let schema = cached_schema();
+        let groups = schema.synonyms();
+        let alternatives = Alternatives::new(groups.len(), DefaultFields::all(&schema));
+        let term = |group, index| {
+            alternatives
+                .get(groups, group, index, || Some(Query::MatchAll))
+                .cloned()
+        };
+        assert_eq!(term(1, 1), Some(Query::MatchAll));
+        // Group 1 has 2 terms: index 2 is not group 2's first.
+        assert_eq!(term(1, 2), None);
+        assert_eq!(term(3, 0), None);
+        assert_eq!(term(usize::MAX, 0), None);
+        assert_eq!(term(0, usize::MAX), None);
+        // Compiled once: a later call does not compile again.
+        assert_eq!(
+            alternatives.get(groups, 1, 1, || panic!("compiled twice")),
+            Some(&Query::MatchAll)
+        );
+        // A term that compiles to nothing stays nothing.
+        assert_eq!(alternatives.get(groups, 2, 0, || None), None);
+        assert_eq!(
+            alternatives.get(groups, 2, 0, || Some(Query::MatchAll)),
+            None
+        );
+    }
+
+    /// ROADMAP 8.1.16: a new set of default fields allocates no slot per term up front, only the slots of the groups
+    /// its runs draw alternatives from, so a client naming new `fields` with every request costs each compilation
+    /// what its own runs use, not every term of a large schema (SPEC §6.2.1: up to 10 000 groups of 64 terms).
+    #[test]
+    fn a_new_set_of_default_fields_allocates_only_the_groups_its_runs_use() {
+        const GROUPS: usize = 2_000;
+        const TERMS: usize = 32;
+        let groups: Vec<Vec<String>> = (0..GROUPS)
+            .map(|g| (0..TERMS).map(|t| format!("g{g}t{t}")).collect())
+            .collect();
+        let schema = SchemaBuilder::new("c")
+            .field("title", FieldKind::Text(TextOptions::default()))
+            .synonyms(groups)
+            .build()
+            .unwrap();
+        let compiler = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+        let filled = || -> Vec<(usize, usize)> {
+            let sets = compiler.alternatives.sets.lock().unwrap();
+            sets.iter().map(|s| s.allocated()).collect()
+        };
+        let limits = QueryLimits::default();
+        // Two runs, of groups 7 and 1 999: their 2 groups' slots, 64 of the schema's 64 000 terms, in each set.
+        for w in 1..=3 {
+            let fields = DefaultFields::parse(&schema, &[format!("title^{w}")]).unwrap();
+            let out = compiler.compile("g7t0 g1999t5", &fields, &limits);
+            assert_eq!(out.synonyms.len(), 2);
+            let cached = compiler.alternatives.sets.lock().unwrap();
+            assert_eq!(cached.last().unwrap().groups.len(), GROUPS);
+        }
+        assert_eq!(filled(), [(2, 2 * TERMS); 3]);
+        // A run of another group fills its group's slots in that set alone.
+        let fields = DefaultFields::parse(&schema, &["title^3"]).unwrap();
+        compiler.compile("g42t1", &fields, &limits);
+        assert_eq!(filled(), [(2, 2 * TERMS), (2, 2 * TERMS), (3, 3 * TERMS)]);
+    }
+
+    /// Compilations on several threads share one cache, and each compiles what a fresh compiler does.
+    #[test]
+    fn threads_share_the_cache() {
+        let schema = cached_schema();
+        let registry = AnalyzerRegistry::builtin();
+        let compiler = QueryCompiler::new(&schema, &registry).unwrap();
+        let sets = [
+            DefaultFields::all(&schema),
+            DefaultFields::parse(&schema, &["title^2"]).unwrap(),
+        ];
+        let texts = ["cheap tv", "tv running shoes", "telly trainers tv"];
+        let limits = QueryLimits::default();
+        // Each by a compiler of its own, which compiles it alone.
+        let want: Vec<Vec<_>> = sets
+            .iter()
+            .map(|fields| {
+                let texts = texts.iter();
+                let compile = |text: &&str| {
+                    let fresh = QueryCompiler::new(&schema, &registry).unwrap();
+                    fresh.compile(text, fields, &limits)
+                };
+                texts.map(compile).collect()
+            })
+            .collect();
+        // Started together, two threads miss on each set at once: the re-check after the re-lock keeps one.
+        let start = std::sync::Barrier::new(4);
+        std::thread::scope(|s| {
+            for t in 0..4 {
+                let (compiler, sets, want, limits, start) =
+                    (&compiler, &sets, &want, &limits, &start);
+                s.spawn(move || {
+                    start.wait();
+                    for i in 0..50 {
+                        let set = (t + i) % sets.len();
+                        let text = i % texts.len();
+                        let got = compiler.compile(texts[text], &sets[set], limits);
+                        assert_eq!(got, want[set][text]);
+                    }
+                });
+            }
+        });
+        // One cached set per set of default fields, however the misses raced.
+        let cached: Vec<DefaultFields> = {
+            let held = compiler.alternatives.sets.lock().unwrap();
+            held.iter().map(|s| s.fields.clone()).collect()
+        };
+        assert_eq!(cached.len(), sets.len(), "{cached:?}");
+        assert!(sets.iter().all(|f| cached.contains(f)), "{cached:?}");
     }
 }

@@ -2,3 +2,5 @@
 //!
 //! Only ever used as a `[dev-dependencies]` entry.
 #![forbid(unsafe_code)]
+
+pub mod synthetic;

@@ -176,6 +176,9 @@ pub(super) fn load<F: ContainerFile + Sync>(
                 segments,
                 first_write: None,
                 last_write: None,
+                // Fresh counters: an open starts them at zero, and so does a read-only handle's full reload, which
+                // runs this too and keeps no count of the state it replaces (ROADMAP 11.4.8).
+                relaxation: Arc::default(),
             };
             collections.insert(name.to_owned(), collection);
         }

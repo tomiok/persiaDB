@@ -655,6 +655,7 @@ dependencies = [
  "persia-analysis",
  "persia-format",
  "persia-storage",
+ "persia-testutil",
  "proptest",
  "rayon",
  "roaring",
@@ -662,6 +663,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -709,6 +711,9 @@ dependencies = [
 [[package]]
 name = "persia-testutil"
 version = "0.0.0"
+dependencies = [
+ "proptest",
+]
 
 [[package]]
 name = "pin-project-lite"

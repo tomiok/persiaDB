@@ -312,7 +312,8 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyDatabase<F> {
     /// - [`Refreshed::Reloaded`]: anything else (a flush commit moved `wal_start` past the records the memtables
     ///   hold, a collection was dropped or its schema changed, the chunks replayed are not the first ones found, or an
     ///   earlier refresh failed after it changed the memtables) runs the open sequence on the reopened container,
-    ///   with the open's registry and analysis.
+    ///   with the open's registry and analysis. Its collections' relaxation counters start again at zero (ROADMAP
+    ///   11.4.8); an incremental refresh keeps them.
     ///
     /// Refreshes run one at a time; readers never wait for one.
     ///
@@ -544,6 +545,9 @@ fn take_manifest<F: ContainerFile + Sync>(
                 segments: Vec::new(),
                 first_write: None,
                 last_write: None,
+                // Fresh counters for a collection new to this handle; a kept one keeps its own, a reload resets
+                // every one (ROADMAP 11.4.8).
+                relaxation: Arc::default(),
             };
             created.push((name.to_owned(), collection));
         }

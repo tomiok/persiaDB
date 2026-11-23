@@ -3,8 +3,9 @@
 //!
 //! Invariants:
 //! 1. L3's step matches a document when, for every required word, the document holds a term that starts with it (the
-//!    last word, and every word of at least 3 characters) or equals it (any other word), beside L0's exclusions and
-//!    filters; a document L0 matches is L0's (checked against an oracle over random corpora).
+//!    last word of at least 2 characters, ROADMAP 8.1.20, and every word of at least 3) or equals it (any other
+//!    word), beside L0's exclusions and filters; a document L0 matches is L0's (checked against an oracle over random
+//!    corpora).
 //! 2. A prefix keeps at most 50 terms, those with the highest collection `df` (SPEC §7.1); over `QueryLimits`, the
 //!    step's prefixes are cut (`prefix:cut`) or the step is skipped (`prefix:skipped`, SPEC §7.1.3).
 //! 3. The step states L0's text as `effective`.
@@ -146,6 +147,14 @@ fn the_words_match_the_terms_they_start_and_the_step_states_l0s_text() {
     assert_eq!(hits(&out), [(1, "d5".to_owned())]);
     let out = search(&db, &registry, "sh run", None);
     assert_eq!(hits(&out), [(0, "d5".to_owned())]);
+    // A one-letter last word stays exact (ROADMAP 8.1.20): `run` alone is expanded, in one step (no tier step without
+    // the last word expanded), and no document holds `s`. With no other word of 3 characters, L3 builds no step.
+    let out = search(&db, &registry, "run s", None);
+    assert_eq!(out.relaxation.applied, ["prefix"]);
+    assert_eq!(hits(&out), []);
+    let out = search(&db, &registry, "sh s", None);
+    assert_eq!(out.relaxation.applied, Vec::<String>::new());
+    assert_eq!(out.relaxation.level, RelaxLevel::Exact);
 }
 
 #[test]
@@ -227,17 +236,19 @@ proptest! {
         let db = database(&refs);
         let out = search(&db, &AnalyzerRegistry::builtin(), &query.join(" "), None);
         let last = query.len() - 1;
-        // Another word of 3 characters or more is expanded too: without L2 before it, L3 then searches the last word
-        // alone expanded first (ROADMAP 8.2.7), so its matches, every other word exact, rank above the rest.
-        let tiered = query[..last].iter().any(|w| w.chars().count() >= 3);
+        // The last word is expanded from 2 characters (ROADMAP 8.1.20). When another word of 3 characters or more is
+        // expanded too, L3 without L2 before it searches the last word alone expanded first (ROADMAP 8.2.7), so its
+        // matches, every other word exact, rank above the rest.
+        let open = |j: usize, w: &str| if j == last { w.chars().count() >= 2 } else { w.chars().count() >= 3 };
+        let last_open = open(last, &query[last]);
+        let others_open = query[..last].iter().enumerate().any(|(j, w)| open(j, w));
+        let tiered = last_open && others_open;
         let mut want = Vec::new();
         for (i, doc) in docs.iter().enumerate() {
             let l0 = query.iter().all(|w| holds(doc, w, false));
             let last_only = query.iter().enumerate().all(|(j, w)| holds(doc, w, j == last));
-            let l3 = query
-                .iter()
-                .enumerate()
-                .all(|(j, w)| holds(doc, w, j == last || w.chars().count() >= 3));
+            let l3 = (last_open || others_open)
+                && query.iter().enumerate().all(|(j, w)| holds(doc, w, open(j, w)));
             let step = if l0 {
                 Some(0)
             } else if tiered && last_only {

@@ -1,13 +1,13 @@
 //! L3 `prefix` (SPEC §7.6, ROADMAP 8.2.3): the query with its words also matching the terms they start.
 //!
 //! One step, listed as `prefix`, built from L0's query (after a tier step `prefix:last` that expands the last term
-//! alone, when L2 did not take its matches first, ROADMAP 8.2.7): the last term, and every other term of at least
-//! [`MIN_LEN`] characters, becomes a `prefix` query of [`DEFAULT_MAX_EXPANSIONS`] terms, which planning expands over
-//! the views' terms (an FST range scan per segment, SPEC §7.1) and keeps by collection `df`. Only words of the user
-//! text are expanded: excluded clauses, phrases and `field:` clauses are not, as they ask for their text exactly. Nor
-//! are the terms of a field whose analyzer stacks tokens (`edge_ngram`, SPEC §6.3.1): its index already holds every
-//! prefix of a word, so the term matches the documents a prefix would, and a prefix would only add the stacked
-//! grams' scores together.
+//! alone, when L2 did not take its matches first, ROADMAP 8.2.7): the last term of at least [`LAST_MIN_LEN`]
+//! characters, and every other term of at least [`MIN_LEN`] characters, becomes a `prefix` query of
+//! [`DEFAULT_MAX_EXPANSIONS`] terms, which planning expands over the views' terms (an FST range scan per segment, SPEC
+//! §7.1) and keeps by collection `df`. Only words of the user text are expanded: excluded clauses, phrases and
+//! `field:` clauses are not, as they ask for their text exactly. Nor are the terms of a field whose analyzer stacks
+//! tokens (`edge_ngram`, SPEC §6.3.1): its index already holds every prefix of a word, so the term matches the
+//! documents a prefix would, and a prefix would only add the stacked grams' scores together.
 
 use super::words::Words;
 use super::{LevelInput, LevelTransform, Step};
@@ -16,17 +16,23 @@ use crate::schema::FieldId;
 use crate::segment::ReadError;
 
 /// The fewest characters (Unicode scalar values) of an analyzed term that L3 expands when it is not the last term
-/// (SPEC §7.6): a shorter prefix would match too many terms to say much. The last term is expanded whatever its
-/// length: it is the word a user may still be typing.
+/// (SPEC §7.6): a shorter prefix would match too many terms to say much.
 pub(crate) const MIN_LEN: usize = 3;
+
+/// The fewest characters (Unicode scalar values) of the analyzed last term that L3 expands (SPEC §7.6, ROADMAP
+/// 8.1.20, ADR-0057): the last word is the one a user may still be typing, so it is expanded shorter than the others,
+/// but a one-character term starts a large share of a field's terms, which every view would walk before the `df` cut
+/// keeps 50, to complete a word that says almost nothing.
+pub(crate) const LAST_MIN_LEN: usize = 2;
 
 /// L3 `prefix` (SPEC §7.6, ROADMAP 8.2.3, ADR-0040).
 ///
 /// A term is a field's analyzed term of a word: one per field of a `combined` (a word over the default fields), or a
 /// `term` of a programmatic query. A term of a `text` field whose analyzer does not stack tokens is expanded when it is
-/// the last term or has at least [`MIN_LEN`] characters. The last term is the last part of the last required clause
-/// of the text, when that clause is a word (of a word the fields split apart, each field's last token), or the last
-/// `must` clause of a programmatic root `bool` (a programmatic `term` or `combined` alone is its own last term).
+/// the last term and has at least [`LAST_MIN_LEN`] characters, or has at least [`MIN_LEN`] characters. The last term
+/// is the last part of the last required clause of the text, when that clause is a word (of a word the fields split
+/// apart, each field's last token), or the last `must` clause of a programmatic root `bool` (a programmatic `term` or
+/// `combined` alone is its own last term).
 ///
 /// Expanded, a `combined` becomes a `bool` of `should` clauses: the fields it keeps exact, as one `combined`, and a
 /// `prefix` per expanded field. A `prefix` scores with its field's schema `boost` as the field weight (SPEC §7.2), as a
@@ -60,7 +66,8 @@ impl LevelTransform for Prefix {
 /// when it expands no term.
 fn step(input: &LevelInput<'_>, last_only: bool, applied: &str) -> Option<Step> {
     let leaf = |field: FieldId, term: &str, last: bool| {
-        (last || !last_only && term.chars().count() >= MIN_LEN).then(|| prefix(field, term))
+        let len = term.chars().count();
+        (last && len >= LAST_MIN_LEN || !last_only && len >= MIN_LEN).then(|| prefix(field, term))
     };
     let words = Words {
         expands: input.expands,
