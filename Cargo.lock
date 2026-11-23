@@ -655,6 +655,7 @@ dependencies = [
  "persia-analysis",
  "persia-format",
  "persia-storage",
+ "persia-testutil",
  "proptest",
  "rayon",
  "roaring",
