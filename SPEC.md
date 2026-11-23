@@ -855,14 +855,26 @@ field, which must then be exactly `0..n`. The engine writes the ids when it seri
 | `stored` | none (always stored, never indexed) |
 
 `stored: false` keeps the value out of the `DocStore` (it is indexed but `get` does not return it). Floats must be finite;
-`-0.0` reads as `0.0`. `analyzer` names a built-in analyzer (§6.3) as `"name"` (its current version) or `"name@version"`;
-the engine writes `"name@version"`, so a stored schema pins the version it was indexed with. A definition naming an
-analyzer or version this build does not have is rejected (unknown analyzer). A stored schema (§8.7) naming a
-well-formed one it lacks (a built-in name of the shape of §6.3.3 and a canonical version, such as `es@2` or `nl@1`
-read by a build that only has `es@1`) was written by a newer build: like an unknown format feature (§15), it is
-reported as *unsupported*, never as corruption; a malformed one (`es@01`, `ES@1`) is corruption. As with an unknown format
-feature, the whole manifest is then unsupported: a build cannot open a database one of whose collections it cannot
-analyze, since it could neither query that collection nor keep it intact on its next commit.
+`-0.0` reads as `0.0`. `analyzer` names a built-in analyzer (§6.3.3) or one registered with the `AnalyzerRegistry` the
+definition is read with (`AnalyzerRegistry::register`, `CollectionSchema::from_json_in`; ROADMAP 6.6.8, ADR-0059), as
+`"name"` (its current version; for a registered one, its highest registered version) or `"name@version"`; the engine
+writes `"name@version"`, so a stored schema pins the version it was indexed with. A registered name has the shape of a
+built-in name (§6.3.3): `register` refuses any other, and every built-in name at every version. A registered analyzer
+is stored and hashed exactly as a built-in one (§6.2.5). A definition naming an analyzer or version that is neither
+built in nor registered is rejected (unknown analyzer); a built-in name never resolves to a registered analyzer.
+A stored schema (§8.7) is read without a registry, and its `analyzer` is:
+- a version this build lacks of a built-in name (`es@2` read by a build that only has `es@1`): written by a newer
+  build. Like an unknown format feature (§15), it is reported as *unsupported*, never as corruption, and as with
+  one the whole manifest is then unsupported: a build cannot open a database one of whose collections it cannot
+  analyze, since it could neither query that collection nor keep it intact on its next commit;
+- any other well-formed `name@version` (a name of that shape, a canonical version): a registered analyzer, and the
+  schema decodes. A database is opened with a registry (`DatabaseOptions::registry`, the one `ReadOnlyDatabase::open`
+  takes), to which every built-in analyzer is added. If it lacks the analyzer, the open fails with
+  `DatabaseError::UnregisteredAnalyzer` before any segment is read, for the same reason; that is not corruption
+  either. The open cannot tell a registered analyzer from a newer build's built-in it lacks (`nl@1`): both are
+  unregistered to it. A build from before registered analyzers reads such a schema as written by a newer build
+  (unsupported), since the name has built-in shape;
+- a malformed one (`es@01`, `ES@1`): corruption.
 
 #### 6.2.3 Ranking and relaxation
 `ranking.static_rank` (optional): `field` (required: an `i64`, `f64` or `datetime` field), `weight` (`1.0`;
@@ -929,9 +941,10 @@ Pipeline: `char_filter* → tokenizer → token_filter*`. Char filters rewrite t
 the analyzer maps token spans back to the original value (§6.3.1); no built-in analyzer has one.
 Built-ins (§6.3.3): `standard` (Unicode UAX#29 words, NFKC, lowercase), `keyword`, `whitespace`, and the language
 analyzers `en`, `es`, `pt`, `fr`, `de` and `it` (stopwords + Snowball stemmer + accent folding).
-Analyzers are looked up by name and version (`persia_analysis::AnalyzerRegistry`). Analyzer name+version is recorded
+Analyzers are looked up by name and version (`persia_analysis::AnalyzerRegistry`), which holds the built-ins and
+those a caller registers (`AnalyzerRegistry::register`, §6.2.2). Analyzer name+version is recorded
 in the schema (§6.2.2); a released version never changes its chain or tables, so any change to a built-in analyzer
-is a new version. Only a change of the Unicode data or algorithms the build uses (a Unicode version bump, or a
+is a new version. A caller must keep the same promise for the versions it registers; the engine cannot check it. Only a change of the Unicode data or algorithms the build uses (a Unicode version bump, or a
 dependency or toolchain update that fixes them within one) can change a released version's output, and the analyzer
 then gets a new version that supersedes it (§6.3.1). This holds as far as the fingerprints of §6.3.1 see: a change visible only
 outside their probe contexts could move an output unversioned. Changing a field's analyzer requires a reindex into a new collection
@@ -1092,7 +1105,10 @@ bounded.
 
 #### 6.3.3 Built-in analyzers
 Every built-in analyzer is at version 1 (`persia_analysis::BUILTIN_ANALYZERS`; `builtin_analyzer(name, version)`
-builds one). Built-in names are, and will stay, of the shape `[a-z][a-z0-9_-]*`. Each chain below is the whole definition of that version, with the tables and Unicode version its
+builds one). Built-in names are, and will stay, of the shape `[a-z][a-z0-9_-]*`
+(`persia_analysis::is_analyzer_name`), and so are registered ones (§6.2.2). A later release may make a name a
+caller registered a built-in: its `register` then fails (`RegisterError::Reserved`), before the caller's database
+opens with the built-in chain in place of its own. Each chain below is the whole definition of that version, with the tables and Unicode version its
 filters name (§6.3.2); `guard` is the length guard of §6.3.1 at its defaults (255 bytes, `truncate`), last in every
 chain so it bounds the final terms.
 
@@ -2349,7 +2365,25 @@ A **read-only open** (ROADMAP 6.6.2) runs the same sequence on a container opene
 write, so it opens beside a live writer, any number at once. It cannot flush, and it does not stop at the size
 threshold, so memory grows with each collection's unflushed backlog until the memtable's docid limit (about 2^31
 operations) fails the open. A read-write open flushes at the threshold (above) and so bounds that memory. It
-shows the snapshot it found and does not follow later commits; it is opened again for those. Because it holds no
+shows the snapshot it found until it is **refreshed** (`ReadOnlyDatabase::refresh`, ROADMAP 6.6.6, ADR-0060),
+which reopens the container read-only (at its path when it was opened by one, so it follows a compaction, §4.6) and
+swaps in the next state at once: a search, or any holder of a snapshot, keeps the one it took. Another `db_uuid`
+there, or an older committed `seq`, is refused and nothing changes. When the WAL chunks already replayed are the
+first ones the new scan finds from the new `wal_start` (the same offset, length and `frame_seq`, and each one past
+the `log_end` of the slot the current state was read with holds the same bytes: its payload's XXH3-128, kept from
+the replay, not a CRC-32C, which over records ending in their own CRC-32C depends only on their lengths, §8.2.1)
+and the commits since dropped no collection and changed no schema (a merge, a retiring
+commit, a created collection, a flush of records this reader never replayed), only the chunks after them are
+replayed (with the stop below) into the same memtables, held until the swap so no view sees part of it, and only
+the segments and sidecars whose manifest entry changed are opened. Anything else (a flush commit moved `wal_start`
+past a replayed chunk, a collection was dropped or its schema changed, another history is at the path, or an earlier
+refresh failed while applying records) runs this open sequence again on the reopened container, with the open's
+registry and analysis. Those chunks past `log_end` are the ones a power loss on the writer's host (the reader may
+be on another, sharing the disk) may still drop, the restarted writer then logging others at the same places; it
+may drop several, so any of them, not only the last, can be where the histories part. The chunks before `log_end`
+are never read again: a commit writes its slot only after it synced every frame before its `log_end` (§4.5), so
+they survive a power loss even if the slot does not. A refresh that fails leaves what readers see unchanged; one
+that failed while applying records leaves its memtables held, and the next refresh reloads in full. Because it holds no
 lock, a writer may commit while the tail is scanned (§4.5.1). The scan can then include that commit's Manifest
 frame, after the loaded `log_end`, and WAL frames logged after it — including records of a collection the loaded
 manifest does not have. At each Manifest frame after the loaded `log_end` whose `seq` is greater than the loaded
@@ -2379,8 +2413,13 @@ which a read-write open truncates too; a read-only open classifies them by readi
 which a read-write open refuses or quarantines, fails it. It writes nothing. `persia verify` (like every `persia` command) exits
 with status 3 when it fails on corruption, status 4 when the file is not a Persia container (the header magic differs, or
 the file is too short to hold the magic; §4.2 still calls that corruption), and 1 on any other failure (ROADMAP 6.6.7),
-so a script separates a wrong file, a damaged database, and any other failed run. It
-analyzes replayed records with the built-in analyzers, the only ones a schema can name (§6.2.2).
+so a script separates a wrong file, a damaged database, and any other failed run. It has the built-in analyzers
+only and cannot load registered ones (§6.2.2): a `text` field whose analyzer it lacks is not analyzed
+(`ReadOnlyDatabase::open_skipping_analysis`, ROADMAP 6.6.8). Replay still decodes each of its records, validates it
+against the schema and applies it, and every other check runs; only that field's terms in the WAL are unchecked.
+The output names each such field on its `analysis` row (`collection.field (name@version)`, else `every text
+field`). A skip is not a failure (status 0). A version this build lacks of a built-in analyzer still fails the open
+as unsupported (status 1).
 
 **Inspection** (ROADMAP 6.6.10, `persia inspect container`) is a read-only container open (§4.4) that prints what
 recovery reads: the active slot's superblock, every frame from `wal_start` (offset, length, `frame_seq`, kind, and
