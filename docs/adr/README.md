@@ -77,3 +77,4 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0052](./0052-blob-garbage-collection-mark-sweep-and-pack-rewrite.md) | Blob garbage collection: the mark, the sweep and the pack rewrite | accepted |
 | [0053](./0053-blob-wiring-writer-proof-and-resume-api.md) | Blob wiring, writer proof and resume API: the pack opens read-write with the container's `WriterProof`, a read-only database opens it read-only, `verify` scans checksums by default, a resume token comes from `put_blob`'s error | accepted |
 | [0054](./0054-blob-pack-reader-leases.md) | Reader leases on the local blob pack: one locked 64-byte lease per read-only handle in `<name>.persia.blobs.leases/`; GC does not sweep while a live lease is not at the committed seq | accepted |
+| [0055](./0055-search-aggregations-and-derived-fields.md) | Search aggregations and derived fields | proposed |
