@@ -3,7 +3,7 @@
 
 **412/605 leaves done (68%)** · 0 in progress · `████████████████████░░░░░░░░░░` · last snapshot: 2026-11-23
 
-MVP (M0–M15): the counts above. Post-MVP: **0/193 leaves done (0%)** · 0 in progress. Those leaves are not part of the percentage, the graph, the ready-next list, or the burn-up. In-progress ones are listed under Post-MVP.
+MVP (M0–M15): the counts above. Post-MVP: **0/202 leaves done (0%)** · 0 in progress. Those leaves are not part of the percentage, the graph, the ready-next list, or the burn-up. In-progress ones are listed under Post-MVP.
 
 Status lives in [`ROADMAP.md`](./ROADMAP.md) checkboxes (`[ ]` todo · `[~]` in progress · `[x]` done).
 After changing one, run `cargo xtask progress --record`.
@@ -103,6 +103,7 @@ Not included in the headline, the graph, the ready-next list, or the burn-up. In
 | **M33** Search features (v1.1) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 6 | M4, M6, M7, M15 |
 | **M34** Backup, export, and query analytics (v1.2) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 2 | M8, M10, M15 |
 | **M35** Formal verification (v1.1) | ▶️ ready | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 10 | M1 |
+| **M36** Search aggregations and derived fields (v1.1) | ▶️ ready | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 9 | M5, M7 |
 
 ### In progress (post-MVP)
 
@@ -120,6 +121,12 @@ _Nothing in progress._
 - `35.3.2` (v1.1) `PinSet` (`persia::internal::pins`, a `Mutex`) against `get_blob` and `put_blob` (SPEC §9.5). `put_blob` pins its `upload_id` before the first chunk write (on resume, before listing) and the `blob_id` before it binds. `get_blob` pins the `blob_id` before the manifest lookup and the upload that manifest names right after. `PinSet::unless_pinned` checks and deletes as one step under the lock, so a pin taken after the mark still protects the object. A referenced blob or chunk is not deleted. (M35)
 - `35.3.3` (v1.1) The other lock-free and atomic structures: search `Thresholds` (`store_max` raises an `AtomicU64` with `fetch_max`, `crates/persia-engine/src/db/exec.rs`) and `CancelToken` (`Arc<AtomicBool>`); merge cancel (`Arc<AtomicBool>` in `crates/persia-engine/src/merge/scheduler.rs`); `Jitter::next_u64` (`AtomicU64` `fetch_add`, `crates/persia-storage/src/retry.rs`); and `run` in `crates/persia-blob/src/remote/parallel.rs` (`AtomicUsize` index, `AtomicBool` failure flag: the error is the lowest failing index, and a recorded failure starts no further index). (M35)
 - `35.4.1` (v1.1) An ADR in `docs/adr/`: what 35.1–35.3 verify, what is out of scope (full functional verification with Verus or Creusot, rejected as cost-prohibitive), and how to run TLC, Kani, and Loom. Append a pointer from SPEC §16.1. Do not rewrite that section. (M35)
+- `36.1.1` (v1.0, design only) Reserve the segment feature flag / layout for columnar field values before the format freeze; ADR accepted. Record in SPEC, before M15, the segment flag (SPEC §5.1, §15) and any layout beyond the `Columns` section (SPEC §5.3.5) so a later writer can set the flag without breaking a v1.0 reader. ADR-0055 becomes accepted. This leaf writes no aggregation code (M36)
+- `36.1.2` (v1.1) Columnar values for numeric and keyword fields per segment, behind the feature flag, with golden fixture. Aggregations read the `Columns` section (SPEC §5.3.5) and do not decode stored documents. Bytes that section does not already define are written only with the flag from 36.1.1. [T] A golden segment round-trips, and a segment that does not set the flag still opens (M36)
+- `36.2.1` (v1.1) count/sum/avg/min/max over hits on one snapshot, with exact numeric semantics (overflow, NaN, missing, empty) as ADR-0055. The snapshot and the hit set are the ones facets use (SPEC §7.5). [T] Empty, missing, non-finite, and saturating inputs match the ADR, including `saturated` (M36)
+- `36.2.2` (v1.1) group-by on keyword field with nested metrics; deterministic ordering and bounded bucket count. Typed columns (`i64`, `f64`, `bool`, `datetime`) use the same rules (ADR-0055). `size` has the facet bounds (SPEC §7.5). [T] Order is the metric, then the key, and a bucket past `size` is absent (M36)
+- `36.2.3` (v1.1) percentiles and histograms. Exact over the included values: nearest-rank percentiles, and histogram edges from the request (ADR-0055). [T] An empty set is null for a percentile and zero in every histogram bucket (M36)
+- … and 4 more
 
 ## In progress (MVP)
 
