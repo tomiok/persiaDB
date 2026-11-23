@@ -710,6 +710,9 @@ dependencies = [
 [[package]]
 name = "persia-testutil"
 version = "0.0.0"
+dependencies = [
+ "proptest",
+]
 
 [[package]]
 name = "pin-project-lite"
