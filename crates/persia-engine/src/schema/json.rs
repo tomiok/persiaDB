@@ -11,6 +11,9 @@ use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use persia_analysis::AnalyzerRegistry;
+
+use super::field::StoredAnalyzer;
 use super::{
     AnalyzerRef, CollectionSchema, Fallback, FieldKind, FilterRelaxation, KeywordOptions, Level,
     Levels, MAX_SCHEMA_JSON_LEN, Parts, RankFn, RankingConfig, RelaxationConfig, SchemaError,
@@ -18,7 +21,15 @@ use super::{
 };
 
 pub(super) fn from_json(json: &str) -> Result<CollectionSchema, SchemaError> {
-    from_raw(parse(json)?)
+    from_raw(parse(json)?, &AnalyzerRef::parse)
+}
+
+/// [`from_json`], with the analyzers `registry` holds besides the built-ins (SPEC §6.2.2).
+pub(super) fn from_json_in(
+    json: &str,
+    registry: &AnalyzerRegistry,
+) -> Result<CollectionSchema, SchemaError> {
+    from_raw(parse(json)?, &|text| AnalyzerRef::parse_in(text, registry))
 }
 
 fn parse(json: &str) -> Result<RawSchema, SchemaError> {
@@ -41,6 +52,10 @@ pub(super) fn to_json(schema: &CollectionSchema) -> Result<String, SchemaError> 
 /// writes them, ids and `"name@version"` analyzers included. Defaults would renumber the fields of an evolved
 /// schema, move a field to a newer analyzer version, or change any setting with the reading build's defaults,
 /// without anything in the stored bytes changing.
+///
+/// A well-formed `name@version` that is not a built-in name reads as a registered analyzer, whether or not any
+/// registry has it: the database open checks its registry (SPEC §6.2.2). A built-in name at a version this build
+/// lacks is [`SchemaError::UnsupportedAnalyzer`].
 pub(super) fn from_stored_json(json: &str) -> Result<CollectionSchema, SchemaError> {
     let mut raw = parse(json)?;
     if let Some(missing) = first_missing(&raw) {
@@ -49,16 +64,19 @@ pub(super) fn from_stored_json(json: &str) -> Result<CollectionSchema, SchemaErr
     // A newer build's analyzer is unsupported only if the rest of the schema is valid: check everything else with
     // the default analyzer in its place, so a damaged schema is still corruption.
     let unsupported = replace_unsupported_analyzers(&mut raw);
-    let schema = from_raw(raw)?;
+    let schema = from_raw(raw, &|text| match AnalyzerRef::read_stored(text) {
+        StoredAnalyzer::Known(analyzer) => Some(analyzer),
+        StoredAnalyzer::Unsupported | StoredAnalyzer::Malformed => None,
+    })?;
     match unsupported {
         Some(e) => Err(e),
         None => Ok(schema),
     }
 }
 
-/// Replaces, in every text field naming a well-formed `name@version` this build lacks, the analyzer with the default
-/// one, and returns the first such field as [`SchemaError::UnsupportedAnalyzer`]: in a stored schema that is a newer
-/// build's analyzer, not corruption.
+/// Replaces, in every text field naming a built-in analyzer at a well-formed version this build lacks, the analyzer
+/// with the default one, and returns the first such field as [`SchemaError::UnsupportedAnalyzer`]: in a stored
+/// schema that is a newer build's analyzer, not corruption.
 fn replace_unsupported_analyzers(raw: &mut RawSchema) -> Option<SchemaError> {
     let mut first = None;
     for (name, field) in &mut raw.fields.0 {
@@ -66,8 +84,7 @@ fn replace_unsupported_analyzers(raw: &mut RawSchema) -> Option<SchemaError> {
             analyzer: Some(analyzer),
             ..
         } = field
-            && AnalyzerRef::parse(analyzer).is_none()
-            && AnalyzerRef::is_well_formed_versioned(analyzer)
+            && AnalyzerRef::read_stored(analyzer) == StoredAnalyzer::Unsupported
         {
             let given = std::mem::replace(analyzer, TextOptions::default().analyzer.to_string());
             first.get_or_insert(SchemaError::UnsupportedAnalyzer {
@@ -147,10 +164,15 @@ impl Serialize for CollectionSchema {
 
 /// For trusted, already-bounded input such as a checksummed manifest (ROADMAP 3.3). A `Deserializer` cannot see the
 /// input's size, so this path does not apply [`MAX_SCHEMA_JSON_LEN`], and a `serde_json::Value`
-/// has already merged duplicate keys: untrusted text goes through [`CollectionSchema::from_json`].
+/// has already merged duplicate keys: untrusted text goes through [`CollectionSchema::from_json`]. Like `from_json`, it
+/// resolves built-in analyzers only: a schema naming a registered one is read with [`CollectionSchema::from_json_in`].
 impl<'de> Deserialize<'de> for CollectionSchema {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        from_raw(Object::<RawSchema>::deserialize(deserializer)?.0).map_err(de::Error::custom)
+        from_raw(
+            Object::<RawSchema>::deserialize(deserializer)?.0,
+            &AnalyzerRef::parse,
+        )
+        .map_err(de::Error::custom)
     }
 }
 
@@ -400,13 +422,16 @@ pub(crate) struct RawRelaxation {
     pub(crate) budget_ms: Option<u32>,
 }
 
-fn from_raw(raw: RawSchema) -> Result<CollectionSchema, SchemaError> {
+/// How a definition's `analyzer` text resolves: `None` is an unknown analyzer.
+type Resolve<'a> = dyn Fn(&str) -> Option<AnalyzerRef> + 'a;
+
+fn from_raw(raw: RawSchema, resolve: &Resolve<'_>) -> Result<CollectionSchema, SchemaError> {
     let fields = raw
         .fields
         .0
         .into_iter()
         .map(|(name, field)| {
-            let (id, kind) = kind_from_raw(&name, field)?;
+            let (id, kind) = kind_from_raw(&name, field, resolve)?;
             Ok((name, id, kind))
         })
         .collect::<Result<Vec<_>, SchemaError>>()?;
@@ -442,7 +467,11 @@ fn from_raw(raw: RawSchema) -> Result<CollectionSchema, SchemaError> {
     validate::build(parts, fields)
 }
 
-fn kind_from_raw(field: &str, raw: RawField) -> Result<(Option<u32>, FieldKind), SchemaError> {
+fn kind_from_raw(
+    field: &str,
+    raw: RawField,
+    resolve: &Resolve<'_>,
+) -> Result<(Option<u32>, FieldKind), SchemaError> {
     let stored = |s: Option<bool>| s.unwrap_or(true);
     Ok(match raw {
         RawField::Text {
@@ -457,12 +486,10 @@ fn kind_from_raw(field: &str, raw: RawField) -> Result<(Option<u32>, FieldKind),
             let d = TextOptions::default();
             let analyzer = match analyzer {
                 None => d.analyzer,
-                Some(text) => {
-                    AnalyzerRef::parse(&text).ok_or_else(|| SchemaError::UnknownAnalyzer {
-                        field: field.to_owned(),
-                        analyzer: text,
-                    })?
-                }
+                Some(text) => resolve(&text).ok_or_else(|| SchemaError::UnknownAnalyzer {
+                    field: field.to_owned(),
+                    analyzer: text,
+                })?,
             };
             let options = TextOptions {
                 analyzer,

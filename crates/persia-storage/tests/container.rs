@@ -1471,3 +1471,66 @@ fn a_read_only_open_fails_on_a_persistent_short_read_after_its_rescans() {
         1 + 8
     );
 }
+
+/// Appends a Manifest frame and commits it.
+fn commit_one<F: ContainerFile>(c: &mut Container<F>, payload: &[u8]) {
+    let manifest = c
+        .append(FrameKind::Manifest, payload, Compression::None)
+        .unwrap();
+    let wal_start = c.end();
+    c.commit(Commit {
+        manifest,
+        wal_start,
+        fence_token: 0,
+    })
+    .unwrap();
+}
+
+#[test]
+fn reopen_read_only_on_a_handle_sees_later_commits_and_leaves_this_one() {
+    // A simulated file: the reopen shares the image.
+    let file = SimFile::new();
+    let mut writer = Container::create_on(file.clone(), [3; 16]).unwrap();
+    let reader = Container::open_on(file, Mode::ReadOnly).unwrap();
+    commit_one(&mut writer, b"one");
+    let reopened = reader.reopen_read_only().unwrap();
+    assert_eq!((reader.superblock().seq, reopened.superblock().seq), (0, 1));
+    assert_eq!(reopened.header().db_uuid, [3; 16]);
+    assert!(reopened.path().is_none());
+
+    // A real file opened by handle: another descriptor of it, beside the writer's lock (a read-only open takes none).
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("handle.persia");
+    let mut writer = Container::create(&path).unwrap();
+    let reader = Container::open_on(std::fs::File::open(&path).unwrap(), Mode::ReadOnly).unwrap();
+    commit_one(&mut writer, b"one");
+    commit_one(&mut writer, b"two");
+    let reopened = reader.reopen_read_only().unwrap();
+    assert_eq!((reader.superblock().seq, reopened.superblock().seq), (0, 2));
+    assert_eq!(reopened.header().db_uuid, writer.header().db_uuid);
+}
+
+#[test]
+fn reopen_read_only_at_a_path_follows_a_file_renamed_over_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let mut first = Container::create(&path).unwrap();
+    commit_one(&mut first, b"first");
+    let reader = Container::open(&path, Mode::ReadOnly).unwrap();
+    drop(first);
+    let other = dir.path().join("other.persia");
+    let mut second = Container::create(&other).unwrap();
+    commit_one(&mut second, b"a");
+    commit_one(&mut second, b"b");
+    commit_one(&mut second, b"c");
+    let uuid = second.header().db_uuid;
+    drop(second);
+    std::fs::rename(&other, &path).unwrap();
+    let reopened = reader.reopen_read_only().unwrap();
+    assert_eq!(reopened.superblock().seq, 3);
+    assert_eq!(reopened.header().db_uuid, uuid);
+    assert_eq!(reopened.path(), reader.path());
+    // This handle still reads the file it opened.
+    assert_eq!(reader.superblock().seq, 1);
+    assert_ne!(reader.header().db_uuid, uuid);
+}

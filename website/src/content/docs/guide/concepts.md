@@ -24,7 +24,7 @@ Names below are the ones used in code and in the SPEC. The short definitions are
 | **Document** | A record with a string `id`, typed fields, and an optional blob reference. |
 | **Segment** | An immutable, self-contained index for one collection (SPEC §5). Once written, it is never edited. |
 | **Memtable** | The in-memory buffer of recent writes. Searches see it, so a `put` is visible before the next flush. |
-| **WAL** | Write-ahead log of operations not yet flushed into a segment. |
+| **WAL** | Write-ahead log of operations not yet flushed into a segment. How a crash replays it is [Durability and crash recovery](/guide/durability/). |
 | **Manifest** | A versioned snapshot: live segments per collection, schemas, and the WAL position still needed. |
 | **Commit** | Atomic publication of a new manifest. Readers move from one manifest to the next; they never see a mix. |
 | **Frame** | One checksummed record in the local container (SPEC §4.4): WAL chunk, segment, manifest, padding, or tombstone sidecar. |

@@ -1100,8 +1100,9 @@ fn relaxed_fallback(c: &mut Criterion) {
     group.finish();
 }
 
-/// L6 `filters` (ROADMAP 8.2.6), in the `search_relaxed` group: `w3 w40` under `tag = nosuch`, a filter no document
-/// passes, so every level of the collection's defaults (L2's rungs, L3, L4 and L5) finds nothing under it.
+/// L6 `filters` (ROADMAP 8.2.6), in the `search_relaxed` group: `w3 w40` under the soft filter `tag = nosuch` (ROADMAP
+/// 8.2.13), which no document passes, so every level of the collection's defaults (L2's rungs, L3, L4 and L5) finds
+/// nothing under it.
 /// `filters/never` is that cascade, which returns nothing; `filters/last_resort` adds the filter step, `w3 w40`
 /// without the filter, which excludes L5's step alone (L5 matches every document an earlier step does) and finds the
 /// hits.
@@ -1125,7 +1126,8 @@ fn relaxed_filters(c: &mut Criterion) {
             &DefaultFields::all(schema),
             &QueryLimits::default(),
         )
-        .with_filter([Filter::Term {
+        // Soft (ROADMAP 8.2.13): a hard `filter` is never dropped, so `last_resort` would build no step.
+        .with_soft_filter([Filter::Term {
             field: tag,
             value: FilterValue::Keyword("nosuch".into()),
         }]);
@@ -1231,6 +1233,99 @@ fn compile_text(schema: &CollectionSchema, text: &str) -> Query {
         .compile(text, &DefaultFields::all(schema), &QueryLimits::default())
         .into_query()
 }
+
+/// A deep cursor page with facets (ROADMAP 8.1.9, 8.1.11), in the `search_relaxed` group: `w3 w40 w7 w120 zz` (no
+/// document holds `zz`) under the largest `min_results`, so the cascade builds every step (L2's rungs, L3, L4 and
+/// L5), and every page counts the facets of `tag` over all of them. `facets/top` is the first page of 10;
+/// `facets/deep` the fifth, after the fourth page's last hit: before ROADMAP 8.1.11 it searched every step before its
+/// cursor's again only to count them, with every match visited; since, it reads the counts the first page that
+/// counted them kept, and searches its own steps pruned.
+fn relaxed_facets(c: &mut Criterion) {
+    let (db, [_, _, tag, _]) = collection(4, false);
+    let snapshot = db.snapshot();
+    let coll = snapshot.collection("bench").unwrap();
+    let memtable = coll.memtable();
+    let schema = coll.schema();
+    let views = coll.views(&memtable).unwrap();
+    let exec = Execution::default().threads(Threads::Current);
+    let query = QueryCompiler::new(schema, &AnalyzerRegistry::builtin())
+        .unwrap()
+        .compile(
+            "w3 w40 w7 w120 zz",
+            &DefaultFields::all(schema),
+            &QueryLimits::default(),
+        );
+    let every = RelaxPlan::new(
+        schema.relaxation(),
+        &RelaxOptions {
+            min_results: Some(*RelaxationConfig::MIN_RESULTS.end()),
+            ..RelaxOptions::default()
+        },
+    )
+    .unwrap();
+    let request = SearchRequest {
+        limit: 10,
+        facets: vec![FacetRequest::new(tag, 10, schema).unwrap()],
+        ..SearchRequest::default()
+    };
+    let mut deep = request.clone();
+    for _ in 0..4 {
+        let page = views.search_relaxed(&query, &deep, &every, &exec).unwrap();
+        deep.search_after = Some(page.hits.last().unwrap().cursor());
+    }
+    let mut group = c.benchmark_group("search_relaxed");
+    for (name, page) in [("facets/top", &request), ("facets/deep", &deep)] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let out = views.search_relaxed(&query, page, &every, &exec).unwrap();
+                assert_eq!(out.hits.len(), 10);
+                assert_ne!(out.facets.first().map(|f| f.values.len()), Some(0));
+                black_box(out)
+            });
+        });
+    }
+    // `facets/fill` (ROADMAP 8.1.9): the first page with `fill` and facets, under the default `min_results` (L0 finds
+    // nothing, `zz`; L2's rungs fill the page). Since 8.1.9 it also searches every step past its own only to count it.
+    // Each iteration asks another facet `size` (more sizes than the cache holds counts), so none reads counts an
+    // earlier one kept: each pays a first page. `facets/fill/plain` is the same page without facets.
+    let fill = RelaxPlan::new(
+        schema.relaxation(),
+        &RelaxOptions {
+            fill: Some(true),
+            ..RelaxOptions::default()
+        },
+    )
+    .unwrap();
+    let sized: Vec<SearchRequest> = (10..10 + 2 * 32)
+        .map(|size| SearchRequest {
+            facets: vec![FacetRequest::new(tag, size, schema).unwrap()],
+            ..request.clone()
+        })
+        .collect();
+    let mut next = sized.iter().cycle();
+    group.bench_function("facets/fill", |b| {
+        b.iter(|| {
+            let page = next.next().unwrap();
+            let out = views.search_relaxed(&query, page, &fill, &exec).unwrap();
+            assert_eq!(out.hits.len(), 10);
+            assert_ne!(out.facets.first().map(|f| f.values.len()), Some(0));
+            black_box(out)
+        });
+    });
+    let plain = SearchRequest {
+        facets: Vec::new(),
+        ..request.clone()
+    };
+    group.bench_function("facets/fill/plain", |b| {
+        b.iter(|| {
+            let out = views.search_relaxed(&query, &plain, &fill, &exec).unwrap();
+            assert_eq!(out.hits.len(), 10);
+            black_box(out)
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench,
@@ -1244,6 +1339,7 @@ criterion_group!(
     relaxed_two_letters,
     relaxed_filters,
     relaxed_compiled,
+    relaxed_facets,
     compile
 );
 criterion_main!(benches);

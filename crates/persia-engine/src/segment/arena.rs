@@ -78,11 +78,25 @@ impl Arena {
         Ok((id, true))
     }
 
-    /// Forgets every string with an id at or above `len` (a failed document's new terms). Rebuilds the table, which
-    /// costs its size: an error path only.
+    /// Forgets every string with an id at or above `len` (a failed document's new terms, ROADMAP 6.1.6), in time
+    /// proportional to how many it forgets.
+    ///
+    /// The table always holds what inserting ids `0, 1, 2...` in order into it would (a new id goes to the first
+    /// empty slot of its probe, and [`Self::grow`] reinserts in id order), so no lower id's probe passes the slot of a
+    /// higher one: that slot was empty when the lower id was placed. Emptying the slots of the highest ids, highest
+    /// first, therefore leaves exactly the table of the ids below `len`, and every probe still ends where it did.
     pub(crate) fn truncate(&mut self, len: usize) {
         if len >= self.ends.len() {
             return;
+        }
+        for id in (len..self.ends.len()).rev() {
+            let (Ok(id), Some(&hash)) = (u32::try_from(id), self.hashes.get(id)) else {
+                continue;
+            };
+            let slot = self.find(self.key(id), hash);
+            if let Some(s) = self.slots.get_mut(slot).filter(|s| **s == id) {
+                *s = EMPTY;
+            }
         }
         let end = len
             .checked_sub(1)
@@ -92,8 +106,6 @@ impl Arena {
         self.bytes.truncate(end);
         self.ends.truncate(len);
         self.hashes.truncate(len);
-        self.slots.fill(EMPTY);
-        self.rehash_into_slots();
     }
 
     /// The string with id `id` (empty for an id that was never returned).
@@ -230,6 +242,74 @@ mod tests {
         assert_eq!((a.len(), a.get(&0_u32.to_le_bytes())), (0, None));
     }
 
+    /// The truncation before ROADMAP 6.1.6: forget the strings, then rebuild the whole table in id order.
+    fn truncate_by_rehash(a: &mut Arena, len: usize) {
+        if len >= a.ends.len() {
+            return;
+        }
+        let end = len
+            .checked_sub(1)
+            .and_then(|last| a.ends.get(last))
+            .copied()
+            .unwrap_or(0);
+        a.bytes.truncate(end);
+        a.ends.truncate(len);
+        a.hashes.truncate(len);
+        a.slots.fill(EMPTY);
+        a.rehash_into_slots();
+    }
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        Intern(Vec<u8>),
+        /// Truncate to this fraction (of 256) of the current length.
+        Truncate(u8),
+    }
+
+    fn op() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            8 => prop::collection::vec(any::<u8>(), 0..4).prop_map(Op::Intern),
+            1 => any::<u8>().prop_map(Op::Truncate),
+        ]
+    }
+
+    proptest! {
+        /// ROADMAP 6.1.6: truncating by emptying the forgotten ids' slots leaves exactly the table the old full rehash
+        /// built (slot for slot), across growth, and the arena keeps agreeing with a model of the kept keys.
+        #[test]
+        fn truncate_matches_a_full_rehash(ops in prop::collection::vec(op(), 0..400)) {
+            let mut a = Arena::default();
+            let mut b = Arena::default();
+            let mut model: Vec<Vec<u8>> = Vec::new();
+            for op in ops {
+                match op {
+                    Op::Intern(key) => {
+                        let expected = model.iter().position(|k| *k == key);
+                        let (id, new) = a.intern(&key).unwrap();
+                        prop_assert_eq!(b.intern(&key).unwrap(), (id, new));
+                        prop_assert_eq!(new, expected.is_none());
+                        if new {
+                            model.push(key);
+                        }
+                        prop_assert_eq!(usize::try_from(id).unwrap(), expected.unwrap_or(model.len() - 1));
+                    }
+                    Op::Truncate(f) => {
+                        let len = model.len() * usize::from(f) / 256;
+                        a.truncate(len);
+                        truncate_by_rehash(&mut b, len);
+                        model.truncate(len);
+                    }
+                }
+                prop_assert_eq!(&a.slots, &b.slots);
+                prop_assert_eq!(a.records(), b.records());
+                prop_assert_eq!(a.len(), model.len());
+            }
+            for (id, key) in (0_u32..).zip(&model) {
+                prop_assert_eq!(a.get(key), Some(id));
+            }
+            prop_assert_eq!(a.get(b"never interned, too long"), None);
+        }
+    }
     proptest! {
         /// The arena agrees with a `HashMap` model on every sequence of keys.
         #[test]

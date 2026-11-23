@@ -26,11 +26,11 @@ not from the previous level's steps.
 |---|---|---|---|
 | L0 `exact` | (none) | All words required, analyzed. | never |
 | L1 `synonyms` | `synonyms` | Each run of words that is a synonym term (§6.3.2) may match any term of its groups (at most 50 alternatives per run). | the text has no synonym term, or the query is programmatic |
-| L2 `drop_terms` | `drop_terms:75%`, `:50%`, `:1` | `minimum_should_match` steps over the `n` words: `max(1, ⌊p·n/100⌋)` of them for `p` = 75, 50, then 1 word. Words no document holds, stopwords and low-IDF words are the ones reported dropped first. | fewer than 2 required words |
+| L2 `drop_terms` | `drop_terms:75%`, `:50%`, `:1` | `minimum_should_match` steps over the `n` words: `max(1, ⌊p·n/100⌋)` of them for `p` = 75, 50, then 1 word. Words no document holds, stopwords and low-IDF words are the ones reported dropped first. | fewer than 2 required words, or a required clause of a programmatic query holds a filter |
 | L3 `prefix` | `prefix:last`, `prefix` | The last word is completed when it has 2 characters or more, and every other word when it has 3 or more (characters of the analyzed term), each to its 50 most frequent completions. `prefix:last` first completes the last word alone, when another word is completed too and L2's last rung did not run before it. | no word qualifies |
 | L4 `fuzzy` | `fuzzy:1`, `fuzzy` | Each word of 4 characters or more matches terms within 1 edit (4–7 characters) or 2 edits (8 or more), 50 per word; a word no document holds is reported in `corrected`. `fuzzy:1` first caps every distance at 1 when some word may take 2. | no word has 4 characters |
-| L5 `fallback` | `fallback` | The collection's own ranking of the documents the filters keep, the excluded words do not match and no earlier step returned: by static rank (§6.2.3), then recency. | `fallback: "none"` |
-| L6 `filters` | `filters` | L0's query without the filters `last_resort` may drop, only when every earlier step found fewer than `min_results` hits. | `filters` is not `"last_resort"`, nothing to drop, or no word searched |
+| L5 `fallback` | `fallback` | The collection's own ranking of the documents every filter of L0 keeps (hard and soft), the excluded words do not match and no earlier step returned: by static rank (§6.2.3), then recency. | `fallback: "none"`, or a filter sits in a clause L5 drops (a programmatic query's filtered `must` clause), which it could not apply |
+| L6 `filters` | `filters` | L0's query without its soft filters (below), the hard ones kept, only when every earlier step found fewer than `min_results` hits. | `filters` is not `"last_resort"`, nothing to drop, or no word searched |
 
 Excluded words (`-word`) are never relaxed: every level keeps them excluded, L5 and L6 included. Phrases (`"..."`)
 and `field:` clauses ask for their text exactly, so L3 and L4 never complete or correct them; L2 may still drop one,
@@ -62,6 +62,12 @@ constraint that must hold there. A `soft_filter` is a preference: L6 (`filters: 
 only it, when every other step found fewer than `min_results` hits. Without `last_resort`, a `soft_filter` holds at
 every level like a `filter`. When L6 found the hits, the response says `filters_dropped: true`, and each such hit has
 `level: "filters"`.
+
+Every level but L6 keeps every filter L0 applies, hard and soft: L5 ranks only the documents they all keep, and L2
+and L5 build no step rather than drop a clause that holds a filter. A programmatic query's root filters are hard
+unless its caller marks them soft (`RelaxedQuery::with_soft_filter`). A query put in place of a compiled one
+(`Compiled::with_query`) is joined to the request's `filter` and `soft_filter` again, and the filters its own root
+holds are the caller's, so hard, also one equal to the `soft_filter`.
 
 ### Choosing settings
 
@@ -95,9 +101,15 @@ every level like a `filter`. When L6 found the hits, the response says `filters_
 - `fallback`: the order L5 ranked by (`static_rank` or `recency`), when L5 found the hits: the explicit sign that some
   hits do not match the words.
 - `filters_dropped`: `true` when L6 found the hits.
-- `truncated`: the budget cut the cascade.
+- `truncated`: the budget cut a step of this page. A step searched only to count facets does not count (below).
 
 Each hit has its `level`, `step` and `rank_score`. `explain: true` adds which step matched it.
+
+Facets (§7.5) count the matches of every step up to the hit step that a page holding every hit builds, each document
+once, at its first step, so every page of a query counts the same, with `fill` or without, by offset or by cursor. L6
+counts when it is built: its matches are documents the `soft_filter` rejects. With `fill`, a page builds the steps
+past its own hits only to count them; when the budget passes in one of those, the page is not truncated, but its
+facets are partial, and the response does not say so.
 
 ## Metrics
 
@@ -109,9 +121,10 @@ already counted) since the database was opened, without a lock:
 - `relaxed_ratio()` and `empty_ratio()`: the share relaxed and the zero-result rate after relaxation.
 
 Read them as `RelaxationStats` from `CollectionSnapshot::relaxation_stats()` or, summed over the collections,
-`Database::relaxation_stats()` (a dropped collection's counts stay in the sum). Every relaxed search also emits one
-`tracing` event at debug level, `relaxed search`, with its collection, `level`, `applied`, page `hits` and
-`truncated`.
+`Database::relaxation_stats()` (a dropped collection's counts stay in the sum). A read-only handle has no database
+sum yet; its collections count from 0 again when a refresh reloads it in full (ROADMAP 11.4.8). Every relaxed search
+also emits one `tracing` event at debug level, `relaxed search`, with its collection, `level`, `applied`, page `hits`
+and `truncated`.
 
 How to read them:
 
@@ -119,8 +132,8 @@ How to read them:
   and synonyms before widening relaxation.
 - Many hits at `fallback` mean the word levels rarely match: the results are the collection's ranking, not answers.
 - A non-zero `empty_ratio` comes from an empty collection, `fallback: "none"`, filters that keep no document, `relax: false`, a
-  truncated cascade (`truncated`), or a fallback step skipped for the limits (`fallback:skipped`, after many
-  expanded steps it must exclude).
+  truncated cascade (`truncated`), a fallback step skipped for the limits (`fallback:skipped`, after many
+  expanded steps it must exclude), or none built for a filter it could not apply (the levels table).
 
 ## The quality gate
 

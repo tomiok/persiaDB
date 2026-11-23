@@ -207,6 +207,9 @@ struct Term {
 #[derive(Debug)]
 struct Root<'a> {
     terms: Vec<Term>,
+    /// The required clauses a caller added beside a compiled query's clauses ([`Compiled::extra_must`], ROADMAP 8.2.15):
+    /// every step requires them, unchanged. None for a programmatic query, whose `must` clauses are its terms.
+    must: &'a [Query],
     must_not: &'a [Query],
     filter: &'a [Filter],
 }
@@ -244,13 +247,15 @@ impl<'a> Root<'a> {
         };
         Some(Self {
             terms,
+            must: input.compiled.map_or(&[], Compiled::extra_must),
             must_not,
             filter,
         })
     }
 
     /// How many terms `input`'s query has: its required clauses, or a programmatic root `bool`'s `must` clauses.
-    /// `None` for any other programmatic query, which L2 does not relax.
+    /// `None` for any other programmatic query, which L2 does not relax, one whose `must` clauses hold a filter
+    /// included.
     fn count(input: &LevelInput<'_>) -> Option<usize> {
         match (input.compiled, input.original) {
             // The compiler builds no `should` at the root: a root changed since has requirements L2 would drop.
@@ -262,8 +267,12 @@ impl<'a> Root<'a> {
                 None
             }
             (Some(compiled), _) => Some(compiled.clauses.iter().filter(|c| !c.negated).count()),
+            // A `must` clause that holds a filter is not a term to drop (ROADMAP 8.2.13): a step without it would match
+            // documents that filter rejects. Such a root is not relaxed.
             (None, Query::Bool(root))
-                if root.should.is_empty() && root.minimum_should_match == 0 =>
+                if root.should.is_empty()
+                    && root.minimum_should_match == 0
+                    && !root.must.iter().any(super::fallback::holds_filter) =>
             {
                 Some(root.must.len())
             }
@@ -313,6 +322,7 @@ impl LevelTransform for DropTerms {
     fn steps(&self, input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
         let Some(Root {
             terms,
+            must,
             must_not,
             filter,
         }) = Root::of(input)
@@ -344,11 +354,11 @@ impl LevelTransform for DropTerms {
                 continue;
             };
             let query = Query::Bool(BoolQuery {
+                must: must.to_vec(),
                 should: should.clone(),
                 must_not: must_not.to_vec(),
                 filter: filter.to_vec(),
                 minimum_should_match,
-                ..BoolQuery::default()
             });
             let effective = input.compiled.map(|compiled| {
                 let mut keeps = vec![false; compiled.clauses.len()];

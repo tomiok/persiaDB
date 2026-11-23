@@ -49,7 +49,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::query::{Compiled, Query, QueryLimits};
+use crate::query::{Compiled, Filter, Query, QueryLimits};
 use crate::schema::{Fallback, FieldId, FilterRelaxation, Level, RankingConfig, RelaxationConfig};
 use crate::search::TermSource;
 use crate::segment::ReadError;
@@ -203,6 +203,11 @@ pub(crate) struct LevelInput<'a> {
     /// ([`Self::dropping`]). A query L2 builds no step for (one required clause, even one the analyzer splits in
     /// several terms) or a plan without L2 leaves it false.
     pub(crate) drops_terms: bool,
+    /// The filters the filter step may drop (ROADMAP 8.2.13, ADR-0056): a compiled query's `soft_filter` but those a
+    /// caller's own root holds ([`Compiled::droppable`]), and nothing else; a programmatic query's, those its caller
+    /// marked soft ([`crate::db::RelaxedQuery::with_soft_filter`]). None by default ([`Self::new`]): every filter is
+    /// hard and the filter step builds nothing; the search sets them ([`Self::softening`]).
+    pub(crate) soft: &'a [Filter],
 }
 
 impl<'a> LevelInput<'a> {
@@ -218,6 +223,7 @@ impl<'a> LevelInput<'a> {
             expands: &no_field,
             terms: None,
             drops_terms: true,
+            soft: &[],
         }
     }
 
@@ -232,6 +238,11 @@ impl<'a> LevelInput<'a> {
             drops_terms,
             ..self
         }
+    }
+
+    /// This input with `soft` the filters the filter step may drop (ROADMAP 8.2.13).
+    pub(crate) fn softening(self, soft: &'a [Filter]) -> Self {
+        Self { soft, ..self }
     }
 
     /// This input with L4 walking `terms` for its corrections.
@@ -374,6 +385,9 @@ pub struct RelaxPlan {
     /// Every step excludes every earlier step, nested or not: the rule before ROADMAP 8.2.2.4, which tests compare to.
     /// Only tests set it.
     exclude_every_step: bool,
+    /// Whether a level's transform was replaced ([`Self::with_level`], tests only): its steps are not this version's, so
+    /// no count of them is kept (ROADMAP 8.1.11).
+    replaced: bool,
 }
 
 impl RelaxPlan {
@@ -433,6 +447,7 @@ impl RelaxPlan {
             budget: Duration::from_millis(u64::from(budget_ms)),
             limits: None,
             exclude_every_step: false,
+            replaced: false,
         })
     }
 
@@ -500,6 +515,12 @@ impl RelaxPlan {
         !self.exclude_every_step
     }
 
+    /// Whether a search may keep the facet counts of its steps for later pages (ROADMAP 8.1.11): its levels are this
+    /// version's and follow the rules its settings record. Always, outside tests.
+    pub(crate) fn cacheable(&self) -> bool {
+        !self.replaced && !self.exclude_every_step
+    }
+
     /// This plan with every step excluding every earlier one, nested or not: the rule ROADMAP 8.2.2.4 replaced.
     #[cfg(test)]
     pub(crate) fn excluding_every_step(mut self) -> Self {
@@ -514,6 +535,7 @@ impl RelaxPlan {
         level: RelaxLevel,
         transform: Arc<dyn LevelTransform>,
     ) -> Self {
+        self.replaced = true;
         if let Some(planned) = self.levels.iter_mut().find(|l| l.level == level) {
             planned.transform = transform;
         } else {

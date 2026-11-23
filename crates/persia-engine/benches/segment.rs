@@ -1,7 +1,7 @@
 //! Indexing throughput: [`SegmentBuilder::add`] over synthetic documents, and [`SegmentWriter::finish`] (ROADMAP 5.1,
 //! 5.2); reading the segment they build: open, term lookup, postings, skipping, positions, documents (ROADMAP 5.3);
 //! merging segments (ROADMAP 6.5.2); opening a segment with a large term dictionary; the memtable: `put` and postings
-//! through a view (ROADMAP 6.1).
+//! through a view (ROADMAP 6.1), and a rejected `put` (ROADMAP 6.1.6).
 //! Deterministic input (a fixed-seed generator), so runs compare; baselines in `docs/benchmarks.md`.
 //! Run: `cargo bench -p persia-engine --bench segment`.
 
@@ -465,6 +465,39 @@ fn bench_memtable(c: &mut Criterion) {
     group.finish();
 }
 
+/// A `put` the memtable rejects after indexing part of it (ROADMAP 6.1.6), into a memtable holding the 2 000 documents:
+/// `body` (120 words, none indexed before) and `brand` are indexed, then `raw` fails on a token over 32 KiB (an analyzer
+/// without the length guard, registered), and the put is undone. The undo forgets the terms the put added to each
+/// field's arena: before 6.1.6 it rehashed each whole table (about 5 000 terms in `body`), now it removes only them.
+/// Rejected puts per second.
+fn bench_rejected_put(c: &mut Criterion) {
+    let mut registry = AnalyzerRegistry::builtin();
+    let raw = persia_analysis::Analyzer::builder(persia_analysis::WhitespaceTokenizer).build();
+    registry.register("raw", 1, raw).unwrap();
+    let json = r#"{"name": "bench", "fields": {
+        "title": {"type": "text", "positions": true}, "body": {"type": "text"},
+        "brand": {"type": "keyword"}, "price": {"type": "f64"}, "raw": {"type": "text", "analyzer": "raw"}
+    }}"#;
+    let schema = CollectionSchema::from_json_in(json, &registry).unwrap();
+    let field = |name: &str| schema.field(name).unwrap().id();
+    let mut mem = Memtable::new(&schema, &registry).unwrap();
+    for d in documents(&schema) {
+        mem.put(&d).unwrap();
+    }
+    let words: Vec<String> = (0..120).map(|i| format!("unseen{i}")).collect();
+    let rejected = Document::new("rejected")
+        .with(field("body"), Value::String(words.join(" ")))
+        .with(field("brand"), Value::String("brand-new".into()))
+        .with(field("raw"), Value::String("x".repeat(40_000)));
+    assert!(mem.put(&rejected).is_err());
+    let mut group = c.benchmark_group("memtable");
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("put_rejected", |b| {
+        b.iter(|| black_box(mem.put(&rejected).is_err()));
+    });
+    group.finish();
+}
+
 /// Merging 8 segments of the same documents, every 10th deleted (ROADMAP 6.5.2): compare with `segment/add` + `finish`,
 /// which re-index them.
 fn bench_merge(c: &mut Criterion) {
@@ -529,6 +562,7 @@ criterion_group!(
     bench_open_large_dict,
     bench_records_over_many_blocks,
     bench_columns,
-    bench_memtable
+    bench_memtable,
+    bench_rejected_put
 );
 criterion_main!(benches);

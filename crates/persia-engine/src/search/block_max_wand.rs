@@ -6,6 +6,7 @@
 //! Every bound is summed in query order, as the score is (SPEC §7.2), so a bound is at least the score exactly
 //! ([`sum_in_order`]): a document is skipped only when it provably scores at most the threshold.
 
+use crate::score::saturate;
 use crate::segment::ReadError;
 
 use super::{Matcher, Pos, ScoreBound, raise, sum_in_order, union_bound};
@@ -144,7 +145,7 @@ impl<M: Matcher> BlockMaxWand<M> {
                 sum += clause.score()?;
             }
         }
-        Ok(sum)
+        Ok(saturate(sum))
     }
 
     /// From `target` (every clause at or after it), the next document to score, or `None`.

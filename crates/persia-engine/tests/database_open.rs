@@ -270,7 +270,8 @@ fn a_read_only_open_stops_before_a_collection_created_during_its_scan() {
         )])
     );
     // The scan did see the newer commit: its Manifest, then the put logged after it.
-    let uncommitted = reader.container().uncommitted_frames();
+    let container = reader.container();
+    let uncommitted = container.uncommitted_frames();
     let manifest = uncommitted
         .iter()
         .find(|f| f.kind == FrameKind::Manifest)
@@ -283,8 +284,7 @@ fn a_read_only_open_stops_before_a_collection_created_during_its_scan() {
     );
     // Invariant 6: `wal_end` is the end of the last chunk replayed, the one before that Manifest, not the end of the
     // last WAL chunk the scan saw (the next snapshot's).
-    let replayed_chunk = reader
-        .container()
+    let replayed_chunk = container
         .frames()
         .iter()
         .rfind(|f| f.kind == FrameKind::WalChunk && f.offset < manifest.offset)
@@ -615,8 +615,8 @@ fn wal_end_moves_with_the_replayed_records_only() {
     drop(db);
     let reader = ReadOnlyDatabase::open(&path, &registry).unwrap();
     assert_eq!((reader.seq(), reader.replayed()), (empty.seq(), 2));
-    let last = reader
-        .container()
+    let container = reader.container();
+    let last = container
         .frames()
         .iter()
         .rfind(|f| f.kind == FrameKind::WalChunk)
@@ -704,7 +704,7 @@ fn wal_end_is_wal_start_without_a_wal_and_counts_from_it() {
     // 5): the next `seq` replays it and its WAL ends where it did, before the commit's Manifest.
     db.create_collection(schema("b")).unwrap();
     let kept = open();
-    let sb = kept.container().superblock();
+    let sb = *kept.container().superblock();
     assert!(kept.seq() > after.seq());
     assert_eq!(sb.wal_start, chunks[0].offset);
     assert_eq!((kept.replayed(), kept.wal_end()), (1, after.wal_end()));

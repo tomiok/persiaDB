@@ -2,7 +2,8 @@
 //!
 //! Invariants:
 //! 1. An expansion keeps the terms of every view that it takes (a byte prefix, or the optimal string alignment
-//!    distance over characters), at most `max_expansions` of them: the highest collection `df` first, then bytes.
+//!    distance over characters), at most `max_expansions` of them: for a fuzzy the fewest edits first (ROADMAP 8.2.12),
+//!    then the highest collection `df`, then bytes.
 //!    Every kept term scores with one `idf`, from the largest of those `df`s. A fuzzy term is then multiplied by
 //!    `(distance + 1 − d) / (distance + 1)`. Hits match that sum, bit for bit, under every pruning strategy. The
 //!    oracle enumerates the terms itself and evaluates SPEC §7.2 on the postings; it does not plan a `bool` of
@@ -198,41 +199,47 @@ fn kept_terms(
     memtable: &MemtableView,
     query: &Query,
 ) -> (FieldId, Vec<Kept>) {
-    let (field, cap, weight_of): (FieldId, u32, Box<dyn Fn(&str) -> Option<f64>>) = match query {
-        Query::Prefix(q) => {
-            let p = q.prefix.clone();
-            (
-                q.field,
-                q.max_expansions,
-                Box::new(move |t| t.starts_with(&p).then_some(1.0)),
-            )
-        }
-        Query::Fuzzy(q) => {
-            let (term, max_distance) = (q.term.clone(), q.distance);
-            let limit = usize::from(max_distance);
-            (
-                q.field,
-                q.max_expansions,
-                Box::new(move |t| {
-                    let edits = osa(&term, t);
-                    (edits <= limit).then(|| edit_weight(max_distance, edits))
-                }),
-            )
-        }
-        _ => unreachable!(),
-    };
+    let (field, cap, weight_of): (FieldId, u32, Box<dyn Fn(&str) -> Option<(usize, f64)>>) =
+        match query {
+            Query::Prefix(q) => {
+                let p = q.prefix.clone();
+                (
+                    q.field,
+                    q.max_expansions,
+                    Box::new(move |t| t.starts_with(&p).then_some((0, 1.0))),
+                )
+            }
+            Query::Fuzzy(q) => {
+                let (term, max_distance) = (q.term.clone(), q.distance);
+                let limit = usize::from(max_distance);
+                (
+                    q.field,
+                    q.max_expansions,
+                    Box::new(move |t| {
+                        let edits = osa(&term, t);
+                        (edits <= limit).then(|| (edits, edit_weight(max_distance, edits)))
+                    }),
+                )
+            }
+            _ => unreachable!(),
+        };
     let stats = c.search_statistics(memtable);
-    let mut ranked: Vec<(u64, String, f64)> = all_terms(c, memtable, field)
+    // A fuzzy keeps the fewest edits first (ROADMAP 8.2.12), then the highest `df`, then bytes; a prefix has no edits.
+    let mut ranked: Vec<(usize, u64, String, f64)> = all_terms(c, memtable, field)
         .into_iter()
         .map(|t| String::from_utf8(t).unwrap())
         .filter_map(|t| weight_of(&t).map(|w| (t, w)))
-        .map(|(t, w)| (stats.df(field, t.as_bytes()).unwrap(), t, w))
+        .map(|(t, (edits, w))| (edits, stats.df(field, t.as_bytes()).unwrap(), t, w))
         .collect();
-    ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    ranked.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
     ranked.truncate(usize::try_from(cap).unwrap());
     let mut kept: Vec<Kept> = ranked
         .into_iter()
-        .map(|(_, term, weight)| Kept { term, weight })
+        .map(|(_, _, term, weight)| Kept { term, weight })
         .collect();
     kept.sort_by(|a, b| a.term.cmp(&b.term));
     (field, kept)
@@ -532,6 +539,29 @@ fn the_cap_ranks_by_the_collection_df() {
     );
 }
 
+/// Invariant 1 by hand (ROADMAP 8.2.12): a `fuzzy` keeps the fewest edits first, then the highest `df`. `rubx`, two
+/// edits from `runa`, is in three documents and `runb`, one edit away, in one: a cap of 1 keeps `runb` at distance 2 as
+/// at distance 1, so the distance-1 query's terms are among the distance-2 one's (L4's tier steps nest, SPEC §7.6).
+#[test]
+fn a_fuzzy_keeps_the_fewest_edits_first() {
+    let (mut db, f) = database();
+    for id in ["x1", "x2", "x3"] {
+        put(&mut db, &f, id, "rubx", "t");
+    }
+    db.commit().unwrap();
+    put(&mut db, &f, "b1", "runb", "t");
+    let fuzzy = |distance, cap| {
+        Query::Fuzzy(FuzzyQuery {
+            field: f.body,
+            term: "runa".into(),
+            distance,
+            max_expansions: cap,
+        })
+    };
+    assert_eq!(found(&db, &fuzzy(2, 1)), ["b1"]);
+    assert_eq!(found(&db, &fuzzy(1, 1)), ["b1"]);
+    assert_eq!(found(&db, &fuzzy(2, 2)), ["b1", "x1", "x2", "x3"]);
+}
 /// Invariant 3.
 #[test]
 fn nothing_kept_matches_nothing_and_bad_expansions_are_errors() {

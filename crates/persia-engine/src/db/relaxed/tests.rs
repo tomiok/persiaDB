@@ -1589,13 +1589,14 @@ fn with_fill_each_page_states_the_steps_it_built() {
         ..request(2)
     };
     let red = term(body, "red");
-    // Page 1 (window 2) is full at L0: it builds nothing more, and counts red's documents only.
+    // Page 1 (window 2) is full at L0: it builds and states nothing more, but it counts the synonyms step a page of every
+    // hit builds (SPEC §7.5, ROADMAP 8.1.9), past its own.
     let first = views.search_relaxed(&red, &base, &relax, &exec()).unwrap();
     assert_eq!(first.relaxation.applied.len(), 0);
     let count =
         |out: &super::RelaxedResults| -> u64 { out.facets[0].values.iter().map(|v| v.count).sum() };
-    assert_eq!(count(&first), 2);
-    // Page 2, by cursor or by offset, needs more: it builds synonyms and counts its documents too.
+    assert_eq!(count(&first), 4);
+    // Page 2, by cursor or by offset, needs more: it builds and states synonyms, and counts the same.
     let by_cursor = SearchRequest {
         search_after: Some(first.hits[1].cursor()),
         ..base.clone()
@@ -1876,6 +1877,61 @@ mod limits {
             max_terms,
             ..QueryLimits::default()
         }
+    }
+
+    /// A nested level of fixed steps (ROADMAP 8.2.2.4): a later step built uncut stands for the earlier ones.
+    #[derive(Debug)]
+    struct Nested(Vec<Step>);
+
+    impl LevelTransform for Nested {
+        fn steps(&self, _input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
+            Ok(self.0.clone())
+        }
+
+        fn nested(&self) -> bool {
+            true
+        }
+    }
+
+    /// SPEC §7.1.3, §7.6 by hand (ROADMAP 8.1.19, 8.2.2.4): a cut step of a nested level stands for no earlier step of
+    /// it, so those stay excluded and count in full against the limits of the later steps. The nested level's steps
+    /// hold prefixes of different bytes (`sh`, `bl`), so no expansion a step excludes is one it holds (no credit,
+    /// ROADMAP 8.2.12). Under 90 expansions: `sh` (50) fits; `bl` (50) beside `sh` (50) is cut to the 40 left; `gr`
+    /// (30) then counts `sh` and the cut `bl` (90) and is skipped, where it would fit had the cut `bl` replaced `sh`.
+    /// Under 100, `bl` fits uncut and stands for `sh`, so `gr` counts `bl` alone (80) and fits. (Since 8.2.12 an engine
+    /// L2 rung is never cut: every expansion it holds is L0's at the same cap, and is credited.)
+    #[test]
+    fn a_cut_step_of_a_nested_level_leaves_its_earlier_steps_excluded() {
+        let (db, body, _) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let nested: Arc<dyn LevelTransform> = Arc::new(Nested(vec![
+            step(prefix(body, "sh", 50), "sh"),
+            step(prefix(body, "bl", 50), "bl"),
+        ]));
+        let later = Stub::new(vec![step(prefix(body, "gr", 30), "gr")]);
+        let relax = |max_expansions| {
+            plan(&min(10), &[(RelaxLevel::Prefix, &later)])
+                .with_level(RelaxLevel::DropTerms, Arc::clone(&nested))
+                .with_limits(QueryLimits {
+                    max_expansions,
+                    ..QueryLimits::default()
+                })
+        };
+        let purple = term(body, "purple");
+        let cut = views
+            .search_relaxed(&purple, &request(10), &relax(90), &exec())
+            .unwrap();
+        assert_eq!(cut.relaxation.applied, ["sh", "bl:cut", "gr:skipped"]);
+        // `c` holds `shoes` and `blue`: `sh`'s, not again `bl`'s.
+        assert_eq!(sorted(&cut), [("a", 1), ("c", 1), ("e", 2)]);
+        let uncut = views
+            .search_relaxed(&purple, &request(10), &relax(100), &exec())
+            .unwrap();
+        assert_eq!(uncut.relaxation.applied, ["sh", "bl", "gr"]);
+        assert_eq!(sorted(&uncut), [("a", 1), ("c", 1), ("d", 3), ("e", 2)]);
     }
 
     #[test]
@@ -2270,7 +2326,8 @@ mod nested {
     //!    as one where every step excludes every earlier step: excluding the latest of a nested level excludes them all.
     //! 2. Under tight limits, where steps are cut or skipped, no document is a hit of two steps: a cut step does not
     //!    stand for its level's earlier steps.
-    //! 3. A step of a nested level never excludes more than the old rule did, so it is cut or skipped no more often.
+    //! 3. A step of a nested level never excludes more than the old rule did while both searched the same steps before
+    //!    it, so it is cut or skipped no more often.
     //! 4. Pages by cursor under tight limits are slices of the one ranking, and state the same cascade without `fill`.
 
     use std::collections::BTreeSet;
@@ -2455,7 +2512,8 @@ mod nested {
         }
         let old = views.search_relaxed(&l0, &all, &every, &exec()).unwrap();
         // Both build the same steps in order, until one has its hits: per step, the old rule's exclusions hold the new
-        // rule's, so a step it cuts or skips was cut or skipped by the old rule too.
+        // rule's, so a step it cuts or skips was cut or skipped by the old rule too. That holds while both searched the
+        // same steps before it: once the new rule searched one the old skipped, its later steps exclude that one too.
         for (new, was) in got.relaxation.applied.iter().zip(&old.relaxation.applied) {
             let held = |label: &str| label.ends_with(":skipped") || label.ends_with(":cut");
             prop_assert!(
@@ -2470,6 +2528,9 @@ mod nested {
                 got.relaxation.applied,
                 old.relaxation.applied
             );
+            if new.ends_with(":skipped") != was.ends_with(":skipped") {
+                break;
+            }
         }
         // A page after a cursor builds the same steps again without searching those before it: the pages by cursor are
         // the one ranking, and, without `fill`, each states the same cascade.
@@ -2555,7 +2616,10 @@ fn l3_does_not_expand_a_field_whose_analyzer_stacks_tokens() {
     assert_eq!(applied(), Vec::<String>::new());
 }
 
+mod effective;
 mod explain;
+mod extra_must;
+mod facets;
 mod fill;
 mod filters;
 mod options;

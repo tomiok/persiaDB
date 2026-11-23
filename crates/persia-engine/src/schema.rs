@@ -33,6 +33,8 @@ pub(crate) use validate::{collection_name_problem, field_name_problem};
 use std::collections::BTreeMap;
 use std::fmt;
 
+use persia_analysis::AnalyzerRegistry;
+
 pub use canonical::SchemaHash;
 pub use config::{
     Fallback, FilterRelaxation, Level, Levels, RankFn, RankingConfig, RelaxationConfig, StaticRank,
@@ -135,6 +137,31 @@ impl CollectionSchema {
     /// [`SchemaError::Json`] for malformed or non-conforming JSON, another variant for a rule of SPEC §6.2.1–§6.2.3.
     pub fn from_json(json: &str) -> Result<Self, SchemaError> {
         json::from_json(json)
+    }
+
+    /// [`Self::from_json`] for a definition that may also name the analyzers `registry` holds besides the built-ins,
+    /// as `"name"` (its highest registered version) or `"name@version"` (SPEC §6.2.2). A database must be opened with
+    /// a registry holding them ([`crate::db::DatabaseOptions::registry`]).
+    ///
+    /// ```
+    /// use persia_analysis::{Analyzer, AnalyzerRegistry, WhitespaceTokenizer};
+    /// use persia_engine::schema::{CollectionSchema, FieldKind, SchemaError};
+    ///
+    /// let mut registry = AnalyzerRegistry::builtin();
+    /// registry.register("tags", 1, Analyzer::builder(WhitespaceTokenizer).build())?;
+    /// let json = r#"{"name": "notes", "fields": {"tags": {"type": "text", "analyzer": "tags"}}}"#;
+    /// let schema = CollectionSchema::from_json_in(json, &registry)?;
+    /// let Some(FieldKind::Text(tags)) = schema.field("tags").map(|f| f.kind()) else { panic!() };
+    /// assert_eq!(tags.analyzer.to_string(), "tags@1");
+    /// // Without the registry, the analyzer is unknown.
+    /// assert!(matches!(CollectionSchema::from_json(json), Err(SchemaError::UnknownAnalyzer { .. })));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// As [`Self::from_json`].
+    pub fn from_json_in(json: &str, registry: &AnalyzerRegistry) -> Result<Self, SchemaError> {
+        json::from_json_in(json, registry)
     }
 
     /// [`Self::from_json`] for a schema the engine stored (SPEC §8.7): every option must be given, and a well-formed
@@ -379,7 +406,8 @@ pub enum SchemaError {
         /// The valid range.
         allowed: &'static str,
     },
-    /// A text field names an analyzer that is not built in, or a version of it that does not exist.
+    /// A text field names an analyzer that is neither built in nor in the registry the definition was read with, or a
+    /// version of it that does not exist.
     #[error("field {field:?}: unknown analyzer {analyzer:?}")]
     UnknownAnalyzer {
         /// The field.
@@ -387,8 +415,9 @@ pub enum SchemaError {
         /// The analyzer as given.
         analyzer: String,
     },
-    /// A stored schema (SPEC §8.7) names a well-formed analyzer version this build does not have, such as `es@2`
-    /// or a later built-in: a newer build wrote it. Like an unknown format feature, it is not corruption (SPEC §15).
+    /// A stored schema (SPEC §8.7) names a version this build does not have of a built-in analyzer, such as `es@2`:
+    /// a newer build wrote it. (Another name it lacks is a registered analyzer, checked when the database opens.) Like
+    /// an unknown format feature, it is not corruption (SPEC §15).
     #[error(
         "field {field:?}: analyzer {analyzer:?} is not supported by this build (written by a newer one)"
     )]

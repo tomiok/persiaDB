@@ -7,7 +7,7 @@
 //! memtable before the commit, in its segment after.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use arc_swap::ArcSwap;
 
@@ -19,6 +19,7 @@ use crate::segment::{ReadError, Segment, Tombstones};
 use crate::stats::{SearchStatistics, SegmentStatistics};
 use crate::view::{SearchView, SegmentView};
 
+use super::relaxed::FacetCache;
 use super::relaxed::{RelaxationCounters, RelaxationStats};
 use super::views::HiddenCache;
 
@@ -67,6 +68,9 @@ pub struct CollectionSnapshot {
     pub(super) hidden: HiddenCache,
     /// The collection's relaxed searches, counted since the open (ROADMAP 8.3.3): shared by all its snapshots.
     pub(super) relaxation: Arc<RelaxationCounters>,
+    /// The facet counts of relaxed queries on this snapshot, once a page counted them (ROADMAP 8.1.11, ADR-0061): they
+    /// go with the snapshot.
+    pub(super) facets: Arc<Mutex<FacetCache>>,
 }
 
 /// Where the live version of a document id is (SPEC §8.3, ROADMAP 6.4.1).

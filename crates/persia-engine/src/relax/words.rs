@@ -67,6 +67,8 @@ impl Words<'_> {
         if !rewritten {
             return None;
         }
+        // Required clauses a caller added beside the clauses, unchanged (ROADMAP 8.2.15).
+        must.extend(compiled.extra_must().iter().cloned());
         Some(
             if must.len() == 1 && must_not.is_empty() && filter.is_empty() {
                 must.pop()?

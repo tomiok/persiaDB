@@ -325,8 +325,9 @@ impl Manifest {
     ///
     /// # Errors
     /// [`ManifestError::Corrupt`] if `bytes` break any rule of SPEC §8.7, [`ManifestError::UnsupportedVersion`]
-    /// for an encoding version this build does not read, [`ManifestError::UnsupportedAnalyzer`] for a schema naming an
-    /// analyzer version it does not have.
+    /// for an encoding version this build does not read, [`ManifestError::UnsupportedAnalyzer`] for a schema naming a
+    /// version it does not have of a built-in analyzer. A schema naming another analyzer decodes: the database open
+    /// checks it against its registry (SPEC §6.2.2).
     pub fn decode(bytes: &[u8]) -> Result<Self, ManifestError> {
         codec::decode(bytes)
     }

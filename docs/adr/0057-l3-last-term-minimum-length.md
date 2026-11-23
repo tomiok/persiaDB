@@ -1,6 +1,6 @@
 # ADR-0057: L3 expands the last term from 2 characters
 
-- Status: accepted
+- Status: proposed
 - Date: 2026-11-22
 - Related: SPEC §7.1, §7.1.3, §7.6; ROADMAP 8.1.20, 8.2.3, 8.2.7; ADR-0040 (amends item 4), ADR-0046
 

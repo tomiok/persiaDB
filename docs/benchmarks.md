@@ -161,6 +161,20 @@ Documents and postings per second.
 |---|--:|--:|--:|
 | 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.1) | 78.9 K | 45.4 M | 69.6 K |
 
+`cargo bench -p persia-engine --bench segment -- memtable/put_rejected` (ROADMAP 6.1.6): one `put` the memtable rejects
+after indexing part of it, into a memtable holding the 2 000 documents. `body` (120 words none indexed before) and
+`brand` are indexed, then a field under a registered analyzer without the length guard fails on a token over 32 KiB,
+and the put is undone. Before 6.1.6 the undo rehashed every field's whole term table (about 5 000 terms in `body`);
+now it empties the slots of the terms the put added. Rejected puts per second; the rest of a rejected put (the
+document's encoding, analyzing a 40 000-byte value, interning) dominates, so the undo's share was about a tenth. The
+undo now costs the terms the put added, where it cost the field's whole vocabulary (measured here at 2 000 documents
+only).
+
+| Recorded | `memtable/put_rejected` |
+|---|--:|
+| 2026-11-22, rustc 1.99.0, AMD Ryzen 5 3600, Linux; full rehash (before ROADMAP 6.1.6) | 18.5 K |
+| 2026-11-22, rustc 1.99.0, AMD Ryzen 5 3600, Linux; slots of the added terms (ROADMAP 6.1.6) | 20.6 K |
+
 ## `persia-engine` segment merging
 
 `cargo bench -p persia-engine --bench segment -- segment_merge`: the 2 000 documents of the segment building
@@ -207,6 +221,24 @@ Commits that tombstone older copies (ROADMAP 6.4.3): `commit_upserts` commits 2 
 | Recorded | `commit` | `commit_upserts` | `commit_inserts_4_segments` | `commit_inserts_64_segments` |
 |---|--:|--:|--:|--:|
 | 2026-10-28, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.4, 6750fe8) | 201 K | 153 K | 174 K | 97.4 K |
+
+## `persia-engine` read-only refresh
+
+`cargo bench -p persia-engine --bench read_only`: a database of 4 committed segments of 2 000 documents of about 40
+words and 2 000 more unflushed in the WAL (20 synced chunks). A backlog past the `log_end` of the superblock slot the
+reader read is re-read on every refresh (each chunk's XXH3-128 checked again, ADR-0060 item 3, since 07c2fe8), so the
+cases fix how much lies there. `refresh_unchanged_backlog` is a refresh with nothing new and the whole backlog past
+`log_end`; `refresh_unchanged` the same once a commit that flushes nothing (a created collection) moved `log_end` past
+it; `reopen` the new `ReadOnlyDatabase::open_on` a reader needed before (every segment opened, the 2 000-record
+backlog replayed); `refresh_one_put` an incremental `ReadOnlyDatabase::refresh` after a synced put by the writer (the
+put not timed), from that last state, with the writer and reader started again from it every 64 puts outside the
+timing, so at most 64 one-document chunks lie past `log_end` and the cost does not grow with the iteration count.
+The container is a `SimFile`. Time per call.
+
+| Recorded | `refresh_one_put` | `refresh_unchanged` | `refresh_unchanged_backlog` | `reopen` |
+|---|--:|--:|--:|--:|
+| 2026-11-22, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.6.6, fbea85d, before 07c2fe8: the put timed, the WAL past `log_end` growing by a chunk each iteration, `refresh_unchanged` and `reopen` measured after those puts; not comparable with the row below) | 1.96 ms | 2.07 ms | — | 56.0 ms |
+| 2026-11-23, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.6.6, the batch review fix-up) | 133 µs | 110 µs | 232 µs | 7.93 ms |
 
 ## `persia-engine` query execution
 
@@ -701,6 +733,58 @@ less `l0/compiled`) is 13.3 µs against 14.3 µs. `l0`, `l0/compiled` and `l1` d
 (they compile once, or without synonyms), yet moved +4–6%, the same on a second run of each build and with the
 review's other change (the metrics' `fetch_add`) left out, while 067702e run again moved +0.2% to +2.2%: likely a
 placement effect of the rebuilt binary on code this change does not touch, not work it adds.
+ROADMAP 8.2.12 (a `fuzzy` keeps the fewest edits first, so L4's tier steps nest; an excluded expansion the step
+subsumes counts once): the expansion walk now reads each accepted term's edit distance again to rank it. Command:
+`cargo bench -p persia-engine --bench search -- 'search_expansion_collection|search_top10_expansion|search_relaxed/(l4|l4/tiers)$'`,
+the default build, against a baseline saved on the commit before (2026-11-22, rustc 1.99.0, 12 threads, Linux).
+
+| | before | after | change |
+|---|--:|--:|--:|
+| `search_expansion_collection/fuzzy/plan` | 504 µs | 517 µs | +1.9% |
+| `search_expansion_collection/fuzzy_long/plan` | 104 µs | 104 µs | within noise |
+| `search_expansion_collection/prefix/plan` | 725 µs | 711 µs | −1.6% |
+| `search_top10_expansion/fuzzy` | 22.9 ms | 21.9 ms | −4.5% |
+| `search_top10_expansion/prefix` | 26.8 ms | 26.4 ms | −1.5% |
+| `search_relaxed/l4` | 2.69 ms | 2.65 ms | within noise |
+| `search_relaxed/l4/tiers` | 366 µs | 359 µs | within noise |
+
+Planning a `fuzzy` alone costs about 2% more (the distance of each term the automaton accepted); the prefix rows, which
+compute nothing new, move as much the other way, the drift between the two runs.
+
+ROADMAP 8.1.11 (facet counts kept once per query, per snapshot): `search_relaxed/facets/top` and `facets/deep` relax
+`w3 w40 w7 w120 zz` under the largest `min_results`, so the cascade builds every step (L2's rungs, L3, L4, L5), with
+facets on `tag`; `top` is the first page of 10, `deep` the fifth, by cursor. Command:
+`cargo bench -p persia-engine --bench search -- 'search_relaxed/facets'`, the default build, against a baseline saved
+on the commit before ROADMAP 8.1.9 (2026-11-22, rustc 1.99.0, 12 threads, Linux). Each iteration after the first reads
+the counts the first one kept, as a client paging the query does.
+
+| | before | after | change |
+|---|--:|--:|--:|
+| `search_relaxed/facets/top` | 11.9 ms | 11.7 ms | −1.5% |
+| `search_relaxed/facets/deep` | 8.57 ms | 1.42 ms | −83% |
+
+Before, the deep page searched every step before its cursor's again with every match visited only to count it; now it
+searches its own steps, pruned, without counting. The first page still collects `min_results` hits from the top in
+each step, which is most of its cost either way.
+
+ROADMAP 8.1.9 (facets count the steps a page of every hit builds), its cost on a first page with `fill`:
+`search_relaxed/facets/fill` is the first page of 10 of the same query under `fill` and the default `min_results`
+(L0 finds nothing, L2's rungs fill the page), with facets on `tag`, each iteration asking another facet `size` (64
+sizes, more than the cache's 32 counts) so that none reads counts an earlier one kept; `facets/fill/plain` is the same
+page without facets. Command: `cargo bench -p persia-engine --bench search -- 'search_relaxed/facets/fill'`, the
+default build; "before" is the same bench added to a copy of the commit before ROADMAP 8.1.9 (4541c36), "after" the
+batch's fix-up (2026-11-23, rustc 1.99.0, 12 threads, Linux).
+
+| | before | after | change |
+|---|--:|--:|--:|
+| `search_relaxed/facets/fill` | 1.39 ms | 12.8 ms | +820% (×9.2) |
+| `search_relaxed/facets/fill/plain` | 1.47 ms | 1.36 ms | within noise |
+
+Before 8.1.9 a `fill` page counted only the steps it built (L0 and the rungs that filled it), so its facets differed
+from a deeper page's. Since, it also searches the steps past its own (L2's later rungs, L3, L4, L5) once its hits are
+in, each with every match visited, only to count them: that is the whole difference, paid by the first page of each
+query on a snapshot (later pages of the query read the kept counts, `facets/deep` above). A page without facets pays
+nothing.
 
 ## `persia-engine` relevance
 

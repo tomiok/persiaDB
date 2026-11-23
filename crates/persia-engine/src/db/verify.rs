@@ -77,7 +77,9 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
     /// a garbage tail and truncated it, the bytes are gone and this reports [`Tail::Clean`] (`scan_end` still names
     /// the stop, and [`persia_storage::container::Recovery::truncated_from`] says the file was cut there).
     pub fn verify(&self) -> Result<VerifyReport, DatabaseError> {
-        let recovery = self.container().recovery();
+        // One state throughout: a refresh meanwhile swaps in another container and snapshot (ROADMAP 6.6.6).
+        let state = self.state();
+        let recovery = state.container.recovery();
         let tail = match recovery.scan_end {
             ScanEnd::Clean { .. } => Tail::Clean,
             ScanEnd::TornTail { offset, .. } => Tail::Torn { offset },
@@ -89,15 +91,15 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
                 return Err(DatabaseError::CorruptTail { offset });
             }
         };
-        let snapshot = self.snapshot();
+        let snapshot = &state.snapshot;
         let mut report = VerifyReport {
             seq: snapshot.seq(),
             collections: 0,
             segments: 0,
             documents: 0,
             deleted: 0,
-            replayed: self.replayed(),
-            uncommitted_frames: self.container().uncommitted_frames().len(),
+            replayed: state.replayed,
+            uncommitted_frames: state.container.uncommitted_frames().len(),
             tail,
         };
         for (name, collection) in snapshot.collections() {
@@ -169,9 +171,10 @@ pub struct BlobReference {
 impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
     /// Calls `f` with every blob reference a document of this database holds where `verify` checks them (SPEC §9.5,
     /// ROADMAP 9.5.3): each document of a committed segment that its committed tombstones leave live, then every put
-    /// of the WAL chunks the open replayed (from `wal_start` on, those after `log_end` included), whatever later
-    /// records did to it, as GC's mark counts them. Documents without a reference are skipped. One segment's document,
-    /// or one chunk, at a time; stops at `f`'s first error.
+    /// of the WAL chunks the current state replayed (from `wal_start` on, those after `log_end` included), whatever
+    /// later records did to it, as GC's mark counts them. Documents without a reference are skipped. One segment's
+    /// document, or one chunk, at a time; stops at `f`'s first error. It reads one state throughout, whatever a
+    /// [`refresh`](ReadOnlyDatabase::refresh) does meanwhile.
     ///
     /// The engine never looks a reference up (it does not depend on `persia-blob`): the blob store's `verify` does.
     ///
@@ -206,7 +209,9 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
         &self,
         mut f: impl FnMut(BlobReference) -> Result<(), E>,
     ) -> Result<(), E> {
-        let snapshot = self.snapshot();
+        // One state throughout, as `verify`.
+        let state = self.state();
+        let snapshot = &state.snapshot;
         for (name, collection) in snapshot.collections() {
             for view in collection.segment_views() {
                 let segment = view.segment();
@@ -232,8 +237,8 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
                 }
             }
         }
-        let chunks = self.wal_chunks().iter().copied();
-        super::blob_refs::for_each_wal_put(self.container(), chunks, |put| {
+        let chunks = state.chunks.iter().map(|c| c.offset);
+        super::blob_refs::for_each_wal_put(&state.container, chunks, |put| {
             let undecodable = |error| {
                 DatabaseError::from(ReplayError::Document {
                     chunk: put.chunk,

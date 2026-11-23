@@ -1,6 +1,6 @@
 # ADR-0058: Cache L1's compiled alternatives per set of default fields
 
-- Status: accepted
+- Status: proposed
 - Date: 2026-11-22
 - Related: SPEC §6.3.2, §7.1.1, §7.6; ROADMAP 8.1.16, 8.2.1; ADR-0039
 

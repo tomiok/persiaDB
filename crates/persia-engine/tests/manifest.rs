@@ -6,8 +6,8 @@
 //!    those bytes. They are never regenerated once released (SPEC §15); `PERSIA_WRITE_MANIFEST_FIXTURES=1` writes
 //!    missing ones.
 //! 2. `decode` never panics: every strict prefix and every bit flip is `Corrupt`, every rule of SPEC §8.7.1 is
-//!    `Corrupt` at the offending entry, a version above 1 is `UnsupportedVersion`, and a well-formed analyzer version
-//!    this build lacks is `UnsupportedAnalyzer`.
+//!    `Corrupt` at the offending entry, a version above 1 is `UnsupportedVersion`, and a well-formed version this build
+//!    lacks of a built-in analyzer is `UnsupportedAnalyzer` (any other well-formed name is a registered analyzer).
 //! 3. Whatever `decode` accepts survives `encode` → `decode` unchanged, and re-encoding is byte-stable; outside the
 //!    schema text every field has one encoding, so an accepted input re-encodes to itself.
 //! 4. `apply` builds `seq + 1` and rejects every rule of SPEC §8.7.2 (every `ApplyError` variant is reached);
@@ -566,8 +566,10 @@ fn schema_rules() {
     assert_eq!(Manifest::decode(&m.encode().unwrap()).unwrap(), m);
 }
 
-/// SPEC §6.2.2, §15: a stored schema naming a well-formed analyzer version this build lacks was written by a newer
-/// build, so it is unsupported, not corrupt; a malformed name is corruption.
+/// SPEC §6.2.2, §15: a stored schema naming a well-formed version this build lacks of a built-in analyzer was written
+/// by a newer build, so it is unsupported, not corrupt; any other well-formed `name@version` is a registered
+/// analyzer and decodes (the database open checks it against its registry, ROADMAP 6.6.8); a malformed name is
+/// corruption.
 #[test]
 fn analyzer_versions_this_build_lacks_are_unsupported() {
     let stored = notes_json();
@@ -579,7 +581,7 @@ fn analyzer_versions_this_build_lacks_are_unsupported() {
         body.extend(0u32.to_le_bytes());
         Manifest::decode(&sealed(&body))
     };
-    for analyzer in ["standard@2", "en@4294967295", "nl@1", "klingon@7"] {
+    for analyzer in ["standard@2", "en@4294967295", "keyword@3"] {
         let e = with(analyzer).unwrap_err();
         assert_eq!(
             e,
@@ -590,6 +592,21 @@ fn analyzer_versions_this_build_lacks_are_unsupported() {
             }
         );
         assert!(!e.is_corruption(), "{e}");
+    }
+    for analyzer in ["nl@1", "klingon@7", "my-prefix_2@4294967295"] {
+        let m = with(analyzer).unwrap();
+        let schema = m.collections().next().unwrap().schema();
+        let Some(FieldKind::Text(o)) = schema.field("body").map(persia_engine::schema::Field::kind)
+        else {
+            panic!("{analyzer}")
+        };
+        assert_eq!(o.analyzer.to_string(), analyzer);
+        assert!(
+            o.analyzer.is_pinned() && !o.analyzer.is_builtin(),
+            "{analyzer}"
+        );
+        // Re-encoded as stored.
+        assert_eq!(Manifest::decode(&m.encode().unwrap()).unwrap(), m);
     }
     for analyzer in [
         "standard@0",
@@ -2727,8 +2744,8 @@ fn a_stored_analyzer_names_a_known_version() {
         v["fields"]["title"]["analyzer"] = Value::String(analyzer.into());
         assert!(schema_corrupt(&decode_with_schema(&v)), "{analyzer:?}");
     }
-    // Well-formed versions this build lacks were written by a newer build (ROADMAP 4.4.11).
-    for analyzer in ["es@2", "klingon@1", "zh-hans@1", "x_2@3"] {
+    // Well-formed versions this build lacks of a built-in analyzer were written by a newer build (ROADMAP 4.4.11).
+    for analyzer in ["es@2", "standard@9"] {
         let mut v = full.clone();
         v["fields"]["title"]["analyzer"] = Value::String(analyzer.into());
         assert!(
@@ -2740,11 +2757,27 @@ fn a_stored_analyzer_names_a_known_version() {
             "{analyzer:?}"
         );
     }
-    // Only a schema valid in every other way is unsupported: an unavailable analyzer does not hide damage.
-    let mut v = full.clone();
-    v["fields"]["title"]["analyzer"] = Value::String("es@2".into());
-    v["fields"]["title"]["boost"] = Value::from(0.0);
-    assert!(schema_corrupt(&decode_with_schema(&v)));
+    // Any other well-formed name is a registered analyzer: it decodes, and the open checks its registry (6.6.8).
+    for analyzer in ["klingon@1", "zh-hans@1", "x_2@3"] {
+        let mut v = full.clone();
+        v["fields"]["title"]["analyzer"] = Value::String(analyzer.into());
+        let m = decode_with_schema(&v).unwrap();
+        let schema = m.collections().next().unwrap().schema();
+        let Some(FieldKind::Text(o)) = schema
+            .field("title")
+            .map(persia_engine::schema::Field::kind)
+        else {
+            panic!("{analyzer}")
+        };
+        assert_eq!(o.analyzer.to_string(), analyzer);
+    }
+    // Only a schema valid in every other way is unsupported or decodes: an unavailable analyzer does not hide damage.
+    for analyzer in ["es@2", "klingon@1"] {
+        let mut v = full.clone();
+        v["fields"]["title"]["analyzer"] = Value::String(analyzer.into());
+        v["fields"]["title"]["boost"] = Value::from(0.0);
+        assert!(schema_corrupt(&decode_with_schema(&v)), "{analyzer}");
+    }
 }
 
 #[test]

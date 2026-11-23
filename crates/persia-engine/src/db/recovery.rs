@@ -26,11 +26,11 @@ use std::sync::Arc;
 use persia_format::frame::FrameKind;
 use persia_format::superblock::Superblock;
 use persia_storage::Storage;
-use persia_storage::container::{Container, ContainerFile};
+use persia_storage::container::{Container, ContainerFile, FrameRef};
 
 use super::{
     Collection, ContainerObjects, Database, DatabaseError, DatabaseOptions, LiveSegment,
-    Structural, objects, open_source,
+    Structural, check_analyzers, objects, open_source,
 };
 use crate::manifest::{Layout, MAX_MANIFEST_LEN, Manifest, ManifestDiff, SegmentEntry};
 use crate::memtable::{Memtable, MemtableError};
@@ -45,8 +45,11 @@ impl<F: ContainerFile + Sync> Database<F> {
         container: Container<F>,
         options: DatabaseOptions,
     ) -> Result<Self, DatabaseError> {
-        let (manifest, collections) =
-            load(&container, |schema| super::new_memtable(schema, &options))?;
+        let options = options.with_builtins();
+        let (manifest, collections) = load(&container, |name, schema| {
+            check_analyzers(name, schema, &options.registry)?;
+            Ok(super::new_memtable(schema, &options)?)
+        })?;
         let wal = WalWriter::resume(container, BTreeMap::new())
             .with_chunk_target(options.wal_chunk_target);
         let mut db = Self::assemble(wal, manifest, collections, options);
@@ -86,6 +89,7 @@ impl<F: ContainerFile + Sync> Database<F> {
     fn replay(&mut self) -> Result<(), DatabaseError> {
         let seq = self.manifest.seq();
         for chunk in wal_chunks(self.wal.log(), seq, true)? {
+            let chunk = chunk.offset;
             let frame = self
                 .wal
                 .log()
@@ -144,11 +148,49 @@ fn is_capacity(error: &MemtableError) -> bool {
 }
 
 /// Steps 2 and 3 of the open sequence (module docs): the committed manifest, and each collection with its segments
-/// open and an empty memtable from `memtable`.
+/// open and an empty memtable from `memtable`, which gets the collection's name and schema. It runs for every
+/// collection before any segment is opened, so an analyzer the registry lacks fails the open before any segment is
+/// read (SPEC §6.2.2, ADR-0059 item 5), whichever collection names it.
 pub(super) fn load<F: ContainerFile + Sync>(
     container: &Container<F>,
-    mut memtable: impl FnMut(&CollectionSchema) -> Result<Memtable, MemtableError>,
+    mut memtable: impl FnMut(&str, &CollectionSchema) -> Result<Memtable, DatabaseError>,
 ) -> Result<(Manifest, BTreeMap<String, Collection>), DatabaseError> {
+    let manifest = read_manifest(container)?;
+    let mut memtables = Vec::with_capacity(manifest.collections().len());
+    for entry in manifest.collections() {
+        let schema = Arc::new(entry.schema().clone());
+        memtables.push((memtable(entry.name(), &schema)?, schema));
+    }
+    let mut collections = BTreeMap::new();
+    {
+        let objects = ContainerObjects::new(container, &manifest);
+        for (entry, (memtable, schema)) in manifest.collections().zip(memtables) {
+            let name = entry.name();
+            let mut segments = Vec::with_capacity(entry.segments().len());
+            for segment in entry.segments() {
+                segments.push(open_segment(&objects, name, segment, &schema)?);
+            }
+            let collection = Collection {
+                memtable,
+                schema,
+                segments,
+                first_write: None,
+                last_write: None,
+                // Fresh counters: an open starts them at zero, and so does a read-only handle's full reload, which
+                // runs this too and keeps no count of the state it replaces (ROADMAP 11.4.8).
+                relaxation: Arc::default(),
+            };
+            collections.insert(name.to_owned(), collection);
+        }
+    }
+    Ok((manifest, collections))
+}
+
+/// Step 2 of the open sequence (module docs): the manifest `container`'s superblock commits (empty at `seq` 0),
+/// decoded and checked against the slot and the local layout (ROADMAP 6.3.7). A refresh reads the next one with it.
+pub(super) fn read_manifest<F: ContainerFile>(
+    container: &Container<F>,
+) -> Result<Manifest, DatabaseError> {
     let sb = *container.superblock();
     let manifest = if sb.seq == 0 {
         // Created, but the first commit did not complete.
@@ -160,31 +202,10 @@ pub(super) fn load<F: ContainerFile + Sync>(
         manifest
     };
     manifest.check_layout(Layout::Container)?;
-    let mut collections = BTreeMap::new();
-    {
-        let objects = ContainerObjects::new(container, &manifest);
-        for entry in manifest.collections() {
-            let name = entry.name();
-            let schema = Arc::new(entry.schema().clone());
-            let mut segments = Vec::with_capacity(entry.segments().len());
-            for segment in entry.segments() {
-                segments.push(open_segment(&objects, name, segment, &schema)?);
-            }
-            let collection = Collection {
-                memtable: memtable(&schema)?,
-                schema,
-                segments,
-                first_write: None,
-                last_write: None,
-                relaxation: Arc::default(),
-            };
-            collections.insert(name.to_owned(), collection);
-        }
-    }
-    Ok((manifest, collections))
+    Ok(manifest)
 }
 
-/// The positions of the `WalChunk` frames to replay onto the manifest loaded at `loaded_seq`, in log order (SPEC
+/// The `WalChunk` frames to replay onto the manifest loaded at `loaded_seq`, in log order (SPEC
 /// §8.6): every `WalChunk` from the committed `wal_start` on, including those recovery found after `log_end`.
 ///
 /// A read-only open (`writer` false) holds no lock, so a writer may commit while the tail is scanned. It stops at
@@ -206,7 +227,7 @@ pub(super) fn wal_chunks<F: ContainerFile>(
     container: &Container<F>,
     loaded_seq: u64,
     writer: bool,
-) -> Result<Vec<u64>, DatabaseError> {
+) -> Result<Vec<FrameRef>, DatabaseError> {
     let log_end = container.superblock().log_end;
     let mut chunks = Vec::new();
     for frame in container.frames() {
@@ -218,7 +239,7 @@ pub(super) fn wal_chunks<F: ContainerFile>(
             }
         }
         if frame.kind == FrameKind::WalChunk {
-            chunks.push(frame.offset);
+            chunks.push(*frame);
         }
     }
     Ok(chunks)
@@ -279,7 +300,7 @@ fn check_slot(manifest: &Manifest, sb: &Superblock) -> Result<(), DatabaseError>
 
 /// Opens a committed segment and its tombstone sidecar through the container's objects, which check their frames
 /// (ROADMAP 6.3.6, 6.3.7), and checks both against the manifest entry.
-fn open_segment<F: ContainerFile + Sync>(
+pub(super) fn open_segment<F: ContainerFile + Sync>(
     objects: &ContainerObjects<'_, F>,
     collection: &str,
     entry: &SegmentEntry,
