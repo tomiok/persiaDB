@@ -27,10 +27,10 @@ time, and has to swap the new database in under its own lock.
    `db_uuid` there, or an older committed `seq`, is refused (`DatabaseError::RefreshRefused`, not corruption):
    nothing changes. A reader that wants to follow such a file opens again.
 3. **Incremental when sound**, `Refreshed::Incremental`: the WAL chunk frames already replayed are the first ones the
-   new scan finds from the new `wal_start`, frame for frame (offset, length, `frame_seq`), the last of them still has
-   the payload it had (its CRC-32C, kept from the replay), and the commits since, if any, dropped no collection and
-   changed no schema. The prefix test covers `wal_start`: a commit that moved it past a replayed chunk flushed records
-   the memtables hold, and that chunk is not found again; one that moved it only over chunks this reader never
+   new scan finds from the new `wal_start`, frame for frame (offset, length, `frame_seq`), every one of them a power
+   loss may still have replaced has the payload it had (below), and the commits since, if any, dropped no collection
+   and changed no schema. The prefix test covers `wal_start`: a commit that moved it past a replayed chunk flushed
+   records the memtables hold, and that chunk is not found again; one that moved it only over chunks this reader never
    replayed (it replayed none) leaves the memtables as a fresh open builds them. So a merge, a commit that only
    retires a cut one (ROADMAP 6.6.9), a created collection, and a flush of records written after this reader's scan
    are incremental. Then only the chunks after the replayed ones are replayed (with the read-only stop of SPEC §8.6)
@@ -38,8 +38,23 @@ time, and has to swap the new database in under its own lock.
    are opened only where the manifest's entry changed; unchanged ones are shared with the old snapshot. While it
    replays, the refresh holds every memtable (`Memtable::hold`, as a batch does, ROADMAP 6.3.12), and releases them
    after the swap, so no reader's view sees part of a refresh.
+
+   **Which chunks are compared by content.** A power loss on the writer's host (the reader may be on another one,
+   sharing the disk, so it survives it) drops the chunks written since the last sync, and the restarted writer logs
+   others at the same offsets, with the same lengths and `frame_seq`s: the frame test cannot tell them apart. It may
+   drop several, so the new history can first differ at any of them, and the last one can be byte-identical (the
+   same record logged again). So the state keeps a fingerprint of every replayed chunk past the `log_end` of the
+   superblock slot it was read with, and a refresh reads each of them again and compares. Those before that
+   `log_end` cannot change: a commit writes its slot only after it synced every frame before its `log_end` (SPEC
+   §4.5 steps 1 to 3), so they survive a power loss even if the slot does not, and they are never read again. After
+   an incremental refresh the next state keeps the fingerprints past the new slot's `log_end` (the old ones were just
+   checked against that container). The fingerprint is XXH3-128 of the payload (`persia_format::hash::xxh3_128`), not
+   a CRC: each WAL record ends with the CRC-32C of its own bytes (SPEC §8.2.1), so by the CRC residue property a
+   CRC-32C over the payload depends only on the chunk header and the record lengths, and two chunks of records of the
+   same lengths share it.
 4. **Full reload otherwise**, `Refreshed::Reloaded`: a replayed chunk is no longer found (a flush commit, another file
-   at the path, a power loss that dropped an unsynced tail), the last one's payload changed, a collection was dropped
+   at the path, a power loss that dropped an unsynced tail), a replayed chunk past the slot's `log_end` holds other
+   bytes (another chunk at its place, item 3), a collection was dropped
    or its schema changed, the same `seq` names another manifest or `wal_start`, or an earlier refresh failed after it
    changed the memtables. The open sequence runs on the reopened container into new memtables (SPEC §8.6), with the
    open's registry and analysis mode (ROADMAP 6.6.8: `UnregisteredAnalyzer`, or the skipping open of `persia verify`).
@@ -58,15 +73,20 @@ time, and has to swap the new database in under its own lock.
   `F: 'static`). `verify` and `blob_references` read one state throughout, so a refresh during them cannot pair a
   snapshot with another container.
 - A refresh costs a container recovery (header, superblock, the frames from `wal_start`, the scan from `log_end`),
-  one re-read of the last replayed chunk, the new WAL frames and the changed segments; a full reload costs an open,
-  as a reopen did.
+  a re-read of each replayed chunk past the current slot's `log_end` (the WAL logged since the last commit this
+  reader took, which a power loss may still replace; never the chunks before it), the new WAL frames and the changed
+  segments; a full reload costs an open, as a reopen did. A writer that logs for long without committing makes each
+  refresh re-read that unsynced backlog; the auto-commit interval (SPEC §8.2, `commit_interval`) bounds it.
 - A snapshot taken before a refresh that keeps the memtables shares them with the new one, so a view taken from it
   after the refresh sees the new records, as a writer's snapshot sees later writes (SPEC §8.4). A view taken before,
   and so a search in progress, sees no change.
 - An incremental refresh applies records to memtables in place, as replay does: the reader's memory grows with the
   backlog it follows until a flush commit makes the next refresh a full reload (ADR-0033 item 4).
 - The divergence checks are best-effort, as `ReadOnlyBlobDatabase::refresh`'s are (SPEC §9.3): another history whose
-  replayed chunks match frame for frame and whose last replayed chunk is byte-identical is taken.
+  replayed chunks match frame for frame and whose replayed chunks past the slot's `log_end` are byte-identical
+  (up to an XXH3-128 collision) is taken. Within one database's history that is sound: the chunks before `log_end`
+  were synced (item 3). Another file put at the path (a copy, a restore) is caught only where it differs in the
+  frames, the slot or those chunks.
 - `ReadOnlyBlobDatabase` keeps refreshing with a new open (`refresh(reopened)`), which pairs the documents with the
   pack refresh and the reader lease (ADR-0054). Calling `refresh` on its `database()` advances the documents without
   the pack: a blob bound since then reads as not found until the blob database is refreshed.
@@ -80,9 +100,14 @@ time, and has to swap the new database in under its own lock.
   run; a new container per refresh is the same open code.
 - **Always a full reload**: correct, and what `ReadOnlyBlobDatabase::refresh` does with a new open today; it re-reads
   every segment and the whole WAL backlog on each refresh.
-- **Comparing every replayed chunk's payload**: catches more divergence, but re-reads the whole backlog on each
-  refresh, which is what the leaf removes. A power loss drops an unsynced suffix, so the last chunk is where another
-  history first shows.
+- **Comparing every replayed chunk's payload**: catches more divergence (another file at the path), but re-reads the
+  whole backlog on each refresh, which is what the leaf removes; the chunks before `log_end` cannot change within one
+  history (item 3).
+- **Comparing only the last replayed chunk**: a power loss can drop several unsynced chunks, and the new history
+  first differs at the first of them, so the last one can be byte-identical and the reader would keep a lost record.
+- **A CRC-32C of the payload as the fingerprint**: as cheap, but it cannot tell two chunks of records of the same
+  lengths apart (item 3), so a chunk a power loss replaced with records of the same sizes would be taken as
+  unchanged.
 - **Incremental across a flush of replayed records** (new segments, memtables rebuilt from the new `wal_start` while
   unchanged segments are kept): saves segment reads, but rebuilds the memtables anyway; left for when a measured
   workload needs it.

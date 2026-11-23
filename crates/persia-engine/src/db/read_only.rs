@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 use persia_analysis::{Analyzer, AnalyzerRegistry, TokenStream, Tokenizer};
-use persia_format::checksum::crc32c;
+use persia_format::hash::xxh3_128;
 use persia_storage::container::{Container, ContainerFile, FrameRef, Mode};
 
 use super::recovery::{for_each_record, load, open_segment, read_manifest, wal_chunks};
@@ -95,9 +95,10 @@ pub(super) struct State<F> {
     /// The WAL chunk frames replayed into them, in order: what `verify` reads the WAL's blob references from (SPEC
     /// §9.5, ROADMAP 9.5.3), and what a refresh finds again at the start of its scan to replay only the frames after.
     pub(super) chunks: Vec<FrameRef>,
-    /// The CRC-32C of the last of those chunks' payload: a refresh reads that chunk again and compares, so another
-    /// chunk at the same place (a power loss dropped the frame and the writer logged another one there) reloads.
-    last_crc: Option<u32>,
+    /// A content hash of each of those chunks a power loss may still replace, those past the `log_end` of
+    /// `container`'s superblock, in log order ([`unsynced`]). A refresh reads them again and compares, so a history
+    /// in which a power loss dropped them and the writer logged others at the same places reloads.
+    unsynced: Vec<Fingerprint>,
     /// The end of the last of those chunks, the committed `wal_start` if none ([`ReadOnlyDatabase::wal_end`]).
     pub(super) wal_end: u64,
     /// The `text` fields whose analysis is skipped ([`ReadOnlyDatabase::open_container_skipping_analysis`]).
@@ -295,7 +296,8 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyDatabase<F> {
     ///
     /// - [`Refreshed::Unchanged`]: the same commit and no WAL chunk since; nothing is swapped.
     /// - [`Refreshed::Incremental`]: the WAL chunks already replayed are the first ones the new scan finds (the same
-    ///   frames, and the last one's payload the same), and the commits since, if any, moved `wal_start` past no chunk
+    ///   frames, and those a power loss may have replaced since, the ones past the `log_end` the current state read,
+    ///   with the same payload bytes), and the commits since, if any, moved `wal_start` past no chunk
     ///   the memtables replayed and kept every collection and its schema (a merge, a commit that retires a cut one, a
     ///   created collection, a flush of records this reader never replayed). The chunks after them
     ///   are replayed, with the read-only stop of SPEC §8.6, into the same memtables, and only the segments and
@@ -381,22 +383,20 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyDatabase<F> {
         } else {
             current.wal_end
         };
-        let applied = replay(
-            &container,
-            &fresh,
-            &mut live.collections,
-            end,
-            current.last_crc,
-        )?;
+        let applied = replay(&container, &fresh, &mut live.collections, end)?;
         let snapshot = Arc::new(snapshot_of(&live.manifest, &live.collections));
         let mut chunks = current.chunks.clone();
         chunks.extend(fresh);
+        // `plan` checked the old fingerprints against this container, so they hold for it: those it has synced since
+        // are dropped.
+        let mut fingerprints = current.unsynced.clone();
+        fingerprints.extend(applied.fingerprints);
         self.state.store(Arc::new(State {
+            unsynced: unsynced(&container, fingerprints),
             container: Arc::new(container),
             snapshot,
             replayed: current.replayed.saturating_add(applied.records),
             chunks,
-            last_crc: applied.last_crc,
             wal_end: applied.wal_end,
             skipped,
         }));
@@ -460,11 +460,19 @@ fn plan<F: ContainerFile + Sync>(
     let Some(fresh) = found.strip_prefix(current.chunks.as_slice()) else {
         return Ok(Step::Reload);
     };
-    if let (Some(last), Some(crc)) = (current.chunks.last(), current.last_crc) {
+    // The same frames may still hold other records: a power loss on the writer's host (this reader may be on another
+    // one, sharing the disk) drops the chunks written since the last sync, and the restarted writer logs others at
+    // the same offsets, with the same lengths and `frame_seq`s. It may drop several, so the new history can first
+    // differ at any of them, and the last one can be byte-identical. Every chunk past the `log_end` of the slot
+    // the current state read is compared by content, the frame's CRC aside: each record ends with the CRC-32C of
+    // its own bytes (SPEC §8.2.1), so a CRC over the payload depends only on the record lengths. The chunks before
+    // that `log_end` cannot change: the commit wrote the slot only after it synced every frame before its
+    // `log_end` (SPEC §4.5 steps 1 to 3), so they survive a power loss even if the slot itself does not.
+    for fingerprint in &current.unsynced {
         let frame = container
-            .read_frame_source(last.offset, MAX_CHUNK_LEN)
+            .read_frame_source(fingerprint.offset, MAX_CHUNK_LEN)
             .map_err(ReplayError::from)?;
-        if crc32c(&frame.payload) != crc {
+        if xxh3_128(&frame.payload) != fingerprint.hash {
             return Ok(Step::Reload);
         }
     }
@@ -562,14 +570,14 @@ fn opened<F: ContainerFile + Sync>(
     // Stop at a Manifest a fresh superblock read shows committed during this scan (SPEC §8.6).
     let chunks = wal_chunks(&container, manifest.seq(), false)?;
     let wal_start = container.superblock().wal_start;
-    let applied = replay(&container, &chunks, &mut collections, wal_start, None)?;
+    let applied = replay(&container, &chunks, &mut collections, wal_start)?;
     let manifest = Arc::new(manifest);
     let state = State {
         snapshot: Arc::new(snapshot_of(&manifest, &collections)),
+        unsynced: unsynced(&container, applied.fingerprints),
         container: Arc::new(container),
         replayed: applied.records,
         chunks,
-        last_crc: applied.last_crc,
         wal_end: applied.wal_end,
         skipped,
     };
@@ -586,8 +594,28 @@ struct Applied {
     records: u64,
     /// The end of the last chunk replayed, or the `end` it was given when there was none.
     wal_end: u64,
-    /// The CRC-32C of that chunk's payload, or the `crc` it was given.
-    last_crc: Option<u32>,
+    /// One per chunk replayed past the container's `log_end`, in order.
+    fingerprints: Vec<Fingerprint>,
+}
+
+/// A replayed WAL chunk and a hash of the payload it was replayed from.
+#[derive(Debug, Clone, Copy)]
+struct Fingerprint {
+    offset: u64,
+    end: u64,
+    /// XXH3-128, not a CRC (see [`plan`]).
+    hash: u128,
+}
+
+/// The `fingerprints` of chunks a power loss may still replace in `container`: those past its superblock's `log_end`,
+/// which a commit syncs before it writes the slot (SPEC §4.5). The others are never read again.
+fn unsynced<F: ContainerFile>(
+    container: &Container<F>,
+    mut fingerprints: Vec<Fingerprint>,
+) -> Vec<Fingerprint> {
+    let log_end = container.superblock().log_end;
+    fingerprints.retain(|f| f.end > log_end);
+    fingerprints
 }
 
 /// Applies every record of `chunks` to its collection's memtable, in order (SPEC §8.2.1).
@@ -596,13 +624,13 @@ fn replay<F: ContainerFile + Sync>(
     chunks: &[FrameRef],
     collections: &mut BTreeMap<String, Collection>,
     end: u64,
-    crc: Option<u32>,
 ) -> Result<Applied, DatabaseError> {
     let mut applied = Applied {
         records: 0,
         wal_end: end,
-        last_crc: crc,
+        fingerprints: Vec::new(),
     };
+    let log_end = container.superblock().log_end;
     for chunk in chunks.iter().map(|c| c.offset) {
         let frame = container
             .read_frame_source(chunk, MAX_CHUNK_LEN)
@@ -621,7 +649,14 @@ fn replay<F: ContainerFile + Sync>(
         applied.records = applied.records.saturating_add(records);
         // Taken from the frame just read: no later lookup that could miss.
         applied.wal_end = frame.frame.end();
-        applied.last_crc = Some(crc32c(&frame.payload));
+        // Only those a power loss may replace ([`unsynced`]) are hashed.
+        if applied.wal_end > log_end {
+            applied.fingerprints.push(Fingerprint {
+                offset: chunk,
+                end: applied.wal_end,
+                hash: xxh3_128(&frame.payload),
+            });
+        }
     }
     Ok(applied)
 }
