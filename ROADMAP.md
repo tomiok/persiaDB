@@ -1,6 +1,6 @@
 # Persia DB — Roadmap
 
-**Versions.** M0–M15 are the MVP and ship as v1.0. Milestones M16 and later are post-MVP; each heading names its target version. The percentage and burn-up in [`PROGRESS.md`](./PROGRESS.md) count M0–M15 only.
+**Versions.** M0–M15 are the MVP and ship as v1.0. Milestones M16 and later are post-MVP; each heading names its target version. The percentage and burn-up in [`PROGRESS.md`](./PROGRESS.md) count M0–M15 only. A leaf of M0–M15 labelled with a later version (`(v1.1)`, `(post-v1)`: right after its id, or ending its text, before any "Done as:" remark; `cargo xtask progress` rejects one placed elsewhere) is post-MVP work filed under its milestone: it counts with the post-MVP leaves and does not hold its milestone, or the ones depending on it, open.
 
 How to read this file:
 - Numbering is hierarchical: `M1` → `1.1` → `1.1.1` → `1.1.1.1`. **Every leaf is one GitHub issue** (title: `[1.1.1] short title`).
@@ -387,7 +387,7 @@ Deps: M2, M5.
 - [x] 6.1.4 Size/age flush triggers
 - [x] 6.1.5 `SearchView` parity for queries: term enumeration (prefix, range, automaton) and column access over segments and the memtable, for 7.1 `Prefix`/`Fuzzy` and 7.4.5 filters (found in 6.1.2)
 - [ ] 6.1.6 Undo a failed `put` without rehashing the term arenas: `Arena::truncate` rebuilds the whole table under the write lock, O(terms) per rejected document (found in the 6.1 review)
-- [ ] 6.1.7 Cache `MemtableView::df` if term statistics become hot: it walks the posting chain under the read lock on every call. The count is the view's `(docs, version)` cutoff, so it cannot reuse a live counter on the term, and a cache has to be keyed by that cutoff and bounded (found in 7.2)
+- [ ] 6.1.7 Cache `MemtableView::df` if term statistics become hot: it walks the posting chain under the read lock on every call. The count is the view's `(docs, version)` cutoff, so it cannot reuse a live counter on the term, and a cache has to be keyed by that cutoff and bounded (found in 7.2) (v1.1)
 
 ## 6.2 WAL (SPEC §8.2)
 - [x] 6.2.1 WAL record format: op (put/delete), collection name, payload, checksum
@@ -408,7 +408,7 @@ Deps: M2, M5.
 - [x] 6.3.8 Golden container fixture holding a segment frame whose `BlobRefs` has a `BlobRef` with non-empty `user_meta` (deferred from 5.2.6, which pins the bare segment in `tests/fixtures/segment/v1.0/`): written by the commit path, opened by CI forever (SPEC §4.4, §9.1, §15)
 - [x] 6.3.9 Log only what replay can apply (SPEC §8.2.1 "What may be logged"): a record of a collection whose create is committed, for an operation its memtable accepts (validation, term length, a docid left), checked before the record is acknowledged; decide whether the memtable applies first (an unlogged write is then briefly visible) or a dry-run check runs before the WAL. Includes whether a changed `strict` (§6.2.4) can make an old put fail replay. Test: a put the memtable rejects is never logged (built-in analyzers truncate tokens at 255 bytes, so `SegmentError::Full` is the reachable case) (found in the 6.2 review)
 - [x] 6.3.10 Schema change and drop through commit (SPEC §8.2.1, §8.7.2): both flush every memtable first, so `wal_start` reaches the end of the log and no record of an earlier schema (or of the dropped collection) is replayed; reopen the collection's segments with the evolved schema. Test: a non-`strict` put with extra fields, then `strict`, then a crash and reopen (found in 6.3.9)
-- [ ] 6.3.11 Flush without re-indexing: build the segment from the memtable's postings instead of analyzing every document again (ADR-0029, found in 6.3.1); bench the flush before and after
+- [ ] 6.3.11 Flush without re-indexing: build the segment from the memtable's postings instead of analyzing every document again (ADR-0029, found in 6.3.1); bench the flush before and after (v1.1)
 - [x] 6.3.12 `put_batch` makes a document visible only once it is durable (today the ones before the last are visible once buffered, SPEC §8.2.1); test with a forced sync failure that no reader sees an unsynced document (found in the 2026-11-02 audit)
 
 ## 6.4 Upserts & deletes across segments
@@ -416,9 +416,9 @@ Deps: M2, M5.
 - [x] 6.4.2 Tombstone sidecar format + versioning (SPEC §8.3, ADR); the writer builds each version as a superset of the previous one, checked before commit (the manifest only sees counts, SPEC §8.7.2)
 - [x] 6.4.3 Delete-by-id and upsert through commit; visibility rules (read-your-writes). Until then a flush keeps only the memtable's live documents, so a delete or upsert of an id in an older segment is lost at the flush (ADR-0029, found in 6.3)
 - [x] 6.4.4 [T] differential tests vs. reference model for random put/delete/commit sequences
-- [ ] 6.4.5 Prune the commit's tombstone lookups by each segment's footer id range (`Segment::id_range`), once open or `Segment::verify` checks `min_id`/`max_id` against the `IdMap` (a wrong range would leave an older copy live). Helps time-ordered ids only; random ids (UUIDs) span every range. Bench `commit_inserts_*` before and after (found in 6.4.3: 64 segments double a 2 000-document commit)
+- [ ] 6.4.5 Prune the commit's tombstone lookups by each segment's footer id range (`Segment::id_range`), once open or `Segment::verify` checks `min_id`/`max_id` against the `IdMap` (a wrong range would leave an older copy live). Helps time-ordered ids only; random ids (UUIDs) span every range. Bench `commit_inserts_*` before and after (found in 6.4.3: 64 segments double a 2 000-document commit) (v1.1)
 - [x] 6.4.6 Drop a segment from the manifest in the commit that deletes its last live document, instead of keeping it listed with `deleted = doc_count` until a merge (ADR-0030 item 8)
-- [ ] 6.4.7 Per-segment id membership filter (e.g. a Bloom filter section) so a commit skips segments that cannot hold an id, for random ids that id ranges do not prune; a format change (SPEC §5.3, ADR, golden file) (found in the 6.4 review)
+- [ ] 6.4.7 Per-segment id membership filter (e.g. a Bloom filter section) so a commit skips segments that cannot hold an id, for random ids that id ranges do not prune; a format change (SPEC §5.3, ADR, golden file) (found in the 6.4 review) (v1.1)
 
 ## 6.5 Compaction / merging (SPEC §8.5)
 - [x] 6.5.1 Merge policy (tiered) as pure function: segments → merge plans; [T] table tests
@@ -429,8 +429,8 @@ Deps: M2, M5.
 - [x] 6.5.3 Background merge scheduler (thread pool, cancellation, backpressure); `Segment::verify` the merged segment before its commit, since a merge copies damage only `verify` finds (SPEC §5.5, found in the 6.5 review)
 - [x] 6.5.4 Safe deletion of obsolete segments via snapshot epoch/refcount
 - [x] 6.5.5 [T] property: merge(search results) == pre-merge results (same hits/scores within epsilon)
-- [ ] 6.5.6 Streaming merge writer: encode the merged sections while the inputs are read, so a merge holds no more than a block per section instead of the whole merged segment in a `SegmentBuilder` (ADR-0031 item 8, found in 6.5.2)
-- [ ] 6.5.7 Merge throughput: a merge-only postings reader that decodes whole lists (no per-term `Postings` cursor), and regrouping without a sort; goal: `segment_merge/copy_8` faster than `segment/add` on the same run (internal bench, `docs/benchmarks.md`; not a claim, BENCHMARKS.md)
+- [ ] 6.5.6 Streaming merge writer: encode the merged sections while the inputs are read, so a merge holds no more than a block per section instead of the whole merged segment in a `SegmentBuilder` (ADR-0031 item 8, found in 6.5.2) (v1.1)
+- [ ] 6.5.7 Merge throughput: a merge-only postings reader that decodes whole lists (no per-term `Postings` cursor), and regrouping without a sort; goal: `segment_merge/copy_8` faster than `segment/add` on the same run (internal bench, `docs/benchmarks.md`; not a claim, BENCHMARKS.md) (v1.1)
 - [x] 6.5.8 Engine-driven container compaction (SPEC §4.6): `Database` names the live frames (the manifest's, plus the obsolete frames still referenced, 6.5.4) and the WAL range, compacts when dead space reaches the ratio, and publishes the relocated manifest (`Manifest::relocate`) (found in 6.5.4)
 - [x] 6.5.9 Merges that survive concurrent deletes: re-apply the deletions committed to its inputs since the plan to the merged segment (a docid map kept with the result) instead of discarding it. Test: the segment count stays bounded under steady deletes, replacing `deletes_into_every_segment_discard_every_merge_until_they_pause` (6.5.11), which pins today's unbounded growth (ADR-0032 item 4, found in 6.5.3)
 - [x] 6.5.10 Until 6.5.8, say that a database file only grows (README, SPEC §4.6), and report its dead bytes (`Database::space_usage`) (found in the 2026-11-02 audit)
