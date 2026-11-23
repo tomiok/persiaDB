@@ -374,6 +374,15 @@ from `wal_start` to the end of the valid frames; the rest of that end is *dead*.
 reach the dead-space ratio of the end (default 40%). Dead frames in `wal_start..log_end` (an old Manifest) count as
 live; they are few and small.
 
+**From the command line** (ROADMAP 10.4.1). `persia compact <path>` runs one compaction on request, whatever the
+dead space. It opens the database read-write as any writer does, so it fails while another writer holds the lock, and
+recovery runs first (§8.6). It commits no document: the WAL records after the last commit stay WAL records. It
+prints the space before and after (`--json` for one JSON object). It has the built-in analyzers only, so a database
+whose schema names a registered analyzer (§6.2.2) fails that read-write open, and is compacted by its application.
+It never opens the blob pack (§9.3), whose space blob GC reclaims (§9.5). Like every compaction it puts the read-only
+handles of other processes behind until they refresh (§9.5), and it must not run during a copy taken with the files
+in use (§4.8).
+
 **The new file**, written by the single writer while it holds the lock:
 1. The live frames below `wal_start`, in their old order, then the frames of `wal_start..log_end`, each copied with
    its stored payload unchanged and a new `frame_seq`, numbered on from one more than the `frame_seq` of the last
@@ -2536,6 +2545,19 @@ whether it lies after `log_end`), the `seq` each Manifest frame holds, and, for 
 put or delete it (a put names its document by the id of its encoding, read without the schema, §6.4.2). A frame whose
 payload does not decode is reported on its row; inspection is a debugging aid and does not fail on it, `persia verify`
 does.
+
+**Statistics and dumps** (ROADMAP 10.4.1). `persia stats` and `persia dump documents` are read-only opens too: no
+lock, nothing written, and no reader lease, since neither reads a blob. Like `verify` they skip the analysis of a
+`text` field whose registered analyzer they lack. `stats` prints the last commit's `seq`, the container's live and
+dead bytes (§4.6, counted from the manifest alone: a live writer may still hold obsolete frames for its readers,
+§8.5), the valid frames and WAL chunks after `log_end`, the replayed WAL records, the blob pack's size if there is
+one (§9.3), and per collection its schema, its segments (documents, deleted, size) and its live documents as a
+reader sees them. `--json` writes one JSON object whose shape is documented with the command; keys are only ever
+added to it. `dump documents --collection <name>` writes the live documents of that snapshot as JSON Lines, each in
+the output form of §6.4.1 (what `get` returns: the stored fields, and a blob as its reference), so
+`Document::from_json` reads a line back. The order is storage order: the segments as the manifest lists them, each in
+ascending docid, then the documents of the WAL records not yet in a segment, in log order. It is the same for every
+dump of one file state; a merge or a commit changes the order, not the set. Documents are streamed one at a time.
 
 ### 8.7 Manifest
 A manifest is the snapshot one commit publishes (ADR-0024): the commit's `seq`, the committing writer's

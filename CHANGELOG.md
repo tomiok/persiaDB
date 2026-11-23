@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia stats <path>`, `persia compact <path>` and `persia dump documents <path> --collection <name>` (ROADMAP
+  10.4.1; SPEC §4.6, §8.6). `stats` reads a database without the writer lock and prints the last commit, the
+  container's live and dead space, the WAL after the last commit, the blob pack's size and, per collection, its schema,
+  documents and segments; `--json` writes one JSON object with a documented shape. `compact` rewrites the container
+  without its dead frames and prints the space before and after (`--json` too); it opens read-write, so it fails while
+  another writer has the database, and it leaves the blob pack alone. `dump documents` writes a collection's live
+  documents as JSON Lines in the output form of SPEC §6.4.1, in storage order, one document at a time. The three exit
+  with the statuses of the other commands (1, 3 for corruption, 4 for a file that is not a container); the `persia-cli`
+  crate docs hold the table of every command's exit status.
 - `persia-engine`: relaxation metrics (ROADMAP 8.3.3; SPEC §7.6, §12.4). Each collection counts its relaxed queries
   (searches without a cursor): how many, how many relaxed past L0, how many still found nothing, and how many found
   their hits at each level. Read them as `RelaxationStats` from `CollectionSnapshot::relaxation_stats` or, summed over

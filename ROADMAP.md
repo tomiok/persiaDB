@@ -702,6 +702,9 @@ Deps: M6, M7, M8, M9. First user-facing release: `v0.1`.
 - [ ] 10.4.1 `persia inspect|dump|verify|compact|stats` commands
 - [ ] 10.4.2 `persia import` (JSONL) and `persia search` for quick experiments
 - [ ] 10.4.3 `persia bench` quick micro-benchmark entry point
+- [ ] 10.4.4 `persia compact` on a database whose schema names a registered analyzer: the command has the built-in analyzers only, and `Database::open` needs every analyzer the schemas name, so it exits 1 today. Needs an engine entry point: a read-write open that skips analysis for a compaction (as `ReadOnlyDatabase::open_skipping_analysis` does for reads), or a compaction that takes the writer lock without replaying the WAL (found in 10.4.1) (v1.0)
+- [ ] 10.4.5 `persia gc`: blob garbage collection from the command line (mark, sweep and pack rewrite, SPEC §9.5), with its grace period and a report of what it deleted and what a reader lease held back; `persia compact` rewrites the container only and leaves `<name>.persia.blobs` alone (found in 10.4.1) (v1.0)
+- [ ] 10.4.6 `persia dump documents` with the blobs: a dump line carries a `BlobRef`, not the bytes, so a dump read back by `persia import` (10.4.2) into another database has dangling references. Decide the export form (a directory of blobs by id beside the JSON Lines, or a flag that refuses documents with blobs) and implement it with `import` (found in 10.4.1) (v1.1)
 
 ## 10.5 Release engineering
 - [ ] 10.5.1 Versioning, changelog, `cargo publish --dry-run` in CI

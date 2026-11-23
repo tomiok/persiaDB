@@ -20,6 +20,34 @@
 //! The pack open and the scan bound each frame's length by its kind before reading it (ROADMAP 9.2.14). Only the local
 //! layout is checked (the remote one is ROADMAP 13.2.6).
 //!
+//! Database commands (ROADMAP 10.4.1) complete the tree. `persia stats` prints what a read-only open reports: the last
+//! commit, the container's live and dead space, the WAL after the last commit, the blob pack's size, and each
+//! collection's schema, documents and segments (module `stats`, which defines its `--json` shape; it is the
+//! whole-database inspection, so there is no `inspect database`). `persia dump documents` writes a collection's live
+//! documents as JSON Lines in the output form of SPEC §6.4.1, in storage order (module `documents`). `persia compact`
+//! rewrites the container without its dead frames (SPEC §4.6, module `compact`); it is the one database command that
+//! opens read-write.
+//!
+//! The command tree. A file or directory is the positional argument (`<PATH>`; `<ROOT>` for a store), every other
+//! argument is a `--flag`, and `--json` asks for one JSON object on one line where a command has one:
+//!
+//! ```text
+//! persia container files <PATH>
+//! persia container sweep <PATH> [--quarantine]
+//! persia store files <ROOT>
+//! persia store sweep <ROOT> [--force]
+//! persia inspect container <PATH> [--id <ID>]
+//! persia inspect segment <PATH> --schema <SCHEMA> [--verify]
+//! persia dump segment <PATH> --schema <SCHEMA> --field <FIELD> [--term <TERM>]
+//! persia dump documents <PATH> --collection <COLLECTION>
+//! persia verify <PATH> [--quick | --deep]
+//! persia stats <PATH> [--json]
+//! persia compact <PATH> [--json]
+//! ```
+//!
+//! Output goes to stdout and a failure's reason to stderr. A reader that closes the pipe early (`persia dump
+//! documents ... | head`) ends the output without an error.
+//!
 //! Exit status (ROADMAP 6.6.7, SPEC §8.6): 0 on success, 3 when the command failed on corrupt stored bytes (a database,
 //! container, segment or blob pack that breaks its format) or on a broken blob reference (`verify`: a document that
 //! references a blob the pack lacks, or whose bytes do not match it, SPEC §9.5), 4 when the file is not a Persia
@@ -29,11 +57,36 @@
 //! another database (`PackOfAnotherDatabase`) or of a newer format (`PackUnsupported`), and a database a live writer
 //! committed to while `verify` ran, which reports "changed during verify, rerun" instead of a dangling reference). A
 //! script separates a wrong file (4), damage (3), and any other failed run (1).
+//!
+//! The status of each command that takes a container, by what it finds at `<PATH>` (tested as a table in
+//! `tests/commands.rs`):
+//!
+//! | Command | A sound database | No file | Not a container | A damaged container | A live writer holds it |
+//! |---|---|---|---|---|---|
+//! | `verify` | 0 | 1 | 4 | 3 | 0 |
+//! | `stats` | 0 | 1 | 4 | 3 | 0 |
+//! | `dump documents` | 0 | 1 | 4 | 3 | 0 |
+//! | `inspect container` | 0 | 1 | 4 | 3 | 0 |
+//! | `compact` | 0 | 1 | 4 | 3 | 1 |
+//! | `container sweep` | 0 | 1 | 4 | 3 | 1 |
+//! | `container files` | 0 | 1 | 0 | 0 | 0 |
+//!
+//! The read-only commands take no lock, so a live writer does not fail them; `compact` and `container sweep` open
+//! read-write and fail with status 1 while another writer has the database. `container files` opens nothing: it lists
+//! the files beside any existing file. `inspect container` reports damage after the last commit on its rows and
+//! still exits 0 (it is a debugging aid; `verify` is the check). Besides the table: `dump documents` exits 1 for a
+//! collection the database lacks, `compact` exits 1 for a schema that names an analyzer registered by the application
+//! (it has the built-in ones only), the segment commands exit 3 for a corrupt segment file and 1 for a missing one or
+//! a `--schema` that is not the segment's, and the store commands exit 1 for a root that is not a directory.
 #![forbid(unsafe_code)]
 
+mod compact;
 mod container;
 mod database;
+mod documents;
+mod open;
 mod segment;
+mod stats;
 
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -91,6 +144,31 @@ enum Command {
         /// Also read every referenced blob whole and check its SHA-256 against its id.
         #[arg(long)]
         deep: bool,
+    },
+    /// Rewrites a container without its dead frames (SPEC §4.6) and prints its size before and after. Opens the
+    /// database read-write, as a writer does, so it fails (status 1) while another writer has it open; commits no
+    /// document. The new file is renamed over the old one, so the path names a complete database at every instant.
+    /// The blob pack (`<name>.persia.blobs`) is not touched. Do not run it during a copy of the files taken with the
+    /// database in use (SPEC §4.8). Read-only handles of other processes keep reading the old file until they
+    /// refresh, which holds a writer's blob garbage collection back meanwhile (SPEC §9.5). Exits with status 3 on
+    /// corruption, 4 when the file is not a Persia container, and 1 on any other failure.
+    Compact {
+        /// The container file.
+        path: PathBuf,
+        /// Write one JSON object instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Prints what a read-only open of a database reports (no lock, no writes, so a live writer may have it open):
+    /// the last commit, the container's live and dead space, the WAL after the last commit, the blob pack's size,
+    /// and each collection's schema, documents and segments. Exits with status 3 on corruption, 4 when the file is
+    /// not a Persia container, and 1 on any other failure.
+    Stats {
+        /// The container file.
+        path: PathBuf,
+        /// Write one JSON object (a stable shape, see the crate docs) instead of text.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -159,6 +237,18 @@ enum DumpCommand {
         /// A term, as indexed (after analysis: e.g. lowercased and stemmed for an English `text` field).
         #[arg(long)]
         term: Option<String>,
+    },
+    /// The live documents of one collection of a database, as JSON Lines (one document per line, in the output form
+    /// of SPEC §6.4.1: what `get` returns, so stored fields only, and a blob as its reference). Read-only, without
+    /// the writer lock. Order: the segments oldest first, each by docid, then the documents of the WAL records not
+    /// yet in a segment, as logged. Documents are streamed, one at a time. Exits with status 3 on corruption, 4 when
+    /// the file is not a Persia container, and 1 on any other failure (a collection the database lacks included).
+    Documents {
+        /// The container file.
+        path: PathBuf,
+        /// The collection to dump.
+        #[arg(long)]
+        collection: String,
     },
 }
 
@@ -294,6 +384,11 @@ fn run(cli: Cli) -> Result<()> {
             field,
             term,
         }) => to_stdout(|out| segment::dump(out, &path, &schema, &field, term.as_deref()))?,
+        Command::Dump(DumpCommand::Documents { path, collection }) => {
+            to_stdout(|out| documents::dump(out, &path, &collection))?;
+        }
+        Command::Compact { path, json } => to_stdout(|out| compact::compact(out, &path, json))?,
+        Command::Stats { path, json } => to_stdout(|out| stats::stats(out, &path, json))?,
         Command::Verify { path, quick, deep } => {
             let scan = match (quick, deep) {
                 (true, _) => Scan::Quick,
