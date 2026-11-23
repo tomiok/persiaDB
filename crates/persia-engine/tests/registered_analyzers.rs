@@ -41,7 +41,7 @@ use persia_engine::db::{
     SearchRequest, SegmentIds, Snapshot,
 };
 use persia_engine::document::{Document, FieldSet, Value};
-use persia_engine::manifest::{CollectionDiff, Manifest, ManifestDiff};
+use persia_engine::manifest::{CollectionDiff, CollectionEntry, Location, Manifest, ManifestDiff};
 use persia_engine::memtable::{FlushPolicy, MemtableError};
 use persia_engine::merge::{MergeOptions, MergePolicy};
 use persia_engine::query::{DefaultFields, QueryCompiler, QueryLimits};
@@ -733,6 +733,77 @@ fn every_crash_point_opens_with_the_analyzer_and_fails_cleanly_without_it() {
 /// ROADMAP 6.6.8 (proposed SPEC §8.6 text: "Replay still decodes each of its records, validates it against the
 /// schema and applies it"): a synced `notes` put whose `title` is an integer fails an open that skips `title`'s
 /// analysis exactly as it fails one that has the analyzer: the record does not decode for the schema.
+#[test]
+fn an_unregistered_analyzer_fails_the_open_before_an_earlier_collection_is_read() {
+    // `archive` (built-ins only) comes first in the manifest and has a damaged segment; `notes`, after it, names
+    // `prefix@1`. The analyzers of every collection are checked before any segment is read (SPEC §6.2.2).
+    let file = SimFile::new();
+    {
+        let mut db =
+            Database::create_on(file.clone(), [9; 16], sim_options(registry(), BIG, 0)).unwrap();
+        let archive = CollectionSchema::from_json(
+            r#"{"name": "archive", "fields": {"body": {"type": "text"}}}"#,
+        )
+        .unwrap();
+        let body = archive.field("body").unwrap().id();
+        db.create_collection(archive).unwrap();
+        db.create_collection(CollectionSchema::from_json_in(SCHEMA, &registry()).unwrap())
+            .unwrap();
+        let doc = Document::new("a1").with(body, Value::String("an archived page".into()));
+        db.put("archive", &doc, Durability::Fsync).unwrap();
+        let doc = note(&db.snapshot(), "n1", "Persia");
+        db.put("notes", &doc, Durability::Fsync).unwrap();
+        db.commit().unwrap();
+        let names: Vec<_> = db
+            .manifest()
+            .collections()
+            .map(CollectionEntry::name)
+            .collect();
+        assert_eq!(names, ["archive", "notes"]);
+    }
+    let mut bytes = file.bytes();
+    {
+        let container =
+            Container::open_on(SimFile::from_bytes(bytes.clone()), Mode::ReadOnly).unwrap();
+        let manifest = ReadOnlyDatabase::open_container(container, &registry())
+            .unwrap()
+            .snapshot()
+            .manifest()
+            .clone();
+        let archive = manifest.collections().next().unwrap();
+        let Location::Frame { offset, len } = archive.segments()[0].location else {
+            panic!("a container segment is a frame")
+        };
+        let middle = usize::try_from(offset + len / 2).unwrap();
+        bytes[middle] ^= 0xFF;
+    }
+    let damaged = || SimFile::from_bytes(bytes.clone());
+    // With the analyzer, the open reads `archive`'s segment and finds the damage.
+    let with = ReadOnlyDatabase::open_container(
+        Container::open_on(damaged(), Mode::ReadOnly).unwrap(),
+        &registry(),
+    )
+    .unwrap_err();
+    assert!(with.is_corruption(), "{with:?}");
+    let check = |e: DatabaseError| {
+        assert!(!e.is_corruption(), "{e:?}");
+        assert!(
+            matches!(&e, DatabaseError::UnregisteredAnalyzer { collection, field, analyzer }
+                if (collection.as_str(), field.as_str(), analyzer.as_str())
+                    == ("notes", "title", "prefix@1")),
+            "{e:?}"
+        );
+    };
+    check(
+        ReadOnlyDatabase::open_container(
+            Container::open_on(damaged(), Mode::ReadOnly).unwrap(),
+            &AnalyzerRegistry::builtin(),
+        )
+        .unwrap_err(),
+    );
+    check(Database::open_on(damaged(), sim_options(AnalyzerRegistry::new(), BIG, 0)).unwrap_err());
+}
+
 #[test]
 fn an_open_skipping_analysis_still_rejects_an_invalid_record() {
     let file = SimFile::new();

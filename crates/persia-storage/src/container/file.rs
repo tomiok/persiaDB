@@ -93,7 +93,9 @@ pub trait ContainerFile: Send + Sync + std::fmt::Debug {
 }
 
 impl ContainerFile for File {
-    /// [`File::try_clone`]: a duplicated descriptor, which shares this one's open file description.
+    /// [`File::try_clone`]: a duplicated descriptor, which shares this one's open file description. A `flock` belongs
+    /// to the description, so a clone of a [`Mode::ReadWrite`](super::Mode::ReadWrite) container's file shares the
+    /// writer's lock: it is released only once the clone (and the old state holding it) drops too.
     fn try_clone_handle(&self) -> io::Result<Self> {
         self.try_clone()
     }

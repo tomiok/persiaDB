@@ -13,12 +13,15 @@
 //!    the new writer's documents, and keeps every write acknowledged at a level the crash keeps (SPEC §8.2.1).
 //! 2. A frame written only in part at the tail (a prefix of its bytes, with or without the file already grown), and
 //!    any seeded power-loss image of unsynced chunks, never fails a refresh, which equals a fresh open.
-//! 3. The CRC guard (ADR-0060 item 3): a power loss drops a replayed `Async` chunk and a new writer logs another one
-//!    with the same offset, length and `frame_seq`; the refresh reloads and the lost record is gone. More generally,
-//!    a refresh after such a loss never shows a record of the lost history.
+//! 3. The content-hash guard (XXH3-128, ADR-0060 item 3): a power loss drops a replayed `Async` chunk and a new
+//!    writer logs another one with the same offset, length and `frame_seq`; the refresh reloads and the lost record is
+//!    gone. More generally, a refresh after such a loss never shows a record of the lost history.
 //! 4. A refresh whose incremental replay fails part-way returns the error and leaves the published state as it was
 //!    (`seq`, replayed records, WAL end, collections, documents); views of it never see the records applied before
 //!    the failure (the memtables stay held). The next refresh reloads in full and so never applies them twice.
+//! 5. A power loss that drops the superblock slot the reader read (written, its `fdatasync` failed) makes a refresh
+//!    fail with `RefreshRefused` (an older commit, not corruption; nothing changes) until the restarted writer's open
+//!    retires the commit that slot named with one of its own (ROADMAP 6.6.9); the refresh after that one reloads.
 
 #![allow(
     clippy::unwrap_used,
@@ -507,9 +510,10 @@ fn last_chunk(container: &Container<SimFile>) -> FrameRef {
         .unwrap()
 }
 
-/// Invariant 3, the CRC guard: the replaced chunk has the same offset, length and `frame_seq`, so only its payload
-/// tells it apart. Every WAL record ends with the CRC-32C of its own bytes, so by the CRC residue property the CRC-32C
-/// of a whole chunk payload depends on its header and record lengths, not on the records' contents.
+/// Invariant 3, the content-hash guard (XXH3-128): the replaced chunk has the same offset, length and `frame_seq`, so
+/// only its payload tells it apart. Every WAL record ends with the CRC-32C of its own bytes, so by the CRC residue
+/// property the CRC-32C of a whole chunk payload depends on its header and record lengths, not on the records'
+/// contents.
 #[test]
 fn a_chunk_a_power_loss_replaced_at_the_same_place_reloads() {
     let (file, mut db) = base();
@@ -690,4 +694,64 @@ fn a_replay_that_fails_part_way_changes_nothing_and_the_next_refresh_reloads() {
         assert_writer(&reader, &db, &ids, ctx);
         assert_eq!(text_of(&reader, "a", "bad1"), None, "{ctx}");
     }
+}
+
+/// Invariant 5. The commit's last mutating call is the `fdatasync` of its superblock slot (SPEC §4.5 step 3).
+#[test]
+fn a_slot_a_power_loss_dropped_is_refused_until_the_restarted_writer_commits() {
+    let put = |db: &mut Database<SimFile>| {
+        db.put("a", &doc("d1", "lost slot"), Durability::Fsync)
+            .unwrap();
+    };
+    let slot_sync = {
+        let (file, mut db) = base();
+        put(&mut db);
+        db.commit().unwrap();
+        file.mutations() - 1
+    };
+    let (file, mut db) = base();
+    let (reader_file, reader) = reader_of(&file);
+    put(&mut db);
+    let lost = db.seq() + 1;
+    file.set_fault(Some(SimFault::FailAt(slot_sync)));
+    db.commit().unwrap_err();
+    drop(db);
+    // The slot is written but not synced: the reader reads it.
+    mirror(&file.bytes(), &reader_file);
+    reader.refresh().unwrap();
+    assert_eq!(reader.seq(), lost);
+
+    // A power loss drops it; the Manifest frame it named was synced before it and is still after `log_end`.
+    let restarted = file.crash(CrashLoss::All);
+    mirror(&restarted.bytes(), &reader_file);
+    let before = published(&reader);
+    let refused = reader.refresh().unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            DatabaseError::RefreshRefused {
+                other_database: false,
+                current,
+                found,
+            } if current == lost && found == lost - 1
+        ),
+        "{refused:?}"
+    );
+    assert!(!refused.is_corruption());
+    assert_eq!(published(&reader), before);
+
+    // The restarted writer's open retires that Manifest with a commit of its own: the refresh follows it.
+    let db = Database::open_on(restarted.clone(), options()).unwrap();
+    assert_eq!(db.seq(), lost);
+    mirror(&restarted.bytes(), &reader_file);
+    let refreshed = reader.refresh().unwrap();
+    assert_eq!(refreshed, Refreshed::Reloaded { seq: lost });
+    assert_fresh(
+        &reader,
+        &reader_file,
+        &["s1", "d1"],
+        "after the retiring commit",
+    );
+    assert_writer(&reader, &db, &["s1", "d1"], "after the retiring commit");
+    assert_eq!(text_of(&reader, "a", "d1").as_deref(), Some("lost slot"));
 }

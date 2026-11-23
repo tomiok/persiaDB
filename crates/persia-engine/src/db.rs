@@ -229,8 +229,12 @@ pub enum DatabaseError {
         analyzer: String,
     },
     /// [`ReadOnlyDatabase::refresh`] found another database in the container (another `db_uuid`: a file put at the
-    /// path), or an older commit of this one (`found` below `current`: a restore), so it kept the state it had
-    /// (ROADMAP 6.6.6, ADR-0060). Not corruption; open the reader again to follow the file.
+    /// path), or an older commit of this one (`found` below `current`), so it kept the state it had (ROADMAP 6.6.6,
+    /// ADR-0060). An older commit is a restore, or, transiently, a power loss on the writer's host that dropped the
+    /// superblock slot this reader read before the writer's `fdatasync` of it: the slot before it is found until the
+    /// restarted writer's open retires the commit the lost slot named with one of its own (ROADMAP 6.6.9), and a
+    /// refresh after that one succeeds. Not corruption; refresh again later, or open the reader again to follow a
+    /// restored file.
     #[error(
         "refresh refused: the container holds {} (seq {found}; the reader shows seq {current})",
         if *other_database { "another database" } else { "an older commit" }

@@ -148,21 +148,24 @@ fn is_capacity(error: &MemtableError) -> bool {
 }
 
 /// Steps 2 and 3 of the open sequence (module docs): the committed manifest, and each collection with its segments
-/// open and an empty memtable from `memtable`, which gets the collection's name and schema and runs before its
-/// segments are opened.
+/// open and an empty memtable from `memtable`, which gets the collection's name and schema. It runs for every
+/// collection before any segment is opened, so an analyzer the registry lacks fails the open before any segment is
+/// read (SPEC §6.2.2, ADR-0059 item 5), whichever collection names it.
 pub(super) fn load<F: ContainerFile + Sync>(
     container: &Container<F>,
     mut memtable: impl FnMut(&str, &CollectionSchema) -> Result<Memtable, DatabaseError>,
 ) -> Result<(Manifest, BTreeMap<String, Collection>), DatabaseError> {
     let manifest = read_manifest(container)?;
+    let mut memtables = Vec::with_capacity(manifest.collections().len());
+    for entry in manifest.collections() {
+        let schema = Arc::new(entry.schema().clone());
+        memtables.push((memtable(entry.name(), &schema)?, schema));
+    }
     let mut collections = BTreeMap::new();
     {
         let objects = ContainerObjects::new(container, &manifest);
-        for entry in manifest.collections() {
+        for (entry, (memtable, schema)) in manifest.collections().zip(memtables) {
             let name = entry.name();
-            let schema = Arc::new(entry.schema().clone());
-            // First: an analyzer the registry lacks fails the open before any segment is read.
-            let memtable = memtable(name, &schema)?;
             let mut segments = Vec::with_capacity(entry.segments().len());
             for segment in entry.segments() {
                 segments.push(open_segment(&objects, name, segment, &schema)?);

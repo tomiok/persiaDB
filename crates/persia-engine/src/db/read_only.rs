@@ -302,9 +302,13 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyDatabase<F> {
     ///   created collection, a flush of records this reader never replayed). The chunks after them
     ///   are replayed, with the read-only stop of SPEC §8.6, into the same memtables, and only the segments and
     ///   sidecars whose manifest entry changed are opened. The memtables are held while records apply (as a batch
-    ///   holds them, SPEC §8.2.1), so no view sees part of a refresh. A snapshot taken before shares them, so a view
-    ///   taken from it after the refresh sees the new records too, as a writer's snapshot sees its later writes
-    ///   (SPEC §8.4).
+    ///   holds them, SPEC §8.2.1) and released one after another after the swap, so a view of a collection's
+    ///   memtable shows none or all of the records the refresh applied to it. Between the swap and that release, a
+    ///   view of the new snapshot pairs the new manifest with the memtable as it was before the refresh: a consistent
+    ///   committed state, since the commits taken here flushed none of the records it holds. Views of two collections
+    ///   taken during the release can straddle it, one before the refresh and one after. A snapshot taken before
+    ///   shares the memtables, so a view taken from it after the refresh sees the new records too, as a writer's
+    ///   snapshot sees its later writes (SPEC §8.4).
     /// - [`Refreshed::Reloaded`]: anything else (a flush commit moved `wal_start` past the records the memtables
     ///   hold, a collection was dropped or its schema changed, the chunks replayed are not the first ones found, or an
     ///   earlier refresh failed after it changed the memtables) runs the open sequence on the reopened container,
@@ -314,9 +318,10 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyDatabase<F> {
     ///
     /// # Errors
     /// Nothing readers see changes on an error. [`DatabaseError::RefreshRefused`] if the container holds another
-    /// database (its `db_uuid`) or an older commit of this one; otherwise as [`Container::reopen_read_only`] and
-    /// [`ReadOnlyDatabase::open_container`]. A replay that fails part-way leaves its memtables held, so views keep
-    /// showing the published state, and the next refresh reloads in full.
+    /// database (its `db_uuid`) or an older commit of this one (a restore, or, until the restarted writer commits, a
+    /// power loss that dropped the superblock slot this reader read before it was synced); otherwise as
+    /// [`Container::reopen_read_only`] and [`ReadOnlyDatabase::open_container`]. A replay that fails part-way leaves its
+    /// memtables held, so views keep showing the published state, and the next refresh reloads in full.
     pub fn refresh(&self) -> Result<Refreshed, DatabaseError> {
         let mut live = self.live.lock().unwrap_or_else(|poisoned| {
             // A refresh panicked: what it applied is unknown, so the next state is opened in full.
@@ -501,13 +506,16 @@ fn take_manifest<F: ContainerFile + Sync>(
     let mut skipped = Vec::new();
     let mut segments = BTreeMap::new();
     let mut created = Vec::new();
+    // As the open's `load`: the same registry and skipped fields as a fresh open of `next`, and every collection's
+    // analyzers checked before any segment is opened.
+    for entry in next.collections() {
+        if analysis == Analysis::SkipUnregistered {
+            skip_unregistered(entry.name(), entry.schema(), &mut registry, &mut skipped)?;
+        }
+        check_analyzers(entry.name(), entry.schema(), &registry)?;
+    }
     for entry in next.collections() {
         let name = entry.name();
-        // As the open's `load`: the same registry and skipped fields as a fresh open of `next`.
-        if analysis == Analysis::SkipUnregistered {
-            skip_unregistered(name, entry.schema(), &mut registry, &mut skipped)?;
-        }
-        check_analyzers(name, entry.schema(), &registry)?;
         let old = live.collections.get(name);
         let old_entries = live
             .manifest

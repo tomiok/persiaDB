@@ -225,14 +225,20 @@ Commits that tombstone older copies (ROADMAP 6.4.3): `commit_upserts` commits 2 
 ## `persia-engine` read-only refresh
 
 `cargo bench -p persia-engine --bench read_only`: a database of 4 committed segments of 2 000 documents of about 40
-words and 2 000 more unflushed in the WAL (20 synced batches). `refresh_one_put` is a synced put by the writer, then
-`ReadOnlyDatabase::refresh` (incremental: the container is reopened and the one new chunk replayed, ADR-0060);
-`refresh_unchanged` a refresh with nothing new; `reopen` the new `ReadOnlyDatabase::open_on` a reader needed before
-(every segment opened, the 2 000-record backlog replayed). The container is a `SimFile`. Time per call.
+words and 2 000 more unflushed in the WAL (20 synced chunks). A backlog past the `log_end` of the superblock slot the
+reader read is re-read on every refresh (each chunk's XXH3-128 checked again, ADR-0060 item 3, since 07c2fe8), so the
+cases fix how much lies there. `refresh_unchanged_backlog` is a refresh with nothing new and the whole backlog past
+`log_end`; `refresh_unchanged` the same once a commit that flushes nothing (a created collection) moved `log_end` past
+it; `reopen` the new `ReadOnlyDatabase::open_on` a reader needed before (every segment opened, the 2 000-record
+backlog replayed); `refresh_one_put` an incremental `ReadOnlyDatabase::refresh` after a synced put by the writer (the
+put not timed), from that last state, with the writer and reader started again from it every 64 puts outside the
+timing, so at most 64 one-document chunks lie past `log_end` and the cost does not grow with the iteration count.
+The container is a `SimFile`. Time per call.
 
-| Recorded | `refresh_one_put` | `refresh_unchanged` | `reopen` |
-|---|--:|--:|--:|
-| 2026-11-22, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.6.6) | 1.96 ms | 2.07 ms | 56.0 ms |
+| Recorded | `refresh_one_put` | `refresh_unchanged` | `refresh_unchanged_backlog` | `reopen` |
+|---|--:|--:|--:|--:|
+| 2026-11-22, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.6.6, fbea85d, before 07c2fe8: the put timed, the WAL past `log_end` growing by a chunk each iteration, `refresh_unchanged` and `reopen` measured after those puts; not comparable with the row below) | 1.96 ms | 2.07 ms | — | 56.0 ms |
+| 2026-11-23, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.6.6, the batch review fix-up) | 133 µs | 110 µs | 232 µs | 7.93 ms |
 
 ## `persia-engine` query execution
 
