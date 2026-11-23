@@ -2011,12 +2011,15 @@ top and counts as a query. A plain search (no cascade) counts nowhere. Per query
 it when the response's `level` is not `exact` (a step after L0 was built and not skipped); `empty` counts it when no
 step of its cascade found a hit, L0 included (the zero-result queries, after whatever relaxation ran, `relax: false`
 included); otherwise the level of its hit step (above) counts it, once. So the per-level counts are the level
-histogram, and add up to `queries − empty`; `relaxed / queries` is the share relaxed and `empty / queries` the share
-still empty. The engine reads them as a `RelaxationStats` per collection (`CollectionSnapshot::relaxation_stats`) and
-for the database (`Database::relaxation_stats`: the collections' sum, with what the collections dropped since the open
-counted, so no count goes down). Each relaxed search (its `level` not `exact`, cursor pages included) also emits one
-`tracing` event at debug level, `relaxed search`, with its collection, `level`, `applied`, the page's hit count
-(`hits`) and `truncated`.
+histogram, and add up to `queries − empty` when no search is in flight: each count is its own counter, added to and
+read one at a time, so counts read during a search may hold some of its counts and not the others (in any order), and
+an exporter that subtracts them uses saturating subtraction. `relaxed / queries` is the share relaxed and
+`empty / queries` the share still empty. A cascade the budget truncated counts the same way, by the steps it ran. The
+engine reads them as a `RelaxationStats` per collection (`CollectionSnapshot::relaxation_stats`) and for the database
+(`Database::relaxation_stats`: the collections' sum, with what each dropped collection counted until its drop, so no
+count goes down; a search made after a drop on a snapshot taken before it counts in that snapshot's collection
+only). Each relaxed search (its `level` not `exact`, cursor pages included) also emits one `tracing` event at debug
+level, `relaxed search`, with its collection, `level`, `applied`, the page's hit count (`hits`) and `truncated`.
 
 ### 7.7 Highlighting / explain
 `explain: true` returns, with each hit of the page, how its score adds up: a tree like the query's with only the
