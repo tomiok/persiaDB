@@ -1315,7 +1315,11 @@ replaced only through it (`Compiled::with_query`): the query a caller puts in is
 request's filters join `q` (added to a root `bool` without `should` clauses or a `minimum_should_match`, else
 wrapped; a filter the root holds already is not added twice). No query a caller puts in can drop them, so no level of
 §7.6 searches without the hard `filter`, and none but L6 under `"last_resort"` without the `soft_filter`, by design
-(ROADMAP 8.2.13, ADR-0056). The clauses
+(ROADMAP 8.2.13, ADR-0056). The filters the root `bool` of the query a caller puts in holds itself (in place, or in the
+root the join wraps) are the caller's own, and hard: no level drops them, also one equal to a `soft_filter`, which the
+join then does not add twice (ROADMAP 8.2.13; the filter step drops neither, §7.6). So `Compiled::with_query` is safe
+for access filters: a query put in can drop no request filter, its own root filters are hard, and no level loosens a
+filter it holds deeper (L5 and L2 build no step rather than drop one, §7.6). The clauses
 describe the new query only while it holds their parts where they were: for a single required part, that part, or a
 `bool` whose first `must` entry is that part (without `should` clauses or a `minimum_should_match`; exclusions,
 filters and further required clauses beside it are allowed); for any other compilation, a root `bool` without those
@@ -1636,7 +1640,7 @@ over every match, whatever the page: per segment from its keyword column (§5.3.
 memtable from its postings, then merged by value bytes, so counts are exact. The values returned are the `size` with the
 highest count, then ascending bytes; a value no match holds is not returned. When the
 relaxation cascade runs (§7.6), a facet counts the matches of every step up to and including the hit step that a page
-holding every hit would build, each document once, at its first step (ROADMAP 8.1.9, ADR-0055). That page is the one
+holding every hit would build, each document once, at its first step (ROADMAP 8.1.9, ADR-0061). That page is the one
 from the top whose window is past every hit: without `fill` it builds the steps every page builds; with `fill`, every
 step of the levels that fill, until the steps run out. It collects every match of each step it searches, so its steps
 after its hit step match nothing, and the set is every step it builds. So every page of one query on one snapshot
@@ -1647,8 +1651,13 @@ counts its cut matches, as every page cuts it alike. A page with `fill` and face
 hits, the remaining steps of the levels that fill, and searches each only to count it: those steps collect no hit, are
 not listed in `applied` or `level`, and are not the cascade's last step a hit's cursor records. They are excluded from
 the later steps and held to the limits as any step. A page the budget truncates (§7.6) counts the steps it completed.
-The counts are kept once per query (ROADMAP 8.1.11): a collection's snapshot keeps the counts of a page that
-counted every such step without being truncated, keyed by the memtable view's version, the query and its compilation,
+When the budget passes in a step a page searches only to count it, the page is not truncated (its hits, `level` and
+`applied` are whole, §7.6), but its facets count only the steps searched before that one: they are partial, and the
+response does not say so (ROADMAP 8.1.31). The counts are kept once per query (ROADMAP 8.1.11): a collection's
+snapshot keeps the counts of a page from the top (without a cursor) that counted every such step, the budget passing
+in none of them. A cursor page keeps none: its cursor may come from a page the budget truncated, whose last step
+(§7.6) stops short of the steps a page from the top builds, so it may count fewer. They are keyed by the memtable
+view's version, the query and its compilation,
 the filters marked soft, the relaxation settings, the step limits and the facets asked for, and a later page of the
 same query reads them instead of searching any step only to count it. The cache holds at most 32 counts and 1 MiB,
 evicts the least recently used first (by a counter of uses, not a clock), and goes with its snapshot at the next
@@ -1692,7 +1701,7 @@ Rules:
   query order, `fallback` the order L5 ranked its hits in (`"static_rank"` or `"recency"`, below) when the hit step is
   L5's and absent otherwise (the explicit flag that the query's ranking ends with documents its words do not match: as
   `effective`, it is the cascade's, the same on every page, and each hit's `level` says which hits are L5's), `filters_dropped` whether the hit step is the filter step (`true` only then: some hit of the ranking does not pass the
-  request's `soft_filter` (the hard `filter` it passes); the same on every page, as `fallback`, and each hit's `level` `filters` says which, ROADMAP 8.2.6), and `truncated` whether the budget cut the cascade (below). Without `fill`, every page of one query on
+  request's `soft_filter` (the hard `filter` it passes); the same on every page, as `fallback`, and each hit's `level` `filters` says which, ROADMAP 8.2.6), and `truncated` whether the budget cut a step of the page (below; not a step searched only to count facets, §7.5). Without `fill`, every page of one query on
   one snapshot states the same, unless the budget truncated it; with `fill`, a deeper page may build, and state, more
   steps. Each hit also states its `level`, its step and its rank score (below). The engine's `Relaxation` (ROADMAP
   8.1.5) defines every field. The *hit step* (ROADMAP 8.1.22, ADR-0043) is the last step of the cascade that found a
@@ -1780,7 +1789,9 @@ reads no statistics. Within §7.1.3's limits it keeps fewer alternatives (`synon
 L2 `drop_terms` (ROADMAP 8.2.2, ADR-0038). Its *terms* are the query's required clauses: of a query compiled from `q`, each
 clause of §7.1.1 that is not excluded (`-`), whatever its parts (a phrase, a word split in two, a word over several
 fields is one term); of a programmatic query, the `must` clauses of a root `bool` that has no `should` clauses and a
-`minimum_should_match` of 0. Any other query, and one of fewer than 2 terms, skips the level (ROADMAP 8.2.2.3): no
+`minimum_should_match` of 0, none of which holds a filter at any depth (a step that did not require such a clause
+would match documents its filter rejects, ROADMAP 8.2.13). Any other query, and one of fewer than 2 terms, skips the
+level (ROADMAP 8.2.2.3): no
 count is below L0's, and dropping the one term would match every document the excluded clauses and filters leave. The step of count `k` is a `bool` whose
 `should` clauses are the terms (a clause of several parts as a `bool` requiring them), with `minimum_should_match` `k`,
 and L0's root `must_not` and `filter` clauses, so excluded clauses stay excluded and filters are not relaxed. Its
@@ -1916,9 +1927,13 @@ request's filters too, hard and soft, which the compiled query keeps beside its 
 8.2.14, ADR-0048), and the required clauses a caller added beside its clauses (§7.1.1, ROADMAP 8.2.15). So no query
 a caller puts in place of the compiled one loses the request filter at L5: it is joined to that query's root, and L5
 reads it from the compilation. A compiled query's excluded clauses are its root's `must_not`; of a query a caller put
-in, L5 keeps the exclusions its own root `bool` holds (one with `should` clauses is wrapped to join the filter, so its exclusions
-are deeper and L5 does not keep them, as for a programmatic query). Excluded clauses at the root stay excluded and
-filters are not relaxed (L6 relaxes them, below), and, as every step, it
+in, L5 keeps the exclusions and filters its own root `bool` holds, also when the join wrapped it (a root with `should`
+clauses, one level down, ROADMAP 8.2.13). L5 never selects a document a filter of L0 rejects (ROADMAP 8.2.13,
+ADR-0056): when L0 holds a filter in a clause L5 drops (below the root and outside its `must_not`: a programmatic
+`boost` or `constant_score` of a filtered `bool`, a filtered `bool` as a `must` or `should` clause of the root or of a
+wrapped caller root), `match_all` would not apply it, so L5 builds no step; a filter inside an excluded clause, or in a
+required clause a caller added, is kept with it. Excluded clauses at the root stay excluded and filters are not
+relaxed (L6 drops soft ones, below), and, as every step, it
 excludes the steps searched before it (the cascade, below): its hits are the live documents the filters keep, the
 excluded clauses do not match and no earlier step matched. A deleted document is never one (§7.3: no search matches
 it). Held to §7.1.3's limits beside the steps it excludes, it is `fallback:cut` or `fallback:skipped` as any step.
@@ -1958,17 +1973,19 @@ ADR-0056): of a query compiled from `q`, the request's `soft_filter`, which the 
 caller marked soft (`RelaxedQuery::with_soft_filter`), every other one being hard. The request's `filter` is hard and
 stays, also when given as soft too. A query a caller put in place of the compiled one holds the request's filters at
 its root (they are joined to it, §7.1.1), and the step drops the soft ones alone: a filter the caller's root `bool`
-holds itself is part of that query and stays, unless it equals a soft filter, which counts as one and is dropped (the
-join does not add it twice, so the two cannot be told apart). When the join wrapped the caller's query (a root with
-`should` clauses or a `minimum_should_match`), the caller's root is the one it wrapped, and the soft filters are
-dropped from both: a clone of the compiled query with `should` clauses added keeps no copy of them. Every other
+holds itself is part of that query and stays, also when it equals a soft filter (ROADMAP 8.2.13: the caller's own
+filters are hard; the join does not add an equal soft one twice, so the two cannot be told apart, and the step drops
+neither). When the join wrapped the caller's query (a root with `should` clauses or a `minimum_should_match`), the
+caller's root is the one it wrapped, which holds the caller's own filters alone: it stays whole, and the soft filters
+are dropped from the wrap. A caller who puts back a clone of the compiled query, which holds the soft filters, so
+makes them its own: no filter step. Every other
 clause stays as L0 has it: its required clauses (a caller's added ones too, ROADMAP 8.2.15), its `should` clauses and
 `minimum_should_match`, its excluded clauses (a user who wrote `-blue` never gets blue, as at L5), its hard filters,
 and any filter deeper in the query. The soft filters are dropped together, in no order. A request whose filters enforce
 access puts them in `filter`, which no level drops, so it may set `last_resort` for its `soft_filter`. The level is
 skipped when there is nothing to drop: a query whose root holds no soft filter (a compiled query with no
-`soft_filter`, even when a query a caller put in has filters of its own at its root; a programmatic one with none
-marked, or whose root is not a `bool`). So does a query that
+`soft_filter`, or whose soft filters the root of a query a caller put in holds itself, even when that root has
+filters of its own; a programmatic one with none marked, or whose root is not a `bool`). So does a query that
 searches no word. A clause searches a word when it is a `term`, `combined`, `phrase`, `prefix` or `fuzzy`, or a
 `bool`, `boost` or `constant_score` that holds such a clause in `must` or `should` (a term only in `must_not` does
 not). `match_all`, an empty `bool` and a `bool` of exclusions alone search none, and neither does a wrapper of one
@@ -2059,11 +2076,13 @@ passed, the cascade stops. A step in progress is dropped whole: it has not seen 
 need not be its best, and a page of them would rank hits the full step ranks lower or does not return. The response
 holds the hits of the steps completed, ranked and paged as above, with `truncated: true`. Its `level` and `applied`
 describe those steps, its hit step is the last of them that found a hit, and a hit's cursor records the last of them as the cascade's last step (on a cursor page, that
-or the cursor's own last step, whichever is later, so the next page tries again). On a cursor page with facets whose
-counts no earlier page of the query kept (§7.5, ROADMAP 8.1.11), the steps before the cursor's, and with `fill` those
-past its own, are searched to count them and spend the budget too, so such a page may be truncated before any hit;
-once a page counted them in full, later pages read the counts and search only their own steps. A cascade that ends
-before the budget passes is not truncated.
+or the cursor's own last step, whichever is later, so the next page tries again). On a page with facets whose counts
+no page of the query kept (§7.5, ROADMAP 8.1.11), the steps a page searches only to count them spend the budget too.
+On a cursor page, those before the cursor's step are steps of the page (it builds them again), so such a page may be
+truncated before any hit. With `fill`, those past the page's own come after its hits: the budget passing in one of
+them leaves the page whole and not truncated, and its facets partial (§7.5). Once a page from the top counted every
+one of them, later pages read the counts and search only their own steps. A cascade whose page's steps end before the
+budget passes is not truncated.
 
 ### 7.7 Highlighting / explain
 `explain: true` returns, with each hit of the page, how its score adds up: a tree like the query's with only the

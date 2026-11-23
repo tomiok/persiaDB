@@ -217,11 +217,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - A required clause a caller adds after a compiled query's clauses (`Compiled::with_query`) no longer detaches the
   compilation: every relaxation level keeps it, unchanged (`Compiled::extra_must`, SPEC §7.1.1, ROADMAP 8.2.15).
 - **Changed (breaking, pre-1.0, no request version):** a request's `filter` is now hard: no relaxation level drops it,
-  `relax.filters = "last_resort"` included. A new request key, `soft_filter` (same grammar and limits), holds the
-  filters `last_resort` may drop at the filter step; with `last_resort` and no `soft_filter`, no filter step is built.
-  Without `last_resort`, `soft_filter` applies as a filter. Engine API: `Compiled::with_soft_filter`,
-  `Compiled::soft_filter`, and `RelaxedQuery::with_soft_filter` for a programmatic query's root filters, which are
-  hard unless marked (SPEC §7.1.2, §7.6, ROADMAP 8.2.13).
+  `relax.filters = "last_resort"` included. The request key `soft_filter` (same grammar and limits, SPEC §7.1.2) is
+  specified to hold the filters `last_resort` may drop at the filter step; with `last_resort` and no `soft_filter`,
+  no filter step is built, and without `last_resort` it applies as a filter. Its engine API is in place
+  (`Compiled::with_soft_filter`, `Compiled::soft_filter`, and `RelaxedQuery::with_soft_filter` for a programmatic
+  query's root filters, which are hard unless marked); parsing it from request JSON is ROADMAP 10.1.10. A filter the
+  root of a query put in with `Compiled::with_query` holds itself is hard too, and L5 `fallback` keeps every filter
+  L0 applies, or builds no step (SPEC §7.6, ROADMAP 8.2.13).
 - Facets of a relaxed search count the steps a page holding every hit builds, so every page of one query counts the
   same, with or without `fill`, by offset or cursor (SPEC §7.5, ROADMAP 8.1.9).
 - A relaxed query's facet counts are kept per snapshot once a page counted them, so deeper cursor pages no
