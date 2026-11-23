@@ -2368,13 +2368,17 @@ operations) fails the open. A read-write open flushes at the threshold (above) a
 shows the snapshot it found until it is **refreshed** (`ReadOnlyDatabase::refresh`, ROADMAP 6.6.6, ADR-0060),
 which reopens the container read-only (at its path when it was opened by one, so it follows a compaction, §4.6) and
 swaps in the next state at once: a search, or any holder of a snapshot, keeps the one it took. Another `db_uuid`
-there, or an older committed `seq`, is refused and nothing changes. When the WAL chunks already replayed are the
+there, or an older committed `seq` (a restore; or, until the restarted writer's open commits, ROADMAP 6.6.9, a power
+loss on the writer's host that dropped the slot the reader read before its `fdatasync`), is refused and nothing
+changes. When the WAL chunks already replayed are the
 first ones the new scan finds from the new `wal_start` (the same offset, length and `frame_seq`, and each one past
 the `log_end` of the slot the current state was read with holds the same bytes: its payload's XXH3-128, kept from
 the replay, not a CRC-32C, which over records ending in their own CRC-32C depends only on their lengths, §8.2.1)
 and the commits since dropped no collection and changed no schema (a merge, a retiring
 commit, a created collection, a flush of records this reader never replayed), only the chunks after them are
-replayed (with the stop below) into the same memtables, held until the swap so no view sees part of it, and only
+replayed (with the stop below) into the same memtables, held until the swap and released one after another after it
+(a view of a collection's memtable shows none or all of the records applied to it; views of two collections taken
+during the release can straddle it), and only
 the segments and sidecars whose manifest entry changed are opened. Anything else (a flush commit moved `wal_start`
 past a replayed chunk, a collection was dropped or its schema changed, another history is at the path, or an earlier
 refresh failed while applying records) runs this open sequence again on the reopened container, with the open's

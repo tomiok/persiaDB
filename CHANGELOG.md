@@ -233,8 +233,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-engine`: a stored schema naming a well-formed analyzer that is not a built-in name now decodes (it was
   `ManifestError::UnsupportedAnalyzer`); the open reports it as `UnregisteredAnalyzer` unless the registry has it.
   `UnsupportedAnalyzer` is now only a built-in name at a version this build lacks.
-- `persia-engine` (breaking): `ReadOnlyDatabase::container` and `manifest` return `Arc`s of the current state,
-  `skipped_analysis` a `Vec`, and `objects` a `ContainerObjects<'static, F>` (needs `F: 'static`).
+- `persia-engine` (breaking): `ReadOnlyDatabase::container` and `manifest` return `Arc`s of the current state, and
+  `objects` a `ContainerObjects<'static, F>` (needs `F: 'static`).
 - `persia` (internal API, breaking): a resume needs `expected_id` or `expected_size`; neither fails with
   `Error::ResumeUnchecked` before anything is read (ROADMAP 9.3.7).
 - `persia` (internal API, breaking): `BlobDatabase::gc` on the pack does not sweep while any reader lease is behind the
