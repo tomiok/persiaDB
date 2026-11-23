@@ -159,6 +159,10 @@ The binary is `persia`. These subcommands exist:
 | `persia store files <dir>` | Temporary files under a local object store. |
 | `persia store sweep <dir> [--force]` | Removes temporary files a live writer does not hold. |
 | `persia verify <file>` | Checks a whole database read-only: every check an open makes, every segment's bytes, one live copy per document id. Exit status 3 on corruption, 4 when the file is not a Persia container. |
+| `persia stats <file> [--json]` | What a read-only open reports, without the writer lock: the last commit, the container's live and dead space, the WAL after the last commit, the blob pack's size, and each collection's schema, documents and segments. |
+| `persia dump documents <file> --collection <name>` | The collection's live documents as JSON Lines (the `get` form of a document), in storage order, one at a time. |
+| `persia compact <file> [--json]` | Rewrites the container without its dead frames and prints the space before and after. Opens read-write, so it fails while another writer has the database. Leaves the blob pack alone. |
+| `persia bench [--dir <dir>] [--docs <n>] [--queries <n>] [--seed <n>] [--json]` | A quick local micro-benchmark on a seeded synthetic corpus in a scratch directory it removes. Its numbers are local guidance only, not a published benchmark. |
 
 The golden segment above is format 1.0 and holds 300 documents (`doc_count` in the inspect output; see [`crates/persia-cli/tests/segment.rs`](./crates/persia-cli/tests/segment.rs)).
 

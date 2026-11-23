@@ -3470,6 +3470,11 @@ Defaults: `memtable_bytes` 64 MiB (with a 10 s idle flush), `commit_interval` 60
 ### 16.3 Benchmarks
 Reproducible harness (`benches/`, dataset download scripts, pinned configs), tracked in CI for regressions (> 5% fails).
 Comparison against other engines is reported with methodology, never cherry-picked.
+`persia bench` (ROADMAP 10.4.3) is not part of that harness. It is a quick local check: a seeded synthetic corpus
+indexed into a new database in a scratch directory the command creates and removes, then a seeded query mix, reported
+as documents per second, the commit time and latency percentiles per kind of query (text, or `--json`). The same seed
+gives the same corpus and queries. Its numbers are local guidance only and are never a published result: its help and
+its output say so, and reproducible numbers, with their method, go in `docs/benchmarks.md`.
 
 ---
 

@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia bench` (ROADMAP 10.4.3; SPEC §16.3): a quick micro-benchmark of this build on this machine. It indexes a
+  seeded synthetic corpus into a new database in a scratch directory it creates and removes (`--dir`, default the
+  system temporary directory; no existing database is opened), commits, and runs a seeded mix of five kinds of query.
+  It prints documents per second, the commit time and each kind's latency percentiles (p50, p90, p99, max), as text or
+  as one JSON object (`--json`); `--docs`, `--queries` and `--seed` size and seed the run, and the same seed gives the
+  same corpus and queries. Its numbers are local guidance only, not a published benchmark, which its help and its
+  output both say.
 - `persia stats <path>`, `persia compact <path>` and `persia dump documents <path> --collection <name>` (ROADMAP
   10.4.1; SPEC §4.6, §8.6). `stats` reads a database without the writer lock and prints the last commit, the
   container's live and dead space, the WAL after the last commit, the blob pack's size and, per collection, its schema,

@@ -43,6 +43,7 @@
 //! persia verify <PATH> [--quick | --deep]
 //! persia stats <PATH> [--json]
 //! persia compact <PATH> [--json]
+//! persia bench [--dir <DIR>] [--docs <DOCS>] [--queries <QUERIES>] [--seed <SEED>] [--json]
 //! ```
 //!
 //! Output goes to stdout and a failure's reason to stderr. A reader that closes the pipe early (`persia dump
@@ -78,8 +79,16 @@
 //! collection the database lacks, `compact` exits 1 for a schema that names an analyzer registered by the application
 //! (it has the built-in ones only), the segment commands exit 3 for a corrupt segment file and 1 for a missing one or
 //! a `--schema` that is not the segment's, and the store commands exit 1 for a root that is not a directory.
+//!
+//! `persia bench` (ROADMAP 10.4.3, module `bench`) is a quick micro-benchmark: it indexes a seeded synthetic corpus
+//! into a new database in a scratch directory it creates and removes, then runs a seeded query mix, and reports
+//! documents per second, the commit time and each query kind's latency percentiles. **Its numbers are local guidance
+//! only, not a published benchmark** (reproducible numbers live in `docs/benchmarks.md`); its help and its output
+//! both say so. It takes no container: it exits 0, or 1 on any failure (a `--dir` that is not a directory, an I/O
+//! error), and never opens an existing database.
 #![forbid(unsafe_code)]
 
+mod bench;
 mod compact;
 mod container;
 mod database;
@@ -166,6 +175,30 @@ enum Command {
     Stats {
         /// The container file.
         path: PathBuf,
+        /// Write one JSON object (a stable shape, see the crate docs) instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Runs a quick micro-benchmark of this build on this machine: indexes a seeded synthetic corpus into a new
+    /// database, commits it, and runs a seeded query mix (term, terms, phrase, filter, typo). Prints documents per
+    /// second, the commit time and each query kind's latency percentiles (p50, p90, p99, max). THE NUMBERS ARE LOCAL
+    /// GUIDANCE ONLY, NOT A PUBLISHED BENCHMARK: they depend on this machine, its load and this build, and one run is
+    /// one sample (reproducible numbers live in docs/benchmarks.md). The same seed gives the same corpus and queries.
+    /// The database is created in a new scratch directory that is removed afterwards, also on failure; no existing
+    /// database is opened. Exits with status 1 on any failure.
+    Bench {
+        /// Where the scratch directory is created [default: the system temporary directory].
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Documents in the corpus.
+        #[arg(long, default_value_t = bench::DEFAULT_DOCS, value_parser = clap::value_parser!(u32).range(1..))]
+        docs: u32,
+        /// Queries in the mix, a fifth of each kind.
+        #[arg(long, default_value_t = bench::DEFAULT_QUERIES)]
+        queries: u32,
+        /// The seed of the corpus and of the queries.
+        #[arg(long, default_value_t = bench::DEFAULT_SEED)]
+        seed: u64,
         /// Write one JSON object (a stable shape, see the crate docs) instead of text.
         #[arg(long)]
         json: bool,
@@ -389,6 +422,22 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Compact { path, json } => to_stdout(|out| compact::compact(out, &path, json))?,
         Command::Stats { path, json } => to_stdout(|out| stats::stats(out, &path, json))?,
+        Command::Bench {
+            dir,
+            docs,
+            queries,
+            seed,
+            json,
+        } => {
+            let options = bench::Options {
+                dir,
+                docs,
+                queries,
+                seed,
+                json,
+            };
+            to_stdout(|out| bench::bench(out, &options))?;
+        }
         Command::Verify { path, quick, deep } => {
             let scan = match (quick, deep) {
                 (true, _) => Scan::Quick,
