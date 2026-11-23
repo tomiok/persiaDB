@@ -117,8 +117,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   with the default fallback, and L5 searched uncut, it runs only when fewer than `min_results` documents pass both
   the filters and the excluded clauses. The response's `level` is `filters` once built, `applied` ends with `filters`, and the new flag
   `Relaxation::filters_dropped` (`"filters_dropped": true`) is set when the step found the hits; each such hit's
-  `level` is `filters`, and its explanation's `relaxed` node names the step. No filter can be marked as one that must
-  hold yet (ROADMAP 8.2.13): do not set `last_resort` on requests whose filters enforce tenancy or permissions.
+  `level` is `filters`, and its explanation's `relaxed` node names the step. Superseded by ROADMAP 8.2.13 (under
+  Changed): the step now drops only the request's `soft_filter`, and `filter` is always hard.
   `"never"` (the default) is unchanged: same plan, steps, indices and `applied`. Benchmarks
   `search_relaxed/filters/never` and `search_relaxed/filters/last_resort`.
 - `persia-engine`: a request's `relax` options (ROADMAP 8.3.1, 8.3.2; SPEC §6.2.3, §7.6; ADR-0045). `RelaxOptions::from_json`
@@ -275,8 +275,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   to the new query again. So `filters: "never"` holds whatever query a caller puts in: before, a query that did not
   hold the clauses' parts made L5 `fallback` search `match_all` without the filter. L5 now keeps the request filter
   beside the root `bool`'s `must_not` and `filter`; the filter step (`last_resort`) drops the request filter alone and
-  keeps a filter the caller's own root holds (one equal to the request filter counts as the request's, also in a caller
-  root the join wrapped because of its `should` clauses). A query put
+  keeps a filter the caller's own root holds (since ROADMAP 8.2.13 it drops only the request's soft filters, and a
+  filter the caller's own root holds stays hard even when it equals one, in place or wrapped). A query put
   in place of a compilation of several parts keeps its clauses only while its root's `must` is theirs exactly and its
   `must_not` holds theirs at the same indexes, else `Compiled::parts` and `Compiled::root` are `None` from then on
   (before, any root `bool` was read as the clauses' root, and a required clause added beside them was relaxed away).

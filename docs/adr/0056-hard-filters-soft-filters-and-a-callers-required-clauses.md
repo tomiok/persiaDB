@@ -35,7 +35,8 @@ may.
 2. **A programmatic query's root filters are hard unless marked soft.** A query built in code has no request keys:
    every filter of its root `bool` is hard, so the filter step drops none of them, unless the caller marks some soft
    (`RelaxedQuery::with_soft_filter`): a root filter equal to a marked one is soft. Before, the filter step dropped
-   every root filter of a programmatic query, which is the "all marked" case now.
+   every root filter of a programmatic query, which is the "all marked" case now. On a compiled query the marks are
+   ignored: its soft filters are the request's `soft_filter` alone, less any filter the caller's own root holds.
 3. **No request version.** This is an additive key before 1.0, beside a change of what `last_resort` drops: requests
    that used `last_resort` with `filter` now keep their filters, and build no filter step until they move the
    droppable ones to `soft_filter`. It is noted under Unreleased in the CHANGELOG. The request JSON itself is parsed

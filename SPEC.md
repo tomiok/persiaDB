@@ -1658,7 +1658,7 @@ snapshot keeps the counts of a page from the top (without a cursor) that counted
 in none of them. A cursor page keeps none: its cursor may come from a page the budget truncated, whose last step
 (§7.6) stops short of the steps a page from the top builds, so it may count fewer. They are keyed by the memtable
 view's version, the query and its compilation,
-the filters marked soft, the relaxation settings, the step limits and the facets asked for, and a later page of the
+the soft filters the filter step may drop, the relaxation settings, the step limits and the facets asked for, and a later page of the
 same query reads them instead of searching any step only to count it. The cache holds at most 32 counts and 1 MiB,
 evicts the least recently used first (by a counter of uses, not a clock), and goes with its snapshot at the next
 publish.
