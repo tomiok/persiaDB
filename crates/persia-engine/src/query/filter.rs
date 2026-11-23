@@ -106,7 +106,17 @@ impl Filter {
             )));
         }
         let Strict(value) = serde_json::from_str(json).map_err(|e| syntax(e.to_string()))?;
-        let filter = parse(&value, schema)?;
+        Self::from_value(&value, schema, limits)
+    }
+
+    /// [`Self::from_json`] for the `filter` or `soft_filter` of a request already parsed (SPEC §7.1): its text is
+    /// bounded by the request's, and its reader rejected repeated keys at every depth.
+    pub(crate) fn from_value(
+        value: &J,
+        schema: &CollectionSchema,
+        limits: &QueryLimits,
+    ) -> Result<Self, QueryError> {
+        let filter = parse(value, schema)?;
         filter.validate(schema, limits)?;
         Ok(filter)
     }

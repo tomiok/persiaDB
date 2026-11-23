@@ -9,6 +9,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: the whole search request (ROADMAP 10.1.10, ADR-0062; SPEC §7.1.4). `search::request::QueryRequest`
+  holds a request's `q`, `fields`, `filter`, `soft_filter`, `sort`, `limit`, `offset`, `search_after`, `facets`,
+  `relax` and `explain`, built in code (`QueryRequest::new` and its `with_` setters, which also set the projection)
+  or parsed from the request JSON (`QueryRequest::from_json`), read strictly: an unknown or repeated key, `null` for a
+  key, a value of another shape and more than 1 MiB of text (`MAX_REQUEST_JSON_LEN`) are errors. `QueryRequest::run`
+  runs it on a `CollectionSnapshot` with `RunOptions` (threads, deadline, cancellation, budget clock, query limits)
+  and returns a `QueryResponse`: the relaxed search's results when the collection's settings, as the request's `relax`
+  overrides them, relax, the plain search's for `relax: false`, and `query_truncated`. `filter` is hard at every
+  relaxation level and `soft_filter` is what `relax.filters = "last_resort"` drops; a filter given as both is hard.
+  Errors are `QueryRequestError`, whose `interrupt()` tells a deadline or a cancellation from an invalid request.
+- `persia-engine`: a cursor as an opaque token (ROADMAP 10.1.10, ADR-0062; SPEC §7.4): `Cursor::to_token` and
+  `Cursor::from_token`, base64url text of a versioned (`CURSOR_TOKEN_VERSION` 1), checksummed encoding. The request
+  JSON's `search_after` takes one. A token that was cut, changed or written by another version is a
+  `CursorTokenError`, never another cursor.
+- `persia-engine`: `CollectionSnapshot::compiler`, the collection's `QueryCompiler` with the analyzers the database
+  indexes with, shared by its snapshots until the schema changes; `DefaultFields::is_for`.
+- `persia-fuzz`: targets `request_json` (any input to `QueryRequest::from_json` never panics, and an accepted request
+  runs without panicking) and `cursor_token` (any token never panics, and an accepted one is the one encoding of its
+  cursor).
 - `persia-engine`: relaxation metrics (ROADMAP 8.3.3; SPEC §7.6, §12.4). Each collection counts its relaxed queries
   (searches without a cursor): how many, how many relaxed past L0, how many still found nothing, and how many found
   their hits at each level. Read them as `RelaxationStats` from `CollectionSnapshot::relaxation_stats` or, summed over

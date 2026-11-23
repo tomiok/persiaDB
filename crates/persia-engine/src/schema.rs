@@ -25,7 +25,7 @@ mod config;
 mod evolution;
 mod field;
 mod json;
-pub(crate) use json::{RawRelaxation, relax_from_json};
+pub(crate) use json::{RawRelaxation, relax_from_json, relax_from_value};
 mod validate;
 
 pub(crate) use validate::{collection_name_problem, field_name_problem};

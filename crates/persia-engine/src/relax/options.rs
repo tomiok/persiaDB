@@ -6,6 +6,7 @@ use std::fmt;
 use super::{RelaxLevel, RelaxPlan};
 use crate::schema::{
     Fallback, FilterRelaxation, Levels, RawRelaxation, RelaxationConfig, relax_from_json,
+    relax_from_value,
 };
 
 /// A query's `relax` (SPEC §7.1, §7.6): each setting it gives overrides the collection's ([`RelaxationConfig`]), and
@@ -71,6 +72,16 @@ impl RelaxOptions {
                 Self::MAX_JSON_LEN
             )));
         }
+        Self::checked(relax_from_json(json).map_err(RelaxError::Json)?)
+    }
+
+    /// [`Self::from_json`] for the `relax` of a request already parsed (SPEC §7.1): its text is bounded by the
+    /// request's, and its reader rejected repeated keys.
+    pub(crate) fn from_value(value: serde_json::Value) -> Result<Self, RelaxError> {
+        Self::checked(relax_from_value(value).map_err(RelaxError::Json)?)
+    }
+
+    fn checked(raw: RawRelaxation) -> Result<Self, RelaxError> {
         let RawRelaxation {
             enabled,
             min_results,
@@ -79,7 +90,7 @@ impl RelaxOptions {
             fill,
             filters,
             budget_ms,
-        } = relax_from_json(json).map_err(RelaxError::Json)?;
+        } = raw;
         let options = Self {
             enabled,
             min_results,
@@ -203,6 +214,30 @@ impl RelaxSettings {
             fill: plan.fill(),
             filters: plan.filters(),
         }
+    }
+
+    /// The settings as a cursor token carries them (SPEC §7.4): one bit per level by [`level_bit`], `min_results`,
+    /// `fill` and `filters`.
+    pub(crate) fn to_parts(self) -> (u16, u32, bool, FilterRelaxation) {
+        (self.levels, self.min_results, self.fill, self.filters)
+    }
+
+    /// The settings a cursor token carries ([`Self::to_parts`]). `None` for bits that name no level.
+    pub(crate) fn from_parts(
+        levels: u16,
+        min_results: u32,
+        fill: bool,
+        filters: FilterRelaxation,
+    ) -> Option<Self> {
+        let known = super::LEVELS
+            .into_iter()
+            .fold(0, |bits, level| bits | level_bit(level));
+        (levels & !known == 0).then_some(Self {
+            levels,
+            min_results,
+            fill,
+            filters,
+        })
     }
 
     /// The levels the plan runs, in cascade order, L0 first.

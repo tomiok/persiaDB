@@ -103,6 +103,7 @@ use crate::manifest::{
 };
 use crate::memtable::{Logged, Memtable, MemtableError};
 use crate::merge::MergeOptions;
+use crate::query::QueryCompiler;
 use crate::schema::{CollectionSchema, EvolutionError, FieldKind};
 use crate::segment::{ReadError, Segment, SegmentError, SegmentMeta, Tombstones, WriteOptions};
 use crate::tombstone::{SidecarError, TombstoneSidecar};
@@ -505,6 +506,25 @@ struct Collection {
     last_write: Option<Instant>,
     /// Its relaxed searches since the open (ROADMAP 8.3.3), which every snapshot of it counts into.
     relaxation: Arc<relaxed::RelaxationCounters>,
+    /// Compiles a request's `q` with the analyzers the memtable indexes with (SPEC §7.1.1, ROADMAP 10.1.10): one per
+    /// schema, shared by the collection's snapshots, so its synonym maps and alternatives are built once.
+    compiler: Arc<QueryCompiler>,
+}
+
+impl Collection {
+    /// A collection of `schema` with `segments` and the empty `memtable`, whose analyzers its compiler takes; its
+    /// counters start at zero.
+    fn new(schema: Arc<CollectionSchema>, segments: Vec<LiveSegment>, memtable: Memtable) -> Self {
+        Self {
+            compiler: Arc::new(memtable.query_compiler()),
+            schema,
+            segments,
+            memtable,
+            first_write: None,
+            last_write: None,
+            relaxation: Arc::default(),
+        }
+    }
 }
 
 /// A memtable flush planned before anything is written.
@@ -866,14 +886,7 @@ impl<F: ContainerFile + Sync> Database<F> {
             segments: Vec::new(),
         };
         diff.collections.insert(name.clone(), create);
-        let collection = Collection {
-            schema: Arc::new(schema),
-            segments: Vec::new(),
-            memtable,
-            first_write: None,
-            last_write: None,
-            relaxation: Arc::default(),
-        };
+        let collection = Collection::new(Arc::new(schema), Vec::new(), memtable);
         self.commit_guarded(Vec::new(), diff, Structural::Create(name, collection))
     }
 
@@ -1443,6 +1456,8 @@ impl<F: ContainerFile + Sync> Database<F> {
                     });
                 }
                 c.schema = schema;
+                // The evolved schema's analyzers, as its new memtable indexes with them.
+                c.compiler = Arc::new(memtable.query_compiler());
                 for (live, reopened) in c.segments.iter_mut().zip(segments) {
                     live.reopened(reopened);
                 }
@@ -1707,6 +1722,7 @@ fn snapshot_of(manifest: &Arc<Manifest>, collections: &BTreeMap<String, Collecti
                     hidden: Arc::default(),
                     relaxation: Arc::clone(&c.relaxation),
                     facets: Arc::default(),
+                    compiler: Arc::clone(&c.compiler),
                 };
                 (name.clone(), snapshot)
             })

@@ -1221,8 +1221,8 @@ returned as it is, and copied as bytes, never re-validated.
   "filter": {"term": ["tenant","t1"]},    // hard: no relaxation level drops it
   "soft_filter": { "and": [ {"term": ["brand","nike"]}, {"range": ["price", {"lte": 100}]} ] },  // only L6 may drop it
   "sort": "score",                        // or [{"field":"price","order":"asc"}]
-  "limit": 20, "offset": 0,               // or "search_after": cursor
-  "facets": ["brand"],
+  "limit": 20, "offset": 0,               // or "search_after": a cursor token (§7.4)
+  "facets": ["brand"],                    // or {"field": "brand", "size": 5}
   "relax": { "min_results": 1 },          // overrides collection default
   "explain": false
 }
@@ -1420,6 +1420,49 @@ compilation's, which see only those. Defaults, configurable per engine:
 | `max_expansions` | 1024 | the `max_expansions` of every `prefix` and `fuzzy`, summed |
 | `max_depth` | 32 | nesting: a leaf is 1, a node one more than its deepest child |
 | `max_text_len` | 8 KiB | bytes of `q` read |
+
+#### 7.1.4 Request JSON
+The request is one JSON object of the keys of §7.1's example (ROADMAP 10.1.10, ADR-0062), each optional. Requests
+are written by programs, so the object is read as strictly as a collection definition (§6.2.1) and a filter (§7.1.2):
+an unknown key, a key repeated at any depth, `null` for a key, a value of another shape than its key's, and text
+longer than 1 MiB are errors, and one about a key names it. Nothing is ignored or guessed. Only the text inside `q`
+never fails (§7.1.1).
+
+| Key | Value | Left out |
+|---|---|---|
+| `q` | a string: the user text (§7.1.1) | `""`, which matches every document |
+| `fields` | an array of one or more `"name"` or `"name^weight"`, distinct `text` fields (§7.1.1) | every `text` field with its `boost` |
+| `filter`, `soft_filter` | one filter object each (§7.1.2) | no filter |
+| `sort` | `"score"` or an array of keys (§7.4) | `"score"` |
+| `limit`, `offset` | integers of at least 0, written without a fraction or an exponent (§7.4) | 20 and 0 |
+| `search_after` | a cursor token (§7.4) | the page starts at the top |
+| `facets` | an array of at most 16 entries, each a field name or `{"field": name, "size": n}` (§7.5) | no facet |
+| `relax` | `false`, `true` or an object (§7.6) | the collection's settings |
+| `explain` | `true` or `false` (§7.7) | `false` |
+
+Each value is read by the rules of its own section. A `sort` key object takes `field`, `order` and `missing`, or
+`score` alone with an object of `order` (§7.4); a facet object takes `field` and `size` (default 10); any other key in
+either is an error. There is no key for the projection of §7.5.1 yet (ROADMAP 10.1.20): a request built in code sets
+it, and a parsed one returns every stored field. The 1 MiB bound is that of a filter's JSON (§7.1.2), which the
+request holds: inside a request, the request's bound is the one that applies to `filter`, `soft_filter` and `relax`
+(§7.6's 64 KiB is for a `relax` read on its own). A `filter` and a `soft_filter` are each held to §7.1.3's limits
+when parsed. When the request runs, the compiled `q` joined to both (§7.1.1) is held to them again, since the filters
+add their nodes, their terms and a level of depth, and a query over a limit is an error that names it. A page whose
+`offset + limit` is over 10 000 (§7.4), and a cursor that does not fit the search, are errors of the run.
+
+The engine holds the request as one typed value, which a caller also builds in code without JSON (the embedded API,
+ROADMAP 10.1.3): both run through the same function, on one snapshot of a collection and a view of its memtable taken
+then. `q` is compiled with the analyzers the collection indexes its `text` fields with (the database's registry,
+§6.2.2), over `fields`. `filter` joins it hard and `soft_filter` soft (§7.1.1). The relaxation settings are the
+collection's as `relax` overrides them (§7.6). When they relax, the relaxed search runs, with the request's compiled
+query (so its text is stated in `original` and `effective`, and `filter` is hard at every level) and its steps held
+to the same limits. When they run L0 alone (`relax: false`, a collection that disables the cascade, or a plan with no
+level, no fallback and no filter step), the plain search runs: its hits have no level or rank score, an explained
+one has no `relaxed` node (§7.7), and the search is not counted in the relaxation metrics (§7.6, ROADMAP 10.1.21). A
+response states such a search as `level: "exact"` with nothing applied (§7.6; the response JSON is ROADMAP 10.1.13).
+A request is built for one schema, whose fields its filters, sort, facets and default fields name by id (§6.2.1):
+run on a snapshot of another schema, default fields of another schema are an error, and the sort, the facets and the
+filters are checked against the snapshot's schema again.
 
 ### 7.2 Scoring: BM25F
 Per term `t` and doc `d` over fields `f` with weights `w_f`:
@@ -1632,6 +1675,39 @@ The other plan and query options are not recorded yet (ROADMAP 10.1.7), so pagin
 unchanged between pages. A request cannot change `proximity` today (it has no such field): only a caller building its
 own `SearchPlan` can, and the relaxed search plans with the default (off).
 
+In JSON a cursor is a *cursor token* (ROADMAP 10.1.10, ADR-0062): a request's `search_after` takes one, and a response
+gives each hit's cursor as one (ROADMAP 10.1.13). A token is opaque text: base64url without padding (RFC 4648 §5) of a
+binary encoding of the cursor that starts with a version byte and ends with the CRC-32C of every byte before it.
+Version 1, integers little-endian, `varint` as §4.1:
+```
+u8      version = 1
+u8      flags: 1 proximity, 2 has step, 4 has relaxation settings, 8 the location is the memtable; other bits 0
+u64     snapshot seq
+u64     memtable view version
+varint  collection name length, then its UTF-8 bytes
+varint  segment index            (absent when the location is the memtable)
+varint  docid (u32)
+varint  number of sort values, then each: u8 tag, 0 missing | 1 score (u64: the f64's bits) | 2 column key (u64) |
+        3 keyword (varint length, bytes)
+varint  step, varint last step, varint hit step                              (only with "has step")
+varint  level bits (bit i: level Li), varint min_results, u8 1 fill | 2 filters last_resort
+                                                                             (only with "has relaxation settings")
+u32     CRC-32C of every byte above
+```
+Nothing stores a token, so it is not an on-disk format (§15) and has no fixture directory. Clients hold tokens
+between requests, though, and a token outlives the process that made it while its snapshot and memtable view are
+still the ones searched, so the version byte is its compatibility rule: any change to the layout, or to what a field
+means (a new level, a new kind of sort value), takes a new version; a build refuses the versions it does not read;
+and a golden test per version pins the text. Decoding reads the version first (a later version may define the rest
+differently), then the checksum, then each field, and never panics. It accepts only the one encoding of a cursor: no
+unknown flag, tag, level bit or setting bit, no overlong varint, no byte left over, no padding, so encoding a decoded
+cursor gives back the token. Text longer than 1 MiB (a request's bound, §7.1.4), text that is not base64url, another
+version, a checksum that does not match and a field that is not well formed are each an error of the request (an
+invalid argument), not a different cursor. The checksum finds damage, not forgery: a token is not authenticated, so a
+decoded cursor is checked as any cursor is (the checks above), and one from another collection, snapshot, sort or
+`relax` is refused by them. A cursor only says where a page starts in a ranking the caller could already ask for: it
+grants nothing a request without it could not read.
+
 Without a facet, two sorts skip matches; with one, every match is visited (a facet counts them all). Pruning (§7.3)
 applies when the first key is the score descending (`"score"`, or a list led by it): then only the threshold of the
 hits after the cursor matters. With the score alone a match scoring at most the worst kept hit is skipped (it loses
@@ -1763,7 +1839,7 @@ A query's `relax` (ROADMAP 8.3.1, ADR-0045) is `false`, `true` or an object. `fa
 `true` is `{"enabled": true}`. The object takes the keys of §6.2.3's `relaxation`: `enabled`, `min_results`, `levels`,
 `fallback`, `fill`, `filters` and `budget_ms`. No key is for the collection only. The limits a step is held to
 (§7.1.3) are the engine's, not a key. The JSON is read as strictly as a collection definition (§6.2.1). An unknown
-or repeated key, `null` for a key, any other shape, and more than 64 KiB of text are errors. The settings merge one
+or repeated key, `null` for a key, any other shape, and more than 64 KiB of text (of a `relax` read on its own; inside a request the request's bound applies, §7.1.4) are errors. The settings merge one
 key at a time: the query's value, else the collection's, else §6.2.3's default. A collection definition that leaves
 a key out has the default. `levels` is one key, so a list replaces the collection's list whole. Each value the query
 gives is held to §6.2.3's rule, also when the query or the collection disables the cascade: `min_results` in
@@ -2107,7 +2183,7 @@ Metrics (ROADMAP 8.3.3). Each collection counts its relaxed searches since the d
 snapshots share (atomic, so a search on any thread counts without a lock; nothing is stored, a reopened database
 counts from 0). A *query* is a relaxed search that returned a response and was given no cursor: a cursor's page
 continues a query counted on its first page and counts nowhere, while a page by `offset` runs the cascade from the
-top and counts as a query. A plain search (no cascade) counts nowhere. Per query: `queries` counts it; `relaxed` counts
+top and counts as a query. A plain search (no cascade) counts nowhere, so neither does a request whose settings run L0 alone, which runs the plain search (§7.1.4): its zero-result queries are not in `empty` (ROADMAP 10.1.21). Per query: `queries` counts it; `relaxed` counts
 it when the response's `level` is not `exact` (a step after L0 was built and not skipped); `empty` counts it when no
 step of its cascade found a hit, L0 included (the zero-result queries, after whatever relaxation ran, `relax: false`
 included); otherwise the level of its hit step (above) counts it, once. So the per-level counts are the level
@@ -3455,6 +3531,8 @@ Comparison against other engines is reported with methodology, never cherry-pick
 
 - Treat every byte read from disk/network as hostile (fuzzing; bounds-checked parsing; decompression-bomb limits).
 - Limits: max doc size, max field count, max query terms, max fuzzy expansions, max result window.
+- A cursor token (§7.4) is client-held input like any other: checksummed against damage, not authenticated, decoded
+  without panicking, and checked against the search it is given to.
 - Path traversal safe (collection/blob names validated); no shelling out.
 - Secrets never logged; redaction in debug output of storage config.
 - Supply chain: `cargo deny`, `cargo audit`, pinned toolchain, reproducible container builds, SBOM.

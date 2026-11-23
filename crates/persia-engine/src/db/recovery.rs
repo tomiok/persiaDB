@@ -170,16 +170,9 @@ pub(super) fn load<F: ContainerFile + Sync>(
             for segment in entry.segments() {
                 segments.push(open_segment(&objects, name, segment, &schema)?);
             }
-            let collection = Collection {
-                memtable,
-                schema,
-                segments,
-                first_write: None,
-                last_write: None,
-                // Fresh counters: an open starts them at zero, and so does a read-only handle's full reload, which
-                // runs this too and keeps no count of the state it replaces (ROADMAP 11.4.8).
-                relaxation: Arc::default(),
-            };
+            // Fresh counters: an open starts them at zero, and so does a read-only handle's full reload, which runs
+            // this too and keeps no count of the state it replaces (ROADMAP 11.4.8).
+            let collection = Collection::new(schema, segments, memtable);
             collections.insert(name.to_owned(), collection);
         }
     }

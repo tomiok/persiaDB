@@ -257,3 +257,17 @@ path = "fuzz_targets/reader_lease.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "request_json"
+path = "fuzz_targets/request_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cursor_token"
+path = "fuzz_targets/cursor_token.rs"
+test = false
+doc = false
+bench = false

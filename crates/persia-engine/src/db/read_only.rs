@@ -539,16 +539,10 @@ fn take_manifest<F: ContainerFile + Sync>(
             });
         }
         if old.is_none() {
-            let collection = Collection {
-                memtable: Memtable::new(&schema, &registry)?,
-                schema,
-                segments: Vec::new(),
-                first_write: None,
-                last_write: None,
-                // Fresh counters for a collection new to this handle; a kept one keeps its own, a reload resets
-                // every one (ROADMAP 11.4.8).
-                relaxation: Arc::default(),
-            };
+            // Fresh counters for a collection new to this handle; a kept one keeps its own, a reload resets every
+            // one (ROADMAP 11.4.8).
+            let memtable = Memtable::new(&schema, &registry)?;
+            let collection = Collection::new(schema, Vec::new(), memtable);
             created.push((name.to_owned(), collection));
         }
         segments.insert(name.to_owned(), opened);
