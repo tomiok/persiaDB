@@ -75,8 +75,8 @@ pub struct CursorOrigin {
 /// ([`RequestError::CursorProximity`]). Another view is [`RequestError::CursorView`]: locations are indices into the
 /// view that returned the hit, so a cursor from elsewhere would repeat a tied hit or pass one over. It also records the
 /// relaxation settings of its search ([`Self::relax`]), and a page under others is [`RequestError::CursorRelax`]
-/// (ROADMAP 8.3.1). Other plan and query options are not recorded (ROADMAP 10.1.7): paging is exact only when they
-/// are unchanged.
+/// (ROADMAP 8.3.1). The query, its fields and filters and the limits are not recorded (ROADMAP 10.1.24): paging is
+/// exact only when they are unchanged.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cursor {
     /// One value per sort key.

@@ -25,7 +25,7 @@ pub const MAX_REQUEST_JSON_LEN: usize = crate::query::MAX_FILTER_JSON_LEN;
 impl QueryRequest {
     /// Parses the request JSON (SPEC §7.1) for a collection of `schema`, holding its filters to `limits` (SPEC
     /// §7.1.3). The keys are `q`, `fields`, `filter`, `soft_filter`, `sort`, `limit`, `offset`, `search_after`,
-    /// `facets`, `relax` and `explain`, each optional: a key left out has [`QueryRequest::default`]'s
+    /// `facets`, `relax`, `explain` and `proximity`, each optional: a key left out has [`QueryRequest::default`]'s
     /// value.
     ///
     /// ```
@@ -110,6 +110,7 @@ impl QueryRequest {
                 "facets" => request.page.facets = facets(&value, schema)?,
                 "relax" => request.relax = RelaxOptions::from_value(value)?,
                 "explain" => request.page.explain = boolean(&key, &value)?,
+                "proximity" => request.proximity = boolean(&key, &value)?,
                 _ => return Err(shape(format!("unknown key {key:?}"))),
             }
         }

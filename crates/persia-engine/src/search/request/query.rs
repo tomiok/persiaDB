@@ -1,5 +1,6 @@
-//! A whole search request (SPEC §7.1, ADR-0062): the user text, the fields it searches, the filters, the page and
-//! the relaxation settings, as one typed value, and the one function that runs it on a collection's snapshot.
+//! A whole search request (SPEC §7.1, ADR-0062): the user text, the fields it searches, the filters, the page, the
+//! relaxation settings and the proximity option, as one typed value, and the one function that runs it on a
+//! collection's snapshot.
 //!
 //! [`QueryRequest`] is what a caller builds in code and what the request JSON parses to ([`QueryRequest::from_json`]),
 //! so both run the same way: `q` compiled with the collection's analyzers, the filters joined to it (`filter` hard,
@@ -25,7 +26,8 @@ use crate::search::{
 /// setters, or parsed ([`Self::from_json`]); run with [`Self::run`].
 ///
 /// The default is an empty `q` (which matches every document, SPEC §7.1.1) over every `text` field, no filter, the
-/// first 20 hits by score, no facet, every stored field, the collection's relaxation settings and no explanation.
+/// first 20 hits by score, no facet, every stored field, the collection's relaxation settings, no explanation and no
+/// proximity bonus.
 ///
 /// A request is built for one schema: its filters, sort, facets, default fields and projection name fields by id
 /// (SPEC §6.2.1). Run it on a snapshot of that schema.
@@ -75,6 +77,7 @@ pub struct QueryRequest {
     pub(super) soft_filter: Option<Filter>,
     pub(super) page: SearchRequest,
     pub(super) relax: RelaxOptions,
+    pub(super) proximity: bool,
 }
 
 impl QueryRequest {
@@ -167,6 +170,14 @@ impl QueryRequest {
         self
     }
 
+    /// Scores the proximity bonus (`proximity`, SPEC §7.2, ADR-0036). Only a search that does not relax takes it:
+    /// with it, [`Self::run`] needs `relax: false` ([`QueryRequestError::ProximityRelaxed`]).
+    #[must_use]
+    pub fn with_proximity(mut self, proximity: bool) -> Self {
+        self.proximity = proximity;
+        self
+    }
+
     /// The user text (`q`).
     pub fn q(&self) -> &str {
         &self.q
@@ -197,6 +208,11 @@ impl QueryRequest {
         &self.relax
     }
 
+    /// Whether the search scores the proximity bonus (`proximity`).
+    pub fn proximity(&self) -> bool {
+        self.proximity
+    }
+
     /// Runs the request on `collection` (SPEC §7.1, ROADMAP 10.1.10): compiles `q` with the collection's analyzers
     /// ([`CollectionSnapshot::compiler`]) over the request's fields, joins `filter` and `soft_filter` to it as a
     /// request's filters join `q` ([`crate::query::Compiled::with_filter`],
@@ -207,14 +223,15 @@ impl QueryRequest {
     /// relax, the search is the relaxed one ([`crate::db::CollectionViews::search_relaxed`], through
     /// `RelaxedQuery::from(&Compiled)`, so `filter` stays hard at every level), with its steps held to the same
     /// limits. When they run L0 alone (`relax: false`, or a collection that disables the cascade), it is the plain
-    /// search ([`crate::db::CollectionViews::search_with`]), planned without the proximity bonus (a request cannot ask
-    /// for it yet, ROADMAP 10.1.7).
+    /// search ([`crate::db::CollectionViews::search_with`]), planned with the proximity bonus when the request asks
+    /// for it (`SearchPlan::with_proximity`) and without it otherwise (`without_proximity`, ROADMAP 10.1.7).
     ///
     /// # Errors
+    /// [`QueryRequestError::ProximityRelaxed`] for `proximity` on a search that relaxes;
     /// [`QueryRequestError::Schema`] for a part built for another schema; [`QueryRequestError::Query`] for a joined
     /// query over the limits or a filter that does not fit the schema; [`QueryRequestError::Relax`] for a `relax`
     /// value that breaks its rule; [`QueryRequestError::Request`] for a page, cursor, sort or facet the search
-    /// refuses, a
+    /// refuses ([`RequestError::CursorProximity`] for a cursor from a search with the other proximity setting), a
     /// view that cannot be read, a deadline or a cancellation; [`QueryRequestError::Plan`] for a query that cannot be
     /// planned.
     pub fn run(
@@ -225,6 +242,11 @@ impl QueryRequest {
         let schema = collection.schema();
         let limits = options.limits;
         self.check_schema(collection)?;
+        let relax = RelaxPlan::new(schema.relaxation(), &self.relax)?.with_limits(limits);
+        // The relaxed search plans every step without the bonus (SPEC §7.2): asked for, it would be ignored.
+        if self.proximity && relax.relaxes() {
+            return Err(QueryRequestError::ProximityRelaxed);
+        }
         let fields = self
             .fields
             .as_ref()
@@ -236,7 +258,6 @@ impl QueryRequest {
             .with_soft_filter(self.soft_filter.clone());
         // The filters add their nodes, terms and a level of depth to the compiled query (SPEC §7.1.3).
         compiled.query().validate(schema, &limits)?;
-        let relax = RelaxPlan::new(schema.relaxation(), &self.relax)?.with_limits(limits);
         let memtable = collection.memtable();
         let views = collection.views(&memtable).map_err(RequestError::from)?;
         let results = if relax.relaxes() {
@@ -250,6 +271,11 @@ impl QueryRequest {
             let stats = collection.search_statistics(&memtable);
             let terms = options.exec.terms(&views);
             let plan = SearchPlan::with_terms(compiled.query(), schema, &stats, &terms)?;
+            let plan = if self.proximity {
+                plan.with_proximity()
+            } else {
+                plan.without_proximity()
+            };
             QueryResults::Plain(views.search_with(&plan, &self.page, &options.exec)?)
         };
         Ok(QueryResponse {
@@ -384,6 +410,12 @@ pub enum QueryRequestError {
     /// `search_after` is not a cursor token this build reads (SPEC §7.4).
     #[error("search_after: {0}")]
     Cursor(#[from] CursorTokenError),
+    /// `proximity: true` on a search that relaxes (SPEC §7.2, ROADMAP 10.1.7): the relaxed search plans every step
+    /// without the bonus, so the option is taken only by a search that runs L0 alone. The fix is in the message.
+    #[error(
+        "\"proximity\": true needs \"relax\": false: a search that relaxes does not score the proximity bonus"
+    )]
+    ProximityRelaxed,
     /// A part of the request was built for another schema than the collection's (its default fields).
     #[error("the request was built for another schema than collection {collection:?} has")]
     Schema {

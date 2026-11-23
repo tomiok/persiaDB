@@ -210,6 +210,7 @@ fn every_key_parses_to_its_typed_value() {
         "facets": ["brand", {"field": "brand", "size": 3}],
         "relax": {"min_results": 4, "fill": true},
         "explain": true,
+        "proximity": true,
     });
     let built = QueryRequest::new("zapatillas rojas nike")
         .with_fields(DefaultFields::parse(&schema, &["title^3", "body"]).unwrap())
@@ -248,7 +249,8 @@ fn every_key_parses_to_its_typed_value() {
             fill: Some(true),
             ..RelaxOptions::default()
         })
-        .with_explain(true);
+        .with_explain(true)
+        .with_proximity(true);
     let parsed = parse(&json.to_string()).unwrap();
     assert_eq!(parsed, built);
     // The getters read what the setters wrote.
@@ -265,6 +267,7 @@ fn every_key_parses_to_its_typed_value() {
     assert_eq!(page.facets.len(), 2);
     assert_eq!(page.projection, Projection::All);
     assert_eq!(parsed.relax().min_results, Some(4));
+    assert!(parsed.proximity());
 }
 
 #[test]
@@ -279,6 +282,7 @@ fn a_key_left_out_has_its_default() {
     assert_eq!((page.offset, page.limit), (0, 20));
     assert!(page.search_after.is_none() && page.facets.is_empty() && !page.explain);
     assert_eq!(empty.relax(), &RelaxOptions::default());
+    assert!(!empty.proximity());
     // One key says nothing about the others.
     assert_eq!(
         parse(r#"{"limit": 3}"#).unwrap(),
@@ -419,6 +423,8 @@ fn the_json_is_read_strictly() {
         (r#"{"facets": null}"#, Kind::Json),
         (r#"{"relax": null}"#, Kind::Json),
         (r#"{"explain": null}"#, Kind::Json),
+        (r#"{"proximity": null}"#, Kind::Json),
+        (r#"{"proximity": "on"}"#, Kind::Json),
         // A value of another shape than its key's.
         (r#"{"q": 5}"#, Kind::Json),
         (r#"{"q": ["a"]}"#, Kind::Json),
@@ -1769,6 +1775,7 @@ struct Model {
     facets: Option<Vec<Option<Option<usize>>>>,
     relax: Option<Relax>,
     explain: Option<bool>,
+    proximity: Option<bool>,
 }
 
 impl Model {
@@ -1825,6 +1832,9 @@ impl Model {
         if let Some(explain) = self.explain {
             o.insert("explain".into(), json!(explain));
         }
+        if let Some(proximity) = self.proximity {
+            o.insert("proximity".into(), json!(proximity));
+        }
         J::Object(o).to_string()
     }
 
@@ -1862,6 +1872,9 @@ impl Model {
         }
         if let Some(explain) = self.explain {
             r = r.with_explain(explain);
+        }
+        if let Some(proximity) = self.proximity {
+            r = r.with_proximity(proximity);
         }
         r
     }
@@ -1906,12 +1919,13 @@ fn any_model() -> impl Strategy<Value = Model> {
             proptest::option::of(facets),
             proptest::option::of(any_relax()),
             proptest::option::of(any::<bool>()),
+            proptest::option::of(any::<bool>()),
         ),
     )
         .prop_map(
             |(
                 (q, fields, filter, soft_filter, sort),
-                (limit, offset, search_after, facets, relax, explain),
+                (limit, offset, search_after, facets, relax, explain, proximity),
             )| {
                 Model {
                     q,
@@ -1925,6 +1939,7 @@ fn any_model() -> impl Strategy<Value = Model> {
                     facets,
                     relax,
                     explain,
+                    proximity,
                 }
             },
         )
@@ -1982,6 +1997,7 @@ fn arbitrary_text_never_panics() {
         Just("\"facets\""),
         Just("\"relax\""),
         Just("\"explain\""),
+        Just("\"proximity\""),
         Just("\"score\""),
         Just("\"field\""),
         Just("\"order\""),

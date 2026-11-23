@@ -19,6 +19,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   overrides them, relax, the plain search's for `relax: false`, and `query_truncated`. `filter` is hard at every
   relaxation level and `soft_filter` is what `relax.filters = "last_resort"` drops; a filter given as both is hard.
   Errors are `QueryRequestError`, whose `interrupt()` tells a deadline or a cancellation from an invalid request.
+- `persia-engine`: the request's `"proximity"` (ROADMAP 10.1.7; SPEC §7.1.4, §7.2). `true` plans the search with the
+  proximity bonus, `false` or no key without it (`QueryRequest::with_proximity`, `proximity`). Only a search that does
+  not relax takes it: on a request whose settings relax (the default), `"proximity": true` is
+  `QueryRequestError::ProximityRelaxed`, whose message names the fix, `"relax": false`. A cursor from a search with
+  the other setting is `RequestError::CursorProximity`.
 - `persia-engine`: a cursor as an opaque token (ROADMAP 10.1.10, ADR-0062; SPEC §7.4): `Cursor::to_token` and
   `Cursor::from_token`, base64url text of a versioned (`CURSOR_TOKEN_VERSION` 1), checksummed encoding. The request
   JSON's `search_after` takes one. A token that was cut, changed or written by another version is a

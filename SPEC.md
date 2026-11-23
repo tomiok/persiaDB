@@ -1224,7 +1224,8 @@ returned as it is, and copied as bytes, never re-validated.
   "limit": 20, "offset": 0,               // or "search_after": a cursor token (§7.4)
   "facets": ["brand"],                    // or {"field": "brand", "size": 5}
   "relax": { "min_results": 1 },          // overrides collection default
-  "explain": false
+  "explain": false,
+  "proximity": false                      // true scores the proximity bonus (§7.2); needs "relax": false
 }
 ```
 Programmatic query AST (term, combined, phrase, prefix, fuzzy, bool must/should/must_not, filter, boost,
@@ -1439,6 +1440,7 @@ never fails (§7.1.1).
 | `facets` | an array of at most 16 entries, each a field name or `{"field": name, "size": n}` (§7.5) | no facet |
 | `relax` | `false`, `true` or an object (§7.6) | the collection's settings |
 | `explain` | `true` or `false` (§7.7) | `false` |
+| `proximity` | `true` or `false` (§7.2) | `false` |
 
 Each value is read by the rules of its own section. A `sort` key object takes `field`, `order` and `missing`, or
 `score` alone with an object of `order` (§7.4); a facet object takes `field` and `size` (default 10); any other key in
@@ -1460,6 +1462,12 @@ to the same limits. When they run L0 alone (`relax: false`, a collection that di
 level, no fallback and no filter step), the plain search runs: its hits have no level or rank score, an explained
 one has no `relaxed` node (§7.7), and the search is not counted in the relaxation metrics (§7.6, ROADMAP 10.1.21). A
 response states such a search as `level: "exact"` with nothing applied (§7.6; the response JSON is ROADMAP 10.1.13).
+`proximity` (ROADMAP 10.1.7, ADR-0036) plans the plain search with the proximity bonus of §7.2 when `true`
+(`SearchPlan::with_proximity`) and without it when `false` or left out (`SearchPlan::without_proximity`). The
+relaxed search plans every step without the bonus (§7.2), so `"proximity": true` on a request whose settings
+relax, which is the default, is an error that names the fix, `"relax": false`; it is not ignored. The bonus
+across relaxed steps is ROADMAP 10.1.14. A cursor records the setting of its search (§7.4), and the request path
+returns the search's error for a cursor given to a search with the other one.
 A request is built for one schema, whose fields its filters, sort, facets and default fields name by id (§6.2.1):
 run on a snapshot of another schema, default fields of another schema are an error, and the sort, the facets and the
 filters are checked against the snapshot's schema again.
@@ -1511,8 +1519,8 @@ term is left out. A `prefix` or `fuzzy` is not a word here, even one that kept a
 pairs: not a `phrase`, `should`, `filter` or `must_not` clauses, a word under `boost` (a `fuzzy` term's weight
 included), nor a field without positions; a single word is no `bool` (§7.1.1). The bonus is **off by default**: a plan
 adds it only when asked (`SearchPlan::with_proximity`). Its measured cost on AND queries buys no nDCG@10 gain yet
-(ADR-0036, Results; §16.1), so it stays opt-in until judged queries it can decide show a gain (ROADMAP 15.1.6). A request cannot ask for it yet (`"proximity"`, ROADMAP 10.1.7), and a
-relaxed search (§7.6) plans every step without it. Without it the bonus is 0 and not added. With
+(ADR-0036, Results; §16.1), so it stays opt-in until judged queries it can decide show a gain (ROADMAP 15.1.6). A request asks for it with `"proximity": true` (§7.1.4, ROADMAP 10.1.7), which only a search that does not relax takes: a
+relaxed search (§7.6) plans every step without it (the bonus across relaxed steps is ROADMAP 10.1.14). Without it the bonus is 0 and not added. With
 `B = Σ_pairs (λ · min(idf_i, idf_j))`, summed in pair order, `bonus ≤ B` exactly: each product is monotonic in
 `π ≤ 1`, and the sum in each addend. `λ` and the window are constants of the scorer: changing them changes ranking
 and goes through the nDCG@10 gate (§16.1).
@@ -1671,9 +1679,10 @@ also records its hit's step, its cascade's last step and its hit step (§7.6). I
 (§7.2): a page under a plan with the other setting is an error, since the bonus changes the scores and so the order.
 It records the relaxation settings of its search too, none for a plain search or one of L0 alone, and a page under
 other settings is an error (§7.6, ROADMAP 8.3.1).
-The other plan and query options are not recorded yet (ROADMAP 10.1.7), so paging is exact only when they are
-unchanged between pages. A request cannot change `proximity` today (it has no such field): only a caller building its
-own `SearchPlan` can, and the relaxed search plans with the default (off).
+The cursor does not record the query, its fields and filters, or the limits (ROADMAP 10.1.24), so paging is exact
+only when they are unchanged between pages. A request sets `proximity` (§7.1.4), and a caller building its own
+`SearchPlan` sets it on the plan; the relaxed search always plans without it, so a cursor from a proximity-on search
+pages only a plain search asked with `"proximity": true`.
 
 In JSON a cursor is a *cursor token* (ROADMAP 10.1.10, ADR-0062): a request's `search_after` takes one, and a response
 gives each hit's cursor as one (ROADMAP 10.1.13). A token is opaque text: base64url without padding (RFC 4648 §5) of a
