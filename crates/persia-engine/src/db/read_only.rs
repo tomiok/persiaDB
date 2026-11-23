@@ -305,10 +305,10 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyDatabase<F> {
     ///   holds them, SPEC §8.2.1) and released one after another after the swap, so a view of a collection's
     ///   memtable shows none or all of the records the refresh applied to it. Between the swap and that release, a
     ///   view of the new snapshot pairs the new manifest with the memtable as it was before the refresh: a consistent
-    ///   committed state, since the commits taken here flushed none of the records it holds. Views of two collections
-    ///   taken during the release can straddle it, one before the refresh and one after. A snapshot taken before
-    ///   shares the memtables, so a view taken from it after the refresh sees the new records too, as a writer's
-    ///   snapshot sees its later writes (SPEC §8.4).
+    ///   committed state, the one a fresh open of that commit builds. Views of two collections taken during the
+    ///   release can straddle it, one before the refresh and one after. A snapshot taken before shares the memtables,
+    ///   so a view taken from it after the refresh sees the new records too, as a writer's snapshot sees its later
+    ///   writes (SPEC §8.4).
     /// - [`Refreshed::Reloaded`]: anything else (a flush commit moved `wal_start` past the records the memtables
     ///   hold, a collection was dropped or its schema changed, the chunks replayed are not the first ones found, or an
     ///   earlier refresh failed after it changed the memtables) runs the open sequence on the reopened container,

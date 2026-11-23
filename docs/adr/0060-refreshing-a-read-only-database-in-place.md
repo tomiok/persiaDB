@@ -39,9 +39,8 @@ time, and has to swap the new database in under its own lock.
    replays, the refresh holds every memtable (`Memtable::hold`, as a batch does, ROADMAP 6.3.12), and releases them
    one after another after the swap, so a view of a collection's memtable shows none or all of the records the
    refresh applied to it. Between the swap and that release, a view of the new snapshot pairs the new manifest with
-   the memtable as it was before the refresh: a consistent committed state, since the commits an incremental refresh
-   takes flushed none of the records the memtables hold. Views of two collections taken during the release can
-   straddle it, one before the refresh and one after.
+   the memtable as it was before the refresh: a consistent committed state, the one a fresh open of that commit
+   builds. Views of two collections taken during the release can straddle it, one before the refresh and one after.
 
    **Which chunks are compared by content.** A power loss on the writer's host (the reader may be on another one,
    sharing the disk, so it survives it) drops the chunks written since the last sync, and the restarted writer logs

@@ -3,8 +3,9 @@
 //! Invariants:
 //! 1. A database opened with a registry holding the analyzer indexes and searches with it, through the memtable,
 //!    a flushed segment and the replayed WAL, read-write and read-only.
-//! 2. An open whose registry lacks it fails with `UnregisteredAnalyzer`, not corruption, before anything is replayed,
-//!    read-write and read-only; the built-ins are there whatever registry the caller gives.
+//! 2. An open whose registry lacks it fails with `UnregisteredAnalyzer`, not corruption, before anything is replayed
+//!    and before any segment is read, whichever collection names it, read-write and read-only, and so does a refresh
+//!    that takes a commit creating such a collection; the built-ins are there whatever registry the caller gives.
 //! 3. `open_skipping_analysis` opens it anyway, replays and verifies every record, lists every field it skipped (each
 //!    one, also when several share the analyzer), and reaches the same documents. It still validates every record.
 //! 4. Evolution (SPEC §6.2.4): an unversioned registered name binds to the field's version, a pinned other version
@@ -51,7 +52,7 @@ use persia_engine::segment::SegmentError;
 use persia_engine::view::SearchView;
 use persia_engine::wal::{Durability, ReplayError, WalRecord, WalWriter};
 use persia_storage::container::sim::{CrashLoss, SimFault, SimFile};
-use persia_storage::container::{Container, Mode};
+use persia_storage::container::{Container, ContainerFile, Mode};
 use proptest::prelude::*;
 
 /// `prefix@1`: lowercased whitespace words and their 2- to 4-character prefixes, which no built-in indexes.
@@ -179,6 +180,147 @@ fn an_open_without_the_analyzer_fails_as_unregistered_not_corrupt() {
     check(ReadOnlyDatabase::open(&path, &other).unwrap_err());
     // Nothing was written: the database still opens with its analyzer.
     Database::open(&path, options(registry())).unwrap();
+}
+
+#[test]
+fn an_unregistered_analyzer_fails_the_open_before_an_earlier_collection_is_read() {
+    // `archive` (built-ins only) comes first in the manifest and has a damaged segment; `notes`, after it, names
+    // `prefix@1`. The analyzers of every collection are checked before any segment is read (SPEC §6.2.2).
+    let file = SimFile::new();
+    {
+        let mut db =
+            Database::create_on(file.clone(), [9; 16], sim_options(registry(), BIG, 0)).unwrap();
+        let archive = CollectionSchema::from_json(
+            r#"{"name": "archive", "fields": {"body": {"type": "text"}}}"#,
+        )
+        .unwrap();
+        let body = archive.field("body").unwrap().id();
+        db.create_collection(archive).unwrap();
+        db.create_collection(CollectionSchema::from_json_in(SCHEMA, &registry()).unwrap())
+            .unwrap();
+        let doc = Document::new("a1").with(body, Value::String("an archived page".into()));
+        db.put("archive", &doc, Durability::Fsync).unwrap();
+        let doc = note(&db.snapshot(), "n1", "Persia");
+        db.put("notes", &doc, Durability::Fsync).unwrap();
+        db.commit().unwrap();
+        let names: Vec<_> = db
+            .manifest()
+            .collections()
+            .map(CollectionEntry::name)
+            .collect();
+        assert_eq!(names, ["archive", "notes"]);
+    }
+    let mut bytes = file.bytes();
+    {
+        let container =
+            Container::open_on(SimFile::from_bytes(bytes.clone()), Mode::ReadOnly).unwrap();
+        let manifest = ReadOnlyDatabase::open_container(container, &registry())
+            .unwrap()
+            .snapshot()
+            .manifest()
+            .clone();
+        let archive = manifest.collections().next().unwrap();
+        let Location::Frame { offset, len } = archive.segments()[0].location else {
+            panic!("a container segment is a frame")
+        };
+        let middle = usize::try_from(offset + len / 2).unwrap();
+        bytes[middle] ^= 0xFF;
+    }
+    let damaged = || SimFile::from_bytes(bytes.clone());
+    // With the analyzer, the open reads `archive`'s segment and finds the damage.
+    let with = ReadOnlyDatabase::open_container(
+        Container::open_on(damaged(), Mode::ReadOnly).unwrap(),
+        &registry(),
+    )
+    .unwrap_err();
+    assert!(with.is_corruption(), "{with:?}");
+    let check = |e: DatabaseError| {
+        assert!(!e.is_corruption(), "{e:?}");
+        assert!(
+            matches!(&e, DatabaseError::UnregisteredAnalyzer { collection, field, analyzer }
+                if (collection.as_str(), field.as_str(), analyzer.as_str())
+                    == ("notes", "title", "prefix@1")),
+            "{e:?}"
+        );
+    };
+    check(
+        ReadOnlyDatabase::open_container(
+            Container::open_on(damaged(), Mode::ReadOnly).unwrap(),
+            &AnalyzerRegistry::builtin(),
+        )
+        .unwrap_err(),
+    );
+    check(Database::open_on(damaged(), sim_options(AnalyzerRegistry::new(), BIG, 0)).unwrap_err());
+}
+
+#[test]
+fn a_refresh_checks_every_collections_analyzers_before_it_opens_a_segment() {
+    // A reader of `archive` with an empty WAL (so the refresh is incremental, ADR-0060 item 3) follows a commit that
+    // adds an `archive` segment, then one that creates `notes` with `prefix@1`. The new `archive` segment, first in
+    // the manifest, is damaged: the refresh checks `notes`'s analyzers before it opens it, as an open would.
+    let file = SimFile::new();
+    let mut db =
+        Database::create_on(file.clone(), [8; 16], sim_options(registry(), BIG, 0)).unwrap();
+    let archive =
+        CollectionSchema::from_json(r#"{"name": "archive", "fields": {"body": {"type": "text"}}}"#)
+            .unwrap();
+    let body = archive.field("body").unwrap().id();
+    let page = |id: &str| Document::new(id).with(body, Value::String(format!("page {id}")));
+    db.create_collection(archive).unwrap();
+    db.put("archive", &page("a1"), Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    let image = file.bytes();
+    let readers = [AnalyzerRegistry::builtin(), registry()].map(|registry| {
+        let file = SimFile::from_bytes(image.clone());
+        let reader = ReadOnlyDatabase::open_on(file.clone(), &registry).unwrap();
+        assert_eq!(reader.replayed(), 0);
+        (file, reader)
+    });
+    let old_segments = db
+        .manifest()
+        .collections()
+        .next()
+        .unwrap()
+        .segments()
+        .to_vec();
+    db.put("archive", &page("a2"), Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    db.create_collection(CollectionSchema::from_json_in(SCHEMA, &registry()).unwrap())
+        .unwrap();
+    let mut bytes = file.bytes();
+    {
+        let archive = db.manifest().collections().next().unwrap();
+        assert_eq!(archive.name(), "archive");
+        let added = archive
+            .segments()
+            .iter()
+            .find(|s| !old_segments.contains(s))
+            .unwrap();
+        let Location::Frame { offset, len } = added.location else {
+            panic!("a container segment is a frame")
+        };
+        bytes[usize::try_from(offset + len / 2).unwrap()] ^= 0xFF;
+    }
+    drop(db);
+    let refresh = |(file, reader): &(SimFile, ReadOnlyDatabase<SimFile>)| {
+        file.write_all_at(&bytes, 0).unwrap();
+        file.set_len(bytes.len() as u64).unwrap();
+        let before = (reader.seq(), reader.manifest(), reader.replayed());
+        let e = reader.refresh().unwrap_err();
+        assert_eq!((reader.seq(), reader.manifest(), reader.replayed()), before);
+        e
+    };
+    let e = refresh(&readers[0]);
+    assert!(!e.is_corruption(), "{e:?}");
+    assert!(
+        matches!(&e, DatabaseError::UnregisteredAnalyzer { collection, field, analyzer }
+            if (collection.as_str(), field.as_str(), analyzer.as_str())
+                == ("notes", "title", "prefix@1")),
+        "{e:?}"
+    );
+    // With the analyzer, the refresh opens the new segment and finds the damage.
+    let with = refresh(&readers[1]);
+    assert!(with.is_corruption(), "{with:?}");
 }
 
 #[test]
@@ -733,77 +875,6 @@ fn every_crash_point_opens_with_the_analyzer_and_fails_cleanly_without_it() {
 /// ROADMAP 6.6.8 (proposed SPEC §8.6 text: "Replay still decodes each of its records, validates it against the
 /// schema and applies it"): a synced `notes` put whose `title` is an integer fails an open that skips `title`'s
 /// analysis exactly as it fails one that has the analyzer: the record does not decode for the schema.
-#[test]
-fn an_unregistered_analyzer_fails_the_open_before_an_earlier_collection_is_read() {
-    // `archive` (built-ins only) comes first in the manifest and has a damaged segment; `notes`, after it, names
-    // `prefix@1`. The analyzers of every collection are checked before any segment is read (SPEC §6.2.2).
-    let file = SimFile::new();
-    {
-        let mut db =
-            Database::create_on(file.clone(), [9; 16], sim_options(registry(), BIG, 0)).unwrap();
-        let archive = CollectionSchema::from_json(
-            r#"{"name": "archive", "fields": {"body": {"type": "text"}}}"#,
-        )
-        .unwrap();
-        let body = archive.field("body").unwrap().id();
-        db.create_collection(archive).unwrap();
-        db.create_collection(CollectionSchema::from_json_in(SCHEMA, &registry()).unwrap())
-            .unwrap();
-        let doc = Document::new("a1").with(body, Value::String("an archived page".into()));
-        db.put("archive", &doc, Durability::Fsync).unwrap();
-        let doc = note(&db.snapshot(), "n1", "Persia");
-        db.put("notes", &doc, Durability::Fsync).unwrap();
-        db.commit().unwrap();
-        let names: Vec<_> = db
-            .manifest()
-            .collections()
-            .map(CollectionEntry::name)
-            .collect();
-        assert_eq!(names, ["archive", "notes"]);
-    }
-    let mut bytes = file.bytes();
-    {
-        let container =
-            Container::open_on(SimFile::from_bytes(bytes.clone()), Mode::ReadOnly).unwrap();
-        let manifest = ReadOnlyDatabase::open_container(container, &registry())
-            .unwrap()
-            .snapshot()
-            .manifest()
-            .clone();
-        let archive = manifest.collections().next().unwrap();
-        let Location::Frame { offset, len } = archive.segments()[0].location else {
-            panic!("a container segment is a frame")
-        };
-        let middle = usize::try_from(offset + len / 2).unwrap();
-        bytes[middle] ^= 0xFF;
-    }
-    let damaged = || SimFile::from_bytes(bytes.clone());
-    // With the analyzer, the open reads `archive`'s segment and finds the damage.
-    let with = ReadOnlyDatabase::open_container(
-        Container::open_on(damaged(), Mode::ReadOnly).unwrap(),
-        &registry(),
-    )
-    .unwrap_err();
-    assert!(with.is_corruption(), "{with:?}");
-    let check = |e: DatabaseError| {
-        assert!(!e.is_corruption(), "{e:?}");
-        assert!(
-            matches!(&e, DatabaseError::UnregisteredAnalyzer { collection, field, analyzer }
-                if (collection.as_str(), field.as_str(), analyzer.as_str())
-                    == ("notes", "title", "prefix@1")),
-            "{e:?}"
-        );
-    };
-    check(
-        ReadOnlyDatabase::open_container(
-            Container::open_on(damaged(), Mode::ReadOnly).unwrap(),
-            &AnalyzerRegistry::builtin(),
-        )
-        .unwrap_err(),
-    );
-    check(Database::open_on(damaged(), sim_options(AnalyzerRegistry::new(), BIG, 0)).unwrap_err());
-}
-
 #[test]
 fn an_open_skipping_analysis_still_rejects_an_invalid_record() {
     let file = SimFile::new();
