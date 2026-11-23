@@ -597,6 +597,8 @@ Deps: M7. **Key differentiator — treat quality here as a product feature.**
 - [ ] 8.4.2 Metric: zero-result rate before/after relaxation; precision of first relaxed hit
 - [ ] 8.4.3 Regression gate: zero-result rate on synthetic suite must be ≤ threshold
 - [ ] 8.4.4 Document tuning guide (`docs/relaxation.md`)
+- [ ] 8.4.5 (v1.1) Multi-word typo queries are answered by L2 dropping the misspelled word before L4 can correct it (found in 8.4.3): on the slow synthetic suite (5 seeds) the first relaxed hit of a 2–3-word typo query holds every intended word 51.6–61.8% of the time with the default levels, against 100% without `drop_terms`; but without `drop_terms`, term-drop queries fall to the fallback (0.7–1.4%, against 75.5–83.6% with it), and a one-word query with an added word and a typo keeps the added word (0% with the default levels, every seed). Decide (ADR) whether L4 should run before L2's lower rungs, or a rung should try the corrections of the words no document holds, and gate the change with `relax_quality`'s baseline
+- [ ] 8.4.6 (v1.1) Synthetic queries the gate cannot see yet (found in 8.4.3): synonym queries (a corpus with synonym groups, for L1), prefix queries (a last word cut short, for L3 apart from L4) and queries only L5 answers (every word unheld and beyond L4's reach), so the gate fails with L1, L3 or L5 left out too
 
 ---
 
@@ -726,6 +728,7 @@ Deps: M10.
 - [ ] 11.4.5 AuthN: API keys/bearer, TLS (rustls), optional mTLS
 - [ ] 11.4.6 Limits: max message size, concurrent requests, per-request deadlines
 - [ ] 11.4.7 Block cache size in the server config (found in 5.3.15): one `BlockCache` (SPEC §10.6) for all the server's segments, sized by a flag (default from 15.2.4), hit and miss counters in the metrics of 11.4.4
+- [ ] 11.4.8 (v1.0) `ReadOnlyDatabase::relaxation_stats`: a read-only handle's searches count into its snapshot's collections (`CollectionSnapshot::relaxation_stats`), but it has no database-wide sum as `Database` has; add one (with `ReadOnlyDatabase::refresh`, ROADMAP 6.6.6, keeping the counts of the collections it reloads) so the server's metrics (11.4.4) can serve from a read-only handle (found in 8.3.3)
 
 ## 11.5 Packaging
 - [ ] 11.5.1 Multi-stage Dockerfile: distroless, non-root, read-only rootfs
