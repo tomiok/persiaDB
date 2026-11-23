@@ -1461,3 +1461,27 @@ Models behind `cfg(loom)`, dev-only (ADR-0001).
 ## 35.4 Docs
 - [ ] 35.4.1 (v1.1) An ADR in `docs/adr/`: what 35.1–35.3 verify, what is out of scope (full functional verification with Verus or Creusot, rejected as cost-prohibitive), and how to run TLC, Kani, and Loom. Append a pointer from SPEC §16.1. Do not rewrite that section.
 
+---
+
+# M36 — Search aggregations and derived fields (target: v1.1)
+Deps: M5, M7.
+
+Post-MVP analytics over the hits of a search (ADR-0055). These leaves are outside M0–M15, so they do not move the MVP percentage. 36.1.1 is design only and is done before the v1.0 format freeze (M15); it does not wait on M15. The metrics are v1.1. Expressions, index-time extractors, and the API are v1.2.
+
+## 36.1 Format
+- [ ] 36.1.1 (v1.0, design only) Reserve the segment feature flag / layout for columnar field values before the format freeze; ADR accepted. Record in SPEC, before M15, the segment flag (SPEC §5.1, §15) and any layout beyond the `Columns` section (SPEC §5.3.5) so a later writer can set the flag without breaking a v1.0 reader. ADR-0055 becomes accepted. This leaf writes no aggregation code
+- [ ] 36.1.2 (v1.1) Columnar values for numeric and keyword fields per segment, behind the feature flag, with golden fixture. Aggregations read the `Columns` section (SPEC §5.3.5) and do not decode stored documents. Bytes that section does not already define are written only with the flag from 36.1.1. [T] A golden segment round-trips, and a segment that does not set the flag still opens
+
+## 36.2 Metrics
+- [ ] 36.2.1 (v1.1) count/sum/avg/min/max over hits on one snapshot, with exact numeric semantics (overflow, NaN, missing, empty) as ADR-0055. The snapshot and the hit set are the ones facets use (SPEC §7.5). [T] Empty, missing, non-finite, and saturating inputs match the ADR, including `saturated`
+- [ ] 36.2.2 (v1.1) group-by on keyword field with nested metrics; deterministic ordering and bounded bucket count. Typed columns (`i64`, `f64`, `bool`, `datetime`) use the same rules (ADR-0055). `size` has the facet bounds (SPEC §7.5). [T] Order is the metric, then the key, and a bucket past `size` is absent
+- [ ] 36.2.3 (v1.1) percentiles and histograms. Exact over the included values: nearest-rank percentiles, and histogram edges from the request (ADR-0055). [T] An empty set is null for a percentile and zero in every histogram bucket
+- [ ] 36.2.4 (v1.1) Differential tests against a naive reference implementation over random corpora. The reference states ADR-0055 (saturation, missing values, empty sets, group-by order, percentiles, histograms). Seeded. The v1.2 expression and extractor leaves extend the same oracle
+
+## 36.3 Expressions and extractors
+- [ ] 36.3.1 (v1.2) computed field expressions (safe evaluator, bounded, no I/O) usable in aggregations and results. Arithmetic, comparisons, field refs, literals, `abs`, and `round`; no loops (ADR-0055). [T] Division by zero and a missing field are null, an expression over 64 nodes is rejected, and the same document always yields the same value
+- [ ] 36.3.2 (v1.2) index-time extractors: regex capture and locale-aware number parsing into derived typed fields. `"1.500,50"` under `es` and `"1,500.50"` under `en` are the same value. Extraction runs at index time; a merge copies the column (ADR-0055). [T] The same input and locale always produce the same column, and a query does not parse the text again
+
+## 36.4 API
+- [ ] 36.4.1 (v1.2) CLI and embedded API surface for aggregations; SDK exposure tracked with M14-style follow-ups. Those follow-ups are new post-MVP leaves, not edits to M14. [T] The CLI and the embedded API return the engine's metrics for one snapshot
+
