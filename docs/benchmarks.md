@@ -161,6 +161,20 @@ Documents and postings per second.
 |---|--:|--:|--:|
 | 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.1) | 78.9 K | 45.4 M | 69.6 K |
 
+`cargo bench -p persia-engine --bench segment -- memtable/put_rejected` (ROADMAP 6.1.6): one `put` the memtable rejects
+after indexing part of it, into a memtable holding the 2 000 documents. `body` (120 words none indexed before) and
+`brand` are indexed, then a field under a registered analyzer without the length guard fails on a token over 32 KiB,
+and the put is undone. Before 6.1.6 the undo rehashed every field's whole term table (about 5 000 terms in `body`);
+now it empties the slots of the terms the put added. Rejected puts per second; the rest of a rejected put (the
+document's encoding, analyzing a 40 000-byte value, interning) dominates, so the undo's share was about a tenth. The
+undo now costs the terms the put added, where it cost the field's whole vocabulary (measured here at 2 000 documents
+only).
+
+| Recorded | `memtable/put_rejected` |
+|---|--:|
+| 2026-11-22, rustc 1.99.0, AMD Ryzen 5 3600, Linux; full rehash (before ROADMAP 6.1.6) | 18.5 K |
+| 2026-11-22, rustc 1.99.0, AMD Ryzen 5 3600, Linux; slots of the added terms (ROADMAP 6.1.6) | 20.6 K |
+
 ## `persia-engine` segment merging
 
 `cargo bench -p persia-engine --bench segment -- segment_merge`: the 2 000 documents of the segment building
@@ -207,6 +221,24 @@ Commits that tombstone older copies (ROADMAP 6.4.3): `commit_upserts` commits 2 
 | Recorded | `commit` | `commit_upserts` | `commit_inserts_4_segments` | `commit_inserts_64_segments` |
 |---|--:|--:|--:|--:|
 | 2026-10-28, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.4, 6750fe8) | 201 K | 153 K | 174 K | 97.4 K |
+
+## `persia-engine` read-only refresh
+
+`cargo bench -p persia-engine --bench read_only`: a database of 4 committed segments of 2 000 documents of about 40
+words and 2 000 more unflushed in the WAL (20 synced chunks). A backlog past the `log_end` of the superblock slot the
+reader read is re-read on every refresh (each chunk's XXH3-128 checked again, ADR-0060 item 3, since 07c2fe8), so the
+cases fix how much lies there. `refresh_unchanged_backlog` is a refresh with nothing new and the whole backlog past
+`log_end`; `refresh_unchanged` the same once a commit that flushes nothing (a created collection) moved `log_end` past
+it; `reopen` the new `ReadOnlyDatabase::open_on` a reader needed before (every segment opened, the 2 000-record
+backlog replayed); `refresh_one_put` an incremental `ReadOnlyDatabase::refresh` after a synced put by the writer (the
+put not timed), from that last state, with the writer and reader started again from it every 64 puts outside the
+timing, so at most 64 one-document chunks lie past `log_end` and the cost does not grow with the iteration count.
+The container is a `SimFile`. Time per call.
+
+| Recorded | `refresh_one_put` | `refresh_unchanged` | `refresh_unchanged_backlog` | `reopen` |
+|---|--:|--:|--:|--:|
+| 2026-11-22, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.6.6, fbea85d, before 07c2fe8: the put timed, the WAL past `log_end` growing by a chunk each iteration, `refresh_unchanged` and `reopen` measured after those puts; not comparable with the row below) | 1.96 ms | 2.07 ms | — | 56.0 ms |
+| 2026-11-23, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.6.6, the batch review fix-up) | 133 µs | 110 µs | 232 µs | 7.93 ms |
 
 ## `persia-engine` query execution
 

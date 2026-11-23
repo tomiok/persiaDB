@@ -494,7 +494,8 @@ impl Memtable {
             .encode(&inner.schema, FieldSet::All)
             .map_err(SegmentError::from)?;
         let marks = inner.marks();
-        // The id is interned last: undoing it would rehash every id (`Arena::truncate`).
+        // The id is interned last, so a rejected document leaves no id to undo; its terms are undone in time
+        // proportional to how many it added (`Arena::truncate`, ROADMAP 6.1.6).
         let result = inner
             .index(docid, doc, &mut self.tokens, &mut self.occurrences)
             .and_then(|()| inner.check_postings())

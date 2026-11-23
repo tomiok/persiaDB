@@ -77,9 +77,29 @@ pub trait ContainerFile: Send + Sync + std::fmt::Debug {
     fn locks_per_handle(&self) -> bool {
         true
     }
+
+    /// Another handle on the same file, for a read-only open of it beside this one
+    /// ([`Container::reopen_read_only`](super::Container::reopen_read_only), ROADMAP 6.6.6). It takes no lock. The
+    /// default reports [`io::ErrorKind::Unsupported`].
+    ///
+    /// # Errors
+    /// The OS error, or [`io::ErrorKind::Unsupported`].
+    fn try_clone_handle(&self) -> io::Result<Self>
+    where
+        Self: Sized,
+    {
+        Err(io::ErrorKind::Unsupported.into())
+    }
 }
 
 impl ContainerFile for File {
+    /// [`File::try_clone`]: a duplicated descriptor, which shares this one's open file description. A `flock` belongs
+    /// to the description, so a clone of a [`Mode::ReadWrite`](super::Mode::ReadWrite) container's file shares the
+    /// writer's lock: it is released only once the clone (and the old state holding it) drops too.
+    fn try_clone_handle(&self) -> io::Result<Self> {
+        self.try_clone()
+    }
+
     fn file_len(&self) -> io::Result<u64> {
         Ok(self.metadata()?.len())
     }

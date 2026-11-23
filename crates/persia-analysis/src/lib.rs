@@ -47,7 +47,7 @@ pub use nfkc::NfkcFilter;
 pub use ngram::EdgeNgramFilter;
 pub use registry::{
     AnalyzerRegistry, BUILTIN_ANALYZERS, BuiltinAnalyzer, DEFAULT_ANALYZER, RegisterError,
-    builtin_analyzer, current_builtin_version,
+    builtin_analyzer, current_builtin_version, is_analyzer_name,
 };
 pub use scratch::Scratch;
 pub use standard::StandardTokenizer;

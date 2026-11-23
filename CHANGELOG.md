@@ -9,6 +9,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: a schema can name an analyzer registered with `AnalyzerRegistry::register`
+  (`CollectionSchema::from_json_in`, `AnalyzerRef::parse_in`, `AnalyzerRef::is_builtin`), stored and hashed as a
+  built-in one (ROADMAP 6.6.8, ADR-0059). A database opens with `DatabaseOptions::registry` (the built-ins are always
+  added); a stored schema naming an analyzer it lacks fails the open with `DatabaseError::UnregisteredAnalyzer`, not
+  as corruption. `ReadOnlyDatabase::open_skipping_analysis` / `open_container_skipping_analysis` and
+  `skipped_analysis()` (`SkippedAnalysis`) open such a database without those analyzers. `persia_engine::analysis`
+  re-exports `persia_analysis`.
+- `persia-analysis`: `is_analyzer_name`, `AnalyzerRegistry::with_builtins`.
+- `persia verify`: checks a database whose schema names a registered analyzer, without analyzing those fields, and
+  lists them on a new `analysis` row (exit status 0).
+- `persia-engine`: `ReadOnlyDatabase::refresh` follows a writer in place (ROADMAP 6.6.6, ADR-0060): the WAL written
+  since, and commits that flushed none of the reader's records and dropped or changed no collection, are applied
+  incrementally; anything else reopens in full. The new state is swapped in atomically and running searches keep
+  theirs (`Refreshed`, `DatabaseError::RefreshRefused` for another database or an older commit at the path). WAL
+  chunks a power loss may still replace are compared by content, so a reader never keeps a write the writer lost.
+- `persia-storage`: `Container::reopen_read_only`; `ContainerFile::try_clone_handle` (provided, `Unsupported` by
+  default; implemented for `File` and `SimFile`).
+- `persia-engine`: `ContainerObjects::shared`, a view that holds its container.
 - `persia-blob` / `persia` (internal API): reader leases on the local pack (ROADMAP 9.2.16, ADR-0054). Every
   `ReadOnlyBlobDatabase` holds a 64-byte locked lease in `<name>.persia.blobs.leases/` naming the seq of the documents
   it holds; `refresh` advances it. `ReaderLease::take_beside`, `ReadOnlyBlobDatabase::with_lease` / `with_lease_in` /
@@ -211,6 +229,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- `persia-analysis` (breaking): `AnalyzerRegistry::register` accepts only names of the shape `[a-z][a-z0-9_-]*`
+  (`RegisterError::InvalidName`).
+- `persia-engine`: a stored schema naming a well-formed analyzer that is not a built-in name now decodes (it was
+  `ManifestError::UnsupportedAnalyzer`); the open reports it as `UnregisteredAnalyzer` unless the registry has it.
+  `UnsupportedAnalyzer` is now only a built-in name at a version this build lacks.
+- `persia-engine` (breaking): `ReadOnlyDatabase::container` and `manifest` return `Arc`s of the current state, and
+  `objects` a `ContainerObjects<'static, F>` (needs `F: 'static`).
 - `persia-engine`: a relaxed response's `truncated` states whether the budget cut a step of the page only. When it
   passes in a step a `fill` page with facets searches only to count them, the page is whole (`truncated: false`) and
   its facet counts miss the later steps, with nothing flagging it yet (ROADMAP 8.1.31); such counts are not kept for

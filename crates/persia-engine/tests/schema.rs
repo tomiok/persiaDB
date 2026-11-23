@@ -1433,6 +1433,68 @@ fn canonical_encoding_golden_remaining_types() {
 const GOLDEN_REMAINING_TYPES: &str = "8fa45c7272bc18a279e24b038b781c8e";
 const GOLDEN_EMPTY: &str = "4236aa2d3c043329e3d87ea985a0c010";
 
+/// ROADMAP 6.6.8: a schema naming a registered analyzer keeps the layout and hash rules of SPEC §6.2.5 (tag 1
+/// `analyzer`: `str name, varint u32 version`), bytes derived by hand from the table: registered analyzers need no
+/// format change. Its stored JSON pins the version as a built-in's does, reads back only with a registry holding the
+/// analyzer, and the definition form `"name"` binds the highest registered version.
+#[test]
+fn canonical_encoding_golden_registered_analyzer() {
+    use persia_analysis::{Analyzer, AnalyzerRegistry, WhitespaceTokenizer};
+
+    let mut registry = AnalyzerRegistry::builtin();
+    for version in [1, 300] {
+        let analyzer = Analyzer::builder(WhitespaceTokenizer).build();
+        registry.register("my-tags_2", version, analyzer).unwrap();
+    }
+    let json = r#"{"name": "r", "fields": {"t": {"type": "text", "analyzer": "my-tags_2"}}}"#;
+    let s = CollectionSchema::from_json_in(json, &registry).unwrap();
+    #[rustfmt::skip]
+    let expected: &[u8] = &[
+        1,                                   // encoding_version
+        1, b'r',                             // name
+        1,                                   // field_count
+        1, b't', 1, 3,                       // t: text, 3 options
+        1, 9, b'm', b'y', b'-', b't', b'a', b'g', b's', b'_', b'2', 0xac, 0x02, // analyzer my-tags_2@300
+        2, 0,                                // !positions
+        4, 1,                                // stored
+    ];
+    assert_eq!(s.canonical_index_definition(), expected);
+    assert_eq!(s.hash().get(), persia_format::hash::xxh3_128(expected));
+    assert_eq!(s.hash().to_string(), GOLDEN_REGISTERED);
+    // Stored pinned, like a built-in; read back only through a registry that has it.
+    let stored = s.to_json().unwrap();
+    assert!(stored.contains(r#""analyzer":"my-tags_2@300""#), "{stored}");
+    assert_eq!(
+        CollectionSchema::from_json_in(&stored, &registry).unwrap(),
+        s
+    );
+    assert_eq!(
+        CollectionSchema::from_json(&stored),
+        Err(SchemaError::UnknownAnalyzer {
+            field: "t".to_owned(),
+            analyzer: "my-tags_2@300".to_owned()
+        })
+    );
+    // A pinned older version is another analyzer, so another hash.
+    let first = json.replace("my-tags_2", "my-tags_2@1");
+    let first = CollectionSchema::from_json_in(&first, &registry).unwrap();
+    assert_ne!(first.hash(), s.hash());
+    // Unknown names and versions are rejected as for built-ins; built-in names never resolve to a registry's.
+    for analyzer in ["my-tags_2@2", "other", "es@2"] {
+        let text = json.replace("my-tags_2", analyzer);
+        assert_eq!(
+            CollectionSchema::from_json_in(&text, &registry),
+            Err(SchemaError::UnknownAnalyzer {
+                field: "t".to_owned(),
+                analyzer: analyzer.to_owned()
+            }),
+            "{analyzer}"
+        );
+    }
+}
+
+const GOLDEN_REGISTERED: &str = "6449b321bcf2946532266ecd5af4da2d";
+
 /// H2. `field_count` and string lengths are LEB128 varints (§4.1): check the one-to-two-byte boundary.
 #[test]
 fn canonical_encoding_varint_boundaries() {

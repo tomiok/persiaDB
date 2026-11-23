@@ -284,6 +284,30 @@ fn registry_register_rules() {
         registry.register("a@b", 1, custom()),
         Err(RegisterError::InvalidName("a@b".to_owned()))
     );
+    // Only the built-in shape `[a-z][a-z0-9_-]*`: a build without the analyzer must read a schema naming it as
+    // unsupported, never corrupt (SPEC §6.2.2).
+    for bad in [
+        "Mine",
+        "mIne",
+        "2nd",
+        "_x",
+        "-x",
+        "my analyzer",
+        "my.analyzer",
+        "é",
+        "mine@1",
+    ] {
+        assert_eq!(
+            registry.register(bad, 1, custom()),
+            Err(RegisterError::InvalidName(bad.to_owned())),
+            "{bad:?}"
+        );
+        assert!(!persia_analysis::is_analyzer_name(bad), "{bad:?}");
+    }
+    for good in ["x", "my-prefix_2", "a0", "zh-hans"] {
+        registry.register(good, 1, custom()).unwrap();
+        assert!(persia_analysis::is_analyzer_name(good), "{good:?}");
+    }
     assert_eq!(
         registry.register("zero", 0, custom()),
         Err(RegisterError::InvalidVersion("zero".to_owned()))
@@ -298,6 +322,12 @@ fn registry_register_rules() {
         );
     }
     assert!(builtins.get("en", 2).is_none());
+    // `with_builtins` adds every built-in version and keeps what was registered.
+    let all = registry.with_builtins();
+    assert_eq!(all.versions("mine").collect::<Vec<_>>(), [1, 2, 10]);
+    for a in BUILTIN_ANALYZERS {
+        assert!(all.get(a.name, a.version).is_some(), "{}", a.name);
+    }
 }
 
 #[test]

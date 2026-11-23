@@ -24,7 +24,8 @@
 
 use std::collections::BTreeMap;
 use std::io;
-use std::ops::Range;
+use std::ops::{Deref, Range};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use persia_format::frame::FrameKind;
@@ -72,8 +73,26 @@ enum Target {
 /// ```
 #[derive(Debug)]
 pub struct ContainerObjects<'a, F> {
-    container: &'a Container<F>,
+    container: Held<'a, F>,
     objects: BTreeMap<String, Target>,
+}
+
+/// The container a [`ContainerObjects`] reads: borrowed, or shared with a read-only database's state (ROADMAP 6.6.6).
+#[derive(Debug)]
+enum Held<'a, F> {
+    Borrowed(&'a Container<F>),
+    Shared(Arc<Container<F>>),
+}
+
+impl<F> Deref for Held<'_, F> {
+    type Target = Container<F>;
+
+    fn deref(&self) -> &Container<F> {
+        match self {
+            Self::Borrowed(c) => c,
+            Self::Shared(c) => c,
+        }
+    }
 }
 
 /// The key of a segment (SPEC §10.4).
@@ -91,6 +110,20 @@ impl<'a, F: ContainerFile> ContainerObjects<'a, F> {
     /// superblock commits ([`super::Database::objects`] passes it): another one gives a view whose keys disagree with
     /// the frames. With no commit yet (`seq` 0) there is no manifest object.
     pub fn new(container: &'a Container<F>, manifest: &Manifest) -> Self {
+        Self::of(Held::Borrowed(container), manifest)
+    }
+
+    /// [`ContainerObjects::new`] holding `container`, so the view outlives the borrow it was made from: what
+    /// [`super::ReadOnlyDatabase::objects`] returns, since a refresh may replace the database's container meanwhile
+    /// (ROADMAP 6.6.6).
+    pub fn shared(container: Arc<Container<F>>, manifest: &Manifest) -> ContainerObjects<'static, F>
+    where
+        F: 'static,
+    {
+        ContainerObjects::of(Held::Shared(container), manifest)
+    }
+
+    fn of(container: Held<'a, F>, manifest: &Manifest) -> Self {
         let sb = container.superblock();
         let mut objects = BTreeMap::new();
         if sb.seq != 0 {

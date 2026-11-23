@@ -46,15 +46,18 @@
 //!    matches every document L0 matches at every count of alternatives per run (a self-check; the engine's step, which
 //!    no search can see, is checked for it in-crate, `relax::synonyms`). Each text with a run is also searched at a
 //!    `max_terms` inside its cut window, a different one at each operation.
-//!    The default fields analyze apart (ROADMAP 8.1.24): `title` by `whitespace`, `body` by `standard` ([`analyze`],
+//!    The default fields analyze apart (ROADMAP 8.1.24): `title` by `whitespace`, `body` by `standard-stop` ([`analyze`],
 //!    checked against both analyzers on the generated alphabet). User text and synonym terms have capitals and `-`
 //!    at times, and the pool other writings of its terms, so a term matches in one field only, two writings are one
 //!    term in `body` alone, and a word is one token in `title` and several in `body` (compiled as SPEC §7.1.1 says
 //!    for fields that split it apart, also through L2's importance, L3's last term and L4's corrections). The runs
 //!    are each field's own, merged as SPEC §6.3.2 says: the union in group then term order (a later field's term
 //!    before an earlier one's), the later field's overlapping match dropped, an alternative compiled away as a
-//!    duplicate over the fields; each is covered. Neither analyzer removes a token, so stopword gaps, and a run whose
-//!    alternatives all compile away (unreachable over two fields with positions), stay with `tests/relax_synonyms.rs`.
+//!    duplicate over the fields; each is covered. `standard-stop` is `standard` with English `stop` (registered, ROADMAP
+//!    8.1.25): user text and synonym terms hold its stopwords ([`STOPWORDS`]), which leave gaps in `body` and stay in
+//!    `title`, so a term matches across a gap only where the gaps line up (SPEC §6.3.2), and L2 drops a stopword
+//!    clause first (SPEC §7.6); both are covered. A run whose
+//!    alternatives all compile away (unreachable over two fields with positions) stays with `tests/relax_synonyms.rs`.
 //! 6. A sort led by the score with a later key on the `n` column (each order and `missing` pair, with the proximity
 //!    bonus and without, in turn) ranks as the score order re-sorted, among exact score ties, by the reference's `n`
 //!    values, then location: every strategy, pages walked by cursor across ties, and on the pool a page of `k` and
@@ -125,6 +128,9 @@ const VOCAB: [&str; 10] = [
 /// other than last, `ele` not) and typos (`crat` a swap from `cart`, `elehpant` a swap from `elephant`, `elepant` one
 /// edit from both `elephant` and `elegant`, `bees` and `carts` an insertion).
 const TYPOS: [&str; 7] = ["ca", "ele", "crat", "carts", "bees", "elepant", "elehpant"];
+/// Words of user text and synonym terms alone that `body`'s English `stop` filter removes, leaving a gap, and `title`
+/// keeps (ROADMAP 8.1.25); `be` also starts `bee`, which L3 completes in `title`.
+const STOPWORDS: [&str; 3] = ["the", "of", "be"];
 const TAGS: [&str; 3] = ["x", "y", "z"];
 const NS: [i64; 4] = [-1, 0, 1, 2];
 const TITLE: usize = 0;
@@ -141,13 +147,30 @@ const STRATEGIES: [Pruning; 3] = [
 /// Per text field: `boost`, `k1`, `b`.
 type Params = [(f64, f64, f64); 2];
 
+/// The built-in analyzers and `standard-stop@1`, `body`'s: `standard` with the English `stop` filter after
+/// `lowercase` (ROADMAP 8.1.25), which no built-in is (each one with `stop` also stems).
+fn registry() -> &'static AnalyzerRegistry {
+    static REGISTRY: std::sync::OnceLock<AnalyzerRegistry> = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        let mut registry = AnalyzerRegistry::builtin();
+        let analyzer = persia_analysis::Analyzer::builder(persia_analysis::StandardTokenizer)
+            .filter(persia_analysis::NfkcFilter)
+            .filter(persia_analysis::LowercaseFilter)
+            .filter(persia_analysis::StopwordFilter::english())
+            .filter(persia_analysis::TokenLengthGuard::default())
+            .build();
+        registry.register("standard-stop", 1, analyzer).unwrap();
+        registry
+    })
+}
+
 fn schema(p: &Params, synonyms: &[Vec<String>]) -> CollectionSchema {
-    // `title` by `whitespace` and `body` by `standard` (ROADMAP 8.1.24): on the documents' lowercase words both give
-    // the words as they are, at positions 0, 1, 2... (the reference's tokens); user text and synonym terms analyze
-    // apart in them ([`analyze`]).
+    // `title` by `whitespace` and `body` by `standard-stop` (ROADMAP 8.1.24, 8.1.25): on the documents' lowercase words
+    // (none a stopword) both give the words as they are, at positions 0, 1, 2... (the reference's tokens); user text
+    // and synonym terms analyze apart in them ([`analyze`]).
     let text = |analyzer: &str, (boost, k1, b)| {
         FieldKind::Text(TextOptions {
-            analyzer: AnalyzerRef::new(analyzer, 1).unwrap(),
+            analyzer: AnalyzerRef::parse_in(&format!("{analyzer}@1"), registry()).unwrap(),
             boost,
             k1,
             b,
@@ -157,7 +180,7 @@ fn schema(p: &Params, synonyms: &[Vec<String>]) -> CollectionSchema {
     };
     SchemaBuilder::new("c")
         .field("title", text("whitespace", p[0]))
-        .field("body", text("standard", p[1]))
+        .field("body", text("standard-stop", p[1]))
         .field("tag", FieldKind::Keyword(KeywordOptions::default()))
         .field("n", FieldKind::I64 { stored: false })
         .synonyms(synonyms.to_vec())
@@ -182,12 +205,19 @@ type Analyzed = (String, Range<usize>, u32);
 
 /// How a default field analyzes `text` at query time (SPEC §6.3.3, §6.3.4), on the alphabet the generators write
 /// (letters, a `-` inside a word, spaces): `title` by `whitespace`, each run of other characters as written; `body` by
-/// `standard`, whose UAX #29 words are there the runs of letters (`-` is a word break), NFKC (the letters are already
-/// composed) and lowercased, so `Cat` and `cat` are one term in `body` alone, and `cat-bee` is two tokens there and
-/// one in `title`. Positions 0, 1, 2... in order: neither analyzer removes a token, so neither leaves a gap.
+/// `standard-stop`, whose UAX #29 words are there the runs of letters (`-` is a word break), NFKC (the letters are
+/// already composed) and lowercased, so `Cat` and `cat` are one term in `body` alone, and `cat-bee` is two tokens there
+/// and one in `title`; then English stopwords removed (ROADMAP 8.1.25). Positions 0, 1, 2... in word order: a removed
+/// stopword keeps its position, so `cat the bee` is `cat` at 0 and `bee` at 2 in `body`.
 fn analyze(field: usize, text: &str) -> Vec<Analyzed> {
+    analyze_counted(field, text).0
+}
+
+/// [`analyze`], and how many positions the text took (the tokenizer's words, removed stopwords included).
+fn analyze_counted(field: usize, text: &str) -> (Vec<Analyzed>, u32) {
     let breaks = |c: char| c.is_whitespace() || (field == BODY && c == '-');
     let mut out = Vec::new();
+    let mut position = 0u32;
     let mut start = None;
     for (i, c) in text
         .char_indices()
@@ -202,23 +232,32 @@ fn analyze(field: usize, text: &str) -> Vec<Analyzed> {
                 } else {
                     word.to_owned()
                 };
-                out.push((term, s..i, u32::try_from(out.len()).unwrap()));
+                let stopword =
+                    field == BODY && persia_analysis::ENGLISH_STOPWORDS.contains(&term.as_str());
+                if !stopword {
+                    out.push((term, s..i, position));
+                }
+                position += 1;
                 start = None;
             }
             _ => {}
         }
     }
-    out
+    (out, position)
 }
 
 /// [`analyze`] as `tests/reference/synonyms.rs` reads an analysis: the tokens and the positions they took.
 fn tokens(field: usize, text: &str) -> (Vec<reference::synonyms::Token>, u32) {
-    let tokens: Vec<_> = analyze(field, text)
-        .into_iter()
-        .map(|(t, _, p)| (t, p))
-        .collect();
-    let took = u32::try_from(tokens.len()).unwrap();
+    let (analyzed, took) = analyze_counted(field, text);
+    let tokens: Vec<_> = analyzed.into_iter().map(|(t, _, p)| (t, p)).collect();
     (tokens, took)
+}
+
+/// Whether a word is a stopword clause (SPEC §7.1.1, ROADMAP 8.2.2.1): `body` analyzes it to no token because its
+/// `stop` filter removed one. `title` removes none.
+fn stopword(word: &str) -> bool {
+    let (tokens, took) = analyze_counted(BODY, word);
+    tokens.is_empty() && took > 0
 }
 
 /// A query matching any of `alternatives`: itself when there is one (SPEC §7.1.1: "one of the fields must match").
@@ -817,11 +856,43 @@ impl Text {
     }
 }
 
+/// `words` with one of [`STOPWORDS`] put in at times (ROADMAP 8.1.25): chosen from the words themselves, not drawn,
+/// so the generators draw what they drew before stopwords and every other case stays as it was (the coverage keys
+/// hold for the fixed seed only, ROADMAP 8.1.27). About one in `every`, none for 0; `inside` keeps it between two words, so a
+/// synonym term's gap is inside it and a text drawn from the term lines up with it.
+fn with_stopword(mut words: Vec<String>, every: u64, inside: bool) -> Vec<String> {
+    if every == 0 {
+        return words;
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in words.iter().flat_map(|w| w.bytes().chain(*b" ")) {
+        h = (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let slots = if inside {
+        words.len().saturating_sub(1)
+    } else {
+        words.len() + 1
+    };
+    if !h.is_multiple_of(every) || slots == 0 {
+        return words;
+    }
+    let stopword = STOPWORDS[usize::try_from((h >> 8) % 3).unwrap()];
+    let at =
+        usize::try_from((h >> 16) % u64::try_from(slots).unwrap()).unwrap() + usize::from(inside);
+    words.insert(at, stopword.to_owned());
+    words
+}
+
 /// User text drawn from the synonym terms (`pool`, each split into its words, or at times at its `-` too, so the words
 /// of a term `body` splits are clauses of their own) and from [`text_word`], so runs of one and several words are
 /// common: at most 6 words (a term past the sixth is cut short, on purpose: a partial run), each excluded at times
 /// (which ends a run, SPEC §6.3.2).
-fn text(fields: [FieldId; 4], pool: Vec<String>) -> impl Strategy<Value = Text> {
+/// With a stopword in about one text in `stopwords` ([`with_stopword`]; none for 0).
+fn text_with(
+    fields: [FieldId; 4],
+    pool: Vec<String>,
+    stopwords: u64,
+) -> impl Strategy<Value = Text> {
     let split = |t: String, at: fn(char) -> bool| {
         t.split(at)
             .filter(|w| !w.is_empty())
@@ -862,8 +933,11 @@ fn text(fields: [FieldId; 4], pool: Vec<String>) -> impl Strategy<Value = Text> 
         prop::collection::vec(prop::bool::weighted(0.2), 6),
         prop::option::weighted(0.3, filter(fields)),
     )
-        .prop_map(|(chunks, excluded, filter)| Text {
-            clauses: chunks.into_iter().flatten().zip(excluded).collect(),
+        .prop_map(move |(chunks, excluded, filter)| Text {
+            clauses: with_stopword(chunks.into_iter().flatten().collect(), stopwords, false)
+                .into_iter()
+                .zip(excluded)
+                .collect(),
             filter,
         })
 }
@@ -876,6 +950,12 @@ fn text(fields: [FieldId; 4], pool: Vec<String>) -> impl Strategy<Value = Text> 
 /// some of its terms, with capitals or with `-` for spaces, which `body` analyzes alike and `title` does not, so a
 /// group may shrink to one term in `body` alone, and a field may match where the other does not (ROADMAP 8.1.24).
 fn synonyms() -> impl Strategy<Value = (Vec<String>, Vec<Vec<String>>)> {
+    synonyms_with(0)
+}
+
+/// [`synonyms`], with a stopword inside about one term of several words in `stopwords` ([`with_stopword`]; none for
+/// 0).
+fn synonyms_with(stopwords: u64) -> impl Strategy<Value = (Vec<String>, Vec<Vec<String>>)> {
     let term = (
         prop_oneof![3 => 1..2_usize, 2 => 2..4_usize],
         prop::collection::vec(text_word(), 3),
@@ -903,7 +983,12 @@ fn synonyms() -> impl Strategy<Value = (Vec<String>, Vec<Vec<String>>)> {
             0..4,
         ),
     )
-        .prop_map(|(mut pool, picks, many, writings)| {
+        .prop_map(move |(mut pool, picks, many, writings)| {
+            // A stopword inside some terms of several words (ROADMAP 8.1.25), which `body` reads as a gap.
+            for t in &mut pool {
+                let words: Vec<String> = t.split(' ').map(str::to_owned).collect();
+                *t = with_stopword(words, stopwords, true).join(" ");
+            }
             // Other writings of some terms (ROADMAP 8.1.24), each alone or in two groups with other terms `x` and
             // `y`: the writing with `x`, then the term (or its first word) with `y` (`x` again at times). For text
             // written as the term, `body` (the first default field) reads both groups and `title` the second only,
@@ -976,8 +1061,13 @@ fn synonyms() -> impl Strategy<Value = (Vec<String>, Vec<Vec<String>>)> {
 }
 
 fn case() -> impl Strategy<Value = Case> {
+    case_with(0)
+}
+
+/// [`case`], its user text and synonym terms holding stopwords as [`text_with`] and [`synonyms_with`] put them in.
+fn case_with(stopwords: u64) -> impl Strategy<Value = Case> {
     let fields = ids(&schema(&[(1.0, 1.2, 0.75); 2], &[]));
-    (params(), synonyms()).prop_flat_map(move |(p, (pool, synonyms))| {
+    (params(), synonyms_with(stopwords)).prop_flat_map(move |(p, (pool, synonyms))| {
         (
             Just(p),
             Just(synonyms),
@@ -989,7 +1079,7 @@ fn case() -> impl Strategy<Value = Case> {
                 ),
                 1..4,
             ),
-            prop::collection::vec(text(fields, pool), 1..4),
+            prop::collection::vec(text_with(fields, pool, stopwords), 1..4),
             // The default, which the steps' 50-term expansions reach late in a cascade, or a limit that cuts them
             // and skips steps sooner (ROADMAP 8.1.19).
             prop_oneof![2 => Just(QueryLimits::default().max_expansions), 1 => 1..12_usize, 1 => 40..240_usize],
@@ -1427,8 +1517,8 @@ fn check(
     }
     // Invariant 5 for user text: compiled as SPEC §7.1.1 says (checked against the reference's own form), then
     // relaxed, each step's `effective` the reference's.
-    let registry = AnalyzerRegistry::builtin();
-    let text_compiler = QueryCompiler::new(schema, &registry).unwrap();
+    let registry = registry();
+    let text_compiler = QueryCompiler::new(schema, registry).unwrap();
     let defaults = DefaultFields::all(schema);
     for (t, text) in case.texts.iter().enumerate() {
         // Compiled at the case's `max_terms` when its query fits it (SPEC §6.3.2: the compilation then bounds the
@@ -1704,6 +1794,7 @@ fn database(schema: CollectionSchema) -> Database<SimFile> {
     let options = DatabaseOptions {
         clock: Arc::new(ManualClock::new(1_700_000_000_000_000)) as _,
         segment_ids: SegmentIds::seeded(1),
+        registry: registry().clone(),
         // No tier merge or deletion rewrite, so every segment keeps what it was flushed with (the model's); a segment
         // with no live document is still dropped, as the model does. Merges run inside the commit.
         merge: MergeOptions {
@@ -1837,18 +1928,56 @@ fn collection_searches_match_the_reference() {
     }
 }
 
-/// The reference's analysis ([`analyze`]) is `whitespace` and `standard`, written from SPEC §6.3.3 for the alphabet
-/// the generators write (ROADMAP 8.1.24): a self-check of that premise on the words and synonym terms they write, and
+/// Invariants 1–5 with `body`'s stopwords in every text and in every synonym term of several words (ROADMAP 8.1.25,
+/// [`case_with`]), so the gap rule of SPEC §6.3.2 and L2's stopword order (SPEC §7.6) meet the reference in cases of
+/// their own, while [`collection_searches_match_the_reference`] draws as before. Each is covered.
+#[test]
+fn stopword_gaps_match_the_reference() {
+    let cases = if cfg!(feature = "slow") { 128 } else { 16 };
+    run(
+        "stopword_gaps_match_the_reference",
+        cases,
+        case_with(1),
+        |case| run_case(&case),
+    );
+    let coverage = COVERAGE.with_borrow(Clone::clone);
+    if std::env::var("PROPTEST_CASES").is_err() {
+        for key in [
+            "synonyms match across a stopword gap",
+            "synonyms hit",
+            "drop_terms hit step over a stopword",
+        ] {
+            assert!(
+                coverage.get(key).is_some_and(|&n| n > 0),
+                "no {key} step: {coverage:#?}"
+            );
+        }
+    }
+}
+
+/// The reference's analysis ([`analyze`]) is `whitespace` and `standard-stop`, written from SPEC §6.3.3 for the
+/// alphabet the generators write (ROADMAP 8.1.24, 8.1.25), and its stopword clauses and positions taken ([`stopword`],
+/// [`tokens`]) are what the analyzers report: a self-check of that premise on the words and synonym terms they write, and
 /// on some by hand, against the built-in analyzers. It checks the suite's model, not the analyzers, which their own
 /// tests pin.
 #[test]
 fn the_reference_analysis_is_the_analyzers_on_the_generated_alphabet() {
-    let analyzers = [(TITLE, "whitespace"), (BODY, "standard")]
-        .map(|(f, name)| (f, persia_analysis::builtin_analyzer(name, 1).unwrap()));
+    let analyzers = [(TITLE, "whitespace"), (BODY, "standard-stop")]
+        .map(|(f, name)| (f, Arc::clone(registry().get(name, 1).unwrap())));
     let check = |text: &str| -> Result<(), TestCaseError> {
         for (field, analyzer) in &analyzers {
             let mut out = persia_analysis::TokenStream::new();
-            analyzer.analyze_query(text, &mut out);
+            let counted = analyzer.analyze_query_counted(text, &mut out);
+            prop_assert_eq!(
+                (
+                    counted.positions,
+                    *field == BODY && out.is_empty() && counted.stopword
+                ),
+                (tokens(*field, text).1, *field == BODY && stopword(text)),
+                "{:?} in field {}",
+                text,
+                field
+            );
             let engine: Vec<Analyzed> = out
                 .into_vec()
                 .into_iter()
@@ -1870,6 +1999,10 @@ fn the_reference_analysis_is_the_analyzers_on_the_generated_alphabet() {
         "cat  bee",
         "elephant-Cats-ca",
         "Café-bee cats",
+        "the Cat of-bee",
+        "THE be",
+        "be-of",
+        "cat-the bee",
     ] {
         check(text).unwrap();
     }
@@ -2107,8 +2240,8 @@ fn search_input(ops: &[Op], input: &Input<'_>, max_expansions: usize) -> Relaxed
     let exec = Execution::default().threads(Threads::Current);
     match input {
         Input::Text(text) => {
-            let registry = AnalyzerRegistry::builtin();
-            let compiled = QueryCompiler::new(&schema, &registry).unwrap().compile(
+            let registry = registry();
+            let compiled = QueryCompiler::new(&schema, registry).unwrap().compile(
                 text,
                 &DefaultFields::all(&schema),
                 &QueryLimits::default(),
@@ -2468,6 +2601,7 @@ fn check_relaxed(
         );
         if let Some(t) = text {
             reference.cover_split(t, &steps, hit_step);
+            Reference::cover_stopwords(t, &steps, hit_step);
         }
         // Step order first, each step's hits its reference matches, within the tolerance, in the reference order.
         prop_assert!(relaxed.hits.windows(2).all(|w| w[0].step <= w[1].step));
@@ -2594,7 +2728,7 @@ struct RefRun {
 }
 
 /// SPEC §6.3.2's runs of `text` over the default fields `title` and `body`, in each maximal stretch of required words
-/// (which an excluded word ends). Each field scans its own analysis ([`analyze`]: `whitespace`, `standard`) of the
+/// (which an excluded word ends). Each field scans its own analysis ([`analyze`]: `whitespace`, `standard-stop`) of the
 /// groups and of the words ([`reference::synonyms::field_matches`]), the fields' matches merge
 /// ([`reference::synonyms::merge`]: the union of the same clauses' alternatives in group then term order, a later
 /// field's match that overlaps them otherwise dropped), each alternative compiles as the quoted phrase `"<term>"` would
@@ -2631,6 +2765,19 @@ fn reference_runs(
             .map(|(&f, s)| reference::synonyms::field_matches(s, &words, &|w| tokens(f, w)))
             .collect();
         cover_fields(&per_field);
+        // A match in `body` over a stopword inside it: its term's gap lined up with the text's (ROADMAP 8.1.25).
+        for (&f, matches) in order.iter().zip(&per_field) {
+            let gap = |w: &&str| {
+                let (tokens, took) = analyze_counted(f, w);
+                tokens.len() < usize::try_from(took).unwrap()
+            };
+            if matches
+                .iter()
+                .any(|(range, _)| words[range.clone()].iter().any(gap))
+            {
+                cover("synonyms match across a stopword gap".to_owned());
+            }
+        }
         for (covered, terms) in reference::synonyms::merge(per_field) {
             let clauses = start + covered.start..start + covered.end;
             let mut own: Vec<RefQuery> = parts[clauses.clone()].concat();
@@ -3054,11 +3201,11 @@ impl Reference<'_> {
 
     /// L2's `effective` for user text at count `k` (SPEC §7.6, ROADMAP 8.2.2.2): its `k` most important required
     /// clauses and every excluded one, in text order. A clause's term is its parts (several required together), and a
-    /// term no document holds is the least important ([`Self::weigh`]), then (no stopwords here: neither analyzer
-    /// removes a token) a lower IDF, then a later position.
+    /// term no document holds is the least important ([`Self::weigh`]), then a stopword ([`stopword`], ROADMAP 8.1.25),
+    /// then a lower IDF, then a later position.
     fn drop_terms_effective(&self, text: &Text, k: usize) -> String {
         let parts = text.parts(self.params, &ids(self.schema));
-        let mut required: Vec<(bool, f64, usize)> = text
+        let mut required: Vec<(bool, bool, f64, usize)> = text
             .clauses
             .iter()
             .enumerate()
@@ -3076,12 +3223,17 @@ impl Reference<'_> {
                         minimum_should_match: 0,
                     }),
                 };
-                (none, idf, i)
+                (none, stopword(&text.clauses[i].0), idf, i)
             })
             .collect();
         // Most important first.
-        required.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)).then(a.2.cmp(&b.2)));
-        let kept: BTreeSet<usize> = required.iter().take(k).map(|r| r.2).collect();
+        required.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then(a.1.cmp(&b.1))
+                .then(b.2.total_cmp(&a.2))
+                .then(a.3.cmp(&b.3))
+        });
+        let kept: BTreeSet<usize> = required.iter().take(k).map(|r| r.3).collect();
         text.sources()
             .into_iter()
             .enumerate()
@@ -3089,6 +3241,20 @@ impl Reference<'_> {
             .map(|(_, s)| s)
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    /// Coverage of stopword clauses where the cascade's compared output reads them (ROADMAP 8.1.25): L2's hit step,
+    /// whose `effective` drops a stopword before any other term a document holds (SPEC §7.6).
+    fn cover_stopwords(text: &Text, steps: &[RefStep], hit_step: usize) {
+        let stopwords = text
+            .clauses
+            .iter()
+            .filter(|c| !c.1 && stopword(&c.0))
+            .count();
+        let required = text.clauses.iter().filter(|c| !c.1).count();
+        if steps[hit_step].level == RelaxLevel::DropTerms && stopwords > 0 && required > stopwords {
+            cover("drop_terms hit step over a stopword".to_owned());
+        }
     }
 
     /// Coverage of a word the default fields split apart (SPEC §7.1.1) where the cascade's compared output reads it

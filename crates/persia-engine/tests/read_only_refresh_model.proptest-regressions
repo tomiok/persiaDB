@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc bdd5f99ebe0049f93c45fb76cf2657886de16e3d2b1a19a415b79f89c9fcb992 # shrinks to (false, [Delete { c: 0, id: 2, durability: Async }, Refresh, Restart { power_loss: true }, Delete { c: 0, id: 0, durability: Async }, Restart { power_loss: false }])

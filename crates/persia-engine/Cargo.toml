@@ -54,3 +54,7 @@ harness = false
 [[bench]]
 name = "keyword_columns"
 harness = false
+
+[[bench]]
+name = "read_only"
+harness = false

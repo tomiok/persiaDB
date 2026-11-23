@@ -215,6 +215,42 @@ impl<F: ContainerFile + 'static> Container<F> {
         self.location.as_ref().map(|l| l.path.as_path())
     }
 
+    /// Opens the same container again, read-only and recovered anew (SPEC §4.5.1): what a later read-only open would
+    /// find, for a reader that follows a writer's commits (ROADMAP 6.6.6). A container opened by path is reopened at
+    /// that path on the same file system, so it follows a compaction that renamed a new file over it (SPEC §4.6); the
+    /// reopened container may then be another file, or even another database: compare its `db_uuid`. One opened on a
+    /// file is reopened on another handle of that file ([`ContainerFile::try_clone_handle`]). This handle is unchanged.
+    ///
+    /// ```
+    /// use persia_format::block::Compression;
+    /// use persia_format::frame::FrameKind;
+    /// use persia_storage::container::{Commit, Container, Mode};
+    ///
+    /// # let dir = tempfile::tempdir()?;
+    /// # let path = dir.path().join("app.persia");
+    /// let mut writer = Container::create(&path)?;
+    /// let reader = Container::open(&path, Mode::ReadOnly)?;
+    /// let manifest = writer.append(FrameKind::Manifest, b"manifest 1", Compression::None)?;
+    /// writer.commit(Commit { manifest, wal_start: writer.end(), fence_token: 0 })?;
+    /// assert_eq!(reader.superblock().seq, 0);
+    /// assert_eq!(reader.reopen_read_only()?.superblock().seq, 1);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// As [`Container::open_in`] or [`Container::open_on`] with [`Mode::ReadOnly`], or the error of
+    /// [`ContainerFile::try_clone_handle`].
+    pub fn reopen_read_only(&self) -> Result<Self> {
+        if let Some(location) = &self.location {
+            return Self::open_in(Arc::clone(&location.vfs), &location.path, Mode::ReadOnly);
+        }
+        let file = self
+            .file
+            .try_clone_handle()
+            .map_err(Error::io("clone the file handle"))?;
+        Self::open_on(file, Mode::ReadOnly)
+    }
+
     /// Compacts the container in place (SPEC §4.6): [`Container::compact_into`] a temporary file
     /// `<name>.compact.<nonce>.<n>` next to it, then renames that over the container and syncs the directory. This
     /// handle then works on the new file; frame offsets the caller held are replaced by the returned
