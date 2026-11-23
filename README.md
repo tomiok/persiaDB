@@ -30,7 +30,7 @@
 </p>
 
 <!-- BEGIN GENERATED progress:summary by `cargo xtask progress`. Do not edit by hand. -->
-**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **415 of 604** MVP leaves done (69%), 0 in progress (last snapshot 2026-11-23). Post-MVP work is 0 of 193 and sits outside that percentage.
+**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **415 of 604** MVP leaves done (69%), 0 in progress (last snapshot 2026-11-23). Post-MVP work is 0 of 202 and sits outside that percentage.
 <!-- END GENERATED progress:summary -->
 
 Format 1.0 is unstable until the v1.0 release ([SPEC §15](./SPEC.md#15-versioning-and-compatibility)). The [docs homepage](https://tomiok.github.io/persiaDB/) plays this poster from [`persia-hero.webm`](./website/public/persia-hero.webm) and [`persia-hero.mp4`](./website/public/persia-hero.mp4).
@@ -280,6 +280,8 @@ From the table under [After v1.0](./ROADMAP.md) on `main`. None of these leaves 
 v2.1, v2.2, and v2.3 are separate targets: UI components, AI search, and on-device storage. Geo stays on v3.0 with the enterprise format work. The ordering notes are in that ROADMAP section.
 
 The embedded SDKs core moved to v1.0 via [14.6](./ROADMAP.md) (inside M14): `persia-ffi` and `persia.h`, the embedded Go SDK, `@persiadb/node`, the embedded Python package, and their prebuilt libraries. The rows above are unchanged. Still later: 16.4.1 (publish only after the v1.0 tag) and 16.6 (read-only WASM) on v1.1, and the Python HTTP client (21.2) on v1.2.
+
+Search aggregations and derived fields are [ADR-0055](./docs/adr/0055-search-aggregations-and-derived-fields.md) (M36, post-MVP).
 
 ## SDKs
 

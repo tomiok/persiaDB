@@ -79,3 +79,4 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0054](./0054-blob-pack-reader-leases.md) | Reader leases on the local blob pack: one locked 64-byte lease per read-only handle in `<name>.persia.blobs.leases/`; GC does not sweep while a live lease is not at the committed seq | accepted |
 | [0057](./0057-l3-last-term-minimum-length.md) | L3 expands the last term from 2 characters (amends 0040 item 4) | accepted |
 | [0058](./0058-cache-l1-alternatives-per-default-fields.md) | Cache L1's compiled alternatives per set of default fields (the last 4), not lazy: `Compiled` unchanged | accepted |
+| [0055](./0055-search-aggregations-and-derived-fields.md) | Search aggregations and derived fields | proposed |
