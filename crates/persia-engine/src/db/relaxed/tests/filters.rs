@@ -95,10 +95,20 @@ fn compile(views: &CollectionViews<'_>, text: &str, filtered: bool) -> Compiled 
         .unwrap()
         .compile(text, &DefaultFields::all(schema), &QueryLimits::default());
     if filtered {
-        compiled.with_filter([tag_is(field(views, "tag"), "x")])
+        compiled.with_soft_filter([tag_is(field(views, "tag"), "x")])
     } else {
         compiled
     }
+}
+
+/// `query` with every filter of its root `bool` marked soft (ROADMAP 8.2.13), as a request's `soft_filter`: the filter
+/// step may drop them all.
+fn marked(query: &Query) -> RelaxedQuery<'_> {
+    let soft = match query {
+        Query::Bool(root) => root.filter.as_slice(),
+        _ => &[],
+    };
+    RelaxedQuery::from(query).with_soft_filter(soft)
 }
 
 fn plan(views: &CollectionViews<'_>, json: &str) -> RelaxPlan {
@@ -334,18 +344,21 @@ fn a_query_put_in_place_never_loses_the_request_filter() {
         ]
     );
     // A clone of the compiled query (which holds the request filter) with a `should` clause added: the join wraps it,
-    // and the filter step drops the request filter from the clone's root too, so it finds what the filter rejected.
+    // and the clone's root holds the request filter itself, so the filter is the caller's own there, and hard (ROADMAP
+    // 8.2.13): the filter step drops nothing, and is not built. Without the filter in the clone, the step drops it from
+    // the wrap and finds what it rejected.
     let Query::Bool(mut clone) = red_shoes.query().clone() else {
         panic!()
     };
     clone.should.push(term("again"));
+    let last_resort = r#"{"min_results": 7, "filters": "last_resort"}"#;
+    let cloned = red_shoes.clone().with_query(Query::Bool(clone.clone()));
+    let last = run(&views, &cloned, &request(10), last_resort);
+    assert!(ids(&last).iter().all(|&(id, _)| kept.contains(&id)));
+    assert!(!last.relaxation.applied.iter().any(|a| a == "filters"));
+    clone.filter.clear();
     let cloned = red_shoes.clone().with_query(Query::Bool(clone));
-    let last = run(
-        &views,
-        &cloned,
-        &request(10),
-        r#"{"min_results": 7, "filters": "last_resort"}"#,
-    );
+    let last = run(&views, &cloned, &request(10), last_resort);
     let dropped: Vec<(&str, RelaxLevel)> = ids(&last)
         .into_iter()
         .filter(|&(_, level)| level == RelaxLevel::Filters)
@@ -451,7 +464,7 @@ fn without_l5_the_filter_step_follows_the_last_word_level() {
     });
     let out = run(
         &views,
-        &programmatic,
+        marked(&programmatic),
         &request(10),
         r#"{"min_results": 3, "filters": "last_resort"}"#,
     );
@@ -684,7 +697,7 @@ fn a_root_of_should_clauses_requires_one_of_them_without_its_filters() {
     });
     let out = run(
         &views,
-        &query,
+        marked(&query),
         &request(10),
         r#"{"min_results": 4, "levels": [], "filters": "last_resort"}"#,
     );
@@ -1177,6 +1190,12 @@ impl L0 {
                         Query::Bool(mut root)
                             if root.should.is_empty() && root.minimum_should_match == 0 =>
                         {
+                            // Without the request filters, which the join adds back: kept in the root, they would
+                            // be the caller's own, and hard (ROADMAP 8.2.13).
+                            root.filter.retain(|f| {
+                                !compiled.filter().contains(f)
+                                    && !compiled.soft_filter().contains(f)
+                            });
                             root.must_not.push(excluded);
                             Query::Bool(root)
                         }
@@ -1221,7 +1240,7 @@ impl L0 {
     fn relaxed(&self) -> RelaxedQuery<'_> {
         match self {
             Self::Compiled(compiled) => compiled.as_ref().into(),
-            Self::Query(query) => query.into(),
+            Self::Query(query) => marked(query),
         }
     }
 }

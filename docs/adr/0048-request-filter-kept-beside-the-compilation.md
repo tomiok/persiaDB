@@ -37,6 +37,8 @@ is not a root `bool`, and what "the request's filters" means once a caller's que
    or a `minimum_should_match` whose `must` is the current one and whose `must_not` holds the clauses' entries at the
    same indexes keeps them (a caller may add exclusions after them, which every level keeps). A required clause a
    caller adds detaches them: the word levels rebuild `must` from the clauses alone and would relax it away unlisted.
+   (Amended by ADR-0056, ROADMAP 8.2.15: a `must` that starts with the clauses' entries keeps them, and every step
+   carries the entries after them unchanged; a required clause put before them still detaches them.)
    Otherwise the compilation is detached from then on: `parts` and `root` are `None`, and L1 to L4 build no step. A
    compilation of no clause is always detached by a replacement. Before, any root `bool` was read as the clauses'
    root, so a query with other entries at those indexes was read as their parts.

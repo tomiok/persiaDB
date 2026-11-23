@@ -3,11 +3,13 @@
 //! One step, listed as `fuzzy`, built from L0's query (after a tier step `fuzzy:1` within one edit when a term may
 //! take two, ROADMAP 8.2.7): every term of at least [`MIN_LEN`] characters becomes a `fuzzy`
 //! query of [`DEFAULT_MAX_EXPANSIONS`] terms at the distance its length allows ([`distance`]), which planning expands
-//! over the views' terms (each segment's FST intersected with the automaton, SPEC §7.1) and keeps by collection `df`.
+//! over the views' terms (each segment's FST intersected with the automaton, SPEC §7.1) and keeps the fewest edits
+//! first, then by collection `df`.
 //! The terms rewritten are L3's ([`super::words`]): words of the user text, in `text` fields whose analyzer does not
 //! stack tokens. Excluded clauses, phrases and `field:` clauses stay exact, as they ask for their text exactly; so do
 //! a stacking field's terms, whose grams would add their scores together.
 
+use core::cmp::Reverse;
 use core::ops::Bound;
 
 use super::words::Words;
@@ -58,6 +60,15 @@ impl LevelTransform for Fuzzy {
         }
         steps.push(step(input, full, TWO_EDITS)?);
         Ok(steps)
+    }
+
+    /// The tier steps are nested (ROADMAP 8.2.12): `fuzzy:1` is `fuzzy` with every distance capped at 1, and a `fuzzy`
+    /// keeps its terms fewest edits first (SPEC §7.1), so each capped `fuzzy` keeps only terms the uncapped one keeps.
+    /// Every other clause, `must_not` and `filter` is the same in both, so `fuzzy` matches every document `fuzzy:1`
+    /// matches, and the later steps exclude only `fuzzy`. Both count alike against the limits: one `fuzzy` of
+    /// [`DEFAULT_MAX_EXPANSIONS`] per rewritten term, at distance 1 or 2 alike.
+    fn nested(&self) -> bool {
+        true
     }
 }
 
@@ -115,8 +126,9 @@ fn capped(term: &str, max: u8) -> Option<u8> {
 /// A word is corrected when it is a required word clause of one part (a `term`, or a `combined` over the default
 /// fields: one token), no field of it holds its term (collection `df` 0, so no document does), and some field L4
 /// rewrites has a term within the word's distance that a document holds. Its correction is the term a field's
-/// `fuzzy` keeps first (SPEC §7.1: the highest collection `df`, ties by bytes), the highest `df` over the fields, ties
-/// to the earlier field: it is searched by the step under any cut (§7.1.3 keeps the most frequent). A word's distance
+/// `fuzzy` keeps first (SPEC §7.1: the fewest edits, then the highest collection `df`, ties by bytes, ROADMAP 8.2.12),
+/// the first by that order over the fields, ties to the earlier field: it is searched by the step under any cut
+/// (§7.1.3 keeps each query's first terms). A word's distance
 /// is capped at `max`, as the step's `fuzzy` is (`fuzzy:1` corrects within one edit, ROADMAP 8.2.7). Each such field
 /// is walked as planning walks it ([`expand`], keeping one term). Without the views' terms
 /// ([`LevelInput::terms`]), nothing is corrected.
@@ -159,7 +171,8 @@ fn corrections(
         if held {
             continue;
         }
-        let mut best: Option<(u64, Vec<u8>)> = None;
+        // The first by the order a `fuzzy` keeps its terms in (SPEC §7.1): the fewest edits, then the highest `df`.
+        let mut best: Option<(u8, Reverse<u64>, Vec<u8>)> = None;
         for &(field, term) in &fields {
             if (input.expands)(field).is_none() || term.is_empty() {
                 continue;
@@ -172,13 +185,18 @@ fn corrections(
             let kept = expand(field, all, &automaton, 1, terms, input.stats)?;
             if let Some((found, df)) = kept.into_iter().next()
                 && df > 0
-                && best.as_ref().is_none_or(|(top, _)| df > *top)
             {
-                best = Some((df, found));
+                let edits = automaton.distance(&found).unwrap_or(u8::MAX);
+                if best
+                    .as_ref()
+                    .is_none_or(|(e, top, _)| (edits, Reverse(df)) < (*e, *top))
+                {
+                    best = Some((edits, Reverse(df), found));
+                }
             }
         }
         // Index terms of `text` fields are UTF-8; one that is not is not reported.
-        if let Some((_, found)) = best
+        if let Some((_, _, found)) = best
             && let Ok(corrected) = String::from_utf8(found)
             && let Some(original) = compiled.source(index)
         {

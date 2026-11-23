@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d92589e8ad7865b06f67c333968b5b7821bd1f2bff38a6bdd66dee95d2676b2e # shrinks to clause = Term(TermQuery { field: FieldId(0), term: "red" })

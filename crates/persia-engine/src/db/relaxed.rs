@@ -23,7 +23,7 @@ use std::time::Instant;
 use super::exec::{ExecTerms, Execution};
 use super::search::{Collected, Cursor, Part, Ranked, SearchHit, SearchRequest, StepCursor};
 use super::views::CollectionViews;
-use crate::query::{BoolQuery, Compiled, Fit, Query, QueryLimits, StepLimits};
+use crate::query::{BoolQuery, Compiled, Filter, Fit, Query, QueryLimits, StepLimits};
 pub use crate::relax::Correction;
 use crate::relax::{
     Expansion, FallbackOrder, LevelInput, PlannedLevel, RelaxLevel, RelaxPlan, RelaxSettings,
@@ -205,6 +205,44 @@ impl Relaxation {
 pub struct RelaxedQuery<'a> {
     query: &'a Query,
     compiled: Option<&'a Compiled>,
+    /// Root filters a caller marked soft ([`Self::with_soft_filter`]).
+    soft: &'a [Filter],
+}
+
+impl<'a> RelaxedQuery<'a> {
+    /// This query with `soft` marking the filters of its root `bool` that the filter step under
+    /// `filters: "last_resort"` may drop (SPEC §7.6, ROADMAP 8.2.13, ADR-0056): a root filter equal to one of them is
+    /// soft, and every other one hard. A programmatic query's root filters are hard unless marked, so without marks it
+    /// builds no filter step. A compiled query's soft filters are its request's `soft_filter`
+    /// ([`Compiled::with_soft_filter`]) and nothing else (SPEC §7.6): marks are ignored, so its request's `filter`
+    /// ([`Compiled::filter`]) and the filters the root of a query a caller put in holds itself
+    /// ([`Compiled::with_query`]) stay hard even if marked. Marking a filter the root does not hold changes nothing:
+    /// the query is searched as it is.
+    ///
+    /// ```
+    /// use persia_engine::db::RelaxedQuery;
+    /// use persia_engine::query::{BoolQuery, Filter, FilterValue, Query, TermQuery};
+    /// use persia_engine::schema::{FieldKind, KeywordOptions, SchemaBuilder, TextOptions};
+    ///
+    /// let schema = SchemaBuilder::new("c")
+    ///     .field("body", FieldKind::Text(TextOptions::default()))
+    ///     .field("tenant", FieldKind::Keyword(KeywordOptions::default()))
+    ///     .field("brand", FieldKind::Keyword(KeywordOptions::default()))
+    ///     .build()?;
+    /// let id = |name: &str| schema.field(name).map(|f| f.id()).ok_or("no field");
+    /// let keyword = |field, value: &str| Filter::Term { field, value: FilterValue::Keyword(value.into()) };
+    /// let (tenant, nike) = (keyword(id("tenant")?, "t1"), keyword(id("brand")?, "nike"));
+    /// let shoes = Query::Term(TermQuery { field: id("body")?, term: "shoes".into() });
+    /// let query = Query::Bool(BoolQuery { must: vec![shoes], filter: vec![tenant, nike.clone()], ..BoolQuery::default() });
+    /// // The filter step may drop `brand: nike`, never `tenant: t1`.
+    /// let soft = [nike];
+    /// let _relaxed = RelaxedQuery::from(&query).with_soft_filter(&soft);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn with_soft_filter(self, soft: &'a [Filter]) -> Self {
+        Self { soft, ..self }
+    }
 }
 
 impl<'a> From<&'a Query> for RelaxedQuery<'a> {
@@ -212,6 +250,7 @@ impl<'a> From<&'a Query> for RelaxedQuery<'a> {
         Self {
             query,
             compiled: None,
+            soft: &[],
         }
     }
 }
@@ -221,6 +260,7 @@ impl<'a> From<&'a Compiled> for RelaxedQuery<'a> {
         Self {
             query: compiled.query(),
             compiled: Some(compiled),
+            soft: &[],
         }
     }
 }
@@ -230,7 +270,9 @@ impl<'a> From<&'a Compiled> for RelaxedQuery<'a> {
 pub struct RelaxedResults {
     /// The page, best first: the hits of each step in step order.
     pub hits: Vec<RelaxedHit>,
-    /// One per requested facet, in request order, over the matches of every step built.
+    /// One per requested facet, in request order, over the matches of every step a page holding every hit builds (SPEC
+    /// §7.5, ROADMAP 8.1.9): the same on every page of the query, but on a page the budget truncated, or one where it
+    /// passed in a step searched only to count it (the page is then whole, its counts miss that step and later ones).
     pub facets: Vec<FacetCounts>,
     /// What the cascade did.
     pub relaxation: Relaxation,
@@ -274,6 +316,10 @@ struct Ran {
     text: StepText,
     /// Not searched: it does not fit the limits (SPEC §7.1.3), and later steps do not exclude it.
     skipped: bool,
+    /// Built for the page. `false` for a step a `fill` page with facets builds past its own only to count it (SPEC
+    /// §7.5, ROADMAP 8.1.9): it collects no hit, is not listed in `applied` or `level`, and is not the cascade's last
+    /// step a cursor records.
+    page: bool,
 }
 
 /// The steps the cascade built so far, and what each excludes from the next.
@@ -336,7 +382,7 @@ impl<'q, 's> Built<'q, 's> {
         self.ran
             .iter()
             .enumerate()
-            .rfind(|(_, r)| !r.skipped)
+            .rfind(|(_, r)| !r.skipped && r.page)
             .map_or((RelaxLevel::Exact, false), |(i, r)| (r.level, i > 0))
     }
 
@@ -368,7 +414,11 @@ impl<'q, 's> Built<'q, 's> {
             |r| (core::mem::take(&mut r.text), r.level),
         );
         // The cursor's page built at least its last step; with fewer steps now (another plan), the page ends sooner.
-        let last = ran.len().saturating_sub(1).max(start.last.unwrap_or(0));
+        let last = ran
+            .iter()
+            .rposition(|r| r.page)
+            .unwrap_or(0)
+            .max(start.last.unwrap_or(0));
         let at = PageSteps {
             first: start.step,
             last,
@@ -398,18 +448,22 @@ impl<'q, 's> Built<'q, 's> {
         self.level_start = self.earlier.len();
     }
 
-    /// A step of `level` that does not fit: listed, not searched, excluded from none.
-    fn skip(&mut self, level: RelaxLevel, label: String) {
-        self.applied.push(label);
+    /// A step of `level` that does not fit: listed (when it is the `page`'s), not searched, excluded from none.
+    fn skip(&mut self, level: RelaxLevel, label: String, page: bool) {
+        if page {
+            self.applied.push(label);
+        }
         self.ran.push(Ran {
             level,
             searched: None,
             text: (None, Vec::new()),
             skipped: true,
+            page,
         });
     }
 
-    /// A step of `level` built (and `searched`, unless no hit or facet was wanted of it): excluded from every later one.
+    /// A step of `level` built (and `searched`, unless no hit or facet was wanted of it), for the `page` or only to count
+    /// its facets: excluded from every later one.
     /// One that `covers` its level's earlier steps (a nested level's step as built, ROADMAP 8.2.2.4) or every earlier
     /// step (L5's, ADR-0047) matches every document they match, so it replaces them in what the later steps exclude.
     fn push(
@@ -419,10 +473,10 @@ impl<'q, 's> Built<'q, 's> {
         label: String,
         text: StepText,
         searched: Option<Searched>,
-        covers: Covers,
+        (covers, page): (Covers, bool),
     ) {
         let first = self.ran.is_empty();
-        if !first {
+        if !first && page {
             self.applied.push(label);
         }
         self.ran.push(Ran {
@@ -430,6 +484,7 @@ impl<'q, 's> Built<'q, 's> {
             searched,
             text,
             skipped: false,
+            page,
         });
         let from = match covers {
             Covers::Itself => None,
@@ -592,6 +647,10 @@ impl CollectionViews<'_> {
     /// ([`RelaxPlan::settings`]): a plain search's ([`SearchHit::cursor`]) pages a plan of L0 alone (`relax: false`).
     /// An explained hit has a root [`Explanation::Relaxed`] naming its step (ROADMAP 8.3.4).
     ///
+    /// Facets count every step a page holding every hit builds (SPEC §7.5, ROADMAP 8.1.9): with `fill`, a page that has
+    /// its hits builds the remaining steps of the levels that fill and searches them only to count them, without
+    /// listing them in [`Relaxation::applied`] or recording them in its cursors.
+    ///
     /// `query` is a [`Query`] or a [`Compiled`] one ([`RelaxedQuery`]); only a compiled query has the user text the
     /// response's [`Relaxation::original`] and [`Relaxation::effective`] state.
     ///
@@ -651,7 +710,12 @@ impl CollectionViews<'_> {
         relax: &RelaxPlan,
         exec: &Execution,
     ) -> Result<RelaxedResults, RelaxedSearchError> {
-        let RelaxedQuery { query, compiled } = query.into();
+        let RelaxedQuery {
+            query,
+            compiled,
+            soft,
+        } = query.into();
+        let soft = soft_filters(compiled, soft);
         // Every step is planned as `SearchPlan::with_terms` plans by default: without proximity (SPEC §7.4).
         let window = self.check_request(request, false, relax.settings())?;
         let collection = self.collection();
@@ -659,28 +723,31 @@ impl CollectionViews<'_> {
         let start = Start::of(request.search_after.as_ref(), relax);
         let reach = Reach::new(relax, start, window);
         let builds = |i: usize, found: usize, fills: bool| start.builds(i, found, fills, reach);
-        let counting = !request.facets.is_empty();
-
-        // The plan's limits, else those the query was compiled with (SPEC §7.1.3).
-        let limits = relax
-            .limits()
-            .copied()
-            .or_else(|| compiled.map(|c| c.limits))
-            .unwrap_or_default();
+        let limits = step_limits(relax, compiled);
+        // Counts a page of this query kept (ROADMAP 8.1.11): read, and no step is searched only to count it.
+        let (key, cached) = self.kept_facets(request, relax, (query, compiled, &soft), limits);
+        let counting = !request.facets.is_empty() && cached.is_none();
         let expands = |field: FieldId| self.expands(field);
         let mut built = Built::new(collection.schema(), limits);
         let mut found = 0usize;
         // The end of the budget, read from when L0 finishes (SPEC §7.6): L0 itself is never cut by it.
         let mut budget: Option<Instant> = None;
         let clock = exec.relax_clock();
-        let mut truncated = false;
+        // Whether the budget passed in a step of the page (SPEC §7.6 `truncated`), or in one searched only to count its
+        // facets: then the page is whole but its counts are not (ROADMAP 8.1.9), and no later page reads them.
+        let mut passed = Passed::default();
         'levels: for planned in relax.planned() {
+            let fills = planned.transform.fills();
+            // A page holding every hit builds every step of the levels that fill (SPEC §7.5, ROADMAP 8.1.9): with `fill`
+            // and facets, a page counts those past its own too, only to count them.
+            let counts_past = counting && relax.fill() && fills;
             // Checked before a level builds its steps: one the cascade does not reach builds nothing.
-            if !builds(built.ran.len(), found, planned.transform.fills()) {
+            let page = builds(built.ran.len(), found, fills);
+            if !page && !counts_past {
                 break;
             }
             if budget.is_some_and(|end| clock.now() >= end) {
-                truncated = true;
+                passed.mark(page);
                 break;
             }
             let first = built.ran.is_empty().then_some(query);
@@ -688,41 +755,38 @@ impl CollectionViews<'_> {
             // match of the tier step (ROADMAP 8.2.7). The same snapshot, query and limits build the same steps on every page.
             let input = LevelInput::new(query, compiled, &stats)
                 .expanding(&expands)
-                .dropping(built.drops_terms());
+                .dropping(built.drops_terms())
+                .softening(&soft);
             let Some(steps) = self.budgeted_level(planned, first, input, exec, budget)? else {
-                truncated = true;
+                passed.mark(page);
                 break;
             };
             built.begin_level();
             for (step, label, text, alternatives) in steps {
                 let i = built.ran.len();
-                if !builds(i, found, planned.transform.fills()) {
+                let page = builds(i, found, fills);
+                if !page && !counts_past {
                     break 'levels;
                 }
                 if budget.is_some_and(|end| clock.now() >= end) {
-                    truncated = true;
+                    passed.mark(page);
                     break 'levels;
                 }
                 let Held { step, label, cut } =
                     built.fit(query, step, label, alternatives.as_ref())?;
                 let Some(step) = step else {
-                    built.skip(planned.level, label);
+                    built.skip(planned.level, label, page);
                     continue;
                 };
-                // Hits this step is to collect: none before the cursor's step, or once the page is full.
-                let wanted = if i >= start.step {
+                // Hits this step is to collect: none before the cursor's step, or once the page is full (a step built only
+                // to count its facets collects none).
+                let wanted = if page && i >= start.step {
                     reach.need.saturating_sub(found)
                 } else {
                     0
                 };
                 let searched = if wanted > 0 || counting {
-                    let part = Part {
-                        sort: &request.sort,
-                        after: request.search_after.as_ref().filter(|_| i == start.step),
-                        facets: &request.facets,
-                        explain: request.explain,
-                        window: wanted,
-                    };
+                    let part = part(request, i == start.step, wanted, counting);
                     let Some(searched) = self.budgeted_step(
                         StepSearch {
                             step: &step,
@@ -735,7 +799,7 @@ impl CollectionViews<'_> {
                         budget,
                     )?
                     else {
-                        truncated = true;
+                        passed.mark(page);
                         break 'levels;
                     };
                     found = found.saturating_add(searched.collected.ranked.len());
@@ -746,24 +810,30 @@ impl CollectionViews<'_> {
                 // A cut step matches less than its level built (SPEC §7.1.3): it stands for no earlier step, which an
                 // uncut later one does again (a cut step's matches are its uncut ones', which the later step holds).
                 let covers = Covers::of(relax, planned, cut);
-                built.push(planned.level, step, label, text, searched, covers);
+                built.push(planned.level, step, label, text, searched, (covers, page));
                 if budget.is_none() {
                     budget = clock.now().checked_add(relax.budget());
                 }
             }
         }
-        self.respond(built, start, request, exec, (compiled, truncated))
+        let facets = Facets {
+            key: key.filter(|_| start.last.is_none() && !passed.page && !passed.counts),
+            cached,
+        };
+        self.respond(built, start, request, exec, (compiled, passed.page, facets))
     }
 
     /// The response of the cascade `built` from `start`: its page of `request` and what it did, for a query
-    /// `compiled` from text (or not) and `truncated` by the budget (or not).
+    /// `compiled` from text (or not) and `truncated` by the budget (or not). Its facets are those `facets` read, else
+    /// those its steps counted, which the snapshot keeps for later pages when `facets` has a key: a page from the top
+    /// that counted every step it builds, without the budget passing (ROADMAP 8.1.11).
     fn respond(
         &self,
         built: Built<'_, '_>,
         start: Start,
         request: &SearchRequest,
         exec: &Execution,
-        (compiled, truncated): (Option<&Compiled>, bool),
+        (compiled, truncated, kept): (Option<&Compiled>, bool, Facets<'_>),
     ) -> Result<RelaxedResults, RelaxedSearchError> {
         let level = built.last_level();
         let Finished {
@@ -773,7 +843,21 @@ impl CollectionViews<'_> {
             at,
             hit_level,
         } = built.finish(start);
-        let (hits, facets) = self.relaxed_page(ran, &applied, request, at, exec)?;
+        let (hits, counted) = self.relaxed_page(ran, &applied, request, at, exec)?;
+        let facets = match kept {
+            Facets {
+                cached: Some(cached),
+                ..
+            } => cached,
+            Facets { key, cached: None } => {
+                if let Some(key) = key {
+                    // Copied and sized before the cache is locked.
+                    let kept = facet_cache::Kept::new(key.to_key(), counted.clone());
+                    self.facet_cache().insert(kept);
+                }
+                counted
+            }
+        };
         let mut relaxation = Relaxation::of(level, applied, compiled, text, truncated);
         // The explicit flag (SPEC §7.6): L5 found the hits the response states.
         relaxation.fallback = (hit_level == RelaxLevel::Fallback)
@@ -784,6 +868,41 @@ impl CollectionViews<'_> {
             facets,
             relaxation,
         })
+    }
+
+    /// The key of `request`'s facets for `query` (its compilation and soft filters) under `relax` and `limits`, and the
+    /// counts the snapshot kept for it (ROADMAP 8.1.11, SPEC §7.5). No key without facets, or for a plan whose levels
+    /// are not this version's. The key borrows the query: it is copied only to keep new counts.
+    fn kept_facets<'k>(
+        &self,
+        request: &'k SearchRequest,
+        relax: &RelaxPlan,
+        (query, compiled, soft): (&'k Query, Option<&'k Compiled>, &'k [Filter]),
+        limits: QueryLimits,
+    ) -> (Option<facet_cache::KeyRef<'k>>, Option<Vec<FacetCounts>>) {
+        if request.facets.is_empty() || !relax.cacheable() {
+            return (None, None);
+        }
+        let key = facet_cache::KeyRef {
+            version: self.memtable().version(),
+            query,
+            compiled,
+            soft,
+            settings: relax.settings(),
+            limits,
+            facets: &request.facets,
+        };
+        let cached = self.facet_cache().get(&key);
+        (Some(key), cached)
+    }
+
+    /// The snapshot's cache of facet counts (ROADMAP 8.1.11).
+    fn facet_cache(&self) -> std::sync::MutexGuard<'_, FacetCache> {
+        // A panic while it was held leaves whole entries: each is replaced or read as one.
+        self.collection()
+            .facets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The schema `boost` of `field` when L3 may prefix-expand its terms (SPEC §7.6, §6.3.1): a `text` field whose analyzer,
@@ -853,6 +972,8 @@ impl CollectionViews<'_> {
         part: &Part<'_>,
         exec: &Execution,
     ) -> Result<Searched, RelaxedSearchError> {
+        #[cfg(test)]
+        SEARCHED.with(|n| n.set(n.get() + 1));
         let terms = exec.terms(self);
         let plan = plan_step(step, earlier, self.collection().schema(), stats, &terms)?;
         // `check_request` was given `false` for every step: a step planned with the bonus would record another
@@ -1017,6 +1138,34 @@ struct PageSteps {
     relax: Option<RelaxSettings>,
 }
 
+/// A search's facets as the snapshot keeps them (ROADMAP 8.1.11): the key to keep them under, `None` when the page's
+/// counts are not to be kept, and the counts kept.
+struct Facets<'a> {
+    key: Option<facet_cache::KeyRef<'a>>,
+    cached: Option<Vec<FacetCounts>>,
+}
+
+/// Where the budget passed (SPEC §7.6): in a step of the page, which truncates it, or in a step searched only to count
+/// its facets (ROADMAP 8.1.9), which leaves the page whole and its counts partial.
+#[derive(Debug, Default, Clone, Copy)]
+struct Passed {
+    /// In a step of the page, or before a level of the page's steps: the response's `truncated`.
+    page: bool,
+    /// In a step built only to count its facets: the counts miss it and the steps after it.
+    counts: bool,
+}
+
+impl Passed {
+    /// The budget passed at a step of the `page` (or one searched only to count it).
+    fn mark(&mut self, page: bool) {
+        if page {
+            self.page = true;
+        } else {
+            self.counts = true;
+        }
+    }
+}
+
 /// A step's text (SPEC §7.6 `effective`) and the words it corrected (`corrected`).
 type StepText = (Option<String>, Vec<Correction>);
 
@@ -1110,6 +1259,39 @@ fn is_deadline(e: &RelaxedSearchError) -> bool {
     )
 }
 
+/// The limits a plan's steps are held to (SPEC §7.1.3): the plan's, else those the query was compiled with, else the
+/// defaults.
+fn step_limits(relax: &RelaxPlan, compiled: Option<&Compiled>) -> QueryLimits {
+    relax
+        .limits()
+        .copied()
+        .or_else(|| compiled.map(|c| c.limits))
+        .unwrap_or_default()
+}
+
+/// What a step collects of `request`: `wanted` hits by its sort, after its cursor when the step is the cursor's
+/// (`at_cursor`), each explained when asked, and its facets when `counting`.
+fn part(request: &SearchRequest, at_cursor: bool, wanted: usize, counting: bool) -> Part<'_> {
+    Part {
+        sort: &request.sort,
+        after: request.search_after.as_ref().filter(|_| at_cursor),
+        facets: if counting { &request.facets } else { &[] },
+        explain: request.explain,
+        window: wanted,
+    }
+}
+
+/// The filters the filter step may drop (SPEC §7.6, ROADMAP 8.2.13): of a compiled query, its request's `soft_filter`
+/// but those a caller's own root holds ([`Compiled::droppable`]), and nothing else, so a filter a caller `marked` is
+/// ignored (its request's `filter` and the caller's own root filters are hard); of a programmatic query, those a
+/// caller `marked`.
+fn soft_filters(compiled: Option<&Compiled>, marked: &[Filter]) -> Vec<Filter> {
+    match compiled {
+        Some(compiled) => compiled.droppable().cloned().collect(),
+        None => marked.to_vec(),
+    }
+}
+
 /// The plan of a step's `query` with the `earlier` steps' queries excluded (SPEC §7.6): a document they match is
 /// theirs. L0, with none earlier, is planned as it is (no copy). A `bool` with one `must` clause and only `must_not` beside it
 /// scores that clause's score exactly (`0.0 + s`), so the step ranks as its query alone.
@@ -1131,7 +1313,23 @@ fn plan_step(
     SearchPlan::with_terms(&excluded, schema, stats, terms)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many steps this thread searched (tests: a page whose facet counts are kept searches none only to count it,
+    /// ROADMAP 8.1.11).
+    static SEARCHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many steps this thread searched so far.
+#[cfg(test)]
+pub(crate) fn searched() -> usize {
+    SEARCHED.with(std::cell::Cell::get)
+}
+
+mod facet_cache;
 mod fallback;
+
+pub(super) use facet_cache::FacetCache;
 
 #[cfg(test)]
 mod tests;

@@ -1,7 +1,7 @@
 //! Relaxed queries within [`QueryLimits`] (SPEC §7.1.3, §7.6; ROADMAP 8.1.8): a step of the relaxation cascade runs
 //! `bool { must: [step], must_not: [earlier steps] }`, and that whole query is held to the limits.
 
-use crate::schema::CollectionSchema;
+use crate::schema::{CollectionSchema, FieldId};
 
 use super::QueryError;
 use super::ast::Query;
@@ -25,7 +25,10 @@ pub(crate) struct StepLimits<'a> {
     limits: QueryLimits,
     /// The root `bool` and every step excluded so far, each at depth 2: what a step's own query has left.
     excluded: Usage,
-    /// Whether the excluded steps alone exceed the limits: every later step is skipped.
+    /// Every `prefix` and `fuzzy` of the steps excluded so far, under a `must_not` too: one a step's own expansion
+    /// subsumes counts once ([`Self::credit`], ROADMAP 8.2.12).
+    expanded: Vec<Expanded>,
+    /// Whether the excluded steps alone exceed the limits on terms, clauses or depth: every later step is skipped.
     full: bool,
 }
 
@@ -44,6 +47,7 @@ impl<'a> StepLimits<'a> {
             schema,
             limits,
             excluded: Usage::default(),
+            expanded: Vec::new(),
             full: false,
         };
         this.recount([first]);
@@ -55,6 +59,7 @@ impl<'a> StepLimits<'a> {
     /// any more. Each was valid when it was first counted.
     pub(crate) fn recount<'q>(&mut self, excluded: impl IntoIterator<Item = &'q Query>) {
         self.excluded = Usage::default();
+        self.expanded.clear();
         self.full = self.excluded.add(&self.limits, 1, 0, 0).is_err();
         for query in excluded {
             self.exclude(query);
@@ -63,10 +68,17 @@ impl<'a> StepLimits<'a> {
 
     /// Counts `query`, searched by a step, as excluded from every later step.
     pub(crate) fn exclude(&mut self, query: &Query) {
+        expanded(query, true, &mut self.expanded);
         if !self.full {
             // Over a limit, every later step is skipped. A searched step was valid (checked by `fit`, or planned as L0).
+            // Expansions are counted in full but not held to their limit here: a step that subsumes some of them counts
+            // them once ([`Self::credit`]), so only `fit` can tell whether a step is over it.
+            let limits = QueryLimits {
+                max_expansions: usize::MAX,
+                ..self.limits
+            };
             self.full = query
-                .check(self.schema, &self.limits, &mut self.excluded, 2)
+                .check(self.schema, &limits, &mut self.excluded, 2)
                 .is_err();
         }
     }
@@ -85,29 +97,53 @@ impl<'a> StepLimits<'a> {
         if self.check(query).is_ok() {
             return Ok(Fit::Fits);
         }
-        let mut cut = query.clone();
-        let mut caps = Vec::new();
-        caps_of(&mut cut, &mut caps);
-        // What the caps a cut may lower share: the limit, less the exclusions' expansions and the step's own
-        // `must_not` ones, which are not cut.
-        let cuttable = caps
-            .iter()
-            .map(|c| usize::try_from(**c).unwrap_or(usize::MAX))
-            .fold(0usize, usize::saturating_add);
-        let room = self
-            .limits
-            .max_expansions
-            .saturating_sub(self.excluded.expansions)
-            .saturating_sub(whole.expansions.saturating_sub(cuttable));
-        if caps.is_empty() || !share(&mut caps, room) {
-            return Ok(Fit::Skipped);
+        // The exclusions the step's expansions subsume as built count once ([`Self::credit`]). A cut that lowers a
+        // subsuming cap below the one it subsumes counts that one again, so a cut is tried with the credit first,
+        // then with none.
+        let credit = self.credit(query);
+        let credits: &[usize] = if credit > 0 { &[credit, 0] } else { &[0] };
+        for &credit in credits {
+            let mut cut = query.clone();
+            let mut caps = Vec::new();
+            caps_of(&mut cut, &mut caps);
+            // What the caps a cut may lower share: the limit, less the exclusions' expansions (but those credited)
+            // and the step's own `must_not` ones, which are not cut.
+            let cuttable = caps
+                .iter()
+                .map(|c| usize::try_from(**c).unwrap_or(usize::MAX))
+                .fold(0usize, usize::saturating_add);
+            let room = self
+                .limits
+                .max_expansions
+                .saturating_sub(self.excluded.expansions.saturating_sub(credit))
+                .saturating_sub(whole.expansions.saturating_sub(cuttable));
+            if caps.is_empty() || !share(&mut caps, room) {
+                return Ok(Fit::Skipped);
+            }
+            // Over terms, clauses or depth, no cut of expansions helps.
+            if self.check(&cut).is_ok() {
+                return Ok(Fit::Cut(cut));
+            }
         }
-        // Over terms, clauses or depth, no cut of expansions helps.
-        Ok(if self.check(&cut).is_ok() {
-            Fit::Cut(cut)
-        } else {
-            Fit::Skipped
-        })
+        Ok(Fit::Skipped)
+    }
+
+    /// The expansions of the excluded steps that `query`'s own expansions subsume (SPEC §7.1.3, ROADMAP 8.2.12): each
+    /// excluded `prefix` or `fuzzy` that keeps only terms a `prefix` or `fuzzy` of `query` outside a `must_not` keeps
+    /// ([`Expanded::subsumes`]), its `max_expansions` summed. Planning expands it to terms the step expands anyway, so
+    /// they count once, as the step's: L4's `fuzzy` counts its own expansions, not again those of the `fuzzy:1` it
+    /// excludes.
+    fn credit(&self, query: &Query) -> usize {
+        if self.expanded.is_empty() {
+            return 0;
+        }
+        let mut own = Vec::new();
+        expanded(query, false, &mut own);
+        self.expanded
+            .iter()
+            .filter(|e| own.iter().any(|o| o.subsumes(e)))
+            .map(|e| usize::try_from(e.cap).unwrap_or(usize::MAX))
+            .fold(0usize, usize::saturating_add)
     }
 
     /// A step that keeps fewer synonym alternatives to fit (SPEC §7.1.3, ROADMAP 8.1.13): `counts` are how many
@@ -158,7 +194,65 @@ impl<'a> StepLimits<'a> {
 
     fn check(&self, query: &Query) -> Result<(), QueryError> {
         let mut usage = self.excluded;
+        usage.expansions = usage.expansions.saturating_sub(self.credit(query));
         query.check(self.schema, &self.limits, &mut usage, 2)
+    }
+}
+
+/// A `prefix` or `fuzzy` by what decides the terms it keeps (SPEC §7.1): its field, its bytes, its distance (0 for a
+/// `prefix`) and its `max_expansions`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Expanded {
+    fuzzy: bool,
+    field: FieldId,
+    bytes: String,
+    distance: u8,
+    cap: u32,
+}
+
+impl Expanded {
+    /// Whether `other` keeps only terms this one keeps (SPEC §7.1): the same `prefix` with no more expansions, or a
+    /// `fuzzy` of the same field and term at no greater distance with no more expansions, since a `fuzzy` keeps the
+    /// fewest edits first, so the terms within a lower distance come first in the same order.
+    fn subsumes(&self, other: &Self) -> bool {
+        self.fuzzy == other.fuzzy
+            && self.field == other.field
+            && self.bytes == other.bytes
+            && other.distance <= self.distance
+            && other.cap <= self.cap
+    }
+}
+
+/// Every `prefix` and `fuzzy` of `query` into `out`, in query order: those under a `must_not` too when `negated`.
+fn expanded(query: &Query, negated: bool, out: &mut Vec<Expanded>) {
+    match query {
+        Query::Prefix(q) => out.push(Expanded {
+            fuzzy: false,
+            field: q.field,
+            bytes: q.prefix.clone(),
+            distance: 0,
+            cap: q.max_expansions,
+        }),
+        Query::Fuzzy(q) => out.push(Expanded {
+            fuzzy: true,
+            field: q.field,
+            bytes: q.term.clone(),
+            distance: q.distance,
+            cap: q.max_expansions,
+        }),
+        Query::Bool(q) => {
+            for clause in q.must.iter().chain(&q.should) {
+                expanded(clause, negated, out);
+            }
+            if negated {
+                for clause in &q.must_not {
+                    expanded(clause, negated, out);
+                }
+            }
+        }
+        Query::Boost(q) => expanded(&q.query, negated, out),
+        Query::ConstantScore(q) => expanded(&q.query, negated, out),
+        Query::Term(_) | Query::Combined(_) | Query::Phrase(_) | Query::MatchAll => {}
     }
 }
 
@@ -234,18 +328,30 @@ mod tests {
     }
 
     fn prefix(field: FieldId, max_expansions: u32) -> Query {
+        prefix_of(field, "ru", max_expansions)
+    }
+
+    fn prefix_of(field: FieldId, prefix: &str, max_expansions: u32) -> Query {
         Query::Prefix(PrefixQuery {
             field,
-            prefix: "ru".into(),
+            prefix: prefix.into(),
             max_expansions,
         })
     }
 
     fn fuzzy(field: FieldId, max_expansions: u32) -> Query {
+        fuzzy_of(field, "shoe", max_expansions)
+    }
+
+    fn fuzzy_of(field: FieldId, term: &str, max_expansions: u32) -> Query {
+        fuzzy_at(field, term, 1, max_expansions)
+    }
+
+    fn fuzzy_at(field: FieldId, term: &str, distance: u8, max_expansions: u32) -> Query {
         Query::Fuzzy(FuzzyQuery {
             field,
-            term: "shoe".into(),
-            distance: 1,
+            term: term.into(),
+            distance,
             max_expansions,
         })
     }
@@ -294,7 +400,8 @@ mod tests {
     fn expansions_are_cut_to_what_the_exclusions_leave_the_largest_first() {
         let (schema, body) = schema();
         // L0 holds 50 of the 80 expansions: the step's 50 + 30 share the 30 left.
-        let fitting = StepLimits::new(&schema, limits(100, 80), &prefix(body, 50)).unwrap();
+        let fitting =
+            StepLimits::new(&schema, limits(100, 80), &prefix_of(body, "sh", 50)).unwrap();
         let step = any(vec![prefix(body, 50), fuzzy(body, 30)]);
         assert_eq!(
             fitting.fit(&step),
@@ -305,9 +412,10 @@ mod tests {
             fitting.fit(&step),
             Ok(Fit::Cut(any(vec![prefix(body, 26), fuzzy(body, 4)])))
         );
-        // A searched step is excluded from the later ones: 30 more, none left.
+        // A searched step is excluded from the later ones: 29 more, 1 left (of other bytes than the step's, or the step
+        // would count it as its own, ROADMAP 8.2.12).
         let mut fitting = fitting;
-        fitting.exclude(&prefix(body, 29));
+        fitting.exclude(&prefix_of(body, "ro", 29));
         assert_eq!(
             fitting.fit(&prefix(body, 50)),
             Ok(Fit::Cut(prefix(body, 1)))
@@ -442,9 +550,11 @@ mod tests {
     }
 
     /// A step: `terms` terms and a prefix or fuzzy per cap, under one `should`, or alone when it is one leaf; beside
-    /// them a `must_not` of a prefix per `excluded` cap when there is one, all of it under a `boost` when `boosted`.
+    /// them a `must_not` of a prefix per `excluded` cap when there is one, all of it under a `boost` when `boosted`. Its
+    /// expansions are of bytes no other step `k` holds, so none counts once as another's (ROADMAP 8.2.12).
     fn step(
         field: FieldId,
+        k: usize,
         (terms, caps, excluded, boosted): &(usize, Vec<u32>, Vec<u32>, bool),
     ) -> Query {
         let terms = *terms;
@@ -457,10 +567,11 @@ mod tests {
             })
             .collect();
         leaves.extend(caps.iter().enumerate().map(|(i, &c)| {
+            let bytes = format!("x{k}_{i}");
             if i % 2 == 0 {
-                prefix(field, c)
+                prefix_of(field, &bytes, c)
             } else {
-                fuzzy(field, c)
+                fuzzy_of(field, &bytes, c)
             }
         }));
         let mut query = match leaves.len() {
@@ -470,7 +581,11 @@ mod tests {
         if !excluded.is_empty() {
             query = Query::Bool(BoolQuery {
                 must: vec![query],
-                must_not: excluded.iter().map(|&c| prefix(field, c)).collect(),
+                must_not: excluded
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &c)| prefix_of(field, &format!("n{k}_{i}"), c))
+                    .collect(),
                 ..BoolQuery::default()
             });
         }
@@ -512,7 +627,7 @@ mod tests {
         ) {
             let (schema, body) = schema();
             let limits = QueryLimits { max_terms, max_clauses, max_expansions, max_depth, ..QueryLimits::default() };
-            let queries: Vec<Query> = steps.iter().map(|s| step(body, s)).collect();
+            let queries: Vec<Query> = steps.iter().enumerate().map(|(k, s)| step(body, k, s)).collect();
             let mut fitting = StepLimits::new(&schema, limits, &queries[0]).unwrap();
             let mut searched = vec![queries[0].clone()];
             for query in &queries[1..] {
@@ -552,6 +667,89 @@ mod tests {
                 fitting.exclude(query);
             }
         }
+    }
+
+    /// ROADMAP 8.2.12: an excluded expansion that keeps only terms one of the step's keeps counts once: a `fuzzy` of the
+    /// same field and term at no greater distance with no more expansions (a `fuzzy` keeps the fewest edits first), or
+    /// the same `prefix` with no more.
+    #[test]
+    fn an_excluded_expansion_the_step_subsumes_counts_once() {
+        let (schema, body) = schema();
+        let near = fuzzy_at(body, "sandalls", 1, 50);
+        let far = fuzzy_at(body, "sandalls", 2, 50);
+        let mut fitting = StepLimits::new(&schema, limits(100, 60), &Query::MatchAll).unwrap();
+        fitting.exclude(&near);
+        // L4's `fuzzy` beside the `fuzzy:1` it excludes: 50, not 100.
+        assert_eq!(fitting.fit(&far), Ok(Fit::Fits));
+        // An identical one too, and one under a `bool` of the step.
+        assert_eq!(fitting.fit(&near), Ok(Fit::Fits));
+        assert_eq!(fitting.fit(&any(vec![far.clone()])), Ok(Fit::Fits));
+        // Another term, a farther distance excluded than searched, more expansions excluded, or another kind: counted
+        // again, so the step is cut to what the exclusion leaves.
+        for (excluded, step, left) in [
+            (fuzzy_at(body, "sandals", 1, 50), far.clone(), 10),
+            (far.clone(), near.clone(), 10),
+            (fuzzy_at(body, "sandalls", 1, 55), far.clone(), 5),
+            (prefix_of(body, "sandalls", 50), far.clone(), 10),
+        ] {
+            let mut fitting = StepLimits::new(&schema, limits(100, 60), &Query::MatchAll).unwrap();
+            fitting.exclude(&excluded);
+            let mut cut = step.clone();
+            if let Query::Fuzzy(f) = &mut cut {
+                f.max_expansions = left;
+            }
+            assert_eq!(fitting.fit(&step), Ok(Fit::Cut(cut)), "{excluded:?}");
+        }
+        // A prefix: the same bytes with no more expansions.
+        let mut fitting = StepLimits::new(&schema, limits(100, 60), &Query::MatchAll).unwrap();
+        fitting.exclude(&prefix_of(body, "sa", 40));
+        assert_eq!(fitting.fit(&prefix_of(body, "sa", 50)), Ok(Fit::Fits));
+        assert_eq!(
+            fitting.fit(&prefix_of(body, "san", 50)),
+            Ok(Fit::Cut(prefix_of(body, "san", 20)))
+        );
+        // Under a `must_not` of the step, an expansion subsumes nothing: the step does not search it.
+        let negated = Query::Bool(BoolQuery {
+            must: vec![Query::MatchAll],
+            must_not: vec![far.clone()],
+            ..BoolQuery::default()
+        });
+        let mut fitting = StepLimits::new(&schema, limits(100, 60), &Query::MatchAll).unwrap();
+        fitting.exclude(&near);
+        assert_eq!(fitting.fit(&negated), Ok(Fit::Skipped));
+        // Excluded expansions over the limit alone no longer skip every later step: one that subsumes them fits.
+        let mut fitting = StepLimits::new(&schema, limits(100, 60), &Query::MatchAll).unwrap();
+        fitting.exclude(&near);
+        fitting.exclude(&near);
+        assert_eq!(fitting.fit(&far), Ok(Fit::Fits));
+        assert_eq!(fitting.fit(&Query::MatchAll), Ok(Fit::Skipped));
+    }
+
+    /// ROADMAP 8.2.12: a cut that lowers the subsuming expansion below the one it subsumes counts that one again, so
+    /// the step is cut to what is left with it counted in full.
+    #[test]
+    fn a_cut_below_a_subsumed_expansion_counts_it_again() {
+        let (schema, body) = schema();
+        let mut fitting = StepLimits::new(&schema, limits(100, 40), &Query::MatchAll).unwrap();
+        fitting.exclude(&fuzzy_at(body, "sandalls", 1, 30));
+        // 50 is over 40; cut to 40 it still keeps the excluded 30's terms, which count once.
+        assert_eq!(
+            fitting.fit(&fuzzy_at(body, "sandalls", 2, 50)),
+            Ok(Fit::Cut(fuzzy_at(body, "sandalls", 2, 40)))
+        );
+        // Beside a `prefix` of 15, the first cut (25 and 15) falls below the excluded 30, which then counts: the two
+        // share the 10 left.
+        let step = any(vec![
+            fuzzy_at(body, "sandalls", 2, 50),
+            prefix_of(body, "bo", 15),
+        ]);
+        assert_eq!(
+            fitting.fit(&step),
+            Ok(Fit::Cut(any(vec![
+                fuzzy_at(body, "sandalls", 2, 5),
+                prefix_of(body, "bo", 5),
+            ])))
+        );
     }
 
     #[test]

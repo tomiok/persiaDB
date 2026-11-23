@@ -50,7 +50,9 @@ there, because filters are often hard constraints (tenancy, permissions). Severa
 3. **No filter is marked hard in this leaf.** Telling a tenancy or permission filter from a soft one needs a new
    request key (for example a `filter` that never relaxes beside one that may), a design for the request JSON (ROADMAP
    10.1, 11.x). SPEC and the guides say a request whose filters enforce access must not set `last_resort`. ROADMAP
-   8.2.13 adds the key.
+   8.2.13 adds the key. (Superseded by ADR-0056 items 1 and 2: `filter` is hard, `soft_filter` holds what the step
+   drops, and a programmatic root's filters are hard unless its caller marks them soft. Item 2 above now reads "every
+   soft filter".)
 4. **It relaxes L0's query.** Every level builds from L0 (SPEC §7.6), and L0 without the filters is the closest match
    the filters rejected. Its `effective` is L0's text (filters are not part of `q`), with no `corrected`. A later
    level's query is not a looser one in general (L4's `fuzzy` does not contain L2's last rung), so "the last level's"

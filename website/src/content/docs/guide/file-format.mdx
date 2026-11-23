@@ -27,6 +27,8 @@ pages, so one bad sector cannot lose both. Open reads both, throws away a slot w
 uses the higher commit sequence (SPEC §4.2–§4.3). From byte 12288 the file is
 append-only frames. Each frame has a kind, a length, a payload padded to 8 bytes, and a CRC32C.
 A torn or corrupt frame ends recovery; the file is logically truncated there (SPEC §4.4).
+What `Database::open` replays after that, and what `persia verify` checks, is
+[Durability and crash recovery](/guide/durability/).
 
 Integers are little-endian. Headers and frames use CRC32C. Internal content hashes and shard routing
 use xxh3 with seed 0. Blob ids are SHA-256 (ADR-0002), a content address that stays stable for the

@@ -1,23 +1,28 @@
 //! The filter step (SPEC §7.6, ROADMAP 8.2.6, ADR-0047): the cascade's last resort, planned only with
 //! `filters: "last_resort"`.
 //!
-//! Its query is L0's with the request's filters dropped: a programmatic root `bool`'s `filter`, or a compiled query's
-//! request filter, which the compilation keeps beside its query ([`Compiled::filter`], ROADMAP 8.2.14, ADR-0048), so
-//! that whatever query a caller put in, the step drops that filter and nothing else. Everything else stays as L0 has
-//! it, excluded clauses (`must_not`), a filter a caller's query holds itself, and any filter deeper in the query
-//! included. The cascade builds it only while the earlier steps found fewer than `min_results`
-//! hits, never to fill a page ([`LevelTransform::fills`]), and excludes the earlier steps from it as from any step,
-//! so its hits are the documents L0's words match that the filters rejected.
+//! Its query is L0's with the request's *soft* filters dropped (ROADMAP 8.2.13, ADR-0056): a compiled query's
+//! `soft_filter`, which the compilation keeps beside its query ([`Compiled::droppable`]), and nothing else; of a
+//! programmatic root `bool`, the filters its caller marked soft ([`crate::db::RelaxedQuery::with_soft_filter`]). A
+//! request's `filter` ([`Compiled::filter`]) is hard and never dropped, nor is an unmarked filter of a programmatic
+//! root, nor a filter the root of a query a caller put in place of a compiled one holds itself
+//! ([`Compiled::with_query`]), even one equal to a soft filter or marked soft: with no soft filter left to drop there
+//! is no step. Everything else stays as L0 has it,
+//! excluded clauses (`must_not`) and any filter deeper in the query included. The cascade builds it only while the
+//! earlier steps found fewer than `min_results` hits, never to fill a page ([`LevelTransform::fills`]), and excludes
+//! the earlier steps from it as from any step, so its hits are the documents L0's words match that the soft filters
+//! rejected.
 
 use super::{LevelInput, LevelTransform, Step};
-use crate::query::{BoolQuery, Compiled, Query};
+use crate::query::{BoolQuery, Compiled, Filter, Query};
 use crate::segment::ReadError;
 
 /// What the filter step lists in `applied` (SPEC §7.6).
 pub(crate) const APPLIED: &str = "filters";
 
-/// The filter step: one step, L0's query without its root filters, whose `effective` is L0's text (no word changes).
-/// A query whose root has no filter, or no word to match, builds none, so the level is skipped.
+/// The filter step: one step, L0's query without its soft root filters, whose `effective` is L0's text (no word
+/// changes). A query without a soft filter at its root, or without a word to match, builds none, so the level is
+/// skipped.
 #[derive(Debug)]
 pub(crate) struct Filters;
 
@@ -41,14 +46,16 @@ impl LevelTransform for Filters {
     }
 }
 
-/// L0's query with the request's filters dropped from its root `bool`, `None` when there are none, or the root has no
-/// word to match. Of a programmatic query, every filter of its root `bool`. Of a compiled one, its request filter
-/// ([`Compiled::filter`]), which `Compiled::query` holds at its root `bool` whatever query a caller put in (ROADMAP
-/// 8.2.14), and nothing else: a filter of the caller's own stays, unless it equals a request filter, which counts as
-/// the request's (the join does not add it twice, so the two cannot be told apart). When the join wrapped the
-/// caller's query (a root with `should` clauses, `Compiled::wrapped`), that root is the caller's: the request's
-/// filters are dropped from it too, or a clone of the compiled query with `should` clauses added would keep them. The
-/// step keeps the rest of the root as L0 has it, a compiled query's clauses' parts included.
+/// L0's query with the soft filters ([`LevelInput::soft`], ROADMAP 8.2.13) dropped from its root `bool`, `None` when it
+/// holds none, or the root has no word to match. A compiled query's soft filters are its request's `soft_filter`
+/// ([`Compiled::droppable`]), which `Compiled::query` holds at its root `bool` whatever query a caller put in
+/// (ROADMAP 8.2.14), and nothing else (a caller's marks are not read for it); a programmatic query's are those its
+/// caller marked. A hard filter (the request's `filter`, [`Compiled::filter`], or an unmarked filter of a programmatic
+/// root) is never dropped, nor a filter the root of a query a caller put in holds itself: [`Compiled::droppable`]
+/// leaves out a soft filter equal to one of those, as the join does not add it twice and the two cannot be told
+/// apart. When the join wrapped the caller's query (a root with `should` clauses, `Compiled::wrapped`), that root holds
+/// the caller's own filters alone, and stays whole. The step keeps the rest of the root as L0 has it, a compiled
+/// query's clauses' parts included.
 ///
 /// A root that searches no word builds no step. A clause searches a word when it is a `term`, `combined`, `phrase`,
 /// `prefix` or `fuzzy`, or a `bool`, `boost` or `constant_score` that holds such a clause in `must` or `should`.
@@ -61,35 +68,25 @@ fn unfiltered(input: &LevelInput<'_>) -> Option<Query> {
         return None;
     };
     let words = root.must.iter().any(has_word) || root.should.iter().any(has_word);
-    let Some(compiled) = input.compiled else {
-        return (words && !root.filter.is_empty()).then(|| {
-            Query::Bool(BoolQuery {
-                filter: Vec::new(),
-                ..root.clone()
-            })
-        });
-    };
-    let request = compiled.filter();
-    if !words || request.is_empty() {
+    // The soft filters (ROADMAP 8.2.13), but any that is a compiled query's hard filter too: hard wins.
+    let hard = input.compiled.map_or(&[][..], Compiled::filter);
+    let soft: Vec<&Filter> = input.soft.iter().filter(|f| !hard.contains(f)).collect();
+    if !words || soft.is_empty() {
         return None;
     }
-    let without = |root: &BoolQuery| BoolQuery {
-        filter: root
-            .filter
-            .iter()
-            .filter(|f| !request.contains(f))
-            .cloned()
-            .collect(),
-        ..root.clone()
-    };
-    let mut step = without(root);
-    // The wrapped caller root, only while L0 is the compilation's own query, which holds it as its one `must`.
-    if let (Some(Query::Bool(caller)), [only]) = (compiled.wrapped(), step.must.as_mut_slice())
-        && matches!(only, Query::Bool(b) if b == caller)
-    {
-        *only = Query::Bool(without(caller));
-    }
-    Some(Query::Bool(step))
+    let filter: Vec<Filter> = root
+        .filter
+        .iter()
+        .filter(|f| !soft.contains(f))
+        .cloned()
+        .collect();
+    // Nothing to drop (a root holding none of the soft filters): no step.
+    (filter.len() < root.filter.len()).then(|| {
+        Query::Bool(BoolQuery {
+            filter,
+            ..root.clone()
+        })
+    })
 }
 
 /// Whether `query` matches by at least one term (SPEC §7.6). A term inside `must_not` does not count: exclusions are

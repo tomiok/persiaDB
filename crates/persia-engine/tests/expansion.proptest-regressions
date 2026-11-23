@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 613aa8034fa9050ef3445ac80452bb72b18c28628a7055142e979ee953b98e7f # shrinks to ops = [Put(1, [0], 7), Put(4, [0], 2), Put(5, [0], 6), Put(2, [0], 0), Put(0, [0], 7), Put(6, [0], 5), Delete(7)], shapes = [Fuzzy(true, "runs", 2, 1)], k = 1

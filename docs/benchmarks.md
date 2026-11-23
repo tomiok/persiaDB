@@ -680,6 +680,59 @@ After the review fix that drops the request filter from a caller root the join w
 step), `filters/last_resort` with one codegen unit reads 792 µs, +0.5% on main, within noise; `filters/never`, which
 never builds the step, reads 337 µs (+1.9%) in the same run, the drift above.
 
+ROADMAP 8.2.12 (a `fuzzy` keeps the fewest edits first, so L4's tier steps nest; an excluded expansion the step
+subsumes counts once): the expansion walk now reads each accepted term's edit distance again to rank it. Command:
+`cargo bench -p persia-engine --bench search -- 'search_expansion_collection|search_top10_expansion|search_relaxed/(l4|l4/tiers)$'`,
+the default build, against a baseline saved on the commit before (2026-11-22, rustc 1.99.0, 12 threads, Linux).
+
+| | before | after | change |
+|---|--:|--:|--:|
+| `search_expansion_collection/fuzzy/plan` | 504 µs | 517 µs | +1.9% |
+| `search_expansion_collection/fuzzy_long/plan` | 104 µs | 104 µs | within noise |
+| `search_expansion_collection/prefix/plan` | 725 µs | 711 µs | −1.6% |
+| `search_top10_expansion/fuzzy` | 22.9 ms | 21.9 ms | −4.5% |
+| `search_top10_expansion/prefix` | 26.8 ms | 26.4 ms | −1.5% |
+| `search_relaxed/l4` | 2.69 ms | 2.65 ms | within noise |
+| `search_relaxed/l4/tiers` | 366 µs | 359 µs | within noise |
+
+Planning a `fuzzy` alone costs about 2% more (the distance of each term the automaton accepted); the prefix rows, which
+compute nothing new, move as much the other way, the drift between the two runs.
+
+ROADMAP 8.1.11 (facet counts kept once per query, per snapshot): `search_relaxed/facets/top` and `facets/deep` relax
+`w3 w40 w7 w120 zz` under the largest `min_results`, so the cascade builds every step (L2's rungs, L3, L4, L5), with
+facets on `tag`; `top` is the first page of 10, `deep` the fifth, by cursor. Command:
+`cargo bench -p persia-engine --bench search -- 'search_relaxed/facets'`, the default build, against a baseline saved
+on the commit before ROADMAP 8.1.9 (2026-11-22, rustc 1.99.0, 12 threads, Linux). Each iteration after the first reads
+the counts the first one kept, as a client paging the query does.
+
+| | before | after | change |
+|---|--:|--:|--:|
+| `search_relaxed/facets/top` | 11.9 ms | 11.7 ms | −1.5% |
+| `search_relaxed/facets/deep` | 8.57 ms | 1.42 ms | −83% |
+
+Before, the deep page searched every step before its cursor's again with every match visited only to count it; now it
+searches its own steps, pruned, without counting. The first page still collects `min_results` hits from the top in
+each step, which is most of its cost either way.
+
+ROADMAP 8.1.9 (facets count the steps a page of every hit builds), its cost on a first page with `fill`:
+`search_relaxed/facets/fill` is the first page of 10 of the same query under `fill` and the default `min_results`
+(L0 finds nothing, L2's rungs fill the page), with facets on `tag`, each iteration asking another facet `size` (64
+sizes, more than the cache's 32 counts) so that none reads counts an earlier one kept; `facets/fill/plain` is the same
+page without facets. Command: `cargo bench -p persia-engine --bench search -- 'search_relaxed/facets/fill'`, the
+default build; "before" is the same bench added to a copy of the commit before ROADMAP 8.1.9 (4541c36), "after" the
+batch's fix-up (2026-11-23, rustc 1.99.0, 12 threads, Linux).
+
+| | before | after | change |
+|---|--:|--:|--:|
+| `search_relaxed/facets/fill` | 1.39 ms | 12.8 ms | +820% (×9.2) |
+| `search_relaxed/facets/fill/plain` | 1.47 ms | 1.36 ms | within noise |
+
+Before 8.1.9 a `fill` page counted only the steps it built (L0 and the rungs that filled it), so its facets differed
+from a deeper page's. Since, it also searches the steps past its own (L2's later rungs, L3, L4, L5) once its hits are
+in, each with every match visited, only to count them: that is the whole difference, paid by the first page of each
+query on a snapshot (later pages of the query read the kept counts, `facets/deep` above). A page without facets pays
+nothing.
+
 ## `persia-engine` relevance
 
 `cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2, 7.8.4): 18 user-text queries with graded judgments over

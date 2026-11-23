@@ -135,8 +135,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   with the default fallback, and L5 searched uncut, it runs only when fewer than `min_results` documents pass both
   the filters and the excluded clauses. The response's `level` is `filters` once built, `applied` ends with `filters`, and the new flag
   `Relaxation::filters_dropped` (`"filters_dropped": true`) is set when the step found the hits; each such hit's
-  `level` is `filters`, and its explanation's `relaxed` node names the step. No filter can be marked as one that must
-  hold yet (ROADMAP 8.2.13): do not set `last_resort` on requests whose filters enforce tenancy or permissions.
+  `level` is `filters`, and its explanation's `relaxed` node names the step. Superseded by ROADMAP 8.2.13 (under
+  Changed): the step now drops only the request's `soft_filter` (less a filter the caller's own root holds) or, of a
+  programmatic query, the root filters marked with `RelaxedQuery::with_soft_filter`; `filter` is always hard.
   `"never"` (the default) is unchanged: same plan, steps, indices and `applied`. Benchmarks
   `search_relaxed/filters/never` and `search_relaxed/filters/last_resort`.
 - `persia-engine`: a request's `relax` options (ROADMAP 8.3.1, 8.3.2; SPEC §6.2.3, §7.6; ADR-0045). `RelaxOptions::from_json`
@@ -235,6 +236,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `UnsupportedAnalyzer` is now only a built-in name at a version this build lacks.
 - `persia-engine` (breaking): `ReadOnlyDatabase::container` and `manifest` return `Arc`s of the current state, and
   `objects` a `ContainerObjects<'static, F>` (needs `F: 'static`).
+- `persia-engine`: a relaxed response's `truncated` states whether the budget cut a step of the page only. When it
+  passes in a step a `fill` page with facets searches only to count them, the page is whole (`truncated: false`) and
+  its facet counts miss the later steps, with nothing flagging it yet (ROADMAP 8.1.31); such counts are not kept for
+  later pages (SPEC §7.5, §7.6).
+- A `fuzzy` query over more qualifying terms than its `max_expansions` keeps the ones with the fewest edits first,
+  then the most frequent (SPEC §7.1), so L4's `fuzzy:1` tier step keeps only terms its `fuzzy` step keeps; L4's
+  `corrected` for a word of 8 characters or more names the closest term rather than the most frequent within two
+  edits (ROADMAP 8.2.12).
+- A required clause a caller adds after a compiled query's clauses (`Compiled::with_query`) no longer detaches the
+  compilation: every relaxation level keeps it, unchanged (`Compiled::extra_must`, SPEC §7.1.1, ROADMAP 8.2.15).
+- **Changed (breaking, pre-1.0, no request version):** a request's `filter` is now hard: no relaxation level drops it,
+  `relax.filters = "last_resort"` included. The request key `soft_filter` (same grammar and limits, SPEC §7.1.2) is
+  specified to hold the filters `last_resort` may drop at the filter step; with `last_resort` and no `soft_filter`,
+  no filter step is built, and without `last_resort` it applies as a filter. Its engine API is in place
+  (`Compiled::with_soft_filter`, `Compiled::soft_filter`, and `RelaxedQuery::with_soft_filter` for a programmatic
+  query's root filters, which are hard unless marked); parsing it from request JSON is ROADMAP 10.1.10. A filter the
+  root of a query put in with `Compiled::with_query` holds itself is hard too, and L5 `fallback` keeps every filter
+  L0 applies, or builds no step (SPEC §7.6, ROADMAP 8.2.13).
+- Facets of a relaxed search count the steps a page holding every hit builds, so every page of one query counts the
+  same, with or without `fill`, by offset or cursor (SPEC §7.5, ROADMAP 8.1.9).
+- A relaxed query's facet counts are kept per snapshot once a page counted them, so deeper cursor pages no
+  longer search earlier steps again only to count them (ROADMAP 8.1.11).
 - `persia` (internal API, breaking): a resume needs `expected_id` or `expected_size`; neither fails with
   `Error::ResumeUnchecked` before anything is read (ROADMAP 9.3.7).
 - `persia` (internal API, breaking): `BlobDatabase::gc` on the pack does not sweep while any reader lease is behind the
@@ -277,9 +300,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `into_query()`, and replace it with the new `Compiled::with_query`, which joins the request filter (`Compiled::filter`)
   to the new query again. So `filters: "never"` holds whatever query a caller puts in: before, a query that did not
   hold the clauses' parts made L5 `fallback` search `match_all` without the filter. L5 now keeps the request filter
-  beside the root `bool`'s `must_not` and `filter`; the filter step (`last_resort`) drops the request filter alone and
-  keeps a filter the caller's own root holds (one equal to the request filter counts as the request's, also in a caller
-  root the join wrapped because of its `should` clauses). A query put
+  beside the root `bool`'s `must_not` and `filter`; the filter step (`last_resort`) keeps a filter the caller's
+  own root holds. Superseded by ROADMAP 8.2.13 (under Changed): the step drops only the request's soft filters, and a
+  filter the caller's own root holds stays hard even when it equals one, in place or wrapped. A query put
   in place of a compilation of several parts keeps its clauses only while its root's `must` is theirs exactly and its
   `must_not` holds theirs at the same indexes, else `Compiled::parts` and `Compiled::root` are `None` from then on
   (before, any root `bool` was read as the clauses' root, and a required clause added beside them was relaxed away).
@@ -460,6 +483,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   skip like unknown kinds. Golden files in `tests/fixtures/blob-pack/v1/`.
 
 ### Fixed
+- Scores that overflow (a `constant_score` near `f64::MAX` under a `boost`, a `bool` summing large ones) saturate at
+  `f64::MAX` instead of becoming `+∞`, in hits, rank scores and explanations (SPEC §7.2, ROADMAP 8.1.12).
+- A relaxation step no longer counts again, against `max_expansions`, an expansion of an earlier step it holds itself:
+  queries with many long words are no longer cut or skipped at L4 sooner than before the typo tiers (SPEC §7.1.3,
+  ROADMAP 8.2.12).
 - `persia-blob`: the remote GC sweep lists an expired upload again under the pin set's lock and keeps it when that
   listing differs from the first (a resume that staged and bound meanwhile, or a listing without `strong_list` that
   missed a fresh chunk); counted in `SweepReport::changed` (breaking: a new field; `SweepReport` is now
