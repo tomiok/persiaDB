@@ -1624,7 +1624,7 @@ stopping at the first level that satisfies `min_results` (or continuing to fill 
 | L0 | `exact` | All query terms required (AND), analyzed |
 | L1 | `synonyms` | Expand terms with collection synonyms (OR within group; cap expansions per matched term, default 50; §6.3.2) |
 | L2 | `drop_terms` | `minimum_should_match` (§7.1) steps over the `n` terms: 100% → 75% → 50% → 1 term, each percentage `p` the count `max(1, ⌊p · n / 100⌋)` (rounded down, as Elasticsearch does; a step whose count repeats the previous one, L0's `n` first, is not built, so 100% never is). Any `count` of the terms match; stopwords and low-IDF terms are the ones a step reports dropped first (below) |
-| L3 | `prefix` | Prefix-expand the last term (and others if len ≥ 3) via FST range scan (cap expansions, default 50) |
+| L3 | `prefix` | Prefix-expand the last term if len ≥ 2 (and others if len ≥ 3) via FST range scan (cap expansions, default 50) |
 | L4 | `fuzzy` | Edit distance 1 (len 4–7) / 2 (len ≥ 8) via Levenshtein automaton ∩ FST (cap expansions, default 50); corrected terms reported |
 | L5 | `fallback` | Per collection: `static_rank` (top by static rank / recency), `none` |
 | L6 | `filters` | Only with `relax.filters = "last_resort"` while the cascade is enabled: L0's query without its root filters, when the query searches a word and every earlier step found fewer than `min_results` hits (below). A query that searches no word builds none |
@@ -1756,10 +1756,13 @@ word clause's parts (each `combined`, and each field of a word the fields split 
 `term` and `combined` field of a root `bool`'s `must` clauses (under `bool` and `boost`), or of a `term` or
 `combined` alone. Within a nested `bool`, its last `must` clause holds the last term of the clause that holds it, and
 so does each of its `should` clauses (each one field's reading of the same word, as the compiler builds them). A term is expanded when its field is a `text` field whose analyzer does not stack tokens, and it is
-the *last term* or has at least 3 characters (Unicode scalar values of the analyzed term: `running` under `en` is
-`run`, 3). The last term is the last part of the last required clause when that clause is a word (of a word the
-fields split apart, each field's last token), and the last `must` clause of a programmatic root `bool`: it is
-expanded whatever its length, as the word a user may still be typing. Excluded clauses, phrases (even of one token)
+the *last term* and has at least 2 characters, or has at least 3 characters (Unicode scalar values of the analyzed
+term: `running` under `en` is `run`, 3; `ñu` is 2, in 3 bytes). The last term is the last part of the last required
+clause when that clause is a word (of a word the fields split apart, each field's last token), and the last `must`
+clause of a programmatic root `bool`: it is expanded shorter than the others, as the word a user may still be typing,
+but not from one character, whose prefix starts a large share of a field's terms, all walked in every view before
+the 50 are kept by `df`, to complete a word that says almost nothing (ROADMAP 8.1.20, ADR-0057). A last term of one
+character stays exact, so the tier step `prefix:last` (below), which expands it alone, is not built. Excluded clauses, phrases (even of one token)
 and `field:` clauses are not expanded, since they ask for their text exactly. Neither are a field's terms when its
 analyzer stacks tokens (`edge_ngram`, §6.3.1): its index already holds each word's prefixes, so the term matches the
 documents a prefix would, and the stacked grams would add their scores together. An expanded `combined` becomes a
@@ -1999,6 +2002,21 @@ describe those steps, its hit step is the last of them that found a hit, and a h
 or the cursor's own last step, whichever is later, so the next page tries again). On a cursor page with facets, the
 steps before the cursor's are searched to count them and spend the budget too, so such a page may be truncated
 before any hit. A cascade that ends before the budget passes is not truncated.
+
+Metrics (ROADMAP 8.3.3). Each collection counts its relaxed searches since the database was opened, in counters its
+snapshots share (atomic, so a search on any thread counts without a lock; nothing is stored, a reopened database
+counts from 0). A *query* is a relaxed search that returned a response and was given no cursor: a cursor's page
+continues a query counted on its first page and counts nowhere, while a page by `offset` runs the cascade from the
+top and counts as a query. A plain search (no cascade) counts nowhere. Per query: `queries` counts it; `relaxed` counts
+it when the response's `level` is not `exact` (a step after L0 was built and not skipped); `empty` counts it when no
+step of its cascade found a hit, L0 included (the zero-result queries, after whatever relaxation ran, `relax: false`
+included); otherwise the level of its hit step (above) counts it, once. So the per-level counts are the level
+histogram, and add up to `queries − empty`; `relaxed / queries` is the share relaxed and `empty / queries` the share
+still empty. The engine reads them as a `RelaxationStats` per collection (`CollectionSnapshot::relaxation_stats`) and
+for the database (`Database::relaxation_stats`: the collections' sum, with what the collections dropped since the open
+counted, so no count goes down). Each relaxed search (its `level` not `exact`, cursor pages included) also emits one
+`tracing` event at debug level, `relaxed search`, with its collection, `level`, `applied`, the page's hit count
+(`hits`) and `truncated`.
 
 ### 7.7 Highlighting / explain
 `explain: true` returns, with each hit of the page, how its score adds up: a tree like the query's with only the
@@ -3168,7 +3186,10 @@ TLS (rustls) optional-on by config; API keys / bearer tokens in v1; mTLS support
 ### 12.4 Observability
 `tracing` spans + OpenTelemetry export; Prometheus `/metrics`
 (query latency histograms by relaxation level, cache hit ratio, segments/collection, merge backlog, WAL bytes,
-replica lag, blob throughput). Structured JSON logs.
+replica lag, blob throughput). Structured JSON logs. Relaxation counters per collection (§7.6 "Metrics": queries,
+relaxed, still empty, and queries per hit-step level) are read from the engine's `RelaxationStats` and exported as
+Prometheus counters with a `collection` label (and a `level` label for the histogram); the engine's `relaxed search`
+debug event is a `tracing` event the server's subscriber logs or drops by level (ROADMAP 8.3.3, M11).
 
 ---
 
@@ -3274,6 +3295,15 @@ Defaults: `memtable_bytes` 64 MiB (with a 10 s idle flush), `commit_interval` 60
 - Integration against MinIO, fake-gcs-server, Azurite via docker-compose.
 - Synthetic load + soak tests, relevance regression suite (fixed corpora + judged queries; nDCG@10 per query and its
   mean gated in CI against a recorded baseline, with a tolerance of one unit of its last recorded digit (0.0001). A move beyond that fails in either direction, so an improvement updates the baseline on purpose, and a changed query set or order fails (docs/benchmarks.md).
+- Relaxation quality gate (ROADMAP 8.4.3): synthetic corpora and typo and term-drop queries of 1 to 3 words with
+  known ground truth (the documents holding every word a query meant), searched through the cascade (§7.6) on a
+  budget clock that never moves. It fails when, with the collection's default settings, any query has no hit; when,
+  with `fallback: "none"`, more than 2% have none; or when the first-relaxed-hit precision (of the queries whose first
+  hit a step after L0 found, the share whose first hit is a document the query meant) falls more than 2 points below
+  a baseline recorded in the repository (`crates/persia-engine/tests/relax_quality/baseline.txt`). A rise passes; the
+  baseline is recorded again only on purpose, the PR saying why it moved. A small fixed-seed suite runs in every
+  test run, a larger one over more seeds in the extended tests. A second test asserts a hit for every synthetic
+  query with the default settings over several corpus shapes, query lengths and index layouts.
 
 ### 16.2 Performance (targets, to be validated by benchmarks — not promises)
 | Metric | Target |

@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: relaxation metrics (ROADMAP 8.3.3; SPEC §7.6, §12.4). Each collection counts its relaxed queries
+  (searches without a cursor): how many, how many relaxed past L0, how many still found nothing, and how many found
+  their hits at each level. Read them as `RelaxationStats` from `CollectionSnapshot::relaxation_stats` or, summed over
+  the collections, `Database::relaxation_stats` (with `relaxed_ratio`, `empty_ratio` and the per-level `levels`). A
+  relaxed search also emits one `tracing` debug event, `relaxed search`, with its level, applied steps, hit count and
+  `truncated` flag. `persia-engine` now depends on `tracing`.
+- `docs/relaxation.md`: a relaxation tuning guide (ROADMAP 8.4.4): the levels, the settings and when to change them,
+  reading a response's `relaxation`, the relaxation metrics, and the synthetic quality gate.
 - `persia-blob` / `persia` (internal API): reader leases on the local pack (ROADMAP 9.2.16, ADR-0054). Every
   `ReadOnlyBlobDatabase` holds a 64-byte locked lease in `<name>.persia.blobs.leases/` naming the seq of the documents
   it holds; `refresh` advances it. `ReaderLease::take_beside`, `ReadOnlyBlobDatabase::with_lease` / `with_lease_in` /
@@ -210,6 +218,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- `persia-engine`: L3 `prefix` expands a query's last term only from 2 characters (ROADMAP 8.1.20; SPEC §7.6,
+  ADR-0057), as every other term from 3. A one-letter last word stays exact, so it no longer walks its field's term
+  dictionary in every view, and a query whose other words are all shorter than 3 characters builds no L3 step.
+- `persia-engine`: a `QueryCompiler` compiles each synonym term's L1 alternative once per set of default fields (the
+  last 4 sets it compiled over) and reuses it, instead of analyzing every alternative again at each compilation
+  (ROADMAP 8.1.16, ADR-0058). Compilations return the same queries as before; a query whose L0 has enough hits pays
+  much less for its synonyms.
 - `persia` (internal API, breaking): a resume needs `expected_id` or `expected_size`; neither fails with
   `Error::ResumeUnchecked` before anything is read (ROADMAP 9.3.7).
 - `persia` (internal API, breaking): `BlobDatabase::gc` on the pack does not sweep while any reader lease is behind the
