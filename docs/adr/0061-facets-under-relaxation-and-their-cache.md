@@ -1,4 +1,4 @@
-# ADR-0055: Facets under relaxation count the steps a page of every hit builds, once per query
+# ADR-0061: Facets under relaxation count the steps a page of every hit builds, once per query
 
 - Status: proposed
 - Date: 2026-11-22

@@ -1,4 +1,4 @@
-//! Facets under relaxation (ROADMAP 8.1.9, 8.1.11; SPEC §7.5, ADR-0055).
+//! Facets under relaxation (ROADMAP 8.1.9, 8.1.11; SPEC §7.5, ADR-0061).
 //!
 //! Invariants:
 //! 1. Every page of one query on one snapshot counts the facets of a page holding every hit: the counts of that page's

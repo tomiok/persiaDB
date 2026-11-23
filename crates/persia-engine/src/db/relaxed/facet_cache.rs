@@ -1,4 +1,4 @@
-//! The facet counts of relaxed searches, counted once per query (SPEC §7.5, §7.6; ROADMAP 8.1.11, ADR-0055).
+//! The facet counts of relaxed searches, counted once per query (SPEC §7.5, §7.6; ROADMAP 8.1.11, ADR-0061).
 //!
 //! Every page of one relaxed query on one snapshot counts the same facets (ROADMAP 8.1.9): those of the steps a page
 //! holding every hit builds. A page computes them by searching every such step, those before its cursor's and past

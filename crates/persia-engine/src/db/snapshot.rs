@@ -65,7 +65,7 @@ pub struct CollectionSnapshot {
     pub(super) statistics: Arc<OnceLock<SegmentStatistics>>,
     /// The copies the memtable hides, as of the newest memtable view searched (ROADMAP 7.4.6).
     pub(super) hidden: HiddenCache,
-    /// The facet counts of relaxed queries on this snapshot, once a page counted them (ROADMAP 8.1.11, ADR-0055): they
+    /// The facet counts of relaxed queries on this snapshot, once a page counted them (ROADMAP 8.1.11, ADR-0061): they
     /// go with the snapshot.
     pub(super) facets: Arc<Mutex<FacetCache>>,
 }
