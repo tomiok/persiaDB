@@ -14,6 +14,7 @@ use arc_swap::ArcSwap;
 use crate::document::Document;
 use crate::manifest::Manifest;
 use crate::memtable::{IdState, MemtableReader, MemtableView};
+use crate::query::QueryCompiler;
 use crate::schema::CollectionSchema;
 use crate::segment::{ReadError, Segment, Tombstones};
 use crate::stats::{SearchStatistics, SegmentStatistics};
@@ -71,6 +72,8 @@ pub struct CollectionSnapshot {
     /// The facet counts of relaxed queries on this snapshot, once a page counted them (ROADMAP 8.1.11, ADR-0061): they
     /// go with the snapshot.
     pub(super) facets: Arc<Mutex<FacetCache>>,
+    /// The collection's query compiler, shared by its snapshots while its schema stays (ROADMAP 10.1.10).
+    pub(super) compiler: Arc<QueryCompiler>,
 }
 
 /// Where the live version of a document id is (SPEC §8.3, ROADMAP 6.4.1).
@@ -91,6 +94,15 @@ impl CollectionSnapshot {
     /// The committed schema.
     pub fn schema(&self) -> &CollectionSchema {
         &self.schema
+    }
+
+    /// The collection's query compiler (SPEC §7.1.1): it analyzes user text with the analyzers the database indexes
+    /// this collection's `text` fields with (its registry's, SPEC §6.2.2), so a query's terms are the ones the index
+    /// holds. One per schema, shared by every snapshot of the collection until its schema changes, so the synonym
+    /// groups it analyzes on first use (SPEC §6.3.2) are analyzed once. A request compiles its `q` with it
+    /// ([`crate::search::request::QueryRequest::run`]).
+    pub fn compiler(&self) -> &QueryCompiler {
+        &self.compiler
     }
 
     /// What the collection's relaxed searches did since the database was opened (SPEC §7.6, §12.4; ROADMAP 8.3.3), read

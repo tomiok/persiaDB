@@ -92,29 +92,8 @@ impl<V: Vfs> LocalStorage<V> {
     /// # Errors
     /// The OS error if a directory cannot be created or synced, or if `root` exists and is not a directory.
     pub fn open_in(vfs: V, root: impl Into<PathBuf>) -> io::Result<Self> {
-        // Absolute, so a later change of the working directory cannot move the store.
-        let root = std::path::absolute(root.into())?;
-        // Create from the outermost missing ancestor inwards, syncing each new directory's parent. Ancestors that
-        // already exist are taken as durable, except the root's own entry, synced below (SPEC §10.1.1).
-        let missing: Vec<&Path> = root
-            .ancestors()
-            .filter(|p| !p.as_os_str().is_empty())
-            .take_while(|p| vfs.is_dir(p).is_err())
-            .collect();
-        for dir in missing.iter().rev() {
-            match vfs.create_dir(dir) {
-                Err(err) if err.kind() != io::ErrorKind::AlreadyExists => return Err(err),
-                _ => vfs.sync_dir(parent_or_cwd(dir))?,
-            }
-        }
-        if !vfs.is_dir(&root)? {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("{} is not a directory", root.display()),
-            ));
-        }
-        // The root's own entry may have been created by another process that has not synced it yet.
-        vfs.sync_dir(parent_or_cwd(&root))?;
+        // Absolute, so a later change of the working directory cannot move the store (SPEC §10.1.1).
+        let root = crate::vfs::create_dir_all_synced(&vfs, root)?;
         let synced_dirs = Mutex::new(HashSet::from([root.clone()]));
         let real_dirs = Mutex::new(HashSet::new());
         Ok(Self {

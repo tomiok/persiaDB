@@ -691,6 +691,13 @@ pub(crate) fn relax_from_json(json: &str) -> Result<RawRelaxation, String> {
     Ok(raw)
 }
 
+/// [`relax_from_json`] for a `relax` already parsed as part of a request (SPEC §7.1), whose reader rejected repeated
+/// keys at every depth.
+pub(crate) fn relax_from_value(value: serde_json::Value) -> Result<RawRelaxation, String> {
+    let Relax(raw) = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    Ok(raw)
+}
+
 /// [`relax_from_json`]'s value.
 struct Relax(RawRelaxation);
 

@@ -11,9 +11,9 @@ use crate::document::json::{Strict, integer, json_kind};
 use crate::document::{DocumentError, MAX_KEYWORD_LEN};
 use crate::schema::{CollectionSchema, Field, FieldId, FieldType};
 
-use super::QueryError;
 use super::ast::field_of;
 use super::limits::{QueryLimits, Usage};
+use super::{MAX_SHOWN, QueryError, shown_name};
 
 /// Longest filter JSON [`Filter::from_json`] reads, in bytes (SPEC §7.1.2).
 pub const MAX_FILTER_JSON_LEN: usize = 1 << 20;
@@ -106,7 +106,17 @@ impl Filter {
             )));
         }
         let Strict(value) = serde_json::from_str(json).map_err(|e| syntax(e.to_string()))?;
-        let filter = parse(&value, schema)?;
+        Self::from_value(&value, schema, limits)
+    }
+
+    /// [`Self::from_json`] for the `filter` or `soft_filter` of a request already parsed (SPEC §7.1): its text is
+    /// bounded by the request's, and its reader rejected repeated keys at every depth.
+    pub(crate) fn from_value(
+        value: &J,
+        schema: &CollectionSchema,
+        limits: &QueryLimits,
+    ) -> Result<Self, QueryError> {
+        let filter = parse(value, schema)?;
         filter.validate(schema, limits)?;
         Ok(filter)
     }
@@ -247,7 +257,13 @@ fn value_fits(field: &Field, value: &FilterValue) -> Result<(), QueryError> {
         Err(QueryError::FilterValue {
             field: field.name().to_owned(),
             expected: expected(field.field_type()),
-            found: format!("{value:?}"),
+            found: match value {
+                // A keyword past the bound is long: named by its length, not repeated (SPEC §7.1.4).
+                FilterValue::Keyword(s) if s.len() > MAX_SHOWN => {
+                    format!("a keyword of {} bytes", s.len())
+                }
+                other => format!("{other:?}"),
+            },
         })
     }
 }
@@ -348,7 +364,7 @@ fn parse(value: &J, schema: &CollectionSchema) -> Result<Filter, QueryError> {
             })
         }
         "not" => Ok(Filter::Not(Box::new(parse(arg, schema)?))),
-        other => Err(syntax(format!("unknown filter {other:?}"))),
+        other => Err(syntax(format!("unknown filter {}", shown_name(other)))),
     }
 }
 
@@ -407,7 +423,7 @@ fn parse_bounds(
             "gte" => (&mut lower, Bound::Included(to_value(field, value)?)),
             "lt" => (&mut upper, Bound::Excluded(to_value(field, value)?)),
             "lte" => (&mut upper, Bound::Included(to_value(field, value)?)),
-            other => return Err(syntax(format!("unknown range bound {other:?}"))),
+            other => return Err(syntax(format!("unknown range bound {}", shown_name(other)))),
         };
         if !matches!(side, Bound::Unbounded) {
             return Err(range_problem(field, "two bounds on one side"));

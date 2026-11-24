@@ -9,6 +9,59 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: the whole search request (ROADMAP 10.1.10, ADR-0062; SPEC §7.1.4). `search::request::QueryRequest`
+  holds a request's `q`, `fields`, `filter`, `soft_filter`, `sort`, `limit`, `offset`, `search_after`, `facets`,
+  `relax` and `explain`, built in code (`QueryRequest::new` and its `with_` setters, which also set the projection)
+  or parsed from the request JSON (`QueryRequest::from_json`), read strictly: an unknown or repeated key, `null` for a
+  key, a value of another shape and more than 1 MiB of text (`MAX_REQUEST_JSON_LEN`) are errors. `QueryRequest::run`
+  runs it on a `CollectionSnapshot` with `RunOptions` (threads, deadline, cancellation, budget clock, query limits)
+  and returns a `QueryResponse`: the relaxed search's results when the collection's settings, as the request's `relax`
+  overrides them, relax, the plain search's for `relax: false`, and `query_truncated`. `filter` is hard at every
+  relaxation level and `soft_filter` is what `relax.filters = "last_resort"` drops; a filter given as both is hard.
+  Errors are `QueryRequestError`, whose `interrupt()` tells a deadline or a cancellation from an invalid request.
+- `persia-engine`: the request's `"proximity"` (ROADMAP 10.1.7; SPEC §7.1.4, §7.2). `true` plans the search with the
+  proximity bonus, `false` or no key without it (`QueryRequest::with_proximity`, `proximity`). Only a search that does
+  not relax takes it: on a request whose settings relax (the default), `"proximity": true` is
+  `QueryRequestError::ProximityRelaxed`, whose message names the fix, `"relax": false`. A cursor from a search with
+  the other setting is `RequestError::CursorProximity`.
+- `persia-engine`, `persia-storage`: durable creation of a database file's missing parent directories, for the
+  facade's open (ROADMAP 10.1.9; SPEC §4.5.2): `persia_engine::db::create_parent_dirs(path)` and
+  `create_parent_dirs_in(vfs, path)` create them from the outermost missing one inward and sync each new directory's
+  parent, through `persia_storage::vfs::create_dir_all_synced`, the walk `LocalStorage::open` already used.
+- `persia-engine`: one block cache per database (engine side of ROADMAP 10.2.5; SPEC §10.6). `DatabaseOptions` has
+  `block_cache: Option<Arc<BlockCache>>`: `None` by default, and each open then makes a new 8 MiB cache for that
+  database; `Some` is a cache shared by every database given it. Every segment the database
+  opens reads through it (recovery, flushes, merges and their verifying open, schema changes), no longer through the
+  process-wide `BlockCache::shared()`. `Database::block_cache` and `block_cache_stats` read it. One `Arc` given to
+  several databases is shared by them. `ReadOnlyOptions` (registry, `skip_unregistered_analysis`, `block_cache`) with
+  `ReadOnlyDatabase::open_with_options`, `open_on_with_options` and `open_container_with_options`; a read-only
+  database reads through its cache at the open and at each refresh (`ReadOnlyDatabase::block_cache`,
+  `block_cache_stats`), and the existing `open*` functions give each database a cache of its own.
+- `persia-storage`, `persia-engine`: mapped reads on by default for read-only handles on local disks, except on
+  Windows (engine side of ROADMAP 10.2.4; SPEC §4.7, ADR-0017 amended 2026-11-23). `Container::map_read_only_if_local`
+  is an `unsafe fn` (no safe public function of `persia-storage` maps a file) that maps a read-only container on a
+  local disk file system and refuses a read-write one (`Error::InvalidInput`). It maps only a file Persia opened by
+  path itself (`Container::open` and its reopens): a container on a file given to `open_on`, or opened through a
+  caller's `Vfs`, returns `Ok(false)`. The engine calls it from one module, `db/read_only/mapped.rs`, the only engine
+  file that allows `unsafe` code (its crate root now denies `unsafe_code` instead of forbidding it).
+  `ReadOnlyDatabase::open_with_options` maps by default (`ReadOnlyOptions::mapped_reads`: `MappedReads::IfLocal` by
+  default, `MappedReads::Never` on Windows, where a mapped reader keeps a writer that stopped with a torn tail from
+  reopening until the reader closes, and on a FAT32 or exFAT fixed drive can make the writer's compactions fail), and
+  each refresh that finds something new maps the container it reopened. A read-write `Database` never maps; the older
+  read-only opens and those of a given file or container keep ordinary reads. A mapped reader requires that nothing
+  but Persia writes or truncates the file while it is open (SPEC §4.7).
+- `persia-engine`: a cursor as an opaque token (ROADMAP 10.1.10, ADR-0062; SPEC §7.4): `Cursor::to_token` and
+  `Cursor::from_token`, base64url text of a versioned (`CURSOR_TOKEN_VERSION` 1), checksummed encoding. The request
+  JSON's `search_after` takes one. A token that was cut, changed or written by another version is a
+  `CursorTokenError`, never another cursor. A cursor records its sort's keys (`Cursor::sort`: each key's field or
+  the score, order and placement of missing values), and a search refuses a cursor of another sort, or one naming a
+  segment its view does not have, as `RequestError::Cursor`. The request JSON refuses `-0` as a count and
+  `"sort": []`, each with its own message.
+- `persia-engine`: `CollectionSnapshot::compiler`, the collection's `QueryCompiler` with the analyzers the database
+  indexes with, shared by its snapshots until the schema changes; `DefaultFields::is_for`.
+- `persia-fuzz`: targets `request_json` (any input to `QueryRequest::from_json` never panics, and an accepted request
+  runs without panicking) and `cursor_token` (any token never panics, and an accepted one is the one encoding of its
+  cursor).
 - `persia-engine`: relaxation metrics (ROADMAP 8.3.3; SPEC §7.6, §12.4). Each collection counts its relaxed queries
   (searches without a cursor): how many, how many relaxed past L0, how many still found nothing, and how many found
   their hits at each level. Read them as `RelaxationStats` from `CollectionSnapshot::relaxation_stats` or, summed over

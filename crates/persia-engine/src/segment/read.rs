@@ -124,7 +124,8 @@ impl Segment {
     /// arrays. Blocks are checked when they are decoded.
     ///
     /// The segment reads its blocks through the process-wide [`BlockCache::shared`] (8 MiB for all the segments opened
-    /// this way, ROADMAP 5.3.15); [`Self::open_with_cache`] takes a cache of another size.
+    /// this way, ROADMAP 5.3.15); [`Self::open_with_cache`] takes another, as a database does for every segment it
+    /// opens ([`crate::db::DatabaseOptions::block_cache`]).
     ///
     /// # Errors
     /// [`ReadError::Unsupported`] for another format major version, unknown `incompat_flags` or schema encoding

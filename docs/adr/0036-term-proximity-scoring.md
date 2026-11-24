@@ -3,6 +3,8 @@
 - Status: accepted
 - Date: 2026-11-07
 - Related: SPEC §7.2, §7.3, §7.7; ROADMAP 7.3.5, 7.4.4, 7.4.8, 7.8.4, 5.3.4; ROADMAP 32.5.1 (collection ranking defaults)
+- Note (2026-11-23): a request asks for the bonus with `"proximity": true` since ROADMAP 10.1.7 (SPEC §7.1.4, ADR-0062
+  item 10), accepted only on a search that does not relax; the bonus across relaxed steps is ROADMAP 10.1.14.
 
 ## Context
 

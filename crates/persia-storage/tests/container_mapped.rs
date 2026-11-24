@@ -60,6 +60,12 @@ fn map_reads(c: &mut Container) -> persia_storage::container::Result<()> {
     unsafe { c.enable_mapped_reads() }
 }
 
+/// [`Container::map_read_only_if_local`] on a container this test owns.
+fn map_if_local(c: &mut Container) -> persia_storage::container::Result<bool> {
+    // SAFETY: as `map_reads`.
+    unsafe { c.map_read_only_if_local() }
+}
+
 fn is_mapped(c: &Container, offset: u64) -> bool {
     let a = c.read_frame_source(offset, MAX).unwrap().payload;
     let b = c.read_frame_source(offset, MAX).unwrap().payload;
@@ -465,4 +471,116 @@ fn a_container_on_a_local_disk_is_mapped_automatically() {
             "from the mapping"
         );
     }
+}
+
+// --- The read-only entry of mapped reads (ROADMAP 10.2.4; SPEC §4.7; ADR-0017, amended 2026-11-23) ---
+
+/// The temporary directory is on a local disk on every CI platform (`a_container_on_a_local_disk_is_mapped_automatically`).
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+#[test]
+fn a_read_only_container_on_a_local_disk_maps_with_the_read_only_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut c, frames) = committed(&path(&dir));
+    assert!(c.is_on_local_disk().unwrap());
+    assert!(map_if_local(&mut c).unwrap());
+    assert!(c.is_mapped());
+    assert_eq!(c.mapped_range(), Some(F..c.superblock().log_end));
+    for (f, want) in frames
+        .iter()
+        .zip([&b"wal one"[..], b"wal two", b"manifest 1"])
+    {
+        assert!(is_mapped(&c, f.offset));
+        assert_eq!(payload(&c, f.offset), want);
+    }
+    assert_eq!(c.mapping_failures(), 0);
+}
+
+#[test]
+fn the_read_only_call_never_maps_a_read_write_container() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = path(&dir);
+    let mut w = Container::create(&path).unwrap();
+    let frames = commit_batch(&mut w, &[b"wal"], b"manifest 1");
+    let err = map_if_local(&mut w).unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)), "{err}");
+    assert!(!w.is_mapped());
+    assert_eq!(w.mapped_range(), None);
+    assert!(!is_mapped(&w, frames[0].offset));
+    // It commits on, unmapped.
+    let later = commit_batch(&mut w, &[b"more wal"], b"manifest 2");
+    assert!(!w.is_mapped());
+    assert_eq!(payload(&w, later[0].offset), b"more wal");
+    drop(w);
+    // Opened again read-write: refused too.
+    let mut w = Container::open(&path, Mode::ReadWrite).unwrap();
+    assert!(matches!(map_if_local(&mut w), Err(Error::InvalidInput(_))));
+    assert!(!w.is_mapped());
+}
+
+/// A reader follows a writer by reopening: the new handle maps what was committed since, and after a compaction the
+/// file renamed over the path, while the handles before keep their mappings of the old bytes (SPEC §4.7).
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+#[test]
+fn a_reopened_reader_maps_the_commits_since_and_the_file_a_compaction_moved_to() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = path(&dir);
+    let mut w = Container::create(&path).unwrap();
+    let seg = w.append(FrameKind::Segment, b"live segment", NONE).unwrap();
+    w.append(FrameKind::Segment, b"dead segment", NONE).unwrap();
+    let wal = w.append(FrameKind::WalChunk, b"wal", NONE).unwrap();
+    w.sync().unwrap();
+    let m = w.append(FrameKind::Manifest, b"manifest 1", NONE).unwrap();
+    w.commit(Commit {
+        manifest: m,
+        wal_start: wal.offset,
+        fence_token: 0,
+    })
+    .unwrap();
+
+    let mut first = Container::open(&path, Mode::ReadOnly).unwrap();
+    assert!(map_if_local(&mut first).unwrap());
+    let first_range = first.mapped_range().unwrap();
+    assert_eq!(first_range, F..w.superblock().log_end);
+
+    // A commit: the reopened handle starts unmapped, and maps up to the new `log_end`.
+    let later = commit_batch(&mut w, &[b"more wal"], b"manifest 2");
+    let mut second = first.reopen_read_only().unwrap();
+    assert!(!second.is_mapped());
+    assert!(map_if_local(&mut second).unwrap());
+    assert_eq!(second.mapped_range(), Some(F..w.superblock().log_end));
+    assert!(second.mapped_range().unwrap().end > first_range.end);
+    assert!(is_mapped(&second, later[0].offset));
+    assert_eq!(payload(&second, later[0].offset), b"more wal");
+    // The handle before keeps its mapping and its view: a read-only handle reads no frame past the end it found.
+    assert_eq!(first.mapped_range(), Some(first_range.clone()));
+    assert!(first.read_frame(later[0].offset, MAX).is_err());
+    assert!(is_mapped(&first, wal.offset));
+    assert_eq!(payload(&first, wal.offset), b"wal");
+
+    // A compaction: the path names a new file, which the next reopened handle maps.
+    let relocation = w
+        .compact(
+            &[seg.offset..seg.end()],
+            |_| Ok(b"manifest 3".to_vec()),
+            NONE,
+        )
+        .unwrap();
+    let mut third = second.reopen_read_only().unwrap();
+    assert!(map_if_local(&mut third).unwrap());
+    assert_eq!(third.mapped_range(), Some(F..w.superblock().log_end));
+    let moved = relocation.get(seg.offset).unwrap();
+    assert!(is_mapped(&third, moved.offset));
+    assert_eq!(payload(&third, moved.offset), b"live segment");
+    assert_eq!(
+        payload(&third, third.superblock().manifest_off),
+        b"manifest 3"
+    );
+    // The handles of the old file keep their mappings and its bytes.
+    assert_eq!(first.mapped_range(), Some(first_range));
+    assert!(is_mapped(&first, seg.offset));
+    assert_eq!(payload(&first, seg.offset), b"live segment");
+    assert_eq!(
+        payload(&second, second.superblock().manifest_off),
+        b"manifest 2"
+    );
 }
