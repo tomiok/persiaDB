@@ -21,8 +21,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `OpenOptions` is a builder with SPEC §14's defaults (`create_if_missing`, `read_only`, `memtable_bytes`,
   `idle_flush`, `commit_interval`, `merge_threads`, `durability`); `persia::Durability` re-exports the engine's.
   A location is a URL only when it starts with `scheme://`: `file://` (empty host or `localhost`, percent-encoded
-  absolute path) opens the file it names, `s3://`, `gs://`, `az://` and `memory://` are `Unsupported` until their
-  backends exist, and any other scheme is `InvalidArgument`. `close` makes a final commit and releases the writer
+  absolute path) opens the file it names, every other scheme is `Unsupported` (`s3://`, `gs://`, `az://` and `memory://`
+  until their backends exist), and only malformed input is `InvalidArgument`. `close` makes a final commit and releases the writer
   lock; dropping a `Db` does the same and logs a failure.
 - `persia`: the SQLite-like open rule (ROADMAP 10.1.9; SPEC §8.1, §13.1). `Db::open` creates the missing parent
   directories of a missing path, then the database; the new directories are durable (each one's parent is synced, SPEC §4.5.2,

@@ -3366,8 +3366,9 @@ provides credentials.
 empty host or `localhost` (any case) and an absolute path, percent-encoded: `%XX` is the byte it names, on Unix
 any byte but NUL, elsewhere the decoded bytes must be UTF-8 and `/C:/dir` is `C:/dir` on Windows. A host, a
 port, a query, a fragment, or a `%` not followed by two hex digits is an invalid argument: nothing is guessed.
-`s3://`, `gs://`, `az://` and `memory://` are *unsupported* (`PERSIA_UNSUPPORTED`, naming the scheme) until their
-backends exist; any other scheme is an invalid argument. Schemes compare without case. The parser is written by
+Every other scheme is *unsupported* (`PERSIA_UNSUPPORTED`, naming the scheme): `s3://`, `gs://`, `az://` and
+`memory://` until their backends exist, and any scheme this build has no backend for. Only malformed input (an
+empty location, a malformed `file://` URL) is an invalid argument. Schemes compare without case. The parser is written by
 hand: no URL crate is a dependency.
 
 ### 10.3 Credentials

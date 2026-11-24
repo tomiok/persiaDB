@@ -120,7 +120,7 @@ report the wrong call.
 | 3 | `PERSIA_CONFLICT` | Second writer, in this process or another (SPEC §8.4), or a lost lease once leases exist (SPEC §11.3); a refresh of a read-only handle that found another database, or an older state, at its path | `ErrorCode::Conflict` |
 | 4 | `PERSIA_INVALID_ARGUMENT` | Null, bad UTF-8, a malformed path or URL, a schema, document or query that is rejected, a value outside its range | `ErrorCode::InvalidArgument` |
 | 5 | `PERSIA_CORRUPT` | Bytes on disk or from a peer failed a checksum or a format rule | `ErrorCode::Corrupt` |
-| 6 | `PERSIA_UNSUPPORTED` | `format_major` or an incompat flag this build does not read (SPEC §15), an analyzer this build or this open lacks (SPEC §6.2.2), or a URL scheme this build has no backend for (`s3://`, `gs://`, `az://`, `memory://` before their backends exist, SPEC §10.2) | `ErrorCode::Unsupported` |
+| 6 | `PERSIA_UNSUPPORTED` | `format_major` or an incompat flag this build does not read (SPEC §15), an analyzer this build or this open lacks (SPEC §6.2.2), or a URL scheme this build has no backend for (any but `file://`: `s3://`, `gs://`, `az://`, `memory://` before their backends exist, SPEC §10.2) | `ErrorCode::Unsupported` |
 | 7 | `PERSIA_IO` | Filesystem or network failure that is not a conflict. Also a failure that fits no other code: memory that could not be allocated, an internal invariant that did not hold | `ErrorCode::Io` |
 | 8 | `PERSIA_TRANSIENT` | Retryable storage failure (SPEC §10.1). Rare in embedded local opens; present for URL opens. | `ErrorCode::Transient` |
 | 9 | `PERSIA_BUSY` | Close while children are open | New at the ABI: `ErrorCode::Busy` is reserved for it and never returned from Rust |

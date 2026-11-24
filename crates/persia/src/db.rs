@@ -130,17 +130,19 @@ impl Db {
     /// db.close()?;
     /// assert!(path.is_file());
     ///
-    /// // Cloud schemes are named by SPEC §10.2 and have no backend in this build.
+    /// // Cloud schemes are named by SPEC §10.2 and have no backend in this build; nor does any other scheme.
     /// assert_eq!(Db::open("s3://bucket/app").unwrap_err().code(), ErrorCode::Unsupported);
-    /// assert_eq!(Db::open("ftp://host/app").unwrap_err().code(), ErrorCode::InvalidArgument);
+    /// assert_eq!(Db::open("ftp://host/app").unwrap_err().code(), ErrorCode::Unsupported);
+    /// // A malformed file:// URL is the caller's mistake.
+    /// assert_eq!(Db::open("file://host/app").unwrap_err().code(), ErrorCode::InvalidArgument);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
     /// # Errors
-    /// - [`ErrorCode::InvalidArgument`]: an empty location, a malformed `file://` URL, an unknown scheme, a path
-    ///   under a file that is not a directory;
-    /// - [`ErrorCode::Unsupported`]: `s3://`, `gs://`, `az://` or `memory://` (no backend in this build), or a
-    ///   file written by a newer format;
+    /// - [`ErrorCode::InvalidArgument`]: an empty location, a malformed `file://` URL, a path under a file that is not
+    ///   a directory;
+    /// - [`ErrorCode::Unsupported`]: any scheme but `file://` (`s3://`, `gs://`, `az://` and `memory://` have no
+    ///   backend in this build yet), or a file written by a newer format;
     /// - [`ErrorCode::NotFound`]: no file at the path, and the open does not create one;
     /// - [`ErrorCode::Conflict`]: another read-write handle has the database open, in this process or another;
     ///   or a blob pack (`<name>.persia.blobs`) is at the path of a database to create;

@@ -1,6 +1,6 @@
 //! Fuzz the location `Db::open` takes (ROADMAP 10.1.1; SPEC §8.1, §10.2): arbitrary text never panics; text that is
 //! not `scheme://...` is the path itself; a `file://` URL is the only one that yields a path, and every refusal is
-//! `InvalidArgument` or `Unsupported`.
+//! `InvalidArgument` for an empty text or a malformed `file://` URL and `Unsupported` for every other scheme.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -28,10 +28,16 @@ fuzz_target!(|data: &[u8]| {
         }
         Err(e) => {
             assert!(url || text.is_empty(), "a path is never refused: {text:?}");
-            assert!(matches!(
-                e.code(),
-                ErrorCode::InvalidArgument | ErrorCode::Unsupported
-            ));
+            let file = text
+                .get(..7)
+                .is_some_and(|s| s.eq_ignore_ascii_case("file://"));
+            // Only malformed input is invalid: an empty text or a file:// URL; every other scheme is unsupported.
+            let expected = if file || text.is_empty() {
+                ErrorCode::InvalidArgument
+            } else {
+                ErrorCode::Unsupported
+            };
+            assert_eq!(e.code(), expected, "{text:?}");
         }
     }
 });

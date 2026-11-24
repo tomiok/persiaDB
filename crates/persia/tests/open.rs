@@ -96,18 +96,15 @@ fn schemes_without_a_backend_are_unsupported_and_others_invalid() {
         "gs://bucket/app",
         "az://account/container/app",
         "memory://",
+        "http://example.com/app.persia",
+        "sqlite://app.db",
     ] {
         let err = Db::open(url).unwrap_err();
         assert_eq!(err.code(), ErrorCode::Unsupported, "{url}: {err}");
         let read_only = OpenOptions::new().read_only(true).open(url).unwrap_err();
         assert_eq!(read_only.code(), ErrorCode::Unsupported, "{url}");
     }
-    for url in [
-        "http://example.com/app.persia",
-        "file://example.com/app.persia",
-        "file:///a%zz",
-        "",
-    ] {
+    for url in ["file://example.com/app.persia", "file:///a%zz", ""] {
         let err = Db::open(url).unwrap_err();
         assert_eq!(err.code(), ErrorCode::InvalidArgument, "{url:?}: {err}");
     }

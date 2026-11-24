@@ -2,9 +2,9 @@
 //!
 //! `Db::open` takes one argument. It is a URL only when it starts with `scheme://`; anything else is a path, so
 //! `C:\data\app.persia` and `./app.persia` are paths. The only scheme this build opens is `file://`, with an empty
-//! host or `localhost` and a percent-encoded absolute path. `s3://`, `gs://`, `az://` and `memory://` are the
-//! schemes of backends that do not exist yet (ROADMAP M12): they are *unsupported*, naming the scheme. Any other
-//! scheme is an invalid argument. The parser is written by hand (no `url` crate) and never panics.
+//! host or `localhost` and a percent-encoded absolute path. Every other scheme is *unsupported* (owner decision b), naming
+//! the scheme: `s3://`, `gs://`, `az://` and `memory://` are those of backends that do not exist yet (ROADMAP M12),
+//! and any other one is a backend this build does not have either. Only malformed input is an invalid argument. The parser is written by hand (no `url` crate) and never panics.
 
 use std::path::{Path, PathBuf};
 
@@ -16,8 +16,8 @@ const FUTURE_SCHEMES: [&str; 4] = ["s3", "gs", "az", "memory"];
 /// The filesystem path `location` names: itself, or the path of a `file://` URL.
 ///
 /// # Errors
-/// [`ErrorCode::Unsupported`] for a scheme of [`FUTURE_SCHEMES`]; [`ErrorCode::InvalidArgument`] for any other
-/// scheme, a `file://` URL that is malformed, and an empty location.
+/// [`ErrorCode::Unsupported`] for every scheme but `file` (the message says whether SPEC §10.2 plans it,
+/// [`FUTURE_SCHEMES`]); [`ErrorCode::InvalidArgument`] for a `file://` URL that is malformed, and an empty location.
 pub(crate) fn path_of(location: &Path) -> Result<PathBuf> {
     if location.as_os_str().is_empty() {
         return Err(invalid("the path is empty"));
@@ -33,17 +33,17 @@ pub(crate) fn path_of(location: &Path) -> Result<PathBuf> {
     if scheme == "file" {
         return file_path(rest);
     }
-    if FUTURE_SCHEMES.contains(&scheme.as_str()) {
-        return Err(Error::new(
-            ErrorCode::Unsupported,
-            format!(
-                "{scheme}:// URLs are not supported by this build: it opens paths and file:// URLs"
-            ),
-        ));
-    }
-    Err(invalid(format!(
-        "unknown URL scheme {scheme:?}: this build opens paths and file:// URLs"
-    )))
+    let planned = if FUTURE_SCHEMES.contains(&scheme.as_str()) {
+        "its backend is not in this build yet"
+    } else {
+        "no backend of this build opens it"
+    };
+    Err(Error::new(
+        ErrorCode::Unsupported,
+        format!(
+            "{scheme}:// URLs are not supported: {planned}; this build opens paths and file:// URLs"
+        ),
+    ))
 }
 
 fn invalid(message: impl Into<String>) -> Error {
@@ -267,11 +267,12 @@ mod tests {
             let err = path_of(Path::new(url)).unwrap_err();
             assert_eq!(err.code(), ErrorCode::Unsupported, "{url}");
             assert!(err.message().starts_with(&format!("{scheme}://")), "{err}");
+            assert!(err.message().contains("not in this build yet"), "{err}");
         }
     }
 
     #[test]
-    fn any_other_scheme_is_invalid_and_named() {
+    fn any_other_scheme_is_unsupported_and_named_too() {
         for (url, scheme) in [
             ("http://example.com/app.persia", "http"),
             ("https://example.com/app.persia", "https"),
@@ -281,8 +282,9 @@ mod tests {
             ("x+y-z.1://a", "x+y-z.1"),
         ] {
             let err = path_of(Path::new(url)).unwrap_err();
-            assert_eq!(err.code(), ErrorCode::InvalidArgument, "{url}");
-            assert!(err.message().contains(scheme), "{err}");
+            assert_eq!(err.code(), ErrorCode::Unsupported, "{url}");
+            assert!(err.message().starts_with(&format!("{scheme}://")), "{err}");
+            assert!(err.message().contains("no backend of this build"), "{err}");
         }
     }
 
@@ -326,7 +328,8 @@ mod tests {
             }
         }
 
-        /// URL-shaped text, which the generator above rarely produces: the scheme decides the outcome.
+        /// URL-shaped text, which the generator above rarely produces: `file` gives a path or an invalid argument, every
+        /// other scheme is unsupported.
         #[test]
         fn any_url_parses_or_is_refused(
             scheme in "[a-zA-Z][a-zA-Z0-9+.-]{0,8}",
@@ -335,10 +338,10 @@ mod tests {
             let url = format!("{scheme}://{rest}");
             match path_of(Path::new(&url)) {
                 Ok(_) => prop_assert!(scheme.eq_ignore_ascii_case("file")),
-                Err(e) if e.code() == ErrorCode::Unsupported => {
-                    prop_assert!(FUTURE_SCHEMES.contains(&scheme.to_ascii_lowercase().as_str()));
+                Err(e) if scheme.eq_ignore_ascii_case("file") => {
+                    prop_assert_eq!(e.code(), ErrorCode::InvalidArgument);
                 }
-                Err(e) => prop_assert_eq!(e.code(), ErrorCode::InvalidArgument),
+                Err(e) => prop_assert_eq!(e.code(), ErrorCode::Unsupported),
             }
         }
     }

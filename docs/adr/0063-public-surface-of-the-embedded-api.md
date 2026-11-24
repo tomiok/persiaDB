@@ -41,7 +41,8 @@ would freeze the engine's shape. The owner decided the surface on 2026-11-23 (wa
    the alias.
 7. **Stable codes.** `ErrorCode` is a `#[non_exhaustive]` enum whose `number()` and `as_str()` are the numbers and
    names of the C ABI's table (`docs/sdk/c-abi.md`): 1 to 12 as designed there, 6 widened to a URL scheme this build
-   has no backend for, and three appended: 13 `PERSIA_READ_ONLY`, 14 `PERSIA_POISONED` (a failed write stopped the
+   has no backend for (every scheme but `file://`, owner decision b: an unknown scheme is not
+   malformed input), and three appended: 13 `PERSIA_READ_ONLY`, 14 `PERSIA_POISONED` (a failed write stopped the
    writer; reopen), 15 `PERSIA_CANCELLED` (deadline or cancel). 9 `BUSY` and 10 `PANIC` are reserved for the ABI and
    never returned from Rust. The list is append-only.
 8. **The mapping is one module**, `crates/persia/src/error/classify.rs`: one exhaustive `match` per engine error enum,
