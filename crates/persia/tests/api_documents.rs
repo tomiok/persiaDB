@@ -336,3 +336,59 @@ fn blob_options_are_checked() {
         ErrorCode::InvalidArgument
     );
 }
+
+#[test]
+fn a_handle_writes_at_the_database_durability_unless_it_chose_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = OpenOptions::new()
+        .durability(Durability::Async)
+        .open(dir.path().join("app.persia"))
+        .unwrap();
+    let c = notes(&db);
+    assert_eq!(c.durability(), Durability::Async);
+    assert_eq!(
+        db.collection("notes").unwrap().durability(),
+        Durability::Async
+    );
+    let own = c.clone().with_durability(Durability::Buffered);
+    assert_eq!(own.durability(), Durability::Buffered);
+    assert_eq!(
+        c.durability(),
+        Durability::Async,
+        "a clone chose, not the handle"
+    );
+}
+
+#[test]
+fn a_read_only_database_reads_no_blob_bytes() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Counting(Arc<AtomicUsize>);
+    impl std::io::Read for Counting {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(0)
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let db = Db::open(&path).unwrap();
+    notes(&db);
+    db.close().unwrap();
+    let reader = OpenOptions::new().read_only(true).open(&path).unwrap();
+    let c = reader.collection("notes").unwrap();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let err = c
+        .put_with_blob(
+            &Document::new("a"),
+            Blob::from_reader(Counting(Arc::clone(&reads))),
+        )
+        .unwrap_err();
+    assert_eq!(err.code(), ErrorCode::ReadOnly, "{err}");
+    let err = reader
+        .put_blob(Counting(Arc::clone(&reads)), &PutBlobOptions::default())
+        .unwrap_err();
+    assert_eq!(err.code(), ErrorCode::ReadOnly, "{err}");
+    assert_eq!(reads.load(Ordering::SeqCst), 0, "refused before reading");
+}

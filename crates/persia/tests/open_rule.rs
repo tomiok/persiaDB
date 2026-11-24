@@ -134,3 +134,21 @@ fn racing_opens_of_a_missing_path_agree_on_one_database() {
         assert_eq!(header(&path), headers[0], "round {round}");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn a_create_that_fails_reports_its_own_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let locked = dir.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let result = Db::open(locked.join("app.persia"));
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    match result {
+        // Run as root, the directory's mode does not apply: nothing to check here.
+        Ok(db) => db.close().unwrap(),
+        // Not retried as a race (that would end as `Transient`): the file system's own failure.
+        Err(err) => assert_eq!(err.code(), ErrorCode::Io, "{err}"),
+    }
+}
