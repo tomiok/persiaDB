@@ -148,7 +148,7 @@ impl OpenOptions {
     }
 
     /// The size at which a collection's unflushed writes are flushed into a segment and committed (SPEC §8.2
-    /// step 3, §14 `memtable_bytes`). 64 MiB by default.
+    /// step 3, §14 `memtable_bytes`). 64 MiB by default. 0 is refused at open.
     ///
     /// ```
     /// let options = persia::OpenOptions::new().memtable_bytes(8 << 20);
@@ -161,7 +161,7 @@ impl OpenOptions {
     }
 
     /// How long a collection's writes must pause before they are flushed and committed in the background
-    /// (SPEC §8.2 step 3). 10 s by default.
+    /// (SPEC §8.2 step 3). 10 s by default. Zero is refused at open.
     ///
     /// ```
     /// use std::time::Duration;
@@ -177,7 +177,7 @@ impl OpenOptions {
 
     /// The longest a write stays unflushed while writes never pause: a background commit flushes it once this
     /// long has passed since the first unflushed write (SPEC §14 `commit_interval`), which bounds what an open
-    /// after a crash replays. 60 s by default.
+    /// after a crash replays. 60 s by default. Zero is refused at open.
     ///
     /// ```
     /// use std::time::Duration;
@@ -191,8 +191,9 @@ impl OpenOptions {
         self
     }
 
-    /// How many threads merge segments in the background (SPEC §8.5, §14 `merge_threads`). 1 by default; with 0 a
-    /// merge runs on the database's maintenance thread, one at a time.
+    /// How many threads merge segments in the background (SPEC §8.5, §14 `merge_threads`). 1 by default. With 0, no
+    /// merge thread is started: each merge runs to its end on the database's maintenance thread, one at a time, and
+    /// holds the writer while it runs (writes wait for it).
     ///
     /// ```
     /// let options = persia::OpenOptions::new().merge_threads(2);
@@ -270,10 +271,33 @@ impl OpenOptions {
     /// ```
     ///
     /// # Errors
-    /// As [`Db::open`].
+    /// [`ErrorCode::InvalidArgument`](crate::ErrorCode::InvalidArgument) for a `memtable_bytes` of 0 or an
+    /// `idle_flush` or `commit_interval` of zero, which would commit at every write or every round; then as
+    /// [`Db::open`].
     pub fn open(&self, location: impl AsRef<Path>) -> Result<Db> {
+        self.validate()?;
         let path = location::path_of(location.as_ref())?;
         Db::open_at(path, self)
+    }
+
+    /// Refuses the settings that have no useful meaning (see [`OpenOptions::open`]). `merge_threads(0)` is not one:
+    /// it runs each merge on the maintenance thread.
+    fn validate(&self) -> Result<()> {
+        let refused = if self.memtable_bytes == 0 {
+            Some("memtable_bytes must be at least 1: 0 would flush a segment at every write")
+        } else if self.idle_flush.is_zero() {
+            Some("idle_flush must be above zero: zero would commit at every maintenance round")
+        } else if self.commit_interval.is_zero() {
+            Some("commit_interval must be above zero: zero would commit at every maintenance round")
+        } else {
+            None
+        };
+        refused.map_or(Ok(()), |message| {
+            Err(crate::Error::new(
+                crate::ErrorCode::InvalidArgument,
+                message,
+            ))
+        })
     }
 
     /// The engine's options for one open (they are not `Clone`: each open draws its own segment ids).

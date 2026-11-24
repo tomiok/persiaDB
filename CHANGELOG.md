@@ -20,6 +20,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `Db::open` creates the database when no file is at the path and opens an existing one without replacing it.
   `OpenOptions` is a builder with SPEC §14's defaults (`create_if_missing`, `read_only`, `memtable_bytes`,
   `idle_flush`, `commit_interval`, `merge_threads`, `durability`); `persia::Durability` re-exports the engine's.
+  A `memtable_bytes` of 0 or an `idle_flush` or `commit_interval` of zero is `InvalidArgument` at open;
+  `merge_threads(0)` runs each merge on the maintenance thread.
   A location is a URL only when it starts with `scheme://`: `file://` (empty host or `localhost`, percent-encoded
   absolute path) opens the file it names, every other scheme is `Unsupported` (`s3://`, `gs://`, `az://` and `memory://`
   until their backends exist), and only malformed input is `InvalidArgument`. `close` makes a final commit and releases the writer
