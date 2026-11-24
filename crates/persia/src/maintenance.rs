@@ -417,5 +417,17 @@ mod tests {
         db.commit().unwrap();
         assert!(!has_work(&db), "flushed");
         assert!(!round(&mut db).unwrap());
+        // A merge in flight is work too: eight flushed segments, and the merge held in flight (ROADMAP 6.5.14).
+        db.log_mut().hold_merges(true);
+        for i in 0..7 {
+            db.put_document("c", &Document::new(format!("d{i}")), Durability::Buffered)
+                .unwrap();
+            db.commit().unwrap();
+        }
+        db.log_mut().merge_step().unwrap();
+        assert!(db.log().merges_running() > 0);
+        assert!(has_work(&db), "a merge in flight");
+        db.log_mut().cancel_merges();
+        assert!(!has_work(&db));
     }
 }
