@@ -220,6 +220,11 @@ fn blobs_stored_read_and_referenced() {
     let got = files.get("big").unwrap().unwrap();
     assert_eq!(got.blob_ref(), Some(&attached));
     // Streamed in windows: more than one of them here.
+    let debug = format!("{:?}", db.get_blob(&attached).unwrap());
+    assert!(
+        debug.starts_with("BlobReader") && debug.contains("offset: 0"),
+        "{debug}"
+    );
     let mut streamed = Vec::new();
     db.get_blob(&attached)
         .unwrap()
