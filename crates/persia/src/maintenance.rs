@@ -108,43 +108,36 @@ impl Signals {
         self.served.notify_all();
     }
 
-    /// Waits until the next round is due (or a stop): at once for a requested round, [`PERIOD`] after the last
-    /// round while there is work (`busy`, or a write since `writes_seen`), never while there is none.
+    /// Waits until the next round is due (or a stop), as [`decide`] says.
     fn next(&self, busy: bool, writes_seen: u64) -> Next {
         let mut state = lock(&self.state);
         let mut due: Option<Instant> = None;
         loop {
-            if state.stop {
-                return Next::Stop;
-            }
-            if state.requested > state.done {
-                return Next::Round {
-                    requested: true,
-                    writes: state.writes,
-                };
-            }
-            let active = !state.held && (busy || state.writes != writes_seen);
-            if !active {
-                due = None;
-                state = self
-                    .wake
-                    .wait(state)
-                    .unwrap_or_else(PoisonError::into_inner);
-                continue;
-            }
-            let at = *due.get_or_insert_with(|| Instant::now() + PERIOD);
             let now = Instant::now();
-            if now >= at {
-                return Next::Round {
-                    requested: false,
-                    writes: state.writes,
-                };
+            match decide(&state, busy, writes_seen, due, now) {
+                Decision::Stop => return Next::Stop,
+                Decision::Round { requested } => {
+                    return Next::Round {
+                        requested,
+                        writes: state.writes,
+                    };
+                }
+                Decision::Park => {
+                    due = None;
+                    state = self
+                        .wake
+                        .wait(state)
+                        .unwrap_or_else(PoisonError::into_inner);
+                }
+                Decision::WaitUntil(at) => {
+                    due = Some(at);
+                    state = self
+                        .wake
+                        .wait_timeout(state, at.saturating_duration_since(now))
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0;
+                }
             }
-            state = self
-                .wake
-                .wait_timeout(state, at - now)
-                .unwrap_or_else(PoisonError::into_inner)
-                .0;
         }
     }
 
@@ -154,6 +147,48 @@ impl Signals {
         state.last = Some(outcome);
         drop(state);
         self.served.notify_all();
+    }
+}
+
+/// What the thread does from `state` at `now`, given whether its last round left work (`busy`), the write count
+/// that round saw, and when the timed round it waits for is `due`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Decision {
+    Stop,
+    /// A round now: one a caller asked for, or the timed one.
+    Round {
+        requested: bool,
+    },
+    /// No work: wait, with no timer, for a write, a request or a stop.
+    Park,
+    /// Work: the timed round is due at this instant ([`PERIOD`] after the wait began).
+    WaitUntil(Instant),
+}
+
+/// The thread's schedule (module docs): a stop first, then a requested round at once, then, while there is work
+/// (`busy`, or a write since `writes_seen`) and the thread is not held, a round [`PERIOD`] after the wait began.
+fn decide(
+    state: &State,
+    busy: bool,
+    writes_seen: u64,
+    due: Option<Instant>,
+    now: Instant,
+) -> Decision {
+    if state.stop {
+        return Decision::Stop;
+    }
+    if state.requested > state.done {
+        return Decision::Round { requested: true };
+    }
+    let work = busy || state.writes != writes_seen;
+    if state.held || !work {
+        return Decision::Park;
+    }
+    let at = due.unwrap_or_else(|| now.checked_add(PERIOD).unwrap_or(now));
+    if now >= at {
+        Decision::Round { requested: false }
+    } else {
+        Decision::WaitUntil(at)
     }
 }
 
@@ -284,4 +319,103 @@ fn has_work(db: &Writer) -> bool {
             .snapshot()
             .collections()
             .any(|(_, c)| c.memtable().version() > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use persia_engine::db::DatabaseOptions;
+    use persia_engine::document::Document;
+    use persia_engine::schema::SchemaBuilder;
+    use persia_engine::wal::Durability;
+
+    use super::*;
+
+    fn state(writes: u64, requested: u64, done: u64, held: bool, stop: bool) -> State {
+        State {
+            writes,
+            requested,
+            done,
+            last: None,
+            held,
+            stop,
+        }
+    }
+
+    #[test]
+    fn the_schedule() {
+        let now = Instant::now();
+        let later = now + PERIOD;
+        let idle = state(3, 0, 0, false, false);
+        // No work: park, with no timer.
+        assert_eq!(decide(&idle, false, 3, None, now), Decision::Park);
+        // A write since the last round, or a round that left work: a round one period from now.
+        assert_eq!(
+            decide(&idle, false, 2, None, now),
+            Decision::WaitUntil(later)
+        );
+        assert_eq!(
+            decide(&idle, true, 3, None, now),
+            Decision::WaitUntil(later)
+        );
+        // The wait keeps its deadline, and the round runs once it is reached.
+        assert_eq!(
+            decide(&idle, true, 3, Some(later), now),
+            Decision::WaitUntil(later)
+        );
+        let timed = Decision::Round { requested: false };
+        assert_eq!(decide(&idle, true, 3, Some(later), later), timed);
+        assert_eq!(decide(&idle, true, 3, Some(now), later), timed);
+        // Held: only a requested round runs, at once.
+        let held = state(9, 0, 0, true, false);
+        assert_eq!(decide(&held, true, 3, Some(now), later), Decision::Park);
+        let asked = Decision::Round { requested: true };
+        assert_eq!(
+            decide(&state(9, 2, 1, true, false), false, 9, None, now),
+            asked
+        );
+        assert_eq!(
+            decide(&state(9, 2, 1, false, false), false, 9, None, now),
+            asked
+        );
+        assert_eq!(
+            decide(&state(9, 2, 2, false, false), false, 9, None, now),
+            Decision::Park
+        );
+        // A stop wins over everything.
+        assert_eq!(
+            decide(&state(9, 2, 1, false, true), true, 3, None, now),
+            Decision::Stop
+        );
+    }
+
+    #[test]
+    fn a_write_is_counted_and_a_stopped_thread_serves_no_round() {
+        let signals = Signals::new(false);
+        signals.wrote();
+        signals.wrote();
+        assert_eq!(lock(&signals.state).writes, 2);
+        assert!(!lock(&signals.state).held);
+        assert!(lock(&Signals::new(true).state).held);
+        signals.stop();
+        assert_eq!(signals.round_now().unwrap_err().code(), ErrorCode::Closed);
+        assert_eq!(lock(&signals.state).requested, 0, "not even asked");
+    }
+
+    #[test]
+    fn work_is_an_unflushed_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db =
+            Writer::create(dir.path().join("app.persia"), DatabaseOptions::default()).unwrap();
+        assert!(!has_work(&db), "no collection");
+        let schema = SchemaBuilder::new("c").build().unwrap();
+        db.log_mut().create_collection(schema).unwrap();
+        assert!(!has_work(&db), "an empty collection");
+        db.put_document("c", &Document::new("a"), Durability::Buffered)
+            .unwrap();
+        assert!(has_work(&db));
+        assert!(round(&mut db).unwrap(), "not due yet: still unflushed");
+        db.commit().unwrap();
+        assert!(!has_work(&db), "flushed");
+        assert!(!round(&mut db).unwrap());
+    }
 }
