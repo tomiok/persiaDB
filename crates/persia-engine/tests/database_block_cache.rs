@@ -327,3 +327,170 @@ fn an_incremental_refresh_that_takes_a_commit_opens_its_segments_through_the_cac
     assert!(cache.stats().misses > 0);
     shared_is_untouched();
 }
+
+/// `id`'s `body` in `snapshot`, read from its segment.
+fn body_of(snapshot: &Snapshot, id: &str) -> String {
+    let body = schema().field("body").unwrap().id();
+    let doc = snapshot.collection("c").unwrap().get(id).unwrap().unwrap();
+    match doc.get(body) {
+        Some(Value::String(text)) => text.clone(),
+        other => panic!("{id}: {other:?}"),
+    }
+}
+
+/// The ids `q` finds in `snapshot` (a plain search, so the postings are read from the segments).
+fn found(snapshot: &Snapshot, q: &str) -> Vec<String> {
+    use persia_engine::db::Threads;
+    use persia_engine::query::QueryLimits;
+    use persia_engine::search::request::{QueryRequest, QueryResults, RunOptions};
+    let c = snapshot.collection("c").unwrap();
+    let json = serde_json::json!({"q": q, "relax": false, "limit": 1000}).to_string();
+    let request = QueryRequest::from_json(&json, c.schema(), &QueryLimits::default()).unwrap();
+    let options = RunOptions::new()
+        .threads(Threads::Current)
+        .budget_clock(Arc::new(ManualClock::new(0)));
+    match request.run(c, &options).unwrap().results {
+        QueryResults::Plain(r) => {
+            let mut ids: Vec<_> = r.hits.iter().map(|h| h.document.id().to_owned()).collect();
+            ids.sort();
+            ids
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Invariant 2, for what the cache holds: two databases of the same id and segment-id seed write segments of the same
+/// ids, and the one cache they share still keys their blocks apart. A mix-up would serve one database's bytes to the
+/// other: wrong documents, without an error.
+#[test]
+fn a_shared_cache_keeps_the_blocks_of_its_databases_apart() {
+    let cache = Arc::new(BlockCache::new(1 << 20));
+    let body = schema().field("body").unwrap().id();
+    let ids = ["a", "b", "c"];
+    let mut dbs = Vec::new();
+    for word in ["alpha", "omega"] {
+        let with = DatabaseOptions {
+            block_cache: Arc::clone(&cache),
+            ..unmerged()
+        };
+        let mut db = Database::create_on(SimFile::new(), [9; 16], with).unwrap();
+        db.create_collection(schema()).unwrap();
+        for id in ids {
+            let doc = Document::new(id).with(body, Value::String(format!("{word} {id}")));
+            db.put("c", &doc, Durability::Fsync).unwrap();
+        }
+        db.commit().unwrap();
+        dbs.push((word, db));
+    }
+    let segment_ids = |db: &Database<SimFile>| -> Vec<u128> {
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        c.segments().iter().map(|s| s.segment_id()).collect()
+    };
+    // The precondition that makes this test bite: the two segments have the same id.
+    assert_eq!(segment_ids(&dbs[0].1), segment_ids(&dbs[1].1));
+    assert_eq!(segment_ids(&dbs[0].1).len(), 1);
+    // Interleaved, so that every read after the first round is served from blocks the other database also cached.
+    let mut last = cache.stats();
+    for round in 0..3 {
+        for (word, db) in &dbs {
+            let snapshot = db.snapshot();
+            assert_eq!(all_read_through(&snapshot, &cache), 1);
+            for id in ids {
+                assert_eq!(body_of(&snapshot, id), format!("{word} {id}"), "{round}");
+            }
+            assert_eq!(found(&snapshot, word), ids, "{word} {round}");
+            for (other, _) in dbs.iter().filter(|(w, _)| w != word) {
+                assert!(found(&snapshot, other).is_empty(), "{word} {round}");
+            }
+        }
+        let now = cache.stats();
+        if round > 0 {
+            assert!(now.hits > last.hits, "{round}: {now:?}");
+        }
+        last = now;
+    }
+    shared_is_untouched();
+}
+
+/// One budget for all the databases that share a cache (SPEC §10.6): what it keeps never goes over its capacity,
+/// and reads stay right while it evicts.
+#[test]
+fn a_shared_cache_holds_at_most_its_capacity_for_all_its_databases() {
+    let capacity = 16 << 10;
+    let cache = Arc::new(BlockCache::new(capacity));
+    let body = schema().field("body").unwrap().id();
+    let text =
+        |db: usize, i: usize| format!("database {db} document {i} {}", "padding ".repeat(i % 17));
+    let mut dbs = Vec::new();
+    for n in 0..3_u8 {
+        let with = DatabaseOptions {
+            block_cache: Arc::clone(&cache),
+            ..unmerged()
+        };
+        let mut db = Database::create_on(SimFile::new(), [n; 16], with).unwrap();
+        db.create_collection(schema()).unwrap();
+        for i in 0..300 {
+            let doc =
+                Document::new(format!("d{i}")).with(body, Value::String(text(usize::from(n), i)));
+            db.put("c", &doc, Durability::Buffered).unwrap();
+        }
+        db.commit().unwrap();
+        dbs.push(db);
+    }
+    let mut misses = Vec::new();
+    for round in 0..2 {
+        for (n, db) in dbs.iter().enumerate() {
+            let snapshot = db.snapshot();
+            for i in (0..300).step_by(7) {
+                assert_eq!(body_of(&snapshot, &format!("d{i}")), text(n, i), "{round}");
+                let held = cache.stats();
+                assert!(held.bytes <= capacity, "{round} {n} {i}: {held:?}");
+            }
+        }
+        misses.push(cache.stats().misses);
+    }
+    // The second round decoded again what the budget evicted: the bound was reached, not merely respected.
+    assert!(misses[1] > misses[0], "{misses:?}");
+    let stats = cache.stats();
+    assert!(stats.misses > 0 && stats.blocks > 0, "{stats:?}");
+    shared_is_untouched();
+}
+
+/// A segment's entries are dropped with it (SPEC §10.6): a database closed gives back what it held in a cache it
+/// shared, and leaves the other's entries in place.
+#[test]
+fn closing_a_database_frees_its_entries_in_a_shared_cache() {
+    let cache = Arc::new(BlockCache::new(BlockCache::DEFAULT_CAPACITY));
+    let open = |id: u8| {
+        let with = DatabaseOptions {
+            block_cache: Arc::clone(&cache),
+            ..unmerged()
+        };
+        let mut db = Database::create_on(SimFile::new(), [id; 16], with).unwrap();
+        db.create_collection(schema()).unwrap();
+        commit(&mut db, &["a", "b", "c"]);
+        read(&db.snapshot(), &["a", "b", "c"]);
+        db
+    };
+    let first = open(1);
+    let one = cache.stats();
+    assert!(one.blocks > 0, "{one:?}");
+    let second = open(2);
+    let both = cache.stats();
+    assert!(both.blocks > one.blocks, "{one:?} {both:?}");
+    drop(first);
+    let left = cache.stats();
+    assert_eq!(
+        (left.blocks, left.bytes),
+        (both.blocks - one.blocks, both.bytes - one.bytes),
+        "{one:?} {both:?} {left:?}"
+    );
+    // The second still reads, from what it left there.
+    read(&second.snapshot(), &["a", "b", "c"]);
+    assert!(cache.stats().hits > left.hits);
+    drop(second);
+    let empty = cache.stats();
+    assert_eq!((empty.blocks, empty.bytes), (0, 0), "{empty:?}");
+    shared_is_untouched();
+}
