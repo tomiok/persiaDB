@@ -31,7 +31,7 @@ The crates are not published (`publish = false` in the workspace). There is no c
 
 `persia-server` is a placeholder binary: it prints "not implemented (M11)" and exits with status 1. No gRPC or HTTP server runs.
 
-`persia-cli` lists and removes temporary and quarantine files next to a container or a local store (`persia container files`, `persia container sweep`, `persia store files`, `persia store sweep`). It can inspect and dump one segment file (`persia inspect segment`, `persia dump segment`, with `--verify` on inspect), and check a whole database read-only (`persia verify`). It does not compact, import, or search.
+`persia-cli` lists and removes temporary and quarantine files next to a container or a local store (`persia container files`, `persia container sweep`, `persia store files`, `persia store sweep`). It can inspect and dump one segment file (`persia inspect segment`, `persia dump segment`, with `--verify` on inspect), and check a whole database read-only (`persia verify`). For a whole database it also prints statistics (`persia stats`), writes a collection's documents as JSON Lines (`persia dump documents`), and compacts the container (`persia compact`). `persia bench` is a quick local micro-benchmark; its numbers are local guidance only. It does not import or search.
 
 `persia-format` encodes and decodes on-disk bytes. It does not open a file as a database. A git dependency, for code that wants those codecs:
 
@@ -141,7 +141,7 @@ The response is specified to carry what happened. This object is the shape in SP
 
 ### Command line
 
-**Partly in the tree.** `persia inspect segment` and `persia dump segment` read one segment file, and `--verify` checks it. `persia verify` checks a whole database. Still planned (ROADMAP 10.4): `compact`, `stats`, JSONL import, a one-shot search, and a small bench. The binary does none of those.
+**Partly in the tree.** `persia inspect segment` and `persia dump segment` read one segment file, and `--verify` checks it. `persia verify` checks a whole database. `persia stats`, `persia dump documents`, and `persia compact` report, dump, and compact a whole database, and `persia bench` is a small local benchmark. Still planned (ROADMAP 10.4.2): JSONL import and a one-shot search. The binary does neither.
 
 ## Common questions
 

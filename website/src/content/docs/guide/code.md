@@ -35,7 +35,7 @@ What each file says about itself:
 | `persia-analysis` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-analysis/src/lib.rs) | Tokenizers, normalizers, stemmers (SPEC §6.3). | Tokenizers, filters, `en` / `es` / `pt` / `fr` / `de` / `it` stemmers, and built-in analyzers. |
 | `persia-blob` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-blob/src/lib.rs) | Content-addressed chunks, dedup, GC (SPEC §9). | %%BLOB_CELL%% |
 
-`persia-server` is a placeholder binary that prints "not implemented (M11)" and exits with status 1. `persia-cli` lists and sweeps temporary and quarantine files, and it inspects and dumps one segment (`persia inspect segment`, `persia dump segment`, with `--verify` on inspect), and verifies a whole database (`persia verify`). It does not search. `persia-proto` is a placeholder library for M11.
+`persia-server` is a placeholder binary that prints "not implemented (M11)" and exits with status 1. `persia-cli` lists and sweeps temporary and quarantine files, and it inspects and dumps one segment (`persia inspect segment`, `persia dump segment`, with `--verify` on inspect), and verifies a whole database (`persia verify`). It also prints a database's statistics (`persia stats`), dumps a collection's documents (`persia dump documents`), compacts a container (`persia compact`), and runs a local micro-benchmark (`persia bench`). It does not import or search. `persia-proto` is a placeholder library for M11.
 The public modules and re-exports of `persia-format` are the list in
 [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs):
 

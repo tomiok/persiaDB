@@ -47,7 +47,7 @@ Three rules shape the rest of the design:
 | `persia` | The embedded API: `Db` and `Collection`. | No `Db` (M10). Blobs with documents are `persia::internal`. |
 | `persia-proto` | `persia.proto` and committed generated code. | Module docs only (M11) |
 | `persia-server` | gRPC and HTTP. Roles: writer, reader, router. | Placeholder: exits with "not implemented" (M11, M13) |
-| `persia-cli` | Sweep temporary and quarantine files. `inspect segment` and `dump segment` read one segment (`--verify` checks it). `compact`, `bench`, import, and search are later. | Sweep, inspect, dump, and `verify` exist. The rest is M10. |
+| `persia-cli` | Sweep temporary and quarantine files. `inspect segment` and `dump segment` read one segment (`--verify` checks it). `verify`, `stats`, `dump documents`, and `compact` work on a whole database; `bench` is a local micro-benchmark. Import and search are later. | Sweep, inspect, dump, `verify`, `stats`, `compact`, and `bench` exist. Import and search are M10 (10.4.2). |
 
 Dependencies point downward only (`persia-format` at the bottom). `cargo xtask check-deps` enforces
 the graph. `BlobDatabase::put` stores the blob, then logs the document, so the engine stores a

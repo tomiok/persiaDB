@@ -136,7 +136,7 @@ The `persia` binary checks a database without taking the writer lock and without
 
 Exit status: 0 success, 1 another failure, 2 usage error, 3 corrupt Persia data or a missing referenced blob, 4 the file is not a Persia container. A header that has the magic and then fails its CRC is damage (status 3). A wrong magic, or a file shorter than the magic, is status 4.
 
-`persia verify` analyzes replayed text with the built-in analyzers. A schema can name only those analyzers today. Loading a custom analyzer for verify is planned (ROADMAP 6.6.8). `persia compact`, import, and search are not in the binary (ROADMAP 10.4).
+`persia verify` analyzes replayed text with the built-in analyzers. A schema can name only those analyzers today. Loading a custom analyzer for verify is planned (ROADMAP 6.6.8). `persia stats` and `persia dump documents` read a database the same way: no lock, nothing written. `persia compact` opens it read-write, so it fails (status 1) while another writer holds the lock. Import and search are not in the binary (ROADMAP 10.4.2).
 
 ## Example
 
