@@ -60,6 +60,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `close` returns the first background error, else the final commit's. `Drop` waits up to 5 s, then detaches the
   thread (which keeps the writer lock until it ends) and logs. A panic while holding the writer poisons writes
   (`Poisoned`); reads go on, and the close makes no final commit.
+- `persia`: callers never call `tick` or `merge_step` (ROADMAP 10.2.6): a program that only opens, puts and closes
+  has its writes committed, and `close` (or a drop on time) returns after the maintenance thread and the engine's
+  merge workers stopped.
 - `persia-engine`: relaxation metrics (ROADMAP 8.3.3; SPEC §7.6, §12.4). Each collection counts its relaxed queries
   (searches without a cursor): how many, how many relaxed past L0, how many still found nothing, and how many found
   their hits at each level. Read them as `RelaxationStats` from `CollectionSnapshot::relaxation_stats` or, summed over

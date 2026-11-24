@@ -2218,9 +2218,10 @@ operations, each into one segment of its live documents in docid order (none if 
 deleted), with the tombstone sidecars that delete the older segments' copies of the ids it touched (§8.3), whatever triggered it: `commit()`; a memtable at its size threshold, before the next write to it; or
 `tick()`, which the embedding calls periodically (commits stay on the caller's thread; merge workers only
 merge, ADR-0032) and which commits when any memtable is idle or reached `commit_interval` since its first unflushed
-write. Callers of the public `Db` never call `tick()` or `merge_step()` (ROADMAP 10.2.6): the facade's own
-threads call them, so a commit and a merge both run off the application's thread, and `close` joins those
-threads. On the engine, a commit still runs on the thread that calls `tick` or `merge_step`, and merge
+write. Callers of the public `Db` never call `tick()` or `merge_step()` (ROADMAP 10.2.6): the facade's maintenance
+thread (one per read-write `Db`, a round every second while there is work, ADR-0065) calls them, so a commit and a
+merge both run off the application's thread, and `close` joins it (the engine's merge workers are joined when the
+database drops). On the engine, a commit still runs on the thread that calls `tick` or `merge_step`, and merge
 workers only merge. Operations replayed at an open count as
 written at the open (their age is not logged), so a replayed backlog waits up to one more interval. Flushing all of them makes the
 commit's `wal_start` the end of the log, so a crash never replays a record that is already in a segment. A commit builds every segment before it writes anything, so a failure there changes nothing; a failed

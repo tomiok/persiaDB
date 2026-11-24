@@ -75,6 +75,10 @@ pub(crate) struct Inner {
 /// any handle and any thread, at every [`Durability`], committed or not. A [`Collection::put_batch`](crate::Collection::put_batch)
 /// is seen whole once it returns. Durability decides what survives a crash, not what reads see.
 ///
+/// **Background work** (ADR-0065): a read-write `Db` commits and merges on its own maintenance thread, as the open's
+/// [`OpenOptions`] say (`idle_flush`, `commit_interval`, `memtable_bytes`, `merge_threads`). A program only opens,
+/// writes and closes; [`Db::close`] joins that thread.
+///
 /// ```
 /// use persia::Db;
 ///
