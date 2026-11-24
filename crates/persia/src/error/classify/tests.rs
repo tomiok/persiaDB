@@ -1545,3 +1545,62 @@ fn request_errors() {
     assert!(matches!(relax[2].1, RelaxError::Json(_)));
     check(relax);
 }
+
+/// The whole request (ROADMAP 10.1.10): each wrapped error keeps its code, a deadline or cancellation anywhere in it
+/// is `CANCELLED`, and every way a cursor token is not one is the caller's.
+#[test]
+fn query_request_and_cursor_token_errors() {
+    use persia_engine::db::Cursor;
+    use persia_engine::search::request::{CursorTokenError, QueryRequestError};
+
+    let tokens: Vec<(ErrorCode, CursorTokenError)> = ["", "!", "AAAA", &"A".repeat(1 << 20)]
+        .into_iter()
+        .map(|t| (InvalidArgument, Cursor::from_token(t).unwrap_err()))
+        .collect();
+    check(tokens.clone());
+    let mut rows: Vec<(ErrorCode, QueryRequestError)> = vec![
+        (InvalidArgument, QueryRequestError::Json("not json".into())),
+        (InvalidArgument, QueryRequestError::ProximityRelaxed),
+        (
+            InvalidArgument,
+            QueryRequestError::Schema {
+                collection: "c".to_owned(),
+            },
+        ),
+    ];
+    rows.extend(
+        tokens
+            .into_iter()
+            .map(|(code, e)| (code, QueryRequestError::Cursor(e))),
+    );
+    rows.extend(
+        query_rows()
+            .into_iter()
+            .map(|(code, e)| (code, QueryRequestError::Query(e))),
+    );
+    rows.extend(
+        request_rows()
+            .into_iter()
+            .map(|(code, e)| (code, QueryRequestError::Request(e))),
+    );
+    rows.extend(
+        search_rows()
+            .into_iter()
+            .map(|(code, e)| (code, QueryRequestError::Plan(e))),
+    );
+    rows.push((
+        InvalidArgument,
+        QueryRequestError::Relax(RelaxOptions::from_json(r#"{"min_results": 0}"#).unwrap_err()),
+    ));
+    for interrupt in [Interrupt::DeadlineExceeded, Interrupt::Cancelled] {
+        rows.push((
+            Cancelled,
+            QueryRequestError::Request(RequestError::Interrupted(interrupt)),
+        ));
+        rows.push((
+            Cancelled,
+            QueryRequestError::Plan(SearchError::Interrupted(interrupt)),
+        ));
+    }
+    check(rows);
+}

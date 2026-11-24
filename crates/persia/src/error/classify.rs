@@ -29,6 +29,7 @@ use persia_engine::query::QueryError;
 use persia_engine::relax::RelaxError;
 use persia_engine::schema::{EvolutionError, SchemaError};
 use persia_engine::score::ScoreError;
+use persia_engine::search::request::{CursorTokenError, QueryRequestError};
 use persia_engine::search::{Interrupt, RequestError, SearchError};
 use persia_engine::segment::{ReadError, SegmentError};
 use persia_engine::tombstone::SidecarError;
@@ -558,6 +559,34 @@ impl Classified for RelaxedSearchError {
             // `#[non_exhaustive]`.
             _ => REQUEST_FALLBACK,
         }
+    }
+}
+
+impl Classified for QueryRequestError {
+    fn code(&self) -> ErrorCode {
+        if self.interrupt().is_some() {
+            return ErrorCode::Cancelled;
+        }
+        match self {
+            // The request JSON is not a request; a part built for another schema is the caller's mix-up.
+            Self::Json(_) | Self::Schema { .. } | Self::ProximityRelaxed => {
+                ErrorCode::InvalidArgument
+            }
+            Self::Query(e) => e.code(),
+            Self::Relax(e) => e.code(),
+            Self::Cursor(e) => e.code(),
+            Self::Request(e) => e.code(),
+            Self::Plan(e) => e.code(),
+            // `#[non_exhaustive]`.
+            _ => REQUEST_FALLBACK,
+        }
+    }
+}
+
+impl Classified for CursorTokenError {
+    fn code(&self) -> ErrorCode {
+        // Every way a token is not one this build reads is the caller's: cut, changed, too long, another version.
+        ErrorCode::InvalidArgument
     }
 }
 

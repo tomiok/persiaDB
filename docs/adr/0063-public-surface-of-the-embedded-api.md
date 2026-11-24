@@ -15,15 +15,19 @@ would freeze the engine's shape. The owner decided the surface on 2026-11-23 (wa
 ## Decision
 
 1. **Facade types for everything with behaviour.** Handles, options, requests, responses and errors are types of
-   `persia`: `Db`, `OpenOptions`, `Collection`, `Blob`, `BlobReader`, `PutBlobOptions`, `Error`, `ErrorCode`, and,
-   once the request API lands (ROADMAP 10.1.3's `search`), `SearchRequest`, `SearchResponse` and the hit types. `Db`
+   `persia`: `Db`, `OpenOptions`, `Collection`, `Blob`, `BlobReader`, `PutBlobOptions`, `BlockCacheStats`, `Error`,
+   `ErrorCode`, and the request API (ROADMAP 10.1.3): `SearchRequest` (a builder, lowered to the engine's
+   `QueryRequest`, ADR-0062), `SearchResponse`, `Hit` and `Relaxation`; a cursor crosses it as an opaque token
+   (`String`). `Db`
    is `Send + Sync`, not `Clone`, with every method on `&self`. A `Collection` owns an `Arc` of the database (no
    lifetime), and its calls fail with `Closed` once the database is closed.
 2. **A fixed allow-list of engine value types**, re-exported under `persia::` because they are plain values with no
    handle behind them: `Document`, `Value`, `CollectionSchema` and its field types (`SchemaBuilder`, `Field`,
    `FieldId`, `FieldKind`, `FieldType`, `TextOptions`, `KeywordOptions`, `AnalyzerRef`, `RankingConfig`,
-   `RelaxationConfig` and the types those name), `Durability`, `BlobRef`, `BlobId`, and with `search`: `RelaxOptions`,
-   `Filter`, `Sort`, the facet request and counts, `Explanation`. Adding to the list is a decision recorded here.
+   `RelaxationConfig` and the types those name), `Durability`, `BlobRef`, `BlobId`, and for search: `RelaxOptions`,
+   `RelaxLevel`, `Filter` and `FilterValue`, `Sort` with `SortKey`, `Order` and `Missing`, `FacetRequest`,
+   `FacetCounts` and `FacetValue`, `Explanation` and the explanation types its variants hold. Adding to the list is
+   a decision recorded here.
 3. **Never public:** `Database`, `DatabaseOptions`, `Snapshot`, `Segment`, `Container`, `Manifest`, `SearchPlan`,
    `Execution`, the query AST, and any error type of the engine, the blob store or the storage layer. No public
    signature of a facade type names one. (Test hooks are `#[doc(hidden)]`, are not API, and may.)

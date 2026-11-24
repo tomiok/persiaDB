@@ -35,6 +35,7 @@ pub mod internal;
 mod location;
 mod maintenance;
 mod options;
+mod search;
 mod typed;
 
 pub use blob::BlobReader;
@@ -46,6 +47,15 @@ pub use internal::documents::Blob;
 #[doc(hidden)]
 pub use options::DetachedSlot;
 pub use options::OpenOptions;
+// Search requests and responses (SPEC §7): plain values (ADR-0063 item 2).
+pub use persia_engine::query::{Filter, FilterValue};
+pub use persia_engine::relax::{RelaxLevel, RelaxOptions};
+pub use persia_engine::search::{
+    Explanation, FacetCounts, FacetRequest, FacetValue, FieldExplanation, Missing, Order,
+    PairExplanation, PhraseExplanation, ProximityExplanation, RelaxedExplanation, Sort, SortKey,
+    WordExplanation,
+};
+pub use search::{Hit, Relaxation, SearchRequest, SearchResponse};
 // Blob references (SPEC §9.1): plain values (ADR-0063 item 2).
 pub use persia_blob::{BlobId, BlobRef};
 // Documents (SPEC §6.4): plain values (ADR-0063 item 2).

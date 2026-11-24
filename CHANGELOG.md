@@ -52,6 +52,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   carries a blob reference is checked against this database's store (and pinned) before it is logged, as
   `put_with_blob(doc, Blob::Stored(..))` is; one the store lacks is `NotFound` and logs nothing. Blob bytes are stored
   before the writer mutex is taken. Writes take the writer mutex one at a time; reads never do.
+- `persia`: search (ROADMAP 10.1.3; SPEC §7; ADR-0062, ADR-0063). `Collection::search(&SearchRequest)` and
+  `Collection::search_json(&str)` lower to the engine's `QueryRequest` and run on the latest published snapshot.
+  `SearchRequest` is a builder (`fields`, `filter`, `soft_filter`, `sort`, `limit`, `offset`, `after`, `facets`,
+  `explain`, `relax`, `proximity`); `SearchResponse` holds `Hit`s (document, score, level, explanation, cursor
+  token), facet counts, `Relaxation` and `query_truncated`, and `next_cursor()`. A damaged or foreign cursor token,
+  and `proximity` on a search that relaxes, are `InvalidArgument`. `Filter`, `FilterValue`, `Sort`, `SortKey`,
+  `Order`, `Missing`, `FacetRequest`, `FacetCounts`, `FacetValue`, `RelaxOptions`, `RelaxLevel` and `Explanation`
+  are re-exported.
 - `persia`: typed documents through `serde` (ROADMAP 10.1.4; SPEC §6.4.1). `Collection::put_struct(&T)` is exactly
   `put_json(serde_json::to_string(&T))`; `Collection::get_struct::<T>(id)` and `Collection::to_struct::<T>(&doc)` read
   a document's JSON output back. SPEC §6.4.1 is the only mapping. `persia` now depends on `serde` and `serde_json`.
