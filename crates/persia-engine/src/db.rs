@@ -49,6 +49,7 @@ mod flush;
 mod merging;
 mod objects;
 mod obsolete;
+mod parents;
 mod policy;
 mod read_only;
 mod recovery;
@@ -83,6 +84,7 @@ pub use merging::{MergeOutcome, MergeStats};
 pub use objects::ContainerObjects;
 use obsolete::Pin;
 pub use obsolete::{ObsoleteKind, ObsoleteObject};
+pub use parents::{create_parent_dirs, create_parent_dirs_in};
 pub use policy::{CommitPolicy, CommitReason, MemtableState};
 pub use read_only::{MappedReads, ReadOnlyDatabase, ReadOnlyOptions, Refreshed, SkippedAnalysis};
 pub use relaxed::{

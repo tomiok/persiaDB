@@ -24,6 +24,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   not relax takes it: on a request whose settings relax (the default), `"proximity": true` is
   `QueryRequestError::ProximityRelaxed`, whose message names the fix, `"relax": false`. A cursor from a search with
   the other setting is `RequestError::CursorProximity`.
+- `persia-engine`, `persia-storage`: durable creation of a database file's missing parent directories, for the
+  facade's open (ROADMAP 10.1.9; SPEC §4.5.2): `persia_engine::db::create_parent_dirs(path)` and
+  `create_parent_dirs_in(vfs, path)` create them from the outermost missing one inward and sync each new directory's
+  parent, through `persia_storage::vfs::create_dir_all_synced`, the walk `LocalStorage::open` already used.
 - `persia-engine`: one block cache per database (engine side of ROADMAP 10.2.5; SPEC §10.6). `DatabaseOptions` has
   `block_cache: Arc<BlockCache>`, by default a new cache of 8 MiB for that database, and every segment the database
   opens reads through it (recovery, flushes, merges and their verifying open, schema changes), no longer through the

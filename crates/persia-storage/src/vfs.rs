@@ -145,6 +145,42 @@ pub trait Vfs: Send + Sync + std::fmt::Debug {
     fn lock_beside(&self, path: &Path) -> io::Result<Option<Self::File>>;
 }
 
+/// Creates the directory `dir` and its missing ancestors on `vfs`, durably, and returns it made absolute.
+///
+/// A new name is durable only once its directory is synced (SPEC §4.5.2, §10.1.1), so the directories are created
+/// from the outermost missing ancestor inward and each new one's parent is synced after it. Ancestors that already
+/// exist are taken as durable, except `dir`'s own entry, which is synced too: another process may have created it
+/// without syncing it yet.
+///
+/// # Errors
+/// The OS error if a directory cannot be created or synced or `dir` cannot be made absolute;
+/// [`io::ErrorKind::InvalidInput`] if `dir` exists and is not a directory.
+pub fn create_dir_all_synced<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: impl Into<PathBuf>,
+) -> io::Result<PathBuf> {
+    let dir = std::path::absolute(dir.into())?;
+    let missing: Vec<&Path> = dir
+        .ancestors()
+        .filter(|p| !p.as_os_str().is_empty())
+        .take_while(|p| vfs.is_dir(p).is_err())
+        .collect();
+    for new in missing.iter().rev() {
+        match vfs.create_dir(new) {
+            Err(err) if err.kind() != io::ErrorKind::AlreadyExists => return Err(err),
+            _ => vfs.sync_dir(fs::parent_or_cwd(new))?,
+        }
+    }
+    if !vfs.is_dir(&dir)? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a directory", dir.display()),
+        ));
+    }
+    vfs.sync_dir(fs::parent_or_cwd(&dir))?;
+    Ok(dir)
+}
+
 /// The operating system's file system.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RealFs;
