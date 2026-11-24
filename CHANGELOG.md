@@ -25,7 +25,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   backends exist, and any other scheme is `InvalidArgument`. `close` makes a final commit and releases the writer
   lock; dropping a `Db` does the same and logs a failure.
 - `persia`: the SQLite-like open rule (ROADMAP 10.1.9; SPEC §8.1, §13.1). `Db::open` creates the missing parent
-  directories of a missing path, then the database; `create_if_missing(false)` and `read_only(true)` (which wins
+  directories of a missing path, then the database; the new directories are durable (each one's parent is synced, SPEC §4.5.2,
+  through `persia_engine::db::create_parent_dirs`); `create_if_missing(false)` and `read_only(true)` (which wins
   over creation) create nothing, and a missing path fails with `NotFound`. A path under a file that is not a
   directory is `InvalidArgument` in every mode. Opens racing on one missing path agree: one creates the database,
   the others open it or fail with `Conflict` as a second writer, and the file is never replaced. A blob pack left at

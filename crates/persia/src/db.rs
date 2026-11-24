@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::Duration;
 
 use persia_blob::PackStore;
-use persia_engine::db::{DatabaseReader, ReadOnlyDatabase, Snapshot};
+use persia_engine::db::{DatabaseReader, ReadOnlyDatabase, Snapshot, create_parent_dirs};
 use persia_engine::wal::Durability;
 
 use crate::error::Classified as _;
@@ -597,14 +597,29 @@ fn check_parents(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Creates the missing parent directories of `path` (SPEC §8.1: the facade's step, not the container's).
+/// Creates the missing parent directories of `path` durably (SPEC §8.1: the facade's step, not the container's;
+/// §4.5.2: each new directory's parent is synced, so a power loss after the first commit cannot lose the file's
+/// directory entry), with the engine's [`create_parent_dirs`].
 fn create_parents(path: &Path) -> Result<()> {
+    create_parents_with(path, |p: &Path| create_parent_dirs(p))
+}
+
+/// [`create_parents`] with `create` as the engine's walk: [`create_parent_dirs`] on the operating system's file
+/// system, or its `create_parent_dirs_in` on a simulated one in the crash tests below.
+fn create_parents_with(path: &Path, create: impl FnOnce(&Path) -> io::Result<()>) -> Result<()> {
     let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
         return Ok(());
     };
-    std::fs::create_dir_all(parent).map_err(|source| {
+    create(path).map_err(|source| {
+        let code = if source.kind() == io::ErrorKind::InvalidInput {
+            // An ancestor that is not a directory, created in between by someone else: `check_parents` refused
+            // the ones it saw.
+            ErrorCode::InvalidArgument
+        } else {
+            ErrorCode::Io
+        };
         Error::with_source(
-            ErrorCode::Io,
+            code,
             format_args!("creating the directory {}", parent.display()),
             source,
         )
@@ -703,4 +718,53 @@ fn dangling(path: &Path) -> Error {
             path.display()
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use persia_engine::db::create_parent_dirs_in;
+    use persia_storage::container::sim::CrashLoss;
+    use persia_storage::vfs::Vfs as _;
+    use persia_storage::vfs::sim::SimFs;
+
+    use super::*;
+
+    /// The facade's parent step, on a simulated file system: every directory it creates survives a crash that drops
+    /// whatever was not synced (SPEC §4.5.2).
+    #[test]
+    fn the_parents_an_open_creates_survive_a_crash() {
+        let fs = SimFs::new();
+        fs.create_dir(Path::new("/data")).unwrap();
+        fs.sync_dir(Path::new("/")).unwrap();
+        let path = Path::new("/data/2026/11/app.persia");
+        create_parents_with(path, |p| create_parent_dirs_in(&fs, p)).unwrap();
+        let crashed = fs.crash(CrashLoss::All);
+        for dir in ["/data", "/data/2026", "/data/2026/11"] {
+            assert!(crashed.is_dir(Path::new(dir)).unwrap(), "{dir}");
+        }
+        // A bare file name has no parent to create: the walk is not even called.
+        create_parents_with(Path::new("app.persia"), |_| Err(io::Error::other("called"))).unwrap();
+    }
+
+    #[test]
+    fn a_failed_parent_step_names_the_directory_and_its_cause() {
+        let fs = SimFs::new();
+        fs.create_dir(Path::new("/data")).unwrap();
+        fs.sync_dir(Path::new("/")).unwrap();
+        // An ancestor that became a file after `check_parents` looked: the engine's walk refuses it.
+        let file = fs.create_new(Path::new("/data/notes")).unwrap();
+        drop(file);
+        let err = create_parents_with(Path::new("/data/notes/app.persia"), |p| {
+            create_parent_dirs_in(&fs, p)
+        })
+        .unwrap_err();
+        assert_eq!(err.code(), ErrorCode::InvalidArgument, "{err}");
+        assert!(err.message().contains("/data/notes"), "{err}");
+        let io = create_parents_with(Path::new("/x/app.persia"), |_| {
+            Err(io::Error::other("disk on fire"))
+        })
+        .unwrap_err();
+        assert_eq!(io.code(), ErrorCode::Io);
+        assert!(std::error::Error::source(&io).is_some());
+    }
 }

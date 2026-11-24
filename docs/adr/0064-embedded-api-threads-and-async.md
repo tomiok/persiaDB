@@ -91,10 +91,9 @@ decisions d, e and o).
   parked threads; a shared pool would be a later change behind the same API.
 - After a bounded `Drop` gave up, nothing reports the final commit's failure but the log.
 - The 1 s period is not configurable. It bounds how late an idle flush or an interval commit can be.
-- **The parents `Db::open` creates** (ROADMAP 10.1.9) are made with `create_dir_all`, which does not sync the new
-  directories, so a power loss right after the first commit can lose the file's directory entry (SPEC §4.5.2). The
-  engine's `create_parent_dirs`, which syncs each directory it creates and its parent, replaces it once it is on
-  `main`; 10.1.9 is ticked only then.
+- **The parents `Db::open` creates** (ROADMAP 10.1.9) are made durable by the engine's `create_parent_dirs`, which
+  syncs each new directory's parent (SPEC §4.5.2), so a power loss right after the first commit cannot lose the file's
+  directory entry. (`std::fs::create_dir_all`, which syncs nothing, was used until that helper reached `main`.)
 - **Cloud backends and 0.6.11.** ROADMAP 12.1.1 plans `object_store` in `persia-storage`, and `object_store` needs
   tokio: under the no-runtime rule (item 10) it cannot be a dependency of an embedded crate as it is. Where the cloud
   backends' async I/O lives (a separate crate beside `persia-server`, a runtime-free client, or a change of the rule)
