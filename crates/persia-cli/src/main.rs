@@ -155,8 +155,10 @@ enum Command {
         deep: bool,
     },
     /// Rewrites a container without its dead frames (SPEC §4.6) and prints its size before and after. Opens the
-    /// database read-write, as a writer does, so it fails (status 1) while another writer has it open; commits no
-    /// document. The new file is renamed over the old one, so the path names a complete database at every instant.
+    /// database read-write, as a writer does, so it fails (status 1) while another writer has it open. It commits no
+    /// document of its own; as with any writer's open, recovery may flush a WAL backlog larger than the default
+    /// memtable or retire a cut commit (SPEC §8.6). The new file is renamed over the old one, so the path names a
+    /// complete database at every instant.
     /// The blob pack (`<name>.persia.blobs`) is not touched. Do not run it during a copy of the files taken with the
     /// database in use (SPEC §4.8). Read-only handles of other processes keep reading the old file until they
     /// refresh, which holds a writer's blob garbage collection back meanwhile (SPEC §9.5). Exits with status 3 on
@@ -164,7 +166,7 @@ enum Command {
     Compact {
         /// The container file.
         path: PathBuf,
-        /// Write one JSON object instead of text.
+        /// Write one JSON object (its keys are listed in the README's command-line section) instead of text.
         #[arg(long)]
         json: bool,
     },
@@ -175,7 +177,8 @@ enum Command {
     Stats {
         /// The container file.
         path: PathBuf,
-        /// Write one JSON object (a stable shape, see the crate docs) instead of text.
+        /// Write one JSON object (a stable shape: its keys are listed in the README's command-line section) instead
+        /// of text.
         #[arg(long)]
         json: bool,
     },
@@ -193,13 +196,15 @@ enum Command {
         /// Documents in the corpus.
         #[arg(long, default_value_t = bench::DEFAULT_DOCS, value_parser = clap::value_parser!(u32).range(1..))]
         docs: u32,
-        /// Queries in the mix, a fifth of each kind.
-        #[arg(long, default_value_t = bench::DEFAULT_QUERIES)]
+        /// Queries in the mix, a fifth of each kind; at most 10000000, since each one's latency is kept.
+        #[arg(long, default_value_t = bench::DEFAULT_QUERIES,
+              value_parser = clap::value_parser!(u32).range(..=i64::from(bench::MAX_QUERIES)))]
         queries: u32,
         /// The seed of the corpus and of the queries.
         #[arg(long, default_value_t = bench::DEFAULT_SEED)]
         seed: u64,
-        /// Write one JSON object (a stable shape, see the crate docs) instead of text.
+        /// Write one JSON object (a stable shape: its keys are listed in the README's command-line section) instead
+        /// of text.
         #[arg(long)]
         json: bool,
     },
@@ -274,7 +279,8 @@ enum DumpCommand {
     /// The live documents of one collection of a database, as JSON Lines (one document per line, in the output form
     /// of SPEC §6.4.1: what `get` returns, so stored fields only, and a blob as its reference). Read-only, without
     /// the writer lock. Order: the segments oldest first, each by docid, then the documents of the WAL records not
-    /// yet in a segment, as logged. Documents are streamed, one at a time. Exits with status 3 on corruption, 4 when
+    /// yet in a segment, as logged. The segments' documents are streamed one at a time; the WAL's are in memory
+    /// already, as the open replayed them. Exits with status 3 on corruption, 4 when
     /// the file is not a Persia container, and 1 on any other failure (a collection the database lacks included).
     Documents {
         /// The container file.

@@ -64,7 +64,8 @@ use serde_json::{Value, json};
 
 use crate::open;
 
-/// The blob pack of the container `<name>.persia` is `<name>.persia.blobs` (SPEC §9.3).
+/// The blob pack of the container `<name>.persia` is `<name>.persia.blobs` (SPEC §9.3). `persia_blob::pack_path` is
+/// that rule, but the CLI does not depend on `persia-blob` and the facade does not re-export it.
 const PACK_SUFFIX: &str = ".blobs";
 
 /// What `persia stats` reports (the module docs describe each number).
@@ -271,6 +272,8 @@ fn hex(db_uuid: [u8; 16]) -> String {
 impl Stats {
     /// The `--json` object (the module docs give its shape).
     pub fn to_json(&self) -> Value {
+        // The header does not store `format_major`: `Header::decode` refuses any major but this build's (SPEC §4.2),
+        // so a container that opened has `FORMAT_MAJOR`.
         json!({
             "path": self.path.display().to_string(),
             "format": {"major": FORMAT_MAJOR, "minor": self.format_minor},

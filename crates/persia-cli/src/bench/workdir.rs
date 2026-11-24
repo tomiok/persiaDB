@@ -157,8 +157,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut base = root.path().to_path_buf();
         while base.as_os_str().len() < 4090 {
-            let room = 4090 - base.as_os_str().len() - 1;
-            base.push("d".repeat(room.min(200)));
+            let left = 4090 - base.as_os_str().len() - 1;
+            base.push("d".repeat(left.min(200)));
         }
         std::fs::create_dir_all(&base).unwrap();
         assert!(base.is_dir());

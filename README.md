@@ -160,13 +160,29 @@ The binary is `persia`. These subcommands exist:
 | `persia store sweep <dir> [--force]` | Removes temporary files a live writer does not hold. |
 | `persia verify <file>` | Checks a whole database read-only: every check an open makes, every segment's bytes, one live copy per document id. Exit status 3 on corruption, 4 when the file is not a Persia container. |
 | `persia stats <file> [--json]` | What a read-only open reports, without the writer lock: the last commit, the container's live and dead space, the WAL after the last commit, the blob pack's size, and each collection's schema, documents and segments. |
-| `persia dump documents <file> --collection <name>` | The collection's live documents as JSON Lines (the `get` form of a document), in storage order, one at a time. |
-| `persia compact <file> [--json]` | Rewrites the container without its dead frames and prints the space before and after. Opens read-write, so it fails while another writer has the database. Leaves the blob pack alone. |
+| `persia dump documents <file> --collection <name>` | The collection's live documents as JSON Lines (the `get` form of a document), in storage order. A segment's documents are streamed one at a time; the WAL's are in memory, as the open replayed them. |
+| `persia compact <file> [--json]` | Rewrites the container without its dead frames and prints the space before and after. Opens read-write, so it fails while another writer has the database. Commits no document of its own, but its open recovers as any writer's does (a WAL backlog over the default 64 MiB memtable is flushed). Leaves the blob pack alone. |
 | `persia bench [--dir <dir>] [--docs <n>] [--queries <n>] [--seed <n>] [--json]` | A quick local micro-benchmark on a seeded synthetic corpus in a scratch directory it removes. Its numbers are local guidance only, not a published benchmark. |
+
+Every command exits with status 0 on success, 1 on any other failure, 2 on a usage error, 3 on corrupt Persia data (or, for `verify`, a missing referenced blob), and 4 when the file is not a Persia container. The `persia-cli` crate docs ([`main.rs`](./crates/persia-cli/src/main.rs)) hold the table of each command's status by what it finds at the path.
+
+**`--json` output.** One JSON object on one line. These are its keys; keys are only ever added. Byte counts are bytes, times are nanoseconds.
+
+- `persia stats --json`:
+  - `path` (canonical), `format` `{major, minor}`, `db_uuid` (32 hex digits), `seq` (the last commit's);
+  - `container` `{bytes, live_bytes, dead_bytes, compaction_due, uncommitted_frames, uncommitted_bytes}`: `bytes` is the end of the valid frames, `compaction_due` whether a writer with the default thresholds would compact, the `uncommitted_*` the valid frames after the last commit;
+  - `wal` `{wal_start, log_end, replayed_records, frames_after_commit, bytes_after_commit}`;
+  - `collections`, by name: `{name, schema: {hash, strict, fields: [{name, type}]}, documents, segment_documents, deleted, wal_documents, segment_bytes, segments: [{id, documents, deleted, bytes}]}`; `documents` counts the live documents a reader sees;
+  - `blob_pack` `{present, bytes}`, `bytes` `null` without a pack.
+- `persia compact --json`: `seq` (the compacted file's), `before` and `after` `{bytes, live_bytes, dead_bytes}`, `reclaimed_bytes`.
+- `persia bench --json`:
+  - `notice` (the numbers are local guidance only), `build` (`release` or `debug`), `seed`, `docs`, `queries`;
+  - `corpus` `{fingerprint, container_bytes}`, `indexing` `{nanos, docs_per_second, commit_nanos}` (`docs_per_second` `null` when the clock read no time), `query_mix` `{fingerprint}` (fingerprints are 16 hex digits);
+  - `query_kinds`, in rotation order (`term`, `terms`, `phrase`, `filter`, `typo`): `{kind, count, hits, truncated, latency_nanos: {p50, p90, p99, max}}`. `latency_nanos` is `null` for a kind that ran no query. `truncated` counts the queries whose page the relaxation time budget (SPEC §7.6) cut short; `hits` repeat for a seed only where `truncated` is 0.
 
 The golden segment above is format 1.0 and holds 300 documents (`doc_count` in the inspect output; see [`crates/persia-cli/tests/segment.rs`](./crates/persia-cli/tests/segment.rs)).
 
-**Planned** (ROADMAP 10.4): `compact`, `stats`, `import` (JSONL), `search`, and `bench`.
+**Planned** (ROADMAP 10.4.2): `import` (JSONL) and `search`.
 
 ### Planned embedded API
 

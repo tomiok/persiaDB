@@ -69,13 +69,26 @@ fn entries(dir: &Path) -> usize {
     std::fs::read_dir(dir).unwrap().count()
 }
 
-/// What a run did, without what it measured: the work a seed fixes.
-fn work(report: &Json) -> Json {
+/// What a run did, without what it measured: the work a seed fixes. The hits are part of it only while the
+/// relaxation budget, which reads the wall clock, truncated no query of the kind (`truncated` is 0) in `both` runs.
+fn work(report: &Json, both: &[&Json]) -> Json {
+    let calm = |kind: usize| {
+        both.iter()
+            .all(|r| r["query_kinds"][kind]["truncated"].as_u64() == Some(0))
+    };
     let kinds: Vec<Json> = report["query_kinds"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|k| serde_json::json!([k["kind"], k["count"], k["hits"]]))
+        .enumerate()
+        .map(|(i, k)| {
+            let hits = if calm(i) {
+                k["hits"].clone()
+            } else {
+                Json::Null
+            };
+            serde_json::json!([k["kind"], k["count"], hits])
+        })
         .collect();
     serde_json::json!([
         report["seed"],
@@ -160,7 +173,10 @@ fn bench_json_has_its_documented_shape() {
         ]
     );
     for kind in kinds {
-        assert_eq!(keys(kind), set(&["kind", "count", "hits", "latency_nanos"]));
+        assert_eq!(
+            keys(kind),
+            set(&["kind", "count", "hits", "truncated", "latency_nanos"])
+        );
         let latency = &kind["latency_nanos"];
         assert_eq!(keys(latency), set(&["p50", "p90", "p99", "max"]));
         let at = |key: &str| latency[key].as_u64().unwrap();
@@ -168,10 +184,16 @@ fn bench_json_has_its_documented_shape() {
             at("p50") <= at("p90") && at("p90") <= at("p99") && at("p99") <= at("max"),
             "{kind}"
         );
-        // Every query is drawn from the corpus, so each kind finds documents, at most a page of 20 per query.
+        // Every query is drawn from the corpus, so each kind finds documents, at most a page of 20 per query; a
+        // page the relaxation budget truncated (on a loaded machine) may hold fewer.
         let hits = kind["hits"].as_u64().unwrap();
         let count = kind["count"].as_u64().unwrap();
-        assert!(hits >= count && hits <= count * 20, "{kind}");
+        let truncated = kind["truncated"].as_u64().unwrap();
+        assert!(truncated <= count, "{kind}");
+        assert!(hits <= count * 20, "{kind}");
+        if truncated == 0 {
+            assert!(hits >= count, "{kind}");
+        }
     }
     assert_eq!(entries(dir.path()), 0, "the scratch directory is removed");
 }
@@ -181,7 +203,8 @@ fn the_same_seed_gives_the_same_corpus_and_queries() {
     let dir = tempfile::tempdir().unwrap();
     let first = bench_json(dir.path(), "200", "40", "42");
     let again = bench_json(dir.path(), "200", "40", "42");
-    assert_eq!(work(&first), work(&again));
+    let both = [&first, &again];
+    assert_eq!(work(&first, &both), work(&again, &both));
     let other = bench_json(dir.path(), "200", "40", "43");
     assert_ne!(
         first["corpus"]["fingerprint"],
@@ -248,7 +271,16 @@ fn bench_text_says_first_that_its_numbers_are_local_guidance() {
         .collect();
     assert_eq!(
         table[0],
-        ["kind", "count", "hits", "p50", "p90", "p99", "max"]
+        [
+            "kind",
+            "count",
+            "hits",
+            "truncated",
+            "p50",
+            "p90",
+            "p99",
+            "max"
+        ]
     );
     let kinds: Vec<(&str, &str)> = table[1..].iter().map(|row| (row[0], row[1])).collect();
     assert_eq!(
@@ -346,6 +378,9 @@ fn bench_usage_errors_exit_with_2() {
         &["bench", "--queries", "-1"],
         &["bench", "--seed", "x"],
         &["bench", "--docs", "4294967296"],
+        // `--queries` is capped, so a run cannot ask for gigabytes of latencies.
+        &["bench", "--queries", "10000001"],
+        &["bench", "--queries", "4294967295"],
         &["bench", "extra"],
     ] {
         let out = persia(args);
@@ -362,6 +397,7 @@ fn bench_without_queries_reports_the_indexing_alone() {
     for kind in report["query_kinds"].as_array().unwrap() {
         assert_eq!(kind["count"], 0);
         assert_eq!(kind["hits"], 0);
+        assert_eq!(kind["truncated"], 0);
         assert!(kind["latency_nanos"].is_null(), "{kind}");
     }
     let text = stdout(&persia(&[
@@ -374,5 +410,5 @@ fn bench_without_queries_reports_the_indexing_alone() {
         "0",
     ]));
     let last: Vec<&str> = text.lines().last().unwrap().split_whitespace().collect();
-    assert_eq!(last, ["typo", "0", "0", "-", "-", "-", "-"]);
+    assert_eq!(last, ["typo", "0", "0", "0", "-", "-", "-", "-"]);
 }

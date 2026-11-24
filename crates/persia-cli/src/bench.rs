@@ -16,8 +16,14 @@
 //!    `typo`), each compiled from user text and searched with the collection's default relaxation (SPEC §7.6), as a
 //!    default search is, for the first page of 20 hits. A latency covers the compilation and the search.
 //!
+//! One untimed query, the one after the mix, runs first: it starts the search thread pool, which the first timed query
+//! would otherwise pay for.
+//!
 //! The same seed gives the same corpus and the same queries: the report carries a fingerprint of each, and the hits
-//! each kind found, so two runs can be seen to have done the same work. Timings are never the same twice.
+//! each kind found, so two runs can be seen to have done the same work. Timings are never the same twice. The hits are
+//! the same only while no query is `truncated`: the relaxation cascade keeps to a time budget on the wall clock
+//! (`budget_ms`, SPEC §7.6), so on a loaded machine a page may stop early with fewer hits. Each kind reports how many
+//! of its queries the budget truncated; compare the hits of two runs only where both report none.
 //!
 //! `--json` writes one object on one line, with these keys and no others (times in nanoseconds):
 //!
@@ -30,7 +36,7 @@
 //!   "indexing": {"nanos": .., "docs_per_second": .. or null, "commit_nanos": ..},
 //!   "query_mix": {"fingerprint": 16 hex digits},
 //!   "query_kinds": [ in rotation order
-//!     {"kind": "term", "count": .., "hits": .., "latency_nanos": {"p50": .., "p90": .., "p99": .., "max": ..} or null}
+//!     {"kind": "term", "count": .., "hits": .., "truncated": .., "latency_nanos": {"p50": .., "p90": .., "p99": .., "max": ..} or null}
 //!   ]
 //! }
 //! ```
@@ -70,6 +76,9 @@ pub const NOTICE: &str = "local guidance only, not a published benchmark: these 
 pub const DEFAULT_DOCS: u32 = 20_000;
 /// `--queries` when not given.
 pub const DEFAULT_QUERIES: u32 = 1000;
+/// The most `--queries` a run takes: every query's latency is kept for the percentiles (8 bytes each), so the cap
+/// bounds that memory at 80 MB.
+pub const MAX_QUERIES: u32 = 10_000_000;
 /// `--seed` when not given.
 pub const DEFAULT_SEED: u64 = 42;
 
@@ -123,15 +132,19 @@ pub struct Report {
 struct KindReport {
     kind: QueryKind,
     count: u64,
-    /// Hits returned, over the kind's queries (at most 20 each): the same for the same seed and sizes.
+    /// Hits returned, over the kind's queries (at most 20 each): the same for the same seed and sizes while
+    /// `truncated` is zero.
     hits: u64,
+    /// The kind's queries whose page the relaxation budget truncated (SPEC §7.6 `truncated`).
+    truncated: u64,
     latency: Option<Percentiles>,
 }
 
 /// Runs the benchmark `options` describes and writes its report to `out`.
 pub fn bench(out: &mut dyn Write, options: &Options) -> Result<()> {
     let base = options.dir.clone().unwrap_or_else(std::env::temp_dir);
-    let report = run_in(&base, options)?;
+    // The relaxation budget reads the system clock, as an application's search does.
+    let report = run_in(&base, options, &Execution::default())?;
     if options.json {
         writeln!(out, "{}", report.to_json())?;
     } else {
@@ -140,9 +153,9 @@ pub fn bench(out: &mut dyn Write, options: &Options) -> Result<()> {
     Ok(())
 }
 
-/// One run in a new scratch directory under `base`, removed before this returns.
-pub fn run_in(base: &Path, options: &Options) -> Result<Report> {
-    in_scratch(base, |dir| run(&dir.join(DATABASE), options))
+/// One run in a new scratch directory under `base`, removed before this returns. The queries search with `exec`.
+pub fn run_in(base: &Path, options: &Options, exec: &Execution) -> Result<Report> {
+    in_scratch(base, |dir| run(&dir.join(DATABASE), options, exec))
 }
 
 /// Runs `f` on a new scratch directory under `base` and removes the directory with everything `f` left in it: after
@@ -156,7 +169,7 @@ fn in_scratch<T>(base: &Path, f: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
 }
 
 /// Indexes the corpus into a new database at `path` and runs the query mix on it.
-fn run(path: &Path, options: &Options) -> Result<Report> {
+fn run(path: &Path, options: &Options, exec: &Execution) -> Result<Report> {
     let schema = schema()?;
     let fields = Fields::of(&schema)?;
     let mut db = Database::create(path, DatabaseOptions::default())
@@ -188,7 +201,7 @@ fn run(path: &Path, options: &Options) -> Result<Report> {
     let commit = started.elapsed();
     let container_bytes = db.container().end();
 
-    let (query_mix, kinds) = search(&db, &fields, options)?;
+    let (query_mix, kinds) = search(&db, &fields, options, exec)?;
     Ok(Report {
         seed: options.seed,
         docs: options.docs,
@@ -207,6 +220,7 @@ fn search(
     db: &Database,
     fields: &Fields,
     options: &Options,
+    exec: &Execution,
 ) -> Result<(Fingerprint, Vec<KindReport>)> {
     let snapshot = db.snapshot();
     let collection = snapshot
@@ -222,43 +236,74 @@ fn search(
     let relax = RelaxPlan::new(schema.relaxation(), &RelaxOptions::default())
         .context("planning the relaxation")?;
     let request = SearchRequest::default();
-    let exec = Execution::default();
-
-    let mut mix = Fingerprint::default();
-    let mut samples: Vec<(QueryKind, Vec<u64>, u64)> = QueryKind::ALL
-        .iter()
-        .map(|kind| (*kind, Vec::new(), 0))
-        .collect();
-    for index in 0..u64::from(options.queries) {
-        let query = corpus::query(options.seed, index, u64::from(options.docs));
-        mix.query(&query);
-        let started = Instant::now();
+    let one = |query: &SyntheticQuery| {
         let text = compiler.compile(&query.text, &defaults, &limits);
-        let searched = match fields.filter(&query) {
+        let searched = match fields.filter(query) {
             Some(filter) => text.with_filter([filter]),
             None => text,
         };
-        let results = views
-            .search_relaxed(&searched, &request, &relax, &exec)
-            .with_context(|| format!("searching {:?}", query.text))?;
+        views
+            .search_relaxed(&searched, &request, &relax, exec)
+            .with_context(|| format!("searching {:?}", query.text))
+    };
+
+    let docs = u64::from(options.docs);
+    let queries = u64::from(options.queries);
+    if queries > 0 {
+        // Untimed and uncounted: it starts the search thread pool (the module docs).
+        one(&corpus::query(options.seed, queries, docs))?;
+    }
+    let mut mix = Fingerprint::default();
+    let mut samples: Vec<Sample> = QueryKind::ALL
+        .iter()
+        .map(|kind| Sample::new(*kind))
+        .collect();
+    for index in 0..queries {
+        let query = corpus::query(options.seed, index, docs);
+        mix.query(&query);
+        let started = Instant::now();
+        let results = one(&query)?;
         let nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        if let Some((_, latencies, hits)) =
-            samples.iter_mut().find(|(kind, ..)| *kind == query.kind)
-        {
-            latencies.push(nanos);
-            *hits = hits.saturating_add(u64::try_from(results.hits.len()).unwrap_or(u64::MAX));
+        if let Some(sample) = samples.iter_mut().find(|s| s.kind == query.kind) {
+            sample.latencies.push(nanos);
+            let found = u64::try_from(results.hits.len()).unwrap_or(u64::MAX);
+            sample.hits = sample.hits.saturating_add(found);
+            sample.truncated = sample
+                .truncated
+                .saturating_add(u64::from(results.relaxation.truncated));
         }
     }
-    let kinds = samples
-        .into_iter()
-        .map(|(kind, latencies, hits)| KindReport {
-            kind,
-            count: u64::try_from(latencies.len()).unwrap_or(u64::MAX),
-            hits,
-            latency: Percentiles::of(&latencies),
-        })
-        .collect();
+    let kinds = samples.into_iter().map(Sample::report).collect();
     Ok((mix, kinds))
+}
+
+/// What the queries of one kind measured, while they run.
+struct Sample {
+    kind: QueryKind,
+    latencies: Vec<u64>,
+    hits: u64,
+    truncated: u64,
+}
+
+impl Sample {
+    const fn new(kind: QueryKind) -> Self {
+        Self {
+            kind,
+            latencies: Vec::new(),
+            hits: 0,
+            truncated: 0,
+        }
+    }
+
+    fn report(self) -> KindReport {
+        KindReport {
+            kind: self.kind,
+            count: u64::try_from(self.latencies.len()).unwrap_or(u64::MAX),
+            hits: self.hits,
+            truncated: self.truncated,
+            latency: Percentiles::of(&self.latencies),
+        }
+    }
 }
 
 /// The schema of the bench collection. `body` indexes positions, so a phrase is a phrase there (SPEC §7.1.1).
@@ -399,8 +444,8 @@ impl Report {
         }
         writeln!(
             out,
-            "\n{:<8} {:>8} {:>10} {:>12} {:>12} {:>12} {:>12}",
-            "kind", "count", "hits", "p50", "p90", "p99", "max"
+            "\n{:<8} {:>8} {:>10} {:>10} {:>12} {:>12} {:>12} {:>12}",
+            "kind", "count", "hits", "truncated", "p50", "p90", "p99", "max"
         )?;
         for kind in &self.kinds {
             let cell = |pick: fn(&Percentiles) -> u64| {
@@ -410,10 +455,11 @@ impl Report {
             };
             writeln!(
                 out,
-                "{:<8} {:>8} {:>10} {:>12} {:>12} {:>12} {:>12}",
+                "{:<8} {:>8} {:>10} {:>10} {:>12} {:>12} {:>12} {:>12}",
                 kind.kind.name(),
                 kind.count,
                 kind.hits,
+                kind.truncated,
                 cell(|l| l.p50),
                 cell(|l| l.p90),
                 cell(|l| l.p99),
@@ -430,6 +476,7 @@ impl KindReport {
             "kind": self.kind.name(),
             "count": self.count,
             "hits": self.hits,
+            "truncated": self.truncated,
             "latency_nanos": self.latency.map(|l| json!({"p50": l.p50, "p90": l.p90, "p99": l.p99, "max": l.max})),
         })
     }
@@ -437,6 +484,8 @@ impl KindReport {
 
 #[cfg(test)]
 mod tests {
+    use persia_engine::db::ManualClock;
+
     use super::*;
 
     fn options(docs: u32, queries: u32, seed: u64) -> Options {
@@ -446,6 +495,28 @@ mod tests {
             queries,
             seed,
             json: false,
+        }
+    }
+
+    /// An execution whose relaxation budget reads a clock that never moves, so no page is truncated and the hits
+    /// are a function of the seed and sizes alone, on any machine and under any load.
+    fn frozen() -> Execution {
+        Execution::default().budget_clock(std::sync::Arc::new(ManualClock::new(0)))
+    }
+
+    /// A clock that moves a second each time it is read: every relaxation step after L0 is past its budget.
+    #[derive(Debug)]
+    struct Ticking(std::sync::Mutex<Instant>);
+
+    impl persia_engine::db::Clock for Ticking {
+        fn now(&self) -> Instant {
+            let mut now = self.0.lock().unwrap();
+            *now += Duration::from_secs(1);
+            *now
+        }
+
+        fn unix_micros(&self) -> i64 {
+            0
         }
     }
 
@@ -468,6 +539,7 @@ mod tests {
                     kind: QueryKind::Term,
                     count: 4,
                     hits: 61,
+                    truncated: 3,
                     latency: Some(Percentiles {
                         p50: 12_345,
                         p90: 999,
@@ -479,6 +551,7 @@ mod tests {
                     kind: QueryKind::Typo,
                     count: 0,
                     hits: 0,
+                    truncated: 0,
                     latency: None,
                 },
             ],
@@ -496,8 +569,8 @@ mod tests {
                 r#""indexing":{{"commit_nanos":20250000,"docs_per_second":2000,"nanos":1500000000}},"#,
                 r#""notice":"{notice}","queries":7,"#,
                 r#""query_kinds":[{{"count":4,"hits":61,"kind":"term","#,
-                r#""latency_nanos":{{"max":2000000000,"p50":12345,"p90":999,"p99":1500000}}}},"#,
-                r#"{{"count":0,"hits":0,"kind":"typo","latency_nanos":null}}],"#,
+                r#""latency_nanos":{{"max":2000000000,"p50":12345,"p90":999,"p99":1500000}},"truncated":3}},"#,
+                r#"{{"count":0,"hits":0,"kind":"typo","latency_nanos":null,"truncated":0}}],"#,
                 r#""query_mix":{{"fingerprint":"{mix}"}},"seed":42}}"#,
             ),
             corpus = report.corpus.hex(),
@@ -523,9 +596,9 @@ indexing          2000 docs/s (1.500 s)
 commit            20.250 ms
 queries           7, fingerprint {}
 
-kind        count       hits          p50          p90          p99          max
-term            4         61    12.345 µs       999 ns     1.500 ms      2.000 s
-typo            0          0            -            -            -            -
+kind        count       hits  truncated          p50          p90          p99          max
+term            4         61          3    12.345 µs       999 ns     1.500 ms      2.000 s
+typo            0          0          0            -            -            -            -
 ",
             build(),
             report.corpus.hex(),
@@ -612,7 +685,7 @@ typo            0          0            -            -            -            -
             let kinds: Vec<_> = report
                 .kinds
                 .iter()
-                .map(|k| (k.kind, k.count, k.hits))
+                .map(|k| (k.kind, k.count, k.hits, k.truncated))
                 .collect();
             (
                 report.corpus,
@@ -621,15 +694,16 @@ typo            0          0            -            -            -            -
                 kinds,
             )
         };
-        let first = run_in(base.path(), &options(300, 60, 42)).unwrap();
-        let again = run_in(base.path(), &options(300, 60, 42)).unwrap();
+        let first = run_in(base.path(), &options(300, 60, 42), &frozen()).unwrap();
+        let again = run_in(base.path(), &options(300, 60, 42), &frozen()).unwrap();
         assert_eq!(work(&first), work(&again));
-        let other_seed = run_in(base.path(), &options(300, 60, 43)).unwrap();
+        assert!(first.kinds.iter().all(|k| k.truncated == 0), "{first:?}");
+        let other_seed = run_in(base.path(), &options(300, 60, 43), &frozen()).unwrap();
         assert_ne!(first.corpus, other_seed.corpus);
         assert_ne!(first.query_mix, other_seed.query_mix);
-        let more_docs = run_in(base.path(), &options(301, 60, 42)).unwrap();
+        let more_docs = run_in(base.path(), &options(301, 60, 42), &frozen()).unwrap();
         assert_ne!(first.corpus, more_docs.corpus);
-        let more_queries = run_in(base.path(), &options(300, 61, 42)).unwrap();
+        let more_queries = run_in(base.path(), &options(300, 61, 42), &frozen()).unwrap();
         assert_eq!(first.corpus, more_queries.corpus);
         assert_ne!(first.query_mix, more_queries.query_mix);
         // Every run removed its scratch directory.
@@ -643,7 +717,7 @@ typo            0          0            -            -            -            -
         let base = tempfile::tempdir().unwrap();
         let work = WorkDir::create_in(base.path()).unwrap();
         let path = work.path().join(DATABASE);
-        let report = run(&path, &options(600, 50, 7)).unwrap();
+        let report = run(&path, &options(600, 50, 7), &frozen()).unwrap();
         assert_eq!((report.seed, report.docs, report.queries), (7, 600, 50));
         assert_eq!(
             report.container_bytes,
@@ -662,6 +736,7 @@ typo            0          0            -            -            -            -
         let kinds: Vec<_> = report.kinds.iter().map(|k| (k.kind, k.count)).collect();
         assert_eq!(kinds, QueryKind::ALL.map(|kind| (kind, 10)));
         for kind in &report.kinds {
+            assert_eq!(kind.truncated, 0, "{kind:?}");
             assert!(kind.hits >= kind.count, "{kind:?}");
             assert!(kind.hits <= kind.count * 20, "{kind:?}");
             let latency = kind.latency.unwrap();
@@ -694,11 +769,35 @@ typo            0          0            -            -            -            -
         assert_eq!(collection.get("doc-00000600").unwrap(), None);
     }
 
+    /// A relaxation budget that has always run out by the next read: the `typo` queries, which find their word only
+    /// through relaxation, are counted as truncated (each at most once), and the hits of a truncated page are the
+    /// ones it found before it stopped.
+    #[test]
+    fn a_page_the_budget_truncated_is_counted_per_kind() {
+        let base = tempfile::tempdir().unwrap();
+        let ticking = Execution::default().budget_clock(std::sync::Arc::new(Ticking(
+            std::sync::Mutex::new(Instant::now()),
+        )));
+        let report = run_in(base.path(), &options(600, 50, 7), &ticking).unwrap();
+        let calm = run_in(base.path(), &options(600, 50, 7), &frozen()).unwrap();
+        for kind in &report.kinds {
+            assert!(kind.truncated <= kind.count, "{kind:?}");
+        }
+        let typo = |r: &Report| r.kinds.iter().find(|k| k.kind == QueryKind::Typo).cloned();
+        let (typo, calm_typo) = (typo(&report).unwrap(), typo(&calm).unwrap());
+        assert!(typo.truncated > 0, "{report:?}");
+        assert!(typo.hits < calm_typo.hits, "{typo:?} {calm_typo:?}");
+        assert_eq!(
+            (report.corpus, report.query_mix),
+            (calm.corpus, calm.query_mix)
+        );
+    }
+
     /// A mix shorter than the rotation leaves kinds without a query: they are reported with no latency.
     #[test]
     fn a_kind_without_a_query_has_no_latency() {
         let base = tempfile::tempdir().unwrap();
-        let report = run_in(base.path(), &options(50, 2, 1)).unwrap();
+        let report = run_in(base.path(), &options(50, 2, 1), &frozen()).unwrap();
         let found: Vec<_> = report
             .kinds
             .iter()
@@ -738,12 +837,12 @@ typo            0          0            -            -            -            -
         assert_eq!(std::fs::read_dir(base.path()).unwrap().count(), 1);
 
         // A base that is not a directory fails before anything is created.
-        let err = run_in(&existing, &options(10, 5, 1)).unwrap_err();
+        let err = run_in(&existing, &options(10, 5, 1), &frozen()).unwrap_err();
         assert!(format!("{err:#}").contains("is not a directory"), "{err:#}");
         assert_eq!(std::fs::read(&existing).unwrap(), b"a user's database");
 
         // A successful run beside a database of the same name leaves it alone too.
-        run_in(base.path(), &options(20, 5, 1)).unwrap();
+        run_in(base.path(), &options(20, 5, 1), &frozen()).unwrap();
         assert_eq!(std::fs::read(&existing).unwrap(), b"a user's database");
         assert_eq!(std::fs::read_dir(base.path()).unwrap().count(), 1);
     }

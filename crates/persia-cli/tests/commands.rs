@@ -754,6 +754,101 @@ fn compact_json_has_its_documented_shape() {
     assert_eq!(stats["container"]["dead_bytes"], 0);
 }
 
+/// A container whose first commit never completed (created, superblock `seq` 0; SPEC §8.6 reads it as the empty
+/// manifest): `seq` 0, no collection, nothing dead, no pack. A database's create commits once, so it reads `seq` 1.
+#[test]
+fn stats_of_a_container_without_a_commit_reports_seq_0() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    drop(persia_storage::container::Container::create(&path).unwrap());
+    let stats = json(&persia(&["stats", path_arg(&path), "--json"]));
+    assert_eq!(stats["seq"], 0, "{stats}");
+    assert_eq!(stats["collections"], serde_json::json!([]));
+    assert_eq!(stats["container"]["dead_bytes"], 0);
+    assert_eq!(stats["container"]["compaction_due"], false);
+    assert_eq!(stats["wal"]["replayed_records"], 0);
+    assert_eq!(stats["blob_pack"]["present"], false);
+    let text = stdout(&persia(&["stats", path_arg(&path)]));
+    assert_eq!(row(&rows(&text), "seq"), "0");
+
+    let created = dir.path().join("created.persia");
+    drop(Database::create(&created, DatabaseOptions::default()).unwrap());
+    let stats = json(&persia(&["stats", path_arg(&created), "--json"]));
+    assert_eq!(stats["seq"], 1, "{stats}");
+    assert_eq!(stats["collections"], serde_json::json!([]));
+}
+
+/// A crash during a compaction leaves the old file and `<name>.compact.*` beside it (SPEC §4.6): `container sweep`
+/// removes that file, and the database still compacts.
+#[test]
+fn container_sweep_removes_what_a_crashed_compaction_left() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let path = root.join("app.persia");
+    rewritten(&path, 3);
+    let leftover = root.join("app.persia.compact.0123456789abcdef.0");
+    std::fs::write(&leftover, b"half a compacted container").unwrap();
+    let swept = stdout(&persia(&["container", "sweep", path_arg(&path)]));
+    assert_eq!(
+        swept,
+        format!("removed\ttemporary\tfree\t{}\n", leftover.display())
+    );
+    assert!(!leftover.exists());
+    assert!(persia(&["compact", path_arg(&path)]).status.success());
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+    assert!(persia(&["verify", path_arg(&path)]).status.success());
+}
+
+/// `compact` commits no document of its own, but its open is a writer's open: a WAL backlog larger than the default
+/// memtable (64 MiB) is flushed into a commit by recovery (SPEC §8.6), so `seq` rises by more than one and the backlog
+/// lands in a segment. The application that logged it had a larger memtable, which the command cannot know.
+#[test]
+fn compact_after_a_wal_backlog_over_the_default_memtable_commits_it_in_recovery() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let schema = SchemaBuilder::new("notes")
+        .field("body", FieldKind::Text(TextOptions::default()))
+        .strict(false)
+        .build()
+        .unwrap();
+    let mut options = DatabaseOptions::default();
+    options.policy.flush.memtable_bytes = 1 << 30;
+    let mut db = Database::create(&path, options).unwrap();
+    db.create_collection(schema.clone()).unwrap();
+    db.commit().unwrap();
+    let seq = db.seq();
+    // 18 documents of 4 MiB each (an extra field, stored and not analyzed): 72 MiB, all in the WAL.
+    let pad = serde_json::Value::String("p".repeat(4 << 20));
+    for i in 0..18 {
+        let mut doc = note(&schema, &format!("big{i:02}"), "padded");
+        doc.insert_extra("pad", pad.clone());
+        db.put("notes", &doc, Durability::Buffered).unwrap();
+    }
+    db.put("notes", &note(&schema, "last", "synced"), Durability::Fsync)
+        .unwrap();
+    assert_eq!(db.seq(), seq);
+    drop(db);
+
+    let done = json(&persia(&["compact", "--json", path_arg(&path)]));
+    let compacted = done["seq"].as_u64().unwrap();
+    assert!(compacted >= seq + 2, "{done} after seq {seq}");
+    let after = read_only(&path);
+    assert_eq!(after.seq(), compacted);
+    let snapshot = after.snapshot();
+    let notes = snapshot.collection("notes").unwrap();
+    let in_segments: u64 = notes
+        .segments()
+        .iter()
+        .map(|s| u64::from(s.doc_count()))
+        .sum();
+    assert!(in_segments > 0, "the backlog was flushed into a segment");
+    assert_eq!(in_segments + u64::from(notes.memtable().live_count()), 19);
+    assert!(notes.get("last").unwrap().is_some());
+}
+
 #[cfg(unix)]
 #[test]
 fn compact_fails_while_a_writer_holds_the_database() {

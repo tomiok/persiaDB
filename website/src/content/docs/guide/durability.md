@@ -136,7 +136,7 @@ The `persia` binary checks a database without taking the writer lock and without
 
 Exit status: 0 success, 1 another failure, 2 usage error, 3 corrupt Persia data or a missing referenced blob, 4 the file is not a Persia container. A header that has the magic and then fails its CRC is damage (status 3). A wrong magic, or a file shorter than the magic, is status 4.
 
-`persia verify` analyzes replayed text with the built-in analyzers. A schema can name only those analyzers today. Loading a custom analyzer for verify is planned (ROADMAP 6.6.8). `persia stats` and `persia dump documents` read a database the same way: no lock, nothing written. `persia compact` opens it read-write, so it fails (status 1) while another writer holds the lock. Import and search are not in the binary (ROADMAP 10.4.2).
+`persia verify` analyzes replayed text with the built-in analyzers only. A schema may name an analyzer the application registered (ROADMAP 6.6.8): `verify`, `persia stats` and `persia dump documents` skip the analysis of that field's replayed text and run every other check (`verify` names the field on its `analysis` row). `stats` and `dump documents` read a database the same way as `verify`: no lock, nothing written. `persia compact` opens it read-write, so it fails (status 1) while another writer holds the lock, and on a schema that names a registered analyzer, which its read-write open needs (ROADMAP 10.4.4). Import and search are not in the binary (ROADMAP 10.4.2).
 
 ## Example
 
@@ -185,7 +185,7 @@ An `Fsync` put is on disk when `put` returns, even if the process dies before `c
 
 - `persia::Db` and `Collection` (M10). The names in [Embedded API](/guide/embedded-api/) are the sketch.
 - Refreshing a `ReadOnlyDatabase` in place, instead of opening the file again (ROADMAP 6.6.6).
-- `persia verify` with analyzers registered past the built-ins (ROADMAP 6.6.8).
+- `persia compact` on a schema that names an analyzer registered past the built-ins (ROADMAP 10.4.4).
 - A commit to S3, GCS, or Azure, and a writer lease across machines (M12, M13). The local file lock is what exists.
 - Encryption at rest (M20). It has not been started.
 - A background thread that calls `tick` or `merge_step`. The caller invokes both.

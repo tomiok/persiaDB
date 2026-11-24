@@ -18,7 +18,8 @@
 //! in `<name>.persia.blobs`), the fields with `stored: true` and the extra fields. A field that is indexed but not
 //! stored is not in a segment's documents and cannot be dumped.
 //!
-//! Documents are read and written one at a time, so memory does not grow with the collection.
+//! The segments' documents are read and written one at a time, so memory does not grow with them. The documents of
+//! the WAL records are in memory already: the open replayed them into the memtable.
 
 use std::io::Write;
 use std::path::Path;

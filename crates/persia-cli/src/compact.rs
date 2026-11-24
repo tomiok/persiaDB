@@ -4,8 +4,11 @@
 //! torn tail, SPEC §8.6), so it fails while another writer has the database open. It then runs
 //! [`Database::compact`]: the live frames are rewritten into a new file that is renamed over the container, so the
 //! path names a complete database at every instant, and a crash leaves the old file and a stale temporary file
-//! (`persia container sweep` removes it). It commits no document: the WAL records after the last commit stay in the
-//! WAL, and the new file holds the snapshot already committed, with `seq` one higher.
+//! (`persia container sweep` removes it). It commits no document of its own: the new file holds the last committed
+//! snapshot, with `seq` one higher than it. That snapshot is the open's: as with any writer's open, recovery may flush
+//! a WAL backlog larger than the default memtable (64 MiB; the command cannot know the application's) into a commit, or
+//! retire a cut commit (SPEC §8.6), so `seq` may rise by more than one over the file's last commit. Otherwise the WAL
+//! records after the last commit stay in the WAL.
 //!
 //! What the compaction leaves alone (SPEC §4.8, §9.5):
 //! - **The blob pack.** `<name>.persia.blobs` is not opened, read or rewritten. Its dead space is reclaimed by the blob
@@ -57,8 +60,24 @@ fn run(path: &Path) -> Result<Compacted> {
         }
         Err(err) => return Err(err).with_context(|| format!("opening {}", path.display())),
     };
-    db.compact()
-        .with_context(|| format!("compacting {}", path.display()))
+    db.compact().map_err(|err| failed(path, err))
+}
+
+/// The error of a failed [`Database::compact`] of `path`. When only the directory sync after the rename failed, the
+/// new file may already be what the path names: the message says what to do next.
+fn failed(path: &Path, err: DatabaseError) -> anyhow::Error {
+    let context = if matches!(
+        err,
+        DatabaseError::Container(ContainerError::CompactedNotDurable { .. })
+    ) {
+        format!(
+            "compacting {} (the new file may already be in place; reopen it or run `persia verify`)",
+            path.display()
+        )
+    } else {
+        format!("compacting {}", path.display())
+    };
+    anyhow::Error::new(err).context(context)
 }
 
 fn reclaimed(done: &Compacted) -> u64 {
