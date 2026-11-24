@@ -442,6 +442,9 @@ mod tests {
         }
         assert_eq!(counts.values().copied().collect::<Vec<_>>(), [20; 5]);
         assert_ne!(query(42, 0, docs), query(43, 0, docs));
+        // A seed that shares bits with the query stream's constant (all of them): the stream is the seed mixed with
+        // it, not merged into it.
+        assert_eq!(query(u64::MAX, 0, docs).text, "pigi");
     }
 
     /// Each query but a `term` is drawn from one document of the corpus, which therefore matches it (a typo's

@@ -148,6 +148,27 @@ mod tests {
         );
     }
 
+    /// Only "already exists" moves on to the next name. Any other failure to create the directory is the run's
+    /// error at once: here the base is as long as a path may be (4096 bytes with its terminator on Linux), so no
+    /// name fits under it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_directory_that_cannot_be_created_is_reported_as_such() {
+        let root = tempfile::tempdir().unwrap();
+        let mut base = root.path().to_path_buf();
+        while base.as_os_str().len() < 4090 {
+            let room = 4090 - base.as_os_str().len() - 1;
+            base.push("d".repeat(room.min(200)));
+        }
+        std::fs::create_dir_all(&base).unwrap();
+        assert!(base.is_dir());
+        let err = WorkDir::create_in(&base).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.starts_with("creating "), "{text}");
+        assert!(!text.contains("already holds"), "{text}");
+        assert_eq!(std::fs::read_dir(&base).unwrap().count(), 0);
+    }
+
     #[test]
     fn a_base_that_is_not_a_directory_is_refused_and_not_created() {
         let base = tempfile::tempdir().unwrap();
