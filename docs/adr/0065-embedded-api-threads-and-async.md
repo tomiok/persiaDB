@@ -83,8 +83,10 @@ decisions d, e and o).
   the idle flush, the interval, or the close.
 - A `put` never pays for a merge commit. It can still pay for a flush commit: a memtable at its size threshold is
   flushed by the write that finds it full (SPEC §8.2 step 3), as in the engine.
-- A long write (a large `put_batch`) delays the round behind it, and delays `close` and `Drop`; a blob upload does
-  not, since it runs before the mutex is taken.
+- A long write (a large `put_batch`) delays the round behind it, and delays `close` and `Drop`. A blob upload delays
+  no write and no round, since it runs before the mutex is taken, but it does delay `close` and `Drop`: the upload
+  holds the read side's share of the pack, which the close drops before the container (ADR-0053 item 2), so the pack
+  never outlives the writer lock its proof stood for.
 - One idle thread per open read-write database. A process with thousands of open databases has thousands of
   parked threads; a shared pool would be a later change behind the same API.
 - After a bounded `Drop` gave up, nothing reports the final commit's failure but the log.
