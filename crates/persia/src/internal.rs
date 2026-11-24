@@ -19,3 +19,11 @@ pub mod gc;
 
 // `verify`: dangling references and the pack's checksum scan (SPEC §9.5; ROADMAP 9.5.3, 9.5.6).
 pub mod verify;
+
+/// Fuzzing hook (ROADMAP 10.1.1): the filesystem path `location` names, as `Db::open` reads it (SPEC §8.1, §10.2).
+///
+/// # Errors
+/// As `Db::open` for a location: `InvalidArgument` or `Unsupported`.
+pub fn location_path(location: &str) -> crate::Result<std::path::PathBuf> {
+    crate::location::path_of(std::path::Path::new(location))
+}
