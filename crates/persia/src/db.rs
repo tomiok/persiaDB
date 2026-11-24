@@ -65,6 +65,10 @@ pub(crate) struct Inner {
 /// §8.4), so it sees every write that returned before it started. A read-only `Db` shows one state, the one its
 /// open found, until [`Db::refresh`].
 ///
+/// **Read-your-writes** (SPEC §8.4): on a read-write `Db`, a read that starts after a write returned sees it, from
+/// any handle and any thread, at every [`Durability`], committed or not. A [`Collection::put_batch`](crate::Collection::put_batch)
+/// is seen whole once it returns. Durability decides what survives a crash, not what reads see.
+///
 /// ```
 /// use persia::Db;
 ///

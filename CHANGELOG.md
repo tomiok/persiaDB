@@ -51,6 +51,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   SPEC §8.4, §8.6); until then it shows one state, from every handle and thread. On a read-write database it does
   nothing. Every handle is `Send + Sync + 'static` (`BlobReader` is `Send`); a second read-write open of a database
   fails at once with `Conflict`.
+- `persia`: read-your-writes is documented and tested (ROADMAP 10.2.2; SPEC §8.4): on a read-write `Db`, a read that
+  starts after a write returned sees it from any handle and thread, at every durability, committed or not.
 - `persia-engine`: relaxation metrics (ROADMAP 8.3.3; SPEC §7.6, §12.4). Each collection counts its relaxed queries
   (searches without a cursor): how many, how many relaxed past L0, how many still found nothing, and how many found
   their hits at each level. Read them as `RelaxationStats` from `CollectionSnapshot::relaxation_stats` or, summed over

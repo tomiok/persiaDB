@@ -2385,6 +2385,11 @@ consulted; that hid the new copy after such a merge.) A file with two live copie
   current one without locks and keep it as long as they like; it shows the committed segments plus the memtable's
   writes as of each view taken from it. A memtable a commit flushes stays in the older snapshots and takes no more
   writes, so every snapshot shows a flushed document exactly once: in the memtable before, in the segment after.
+- **Read-your-writes** (the embedded API, ROADMAP 10.2.2). On a read-write `Db`, a read that starts after a write
+  returned sees it, from any handle and any thread, whatever the write's durability, before and after the commit that
+  flushes it: `get` loads the latest snapshot, and the write was applied to the memtable that snapshot reads before
+  the write returned. A `put_batch` is seen whole once it returns, and not before. A read-only `Db` sees a write
+  after a `refresh` that starts once the write is in the file (`Async` or `Fsync`, or a later sync or commit).
 
 ### 8.5 Compaction (merge policy)
 Tiered: group segments by size tier (factor 10), merge when ≥ 8 in a tier or when deleted ratio > 20%.
