@@ -30,6 +30,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   directory is `InvalidArgument` in every mode. Opens racing on one missing path agree: one creates the database,
   the others open it or fail with `Conflict` as a second writer, and the file is never replaced. A blob pack left at
   `<name>.persia.blobs` with no database beside it refuses the create with `Conflict`.
+- `persia`: `Collection` handles (ROADMAP 10.1.2; SPEC §6.2). `Db::create_collection` (and `create_collection_json`),
+  `Db::collection`, `Db::collection_names`, `Db::drop_collection`; `Collection::name` and `Collection::schema`. A
+  handle owns a share of the database (no lifetime), is `Send + Sync + Clone`, names its collection (a dropped one
+  is `NotFound`, one created again under the name is reached), and fails with `Closed` once the database is closed.
+  The schema types are re-exported under `persia::` (`CollectionSchema`, `SchemaBuilder`, `Field`, `FieldId`,
+  `FieldKind`, `FieldType`, `TextOptions`, `KeywordOptions`, `AnalyzerRef`, `RankingConfig`, `RelaxationConfig` and
+  the types they name, ADR-0064).
 - `persia-engine`: relaxation metrics (ROADMAP 8.3.3; SPEC §7.6, §12.4). Each collection counts its relaxed queries
   (searches without a cursor): how many, how many relaxed past L0, how many still found nothing, and how many found
   their hits at each level. Read them as `RelaxationStats` from `CollectionSnapshot::relaxation_stats` or, summed over

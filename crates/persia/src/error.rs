@@ -279,13 +279,11 @@ impl Error {
     }
 
     /// A call on a handle whose database was closed or dropped.
-    #[cfg_attr(not(test), allow(dead_code))] // Returned by the collection handles (ROADMAP 10.1.2).
     pub(crate) fn closed() -> Self {
         Self::new(ErrorCode::Closed, "the database is closed")
     }
 
     /// A write on a database opened read-only.
-    #[cfg_attr(not(test), allow(dead_code))] // Returned by the collection handles (ROADMAP 10.1.2).
     pub(crate) fn read_only(what: &str) -> Self {
         Self::new(
             ErrorCode::ReadOnly,

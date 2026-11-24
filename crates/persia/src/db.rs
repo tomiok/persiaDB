@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use persia_blob::PackStore;
-use persia_engine::db::DatabaseReader;
+use persia_engine::db::{DatabaseReader, Snapshot};
 use persia_engine::wal::Durability;
 
 use crate::error::Classified as _;
@@ -17,14 +17,14 @@ use crate::options::OpenOptions;
 use crate::{Error, ErrorCode, Result};
 
 /// The writer: the engine's database with its blob pack.
-type Writer = BlobDatabase<PackStore>;
+pub(crate) type Writer = BlobDatabase<PackStore>;
 
 /// What reads of a read-write database use, so that they never take the writer's mutex.
-#[allow(dead_code)] // Read by the collection handles (ROADMAP 10.1.2).
 struct ReadSide {
     /// Loads the latest published snapshot without a lock (SPEC §8.4).
     reader: DatabaseReader,
     /// The blob store and the writer's pin set, shared with the writer.
+    #[allow(dead_code)] // Read by the blob reads (ROADMAP 10.1.3).
     blobs: Blobs<PackStore>,
 }
 
@@ -45,7 +45,7 @@ enum Mode {
 pub(crate) struct Inner {
     path: PathBuf,
     /// The durability of writes through handles that did not choose their own.
-    #[allow(dead_code)] // Read by the collection handles (ROADMAP 10.1.2).
+    #[allow(dead_code)] // Read by the writes (ROADMAP 10.1.3).
     durability: Durability,
     /// Set first by a close or a drop: later calls on any handle fail with [`ErrorCode::Closed`].
     closed: AtomicBool,
@@ -75,7 +75,7 @@ pub(crate) struct Inner {
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub struct Db {
-    inner: Arc<Inner>,
+    pub(crate) inner: Arc<Inner>,
 }
 
 impl fmt::Debug for Db {
@@ -249,6 +249,68 @@ impl Inner {
             }
         }
     }
+}
+
+impl Inner {
+    /// The path the database was opened at.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// [`ErrorCode::Closed`] once the database is closed or dropped.
+    pub(crate) fn check_open(&self) -> Result<()> {
+        if self.closed.load(Ordering::SeqCst) {
+            Err(Error::closed())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// [`ErrorCode::Closed`] once closed, [`ErrorCode::ReadOnly`] (naming `what`) on a read-only database.
+    pub(crate) fn check_writable(&self, what: &str) -> Result<()> {
+        self.check_open()?;
+        match self.mode {
+            Mode::ReadWrite { .. } => Ok(()),
+            Mode::ReadOnly(_) => Err(Error::read_only(what)),
+        }
+    }
+
+    /// The latest published snapshot (SPEC §8.4): a read-write database's latest commit plus its memtables, a
+    /// read-only one's state as of its open or last refresh. No writer lock is taken.
+    pub(crate) fn snapshot(&self) -> Result<Arc<Snapshot>> {
+        self.check_open()?;
+        match &self.mode {
+            Mode::ReadWrite { reads, .. } => read_lock(reads)
+                .as_ref()
+                .map(|r| r.reader.snapshot())
+                .ok_or_else(Error::closed),
+            Mode::ReadOnly(db) => read_lock(db)
+                .as_ref()
+                .map(|db| db.database().snapshot())
+                .ok_or_else(Error::closed),
+        }
+    }
+
+    /// `f` on the writer, under the writer mutex: one write at a time (ADR-0065 item 1). `what` names the write for
+    /// the error of a read-only database.
+    pub(crate) fn write<T>(
+        &self,
+        what: &str,
+        f: impl FnOnce(&mut Writer) -> Result<T>,
+    ) -> Result<T> {
+        self.check_open()?;
+        let Mode::ReadWrite { writer, .. } = &self.mode else {
+            return Err(Error::read_only(what));
+        };
+        let mut guard = writer.lock().map_err(|_| Error::writer_panicked())?;
+        let db = guard.as_mut().ok_or_else(Error::closed)?;
+        f(db)
+    }
+}
+
+fn read_lock<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    // A panic while it was held for writing (a close, a refresh) left its value whole: `Option::take` or a swap.
+    lock.read().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Whether a file (or anything else) is at `path`.

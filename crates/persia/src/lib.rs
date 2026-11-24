@@ -22,6 +22,7 @@
 // Sizes and offsets convert with `From` or `try_from`, never a silent `as` (CLAUDE.md checked ops).
 #![cfg_attr(not(test), deny(clippy::as_conversions))]
 
+mod collection;
 mod db;
 mod error;
 #[doc(hidden)]
@@ -29,8 +30,15 @@ pub mod internal;
 mod location;
 mod options;
 
+pub use collection::Collection;
 pub use db::Db;
 pub use error::{Error, ErrorCode, Result};
 pub use options::OpenOptions;
 /// How durable a write is before its call returns (SPEC §8.2.1): `Buffered`, `Async` or `Fsync` (the default).
 pub use persia_engine::wal::Durability;
+// Collection schemas (SPEC §6.2): plain values, re-exported as the engine has them (ADR-0064 item 2).
+pub use persia_engine::schema::{
+    AnalyzerRef, BuiltinAnalyzer, CollectionSchema, Fallback, Field, FieldId, FieldKind, FieldType,
+    FilterRelaxation, KeywordOptions, Level, Levels, RankFn, RankingConfig, RelaxationConfig,
+    SchemaBuilder, StaticRank, TextOptions,
+};
