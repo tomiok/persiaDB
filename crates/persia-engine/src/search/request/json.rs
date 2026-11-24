@@ -11,7 +11,7 @@ use serde_json::{Map, Value as J};
 use super::query::{QueryRequest, QueryRequestError};
 use crate::db::Cursor;
 use crate::document::json::{Strict, json_kind};
-use crate::query::{DefaultFields, Filter, QueryError, QueryLimits};
+use crate::query::{DefaultFields, Filter, MAX_SHOWN, QueryError, QueryLimits, shown_name};
 use crate::relax::RelaxOptions;
 use crate::schema::{CollectionSchema, Field};
 use crate::search::{
@@ -323,15 +323,9 @@ fn shown(value: &J) -> String {
     }
 }
 
-/// The longest string an error message repeats as written.
-const MAX_SHOWN: usize = 32;
-
 /// An object's key as an error names it: as [`shown`] gives a short one, a longer one by its length, so a message
-/// stays short whatever the request holds (a key may be up to the request's 1 MiB).
+/// stays short whatever the request holds (a key may be up to the request's 1 MiB). Field names, `fields` entries and
+/// filter keys are named the same way ([`crate::query::shown_name`]).
 fn shown_key(key: &str) -> String {
-    if key.len() <= MAX_SHOWN {
-        shown(&J::String(key.to_owned()))
-    } else {
-        format!("of {} bytes", key.len())
-    }
+    shown_name(key)
 }

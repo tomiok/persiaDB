@@ -2256,3 +2256,39 @@ fn a_huge_key_is_not_repeated_in_its_error() {
     let message = parse(r#"{"query": 1}"#).unwrap_err().to_string();
     assert_eq!(message, r#"request: unknown key "query""#);
 }
+
+/// A caller string of any length is named in a bounded message wherever a request echoes one (SPEC §7.1.4): an
+/// unknown field in `fields`, `sort`, `facets` and a filter, a malformed `fields` entry, an unknown filter or range
+/// bound key, and a keyword filter value past its bound. (There is no projection key yet, ROADMAP 10.1.20.)
+#[test]
+fn a_huge_field_name_is_not_repeated_in_its_error() {
+    let huge = "f".repeat(1 << 16);
+    let h = huge.as_str();
+    let weighted = format!("title^{h}");
+    // Each request, and the length its message names: the echoed string's.
+    for (json, len) in [
+        (json!({"fields": [h]}), huge.len()),
+        (json!({"fields": [weighted]}), weighted.len()),
+        (json!({"sort": [{"field": h}]}), huge.len()),
+        (json!({"facets": [h]}), huge.len()),
+        (json!({"facets": [{"field": h, "size": 3}]}), huge.len()),
+        (json!({"filter": {"term": [h, "x"]}}), huge.len()),
+        (
+            json!({"soft_filter": {"range": [h, {"gte": 1}]}}),
+            huge.len(),
+        ),
+        (json!({"filter": {h: ["brand", "x"]}}), huge.len()),
+        (json!({"filter": {"range": ["price", {h: 1}]}}), huge.len()),
+        (json!({"filter": {"term": ["brand", h]}}), huge.len()),
+    ] {
+        let error = parse(&json.to_string()).unwrap_err();
+        let message = error.to_string();
+        assert!(message.len() < 200, "{} bytes", message.len());
+        assert!(message.contains(&format!("{len} bytes")), "{message}");
+    }
+    // A short unknown name is still quoted as written.
+    let message = parse(r#"{"sort": [{"field": "nope"}]}"#)
+        .unwrap_err()
+        .to_string();
+    assert!(message.contains(r#""nope""#), "{message}");
+}
