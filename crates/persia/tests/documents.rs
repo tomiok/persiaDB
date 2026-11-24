@@ -907,3 +907,61 @@ fn a_failed_put_or_commit_releases_what_it_made_durable() {
         "the failed commit synced the WAL: its pins go"
     );
 }
+
+/// `put_batch` pins every blob its documents carry, checks the store holds each before logging any, and holds the
+/// pins until the batch is durable (ROADMAP 10.1.3; SPEC §9.5, §9.6).
+#[test]
+fn put_batch_holds_the_pins_of_its_blobs_until_durable() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = BlobDatabase::new(
+        database(&dir.path().join("a.persia")),
+        Blobs::new(Arc::new(MemoryBlobStore::new())),
+    );
+    let (stored, pins) = db
+        .put_blob(&b"shared"[..], &PutBlobOptions::default())
+        .unwrap();
+    drop(pins);
+    let mut with_blob = doc("a");
+    with_blob.set_blob_ref(Some(stored.clone()));
+    db.put_batch("c", &[with_blob.clone(), doc("b")], Durability::Buffered)
+        .unwrap();
+    assert_eq!(
+        db.held(),
+        1,
+        "the one document with a blob, logged and not durable"
+    );
+    assert!(
+        db.blobs()
+            .pin_set()
+            .is_pinned(Pinned::Blob(stored.blob_id()))
+    );
+    db.commit().unwrap();
+    assert_eq!(db.held(), 0);
+
+    // Rejected before anything is logged: nothing is held.
+    let err = db
+        .put_batch("missing", &[with_blob.clone()], Durability::Buffered)
+        .unwrap_err();
+    assert!(matches!(err, Error::Database(_)), "{err}");
+    assert_eq!(db.held(), 0);
+    let mut foreign = doc("f");
+    let elsewhere = Blobs::new(Arc::new(MemoryBlobStore::new()));
+    let (other, _pins) = elsewhere
+        .put_blob(&b"elsewhere"[..], &PutBlobOptions::default())
+        .unwrap();
+    foreign.set_blob_ref(Some(other));
+    let err = db
+        .put_batch("c", &[doc("x"), foreign], Durability::Buffered)
+        .unwrap_err();
+    assert!(matches!(err, Error::BlobNotStored { .. }), "{err}");
+    assert_eq!(db.held(), 0);
+    assert!(
+        db.log()
+            .snapshot()
+            .collection("c")
+            .unwrap()
+            .get("x")
+            .unwrap()
+            .is_none()
+    );
+}
