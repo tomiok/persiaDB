@@ -44,6 +44,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   carries a blob reference is checked against this database's store (and pinned) before it is logged, as
   `put_with_blob(doc, Blob::Stored(..))` is; one the store lacks is `NotFound` and logs nothing. Blob bytes are stored
   before the writer mutex is taken. Writes take the writer mutex one at a time; reads never do.
+- `persia`: typed documents through `serde` (ROADMAP 10.1.4; SPEC §6.4.1). `Collection::put_struct(&T)` is exactly
+  `put_json(serde_json::to_string(&T))`; `Collection::get_struct::<T>(id)` and `Collection::to_struct::<T>(&doc)` read
+  a document's JSON output back. SPEC §6.4.1 is the only mapping. `persia` now depends on `serde` and `serde_json`.
 - `persia-engine`: relaxation metrics (ROADMAP 8.3.3; SPEC §7.6, §12.4). Each collection counts its relaxed queries
   (searches without a cursor): how many, how many relaxed past L0, how many still found nothing, and how many found
   their hits at each level. Read them as `RelaxationStats` from `CollectionSnapshot::relaxation_stats` or, summed over

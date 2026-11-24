@@ -600,6 +600,8 @@ dependencies = [
  "persia-engine",
  "persia-storage",
  "proptest",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tracing",

@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 persia-engine.workspace = true
 persia-blob.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

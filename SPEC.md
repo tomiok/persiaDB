@@ -1179,6 +1179,9 @@ A document is an `id`, an optional `blob` reference (§9.1) and a value per fiel
   16 MiB, and so is the binary encoding (§6.4.2) of the whole document.
 - **Output.** `get` writes an object with `id`, then `blob` if present, then the fields and extra fields in
   ascending byte order of their names; values in the forms above.
+- **Typed values** (ROADMAP 10.1.4). The embedded API's `put_struct(&value)` is exactly `put` of the document this
+  JSON form reads from `serde_json`'s text of the value, and `get_struct` / `to_struct` read the output above with
+  `serde_json`: these rules are the only mapping between a Rust type and a document.
 
 #### 6.4.2 Binary encoding
 The encoding of a document in `DocStore` (and anywhere else a document is persisted) is CBOR (RFC 8949) restricted so

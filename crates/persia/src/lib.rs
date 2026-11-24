@@ -31,6 +31,7 @@ mod error;
 pub mod internal;
 mod location;
 mod options;
+mod typed;
 
 pub use blob::BlobReader;
 pub use collection::Collection;
