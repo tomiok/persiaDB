@@ -947,6 +947,65 @@ impl Error {
     }
 }
 
+impl<S: BlobStore + ?Sized, L: DocumentLog> BlobDatabase<S, L> {
+    /// Logs `doc` of `collection` at `durability`: with [`BlobDatabase::put`] of [`Blob::Stored`] when it carries a
+    /// blob reference (pinned and checked against the store first, SPEC §9.6), else as it is. What the embedded API's
+    /// `put` does: a reference set by hand is held to the same rule as one `put_blob` returned (ADR-0064 item 5).
+    ///
+    /// # Errors
+    /// [`Error::BlobNotStored`] for a reference the store lacks (nothing is logged); then as [`BlobDatabase::put`].
+    pub fn put_document(
+        &mut self,
+        collection: &str,
+        doc: &Document,
+        durability: Durability,
+    ) -> Result<(), Error> {
+        if let Some(blob_ref) = doc.blob_ref() {
+            let stored = Blob::Stored(blob_ref.clone());
+            return self.put(collection, doc, stored, durability).map(drop);
+        }
+        self.release_durable();
+        let logged = self.log.put(collection, doc, durability);
+        self.release_durable();
+        Ok(logged?)
+    }
+}
+
+impl<S: BlobStore + ?Sized, F: ContainerFile + Sync> BlobDatabase<S, Database<F>> {
+    /// [`Database::put_batch`] of `docs`, after pinning every blob reference they carry and checking the store holds
+    /// it (SPEC §9.6): a reference the store lacks rejects the whole batch before anything is logged. The pins are
+    /// held until the batch is durable, as [`BlobDatabase::put`] holds its document's.
+    ///
+    /// # Errors
+    /// [`Error::BlobNotStored`] (nothing is logged); then as [`Database::put_batch`].
+    pub fn put_batch(
+        &mut self,
+        collection: &str,
+        docs: &[Document],
+        durability: Durability,
+    ) -> Result<(), Error> {
+        self.release_durable();
+        let mut pins = Vec::new();
+        for blob_ref in docs.iter().filter_map(Document::blob_ref) {
+            let Some(pinned) = self.blobs.pin_contained(blob_ref)? else {
+                return Err(Error::BlobNotStored {
+                    blob_id: blob_ref.blob_id(),
+                });
+            };
+            pins.push(pinned);
+        }
+        let before = self.log.wal_mark();
+        let logged = self.log.put_batch(collection, docs, durability);
+        let mark = self.log.wal_mark();
+        // As in `put`: a record appended may be on disk, so its blob stays pinned until the mark is durable.
+        if mark > before {
+            self.held.extend(pins.into_iter().map(|p| (mark, p)));
+        }
+        self.release_durable();
+        Ok(logged?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use persia_engine::db::DatabaseOptions;

@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use persia_engine::db::CollectionSnapshot;
 use persia_engine::schema::CollectionSchema;
+use persia_engine::wal::Durability;
 
 use crate::db::{Db, Inner};
 use crate::{Error, ErrorCode, Result};
@@ -36,6 +37,8 @@ use crate::{Error, ErrorCode, Result};
 pub struct Collection {
     pub(crate) db: Arc<Inner>,
     pub(crate) name: String,
+    /// The durability of this handle's writes; the database's when `None`.
+    pub(crate) durability: Option<Durability>,
 }
 
 impl fmt::Debug for Collection {
@@ -228,6 +231,7 @@ impl Db {
         Collection {
             db: Arc::clone(&self.inner),
             name,
+            durability: None,
         }
     }
 }

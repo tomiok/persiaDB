@@ -37,6 +37,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   The schema types are re-exported under `persia::` (`CollectionSchema`, `SchemaBuilder`, `Field`, `FieldId`,
   `FieldKind`, `FieldType`, `TextOptions`, `KeywordOptions`, `AnalyzerRef`, `RankingConfig`, `RelaxationConfig` and
   the types they name, ADR-0064).
+- `persia`: documents and blobs (ROADMAP 10.1.3, search excepted; SPEC §6.4, §8.1, §8.2, §9.6). `Collection::put`,
+  `put_batch`, `put_json`, `put_with_blob`, `delete`, `get`, `get_json`, `commit` and `with_durability`; `Db::commit`,
+  `Db::put_blob`, `Db::get_blob` (a `BlobReader` that owns a share of the database) and `Db::get_blob_range`.
+  `persia::Blob`, `PutBlobOptions`, `Document`, `Value`, `BlobRef` and `BlobId` are re-exported. A document that
+  carries a blob reference is checked against this database's store (and pinned) before it is logged, as
+  `put_with_blob(doc, Blob::Stored(..))` is; one the store lacks is `NotFound` and logs nothing. Blob bytes are stored
+  before the writer mutex is taken. Writes take the writer mutex one at a time; reads never do.
 - `persia-engine`: relaxation metrics (ROADMAP 8.3.3; SPEC §7.6, §12.4). Each collection counts its relaxed queries
   (searches without a cursor): how many, how many relaxed past L0, how many still found nothing, and how many found
   their hits at each level. Read them as `RelaxationStats` from `CollectionSnapshot::relaxation_stats` or, summed over

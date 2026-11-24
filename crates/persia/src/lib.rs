@@ -22,18 +22,27 @@
 // Sizes and offsets convert with `From` or `try_from`, never a silent `as` (CLAUDE.md checked ops).
 #![cfg_attr(not(test), deny(clippy::as_conversions))]
 
+mod blob;
 mod collection;
 mod db;
+mod documents;
 mod error;
 #[doc(hidden)]
 pub mod internal;
 mod location;
 mod options;
 
+pub use blob::BlobReader;
 pub use collection::Collection;
 pub use db::Db;
 pub use error::{Error, ErrorCode, Result};
+pub use internal::blob::PutBlobOptions;
+pub use internal::documents::Blob;
 pub use options::OpenOptions;
+// Blob references (SPEC §9.1): plain values (ADR-0064 item 2).
+pub use persia_blob::{BlobId, BlobRef};
+// Documents (SPEC §6.4): plain values (ADR-0064 item 2).
+pub use persia_engine::document::{Document, Value};
 /// How durable a write is before its call returns (SPEC §8.2.1): `Buffered`, `Async` or `Fsync` (the default).
 pub use persia_engine::wal::Durability;
 // Collection schemas (SPEC §6.2): plain values, re-exported as the engine has them (ADR-0064 item 2).

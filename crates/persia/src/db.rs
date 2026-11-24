@@ -24,7 +24,6 @@ struct ReadSide {
     /// Loads the latest published snapshot without a lock (SPEC §8.4).
     reader: DatabaseReader,
     /// The blob store and the writer's pin set, shared with the writer.
-    #[allow(dead_code)] // Read by the blob reads (ROADMAP 10.1.3).
     blobs: Blobs<PackStore>,
 }
 
@@ -45,7 +44,6 @@ enum Mode {
 pub(crate) struct Inner {
     path: PathBuf,
     /// The durability of writes through handles that did not choose their own.
-    #[allow(dead_code)] // Read by the writes (ROADMAP 10.1.3).
     durability: Durability,
     /// Set first by a close or a drop: later calls on any handle fail with [`ErrorCode::Closed`].
     closed: AtomicBool,
@@ -264,6 +262,34 @@ impl Inner {
         } else {
             Ok(())
         }
+    }
+
+    /// The durability of writes through handles that did not choose their own.
+    pub(crate) fn durability(&self) -> Durability {
+        self.durability
+    }
+
+    /// `f` on the blob store reads use: the writer's pack (shared, without the writer mutex) or the read-only pack.
+    pub(crate) fn with_blobs<T>(
+        &self,
+        f: impl FnOnce(&Blobs<PackStore>) -> Result<T>,
+    ) -> Result<T> {
+        self.check_open()?;
+        match &self.mode {
+            Mode::ReadWrite { reads, .. } => match read_lock(reads).as_ref() {
+                Some(r) => f(&r.blobs),
+                None => Err(Error::closed()),
+            },
+            Mode::ReadOnly(db) => match read_lock(db).as_ref() {
+                Some(db) => f(db.blobs()),
+                None => Err(Error::closed()),
+            },
+        }
+    }
+
+    /// [`Db::commit`]: every collection's unflushed writes flushed and committed, under the writer mutex.
+    pub(crate) fn commit(&self) -> Result<()> {
+        self.write("commit", |db| db.commit().map(drop).map_err(Error::wrap))
     }
 
     /// [`ErrorCode::Closed`] once closed, [`ErrorCode::ReadOnly`] (naming `what`) on a read-only database.

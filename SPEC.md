@@ -3069,8 +3069,10 @@ durability (ADR-0051).
 
 **No dangling references** (ROADMAP 9.5.6). The engine's `Document::set_blob_ref` takes any `BlobRef`, and
 `persia-engine` commits it without looking it up (§9.5), so a reference with no bytes behind it can be committed
-below the public API. The public embedded API (M10, `persia`) never exposes a raw `set_blob_ref`. A document gets a
-blob only through `put(doc, blob)`, where `blob` is either bytes to store (`Blob::from_path`, `Blob::from_reader`),
+below the public API. The public embedded API (M10, `persia`) re-exports `Document` with its `set_blob_ref`, but
+never logs a reference it has not checked: `put(doc)` of a document that carries one is `put(doc,
+Blob::Stored(reference))` (ADR-0064 item 5), and in Rust `put(doc, blob)` is `Collection::put_with_blob`. A document
+gets a blob only through `put(doc, blob)`, where `blob` is either bytes to store (`Blob::from_path`, `Blob::from_reader`),
 which `put` stores first (§9.5), or a `BlobRef` that this database's `put_blob` returned, which `put` checks is bound
 in this database's store (and pinned, §9.5) before it logs the document; a `BlobRef` it does not find is an error
 and logs nothing. The server and the SDKs (M11, M14) go through the same calls. A dangling reference that reaches a
