@@ -8,9 +8,6 @@
 //! The codes are the numbers of the C ABI's error table (`docs/sdk/c-abi.md`), so a language binding passes
 //! [`ErrorCode::number`] through unchanged. They are append-only: a released number never changes its meaning.
 
-// The facade that returns these errors lands with ROADMAP 10.1.1: until then only the tests build them.
-#![cfg_attr(not(test), allow(dead_code))]
-
 mod classify;
 
 use std::fmt;
@@ -23,10 +20,14 @@ type Source = Box<dyn std::error::Error + Send + Sync + 'static>;
 /// `std::result::Result` with this crate's [`Error`].
 ///
 /// ```
-/// fn first(names: &[String]) -> persia::Result<Option<&String>> {
-///     Ok(names.first())
+/// fn collections(db: &persia::Db) -> persia::Result<bool> {
+///     Ok(db.is_read_only())
 /// }
-/// assert_eq!(first(&[]).ok(), Some(None));
+/// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+/// # let dir = tempfile::tempdir()?;
+/// # let db = persia::Db::open(dir.path().join("app.persia"))?;
+/// # assert!(!collections(&db)?);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -39,11 +40,18 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// ```
 /// use persia::ErrorCode;
 ///
-/// fn retryable(code: ErrorCode) -> bool {
-///     matches!(code, ErrorCode::Transient)
+/// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+/// # let dir = tempfile::tempdir()?;
+/// let missing = dir.path().join("missing.persia");
+/// let err = persia::OpenOptions::new().create_if_missing(false).open(&missing).unwrap_err();
+/// assert_eq!(err.code(), ErrorCode::NotFound);
+/// assert_eq!((err.code().number(), err.code().as_str()), (1, "PERSIA_NOT_FOUND"));
+/// match err.code() {
+///     ErrorCode::NotFound => {} // create it, or tell the user
+///     ErrorCode::Transient => {} // the only code to retry blindly
+///     _ => {} // the enum is `#[non_exhaustive]`: codes are appended
 /// }
-/// assert!(!retryable(ErrorCode::NotFound));
-/// assert_eq!((ErrorCode::NotFound.number(), ErrorCode::NotFound.as_str()), (1, "PERSIA_NOT_FOUND"));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -199,13 +207,19 @@ impl fmt::Display for ErrorCode {
 /// use std::error::Error as _;
 /// use persia::ErrorCode;
 ///
-/// fn describe(err: &persia::Error) -> String {
-///     let cause = err.source().map(ToString::to_string).unwrap_or_default();
-///     match err.code() {
-///         ErrorCode::NotFound => format!("missing: {err}"),
-///         code => format!("{code}: {} ({cause})", err.message()),
-///     }
-/// }
+/// let err = persia::Db::open("file://example.com/app.persia").unwrap_err();
+/// assert_eq!(err.code(), ErrorCode::InvalidArgument);
+/// assert_eq!(err.to_string(), err.message());
+/// assert!(err.source().is_none()); // found by this crate itself: nothing underneath
+///
+/// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+/// # let dir = tempfile::tempdir()?;
+/// let path = dir.path().join("notes.txt");
+/// std::fs::write(&path, "not a database")?;
+/// let err = persia::Db::open(&path).unwrap_err();
+/// assert_eq!(err.code(), ErrorCode::Corrupt);
+/// assert!(err.source().is_some()); // the engine's own error, as `dyn Error`
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub struct Error {
     code: ErrorCode,
@@ -249,12 +263,29 @@ impl Error {
         }
     }
 
+    /// This error with `context` in front of its message: what was being done.
+    #[must_use]
+    pub(crate) fn context(mut self, context: impl fmt::Display) -> Self {
+        self.message = format!("{context}: {}", self.message);
+        self
+    }
+
+    /// A thread panicked while it held the writer: what its write left behind is unknown.
+    pub(crate) fn writer_panicked() -> Self {
+        Self::new(
+            ErrorCode::Poisoned,
+            "a thread panicked while writing to the database: close it and open it again",
+        )
+    }
+
     /// A call on a handle whose database was closed or dropped.
+    #[cfg_attr(not(test), allow(dead_code))] // Returned by the collection handles (ROADMAP 10.1.2).
     pub(crate) fn closed() -> Self {
         Self::new(ErrorCode::Closed, "the database is closed")
     }
 
     /// A write on a database opened read-only.
+    #[cfg_attr(not(test), allow(dead_code))] // Returned by the collection handles (ROADMAP 10.1.2).
     pub(crate) fn read_only(what: &str) -> Self {
         Self::new(
             ErrorCode::ReadOnly,
@@ -267,9 +298,8 @@ impl Error {
     /// ```
     /// use persia::ErrorCode;
     ///
-    /// fn is_missing(err: &persia::Error) -> bool {
-    ///     err.code() == ErrorCode::NotFound
-    /// }
+    /// let err = persia::Db::open("s3://bucket/app").unwrap_err();
+    /// assert_eq!(err.code(), ErrorCode::Unsupported);
     /// ```
     #[must_use]
     pub fn code(&self) -> ErrorCode {
@@ -279,9 +309,8 @@ impl Error {
     /// A description for people. Not stable: do not parse it.
     ///
     /// ```
-    /// fn log(err: &persia::Error) {
-    ///     eprintln!("{}", err.message());
-    /// }
+    /// let err = persia::Db::open("s3://bucket/app").unwrap_err();
+    /// assert!(err.message().contains("s3"));
     /// ```
     #[must_use]
     pub fn message(&self) -> &str {

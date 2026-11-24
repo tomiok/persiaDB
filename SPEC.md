@@ -3208,6 +3208,14 @@ above.
 `memory://`. Scheme selects the backend. **Zero Persia-specific configuration** is required when the ambient environment
 provides credentials.
 
+**Before M12** (ROADMAP 10.1.1, ADR-0064) `persia::Db::open` accepts a path and `file://`. A `file://` URL has an
+empty host or `localhost` (any case) and an absolute path, percent-encoded: `%XX` is the byte it names, on Unix
+any byte but NUL, elsewhere the decoded bytes must be UTF-8 and `/C:/dir` is `C:/dir` on Windows. A host, a
+port, a query, a fragment, or a `%` not followed by two hex digits is an invalid argument: nothing is guessed.
+`s3://`, `gs://`, `az://` and `memory://` are *unsupported* (`PERSIA_UNSUPPORTED`, naming the scheme) until their
+backends exist; any other scheme is an invalid argument. Schemes compare without case. The parser is written by
+hand: no URL crate is a dependency.
+
 ### 10.3 Credentials
 Use each provider's standard chain: env vars, shared config files, IMDS / IRSA / Workload Identity / managed identity.
 Explicit options are overrides, not requirements. Endpoint override supported (MinIO, fake-gcs, Azurite).

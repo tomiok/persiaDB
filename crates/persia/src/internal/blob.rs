@@ -105,9 +105,23 @@ impl Default for PutBlobOptions {
 #[derive(Debug)]
 pub struct Blobs<S: ?Sized> {
     pins: Arc<PinSet>,
-    ids: Mutex<SegmentIds>,
+    /// Shared by the clones of a handle, so they draw from one source.
+    ids: Arc<Mutex<SegmentIds>>,
     clock: Arc<dyn RetryClock>,
     store: Arc<S>,
+}
+
+/// A second handle on the same store, pin set, upload ids and retry clock: what the embedded API's reads use beside
+/// the writer, so a blob read pins in the set GC honors without taking the writer's lock (ROADMAP 10.1.3).
+impl<S: ?Sized> Clone for Blobs<S> {
+    fn clone(&self) -> Self {
+        Self {
+            pins: Arc::clone(&self.pins),
+            ids: Arc::clone(&self.ids),
+            clock: Arc::clone(&self.clock),
+            store: Arc::clone(&self.store),
+        }
+    }
 }
 
 impl<S: BlobStore + ?Sized> Blobs<S> {
@@ -120,7 +134,7 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     pub fn with_upload_ids(store: Arc<S>, ids: SegmentIds) -> Self {
         Self {
             pins: Arc::new(PinSet::new()),
-            ids: Mutex::new(ids),
+            ids: Arc::new(Mutex::new(ids)),
             clock: Arc::new(SystemRetryClock::new()),
             store,
         }

@@ -1,0 +1,303 @@
+//! How a database is opened (SPEC §8.1, §14; ROADMAP 10.1.1).
+
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+use persia_engine::db::{Clock, CommitPolicy, DatabaseOptions};
+use persia_engine::memtable::FlushPolicy;
+use persia_engine::merge::MergeOptions;
+use persia_engine::wal::Durability;
+
+use crate::db::Db;
+use crate::{Result, location};
+
+/// Options for opening a database: a builder whose defaults are the ones of SPEC §14, with no file to read them
+/// from. [`Db::open`] is `OpenOptions::new().open(..)`.
+///
+/// | Option | Default | SPEC §14 knob |
+/// |---|---|---|
+/// | [`create_if_missing`](Self::create_if_missing) | `true` | |
+/// | [`read_only`](Self::read_only) | `false` | |
+/// | [`memtable_bytes`](Self::memtable_bytes) | 64 MiB | `memtable_bytes` |
+/// | [`idle_flush`](Self::idle_flush) | 10 s | (with `memtable_bytes`) |
+/// | [`commit_interval`](Self::commit_interval) | 60 s | `commit_interval` |
+/// | [`merge_threads`](Self::merge_threads) | 1 | `merge_threads` |
+/// | [`durability`](Self::durability) | [`Durability::Fsync`] | `fsync_policy` |
+///
+/// No option is stored in the database: each open chooses its own.
+///
+/// ```
+/// use std::time::Duration;
+/// use persia::{Durability, OpenOptions};
+///
+/// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+/// # let dir = tempfile::tempdir()?;
+/// let path = dir.path().join("app.persia");
+/// let db = OpenOptions::new()
+///     .memtable_bytes(16 << 20)
+///     .commit_interval(Duration::from_secs(30))
+///     .durability(Durability::Async)
+///     .open(&path)?;
+/// db.close()?;
+///
+/// // The same file, read-only: nothing is created, nothing is written.
+/// let reader = OpenOptions::new().read_only(true).open(&path)?;
+/// assert!(reader.is_read_only());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Debug, Clone)]
+pub struct OpenOptions {
+    pub(crate) create_if_missing: bool,
+    pub(crate) read_only: bool,
+    memtable_bytes: usize,
+    idle_flush: Duration,
+    commit_interval: Duration,
+    merge_threads: usize,
+    pub(crate) durability: Durability,
+    /// Where the database reads the time; the system's clocks when `None`.
+    clock: Option<Arc<dyn Clock>>,
+}
+
+impl Default for OpenOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OpenOptions {
+    /// The defaults (the table above).
+    ///
+    /// ```
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// let db = persia::OpenOptions::new().open(dir.path().join("app.persia"))?;
+    /// assert!(!db.is_read_only());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            create_if_missing: true,
+            read_only: false,
+            memtable_bytes: FlushPolicy::DEFAULT_MEMTABLE_BYTES,
+            idle_flush: FlushPolicy::DEFAULT_IDLE,
+            commit_interval: CommitPolicy::DEFAULT_INTERVAL,
+            merge_threads: MergeOptions::DEFAULT_THREADS,
+            durability: Durability::Fsync,
+            clock: None,
+        }
+    }
+
+    /// Whether the open creates the database when no file is at the path (SPEC §8.1). On by default; `false`
+    /// requires the file to exist and creates nothing.
+    ///
+    /// ```
+    /// use persia::{ErrorCode, OpenOptions};
+    ///
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// let path = dir.path().join("app.persia");
+    /// let err = OpenOptions::new().create_if_missing(false).open(&path).unwrap_err();
+    /// assert_eq!(err.code(), ErrorCode::NotFound);
+    /// assert!(!path.exists());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn create_if_missing(mut self, create: bool) -> Self {
+        self.create_if_missing = create;
+        self
+    }
+
+    /// Whether the database is opened read-only (SPEC §8.1, §8.4): no writer lock, no write, beside a writer in
+    /// this process or another. It shows the committed state the open found. A read-only open never creates the
+    /// database, whatever [`create_if_missing`](Self::create_if_missing) says.
+    ///
+    /// ```
+    /// use persia::{Db, ErrorCode, OpenOptions};
+    ///
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// let path = dir.path().join("app.persia");
+    /// let writer = Db::open(&path)?;
+    /// let reader = OpenOptions::new().read_only(true).open(&path)?; // beside the writer
+    /// assert!(reader.is_read_only() && !writer.is_read_only());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
+
+    /// The size at which a collection's unflushed writes are flushed into a segment and committed (SPEC §8.2
+    /// step 3, §14 `memtable_bytes`). 64 MiB by default.
+    ///
+    /// ```
+    /// let options = persia::OpenOptions::new().memtable_bytes(8 << 20);
+    /// # let _ = options;
+    /// ```
+    #[must_use]
+    pub fn memtable_bytes(mut self, bytes: usize) -> Self {
+        self.memtable_bytes = bytes;
+        self
+    }
+
+    /// How long a collection's writes must pause before they are flushed and committed in the background
+    /// (SPEC §8.2 step 3). 10 s by default.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// let options = persia::OpenOptions::new().idle_flush(Duration::from_secs(2));
+    /// # let _ = options;
+    /// ```
+    #[must_use]
+    pub fn idle_flush(mut self, idle: Duration) -> Self {
+        self.idle_flush = idle;
+        self
+    }
+
+    /// The longest a write stays unflushed while writes never pause: a background commit flushes it once this
+    /// long has passed since the first unflushed write (SPEC §14 `commit_interval`), which bounds what an open
+    /// after a crash replays. 60 s by default.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// let options = persia::OpenOptions::new().commit_interval(Duration::from_secs(15));
+    /// # let _ = options;
+    /// ```
+    #[must_use]
+    pub fn commit_interval(mut self, interval: Duration) -> Self {
+        self.commit_interval = interval;
+        self
+    }
+
+    /// How many threads merge segments in the background (SPEC §8.5, §14 `merge_threads`). 1 by default; with 0 a
+    /// merge runs on the database's maintenance thread, one at a time.
+    ///
+    /// ```
+    /// let options = persia::OpenOptions::new().merge_threads(2);
+    /// # let _ = options;
+    /// ```
+    #[must_use]
+    pub fn merge_threads(mut self, threads: usize) -> Self {
+        self.merge_threads = threads;
+        self
+    }
+
+    /// The durability a write reaches before its call returns (SPEC §8.2.1, §14 `fsync_policy`), for every
+    /// collection handle of this database that does not choose its own. [`Durability::Fsync`] by default: a write
+    /// that returned survives a power loss.
+    ///
+    /// ```
+    /// use persia::{Durability, OpenOptions};
+    ///
+    /// // Writes return once they are in the file, not synced: they survive the process, not the machine.
+    /// let options = OpenOptions::new().durability(Durability::Async);
+    /// # let _ = options;
+    /// ```
+    #[must_use]
+    pub fn durability(mut self, durability: Durability) -> Self {
+        self.durability = durability;
+        self
+    }
+
+    /// Test hook: where the database reads the time, so tests decide when a background commit is due.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
+    /// Opens the database at `location` with these options: a filesystem path, or a `file://` URL with an empty
+    /// host or `localhost` (see [`Db::open`] for what is a URL and for the rules of the open, SPEC §8.1).
+    ///
+    /// ```
+    /// use persia::OpenOptions;
+    ///
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// let options = OpenOptions::new().merge_threads(0);
+    /// let first = options.open(dir.path().join("a.persia"))?; // the options can open several databases
+    /// let second = options.open(dir.path().join("b.persia"))?;
+    /// # drop((first, second));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// As [`Db::open`].
+    pub fn open(&self, location: impl AsRef<Path>) -> Result<Db> {
+        let path = location::path_of(location.as_ref())?;
+        Db::open_at(path, self)
+    }
+
+    /// The engine's options for one open (they are not `Clone`: each open draws its own segment ids).
+    pub(crate) fn database_options(&self) -> DatabaseOptions {
+        let defaults = DatabaseOptions::default();
+        DatabaseOptions {
+            policy: CommitPolicy {
+                flush: FlushPolicy {
+                    memtable_bytes: self.memtable_bytes,
+                    idle: self.idle_flush,
+                },
+                interval: self.commit_interval,
+            },
+            merge: MergeOptions {
+                threads: self.merge_threads,
+                ..defaults.merge
+            },
+            clock: self.clock.clone().unwrap_or(defaults.clock),
+            ..defaults
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use persia_engine::db::ManualClock;
+
+    use super::*;
+
+    #[test]
+    fn the_defaults_are_the_specs() {
+        let options = OpenOptions::new();
+        assert!(options.create_if_missing && !options.read_only);
+        assert_eq!(options.durability, Durability::Fsync);
+        let engine = options.database_options();
+        assert_eq!(engine.policy, CommitPolicy::default());
+        assert_eq!(engine.policy.flush.memtable_bytes, 64 << 20);
+        assert_eq!(engine.policy.flush.idle, Duration::from_secs(10));
+        assert_eq!(engine.policy.interval, Duration::from_secs(60));
+        assert_eq!(engine.merge.threads, 1);
+        let by_default = OpenOptions::default().database_options();
+        assert_eq!(by_default.policy, engine.policy);
+    }
+
+    #[test]
+    fn every_knob_reaches_the_engine() {
+        let clock = Arc::new(ManualClock::new(1_000));
+        let options = OpenOptions::new()
+            .create_if_missing(false)
+            .read_only(true)
+            .memtable_bytes(1 << 20)
+            .idle_flush(Duration::from_secs(2))
+            .commit_interval(Duration::from_secs(7))
+            .merge_threads(3)
+            .durability(Durability::Buffered)
+            .clock(clock);
+        assert!(!options.create_if_missing && options.read_only);
+        assert_eq!(options.durability, Durability::Buffered);
+        let engine = options.database_options();
+        assert_eq!(engine.policy.flush.memtable_bytes, 1 << 20);
+        assert_eq!(engine.policy.flush.idle, Duration::from_secs(2));
+        assert_eq!(engine.policy.interval, Duration::from_secs(7));
+        assert_eq!(engine.merge.threads, 3);
+        assert_eq!(engine.clock.unix_micros(), 1_000, "the injected clock");
+        // Without one, the system's: not 1970.
+        let system = OpenOptions::new().database_options();
+        assert!(system.clock.unix_micros() > 1_000_000_000_000_000);
+    }
+}

@@ -16,6 +16,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `14 PERSIA_POISONED` and `15 PERSIA_CANCELLED`; `6 PERSIA_UNSUPPORTED` now also covers a URL scheme this build has
   no backend for. Codes are append-only. `9 PERSIA_BUSY` and `10 PERSIA_PANIC` are reserved for the ABI and never
   returned from Rust.
+- `persia`: `Db::open(path | url)`, `OpenOptions` and `Db::close` (ROADMAP 10.1.1; SPEC §8.1, §10.2, §14).
+  `Db::open` creates the database when no file is at the path and opens an existing one without replacing it.
+  `OpenOptions` is a builder with SPEC §14's defaults (`create_if_missing`, `read_only`, `memtable_bytes`,
+  `idle_flush`, `commit_interval`, `merge_threads`, `durability`); `persia::Durability` re-exports the engine's.
+  A location is a URL only when it starts with `scheme://`: `file://` (empty host or `localhost`, percent-encoded
+  absolute path) opens the file it names, `s3://`, `gs://`, `az://` and `memory://` are `Unsupported` until their
+  backends exist, and any other scheme is `InvalidArgument`. `close` makes a final commit and releases the writer
+  lock; dropping a `Db` does the same and logs a failure.
 - `persia-engine`: relaxation metrics (ROADMAP 8.3.3; SPEC §7.6, §12.4). Each collection counts its relaxed queries
   (searches without a cursor): how many, how many relaxed past L0, how many still found nothing, and how many found
   their hits at each level. Read them as `RelaxationStats` from `CollectionSnapshot::relaxation_stats` or, summed over
