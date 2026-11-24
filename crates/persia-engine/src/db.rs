@@ -49,6 +49,7 @@ mod flush;
 mod merging;
 mod objects;
 mod obsolete;
+mod parents;
 mod policy;
 mod read_only;
 mod recovery;
@@ -83,8 +84,9 @@ pub use merging::{MergeOutcome, MergeStats};
 pub use objects::ContainerObjects;
 use obsolete::Pin;
 pub use obsolete::{ObsoleteKind, ObsoleteObject};
+pub use parents::{create_parent_dirs, create_parent_dirs_in};
 pub use policy::{CommitPolicy, CommitReason, MemtableState};
-pub use read_only::{ReadOnlyDatabase, Refreshed, SkippedAnalysis};
+pub use read_only::{MappedReads, ReadOnlyDatabase, ReadOnlyOptions, Refreshed, SkippedAnalysis};
 pub use relaxed::{
     Correction, Relaxation, RelaxationStats, RelaxedHit, RelaxedQuery, RelaxedResults,
     RelaxedSearchError,
@@ -103,8 +105,11 @@ use crate::manifest::{
 };
 use crate::memtable::{Logged, Memtable, MemtableError};
 use crate::merge::MergeOptions;
+use crate::query::QueryCompiler;
 use crate::schema::{CollectionSchema, EvolutionError, FieldKind};
-use crate::segment::{ReadError, Segment, SegmentError, SegmentMeta, Tombstones, WriteOptions};
+use crate::segment::{
+    BlockCache, CacheStats, ReadError, Segment, SegmentError, SegmentMeta, Tombstones, WriteOptions,
+};
 use crate::tombstone::{SidecarError, TombstoneSidecar};
 use crate::view::{SearchView, SegmentView};
 use crate::wal::{
@@ -399,6 +404,13 @@ pub struct DatabaseOptions {
     pub merge: MergeOptions,
     /// When the container is compacted on its own (SPEC §4.6).
     pub compaction: CompactionOptions,
+    /// The cache of decoded blocks every segment this database opens reads through (SPEC §10.6, ROADMAP 10.2.5): the
+    /// segments its open recovers, those its flushes and merges write, and those a schema change opens again. `None`
+    /// (the default): each open makes a new cache of [`BlockCache::DEFAULT_CAPACITY`] (8 MiB) for that database
+    /// alone, however many opens use options built alike. `Some`: that cache, shared by every database
+    /// given the same `Arc`, under its one budget. [`Database::block_cache`] and [`Database::block_cache_stats`]
+    /// read the one in use.
+    pub block_cache: Option<Arc<BlockCache>>,
     /// Caps each memtable's docids, so tests reach the limit.
     #[cfg(test)]
     pub(crate) memtable_max_docs: Option<u32>,
@@ -415,6 +427,7 @@ impl Default for DatabaseOptions {
             wal_chunk_target: DEFAULT_CHUNK_TARGET,
             merge: MergeOptions::default(),
             compaction: CompactionOptions::default(),
+            block_cache: None,
             #[cfg(test)]
             memtable_max_docs: None,
         }
@@ -426,6 +439,14 @@ impl DatabaseOptions {
     fn with_builtins(mut self) -> Self {
         self.registry = std::mem::take(&mut self.registry).with_builtins();
         self
+    }
+
+    /// The cache an open with these options reads through (SPEC §10.6): the one given, else a new one of
+    /// [`BlockCache::DEFAULT_CAPACITY`] for that database alone.
+    fn cache(&self) -> Arc<BlockCache> {
+        self.block_cache
+            .clone()
+            .unwrap_or_else(|| Arc::new(BlockCache::default()))
     }
 }
 
@@ -505,6 +526,25 @@ struct Collection {
     last_write: Option<Instant>,
     /// Its relaxed searches since the open (ROADMAP 8.3.3), which every snapshot of it counts into.
     relaxation: Arc<relaxed::RelaxationCounters>,
+    /// Compiles a request's `q` with the analyzers the memtable indexes with (SPEC §7.1.1, ROADMAP 10.1.10): one per
+    /// schema, shared by the collection's snapshots, so its synonym maps and alternatives are built once.
+    compiler: Arc<QueryCompiler>,
+}
+
+impl Collection {
+    /// A collection of `schema` with `segments` and the empty `memtable`, whose analyzers its compiler takes; its
+    /// counters start at zero.
+    fn new(schema: Arc<CollectionSchema>, segments: Vec<LiveSegment>, memtable: Memtable) -> Self {
+        Self {
+            compiler: Arc::new(memtable.query_compiler()),
+            schema,
+            segments,
+            memtable,
+            first_write: None,
+            last_write: None,
+            relaxation: Arc::default(),
+        }
+    }
 }
 
 /// A memtable flush planned before anything is written.
@@ -572,6 +612,8 @@ pub struct Database<F = File> {
     /// [`Database::referenced_blobs`]). Dead ones are dropped at each publish.
     retired: Vec<blob_refs::RetiredView>,
     options: DatabaseOptions,
+    /// The cache every segment this database opens reads through: its options' or, by default, its own (SPEC §10.6).
+    block_cache: Arc<BlockCache>,
     poisoned: bool,
     /// While an open replays the WAL, the position of the chunk it is in: a commit then keeps `wal_start` there, since
     /// the records from there on may not be in a memtable yet (ROADMAP 6.6.5).
@@ -675,7 +717,14 @@ impl<F: ContainerFile + Sync> Database<F> {
         let options = options.with_builtins();
         let wal = WalWriter::resume(container, BTreeMap::new())
             .with_chunk_target(options.wal_chunk_target);
-        let mut db = Self::assemble(wal, Manifest::empty(), BTreeMap::new(), options);
+        let block_cache = options.cache();
+        let mut db = Self::assemble(
+            wal,
+            Manifest::empty(),
+            BTreeMap::new(),
+            options,
+            block_cache,
+        );
         db.commit_guarded(Vec::new(), ManifestDiff::default(), Structural::None)?;
         Ok(db)
     }
@@ -685,6 +734,7 @@ impl<F: ContainerFile + Sync> Database<F> {
         manifest: Manifest,
         collections: BTreeMap<String, Collection>,
         options: DatabaseOptions,
+        block_cache: Arc<BlockCache>,
     ) -> Self {
         let manifest = Arc::new(manifest);
         let snapshot = snapshot_of(&manifest, &collections);
@@ -696,6 +746,7 @@ impl<F: ContainerFile + Sync> Database<F> {
             retired: Vec::new(),
             merges: merging::Merges::new(options.merge.threads),
             options,
+            block_cache,
             poisoned: false,
             replaying: None,
             compactions: CompactionStats::default(),
@@ -765,6 +816,30 @@ impl<F: ContainerFile + Sync> Database<F> {
             .fold(self.relaxation_dropped, |sum, c| {
                 sum.plus(&c.relaxation.load())
             })
+    }
+
+    /// The cache every segment of this database reads its blocks through ([`DatabaseOptions::block_cache`], SPEC
+    /// §10.6): this database's own unless its options were given one shared with others.
+    pub fn block_cache(&self) -> &Arc<BlockCache> {
+        &self.block_cache
+    }
+
+    /// The counters of [`Self::block_cache`], read now: reads served from it, reads that decoded their block, and the
+    /// entries and decoded bytes it holds. With a cache shared by several databases, they are the cache's, not this
+    /// database's share.
+    ///
+    /// ```
+    /// use persia_engine::db::{Database, DatabaseOptions};
+    /// use persia_engine::segment::BlockCache;
+    /// use persia_storage::container::sim::SimFile;
+    ///
+    /// let db = Database::create_on(SimFile::new(), [7; 16], DatabaseOptions::default())?;
+    /// assert_eq!(db.block_cache().capacity(), BlockCache::DEFAULT_CAPACITY);
+    /// assert_eq!(db.block_cache_stats().misses, 0);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn block_cache_stats(&self) -> CacheStats {
+        self.block_cache.stats()
     }
 
     /// A handle that loads the latest published snapshot from any thread.
@@ -866,14 +941,7 @@ impl<F: ContainerFile + Sync> Database<F> {
             segments: Vec::new(),
         };
         diff.collections.insert(name.clone(), create);
-        let collection = Collection {
-            schema: Arc::new(schema),
-            segments: Vec::new(),
-            memtable,
-            first_write: None,
-            last_write: None,
-            relaxation: Arc::default(),
-        };
+        let collection = Collection::new(Arc::new(schema), Vec::new(), memtable);
         self.commit_guarded(Vec::new(), diff, Structural::Create(name, collection))
     }
 
@@ -1403,7 +1471,8 @@ impl<F: ContainerFile + Sync> Database<F> {
                     what: "a committed segment is not in its manifest",
                 })?;
             let source = ByteSource::new(flushed.bytes.into());
-            let segment = open_source(source, &p.collection, entry, &c.schema)?;
+            let cache = &self.block_cache;
+            let segment = open_source(source, &p.collection, entry, &c.schema, cache)?;
             c.segments.push(LiveSegment::new(segment, None));
         }
         c.memtable = p.memtable;
@@ -1443,6 +1512,8 @@ impl<F: ContainerFile + Sync> Database<F> {
                     });
                 }
                 c.schema = schema;
+                // The evolved schema's analyzers, as its new memtable indexes with them.
+                c.compiler = Arc::new(memtable.query_compiler());
                 for (live, reopened) in c.segments.iter_mut().zip(segments) {
                     live.reopened(reopened);
                 }
@@ -1661,18 +1732,23 @@ fn new_segment_id(
     }
 }
 
-/// Opens the bytes of the segment `entry` describes and checks its footer against the entry.
+/// Opens the bytes of the segment `entry` describes, reading its blocks through `cache` (the database's, SPEC §10.6),
+/// and checks its footer against the entry.
 fn open_source(
     source: ByteSource,
     collection: &str,
     entry: &SegmentEntry,
     schema: &CollectionSchema,
+    cache: &Arc<BlockCache>,
 ) -> Result<Arc<Segment>, DatabaseError> {
-    let segment = Segment::open(source, schema).map_err(|source| DatabaseError::OpenSegment {
-        collection: collection.to_owned(),
-        id: entry.id,
-        source,
-    })?;
+    let segment =
+        Segment::open_with_cache(source, schema, Arc::clone(cache)).map_err(|source| {
+            DatabaseError::OpenSegment {
+                collection: collection.to_owned(),
+                id: entry.id,
+                source,
+            }
+        })?;
     let mismatch = |field| DatabaseError::SegmentMismatch {
         collection: collection.to_owned(),
         id: entry.id,
@@ -1707,6 +1783,7 @@ fn snapshot_of(manifest: &Arc<Manifest>, collections: &BTreeMap<String, Collecti
                     hidden: Arc::default(),
                     relaxation: Arc::clone(&c.relaxation),
                     facets: Arc::default(),
+                    compiler: Arc::clone(&c.compiler),
                 };
                 (name.clone(), snapshot)
             })

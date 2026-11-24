@@ -1117,6 +1117,7 @@ impl CollectionViews<'_> {
                 &segments,
                 page,
                 explanations,
+                &request.sort,
                 &request.projection,
                 plan.proximity(),
             )?;

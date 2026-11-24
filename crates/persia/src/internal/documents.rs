@@ -22,7 +22,9 @@ pub use persia_blob::pack::lease::ReaderLease;
 use persia_blob::pack::lease::leases_dir;
 use persia_blob::pack::{ContainerFile, Vfs};
 use persia_blob::{BlobId, BlobRef, BlobStore, PackStore, pack_path};
-use persia_engine::db::{Database, DatabaseError, DatabaseOptions, ReadOnlyDatabase};
+use persia_engine::db::{
+    Database, DatabaseError, DatabaseOptions, ReadOnlyDatabase, ReadOnlyOptions,
+};
 use persia_engine::document::Document;
 use persia_engine::wal::{Durability, WalMark};
 
@@ -146,28 +148,70 @@ pub enum Error {
     NoContainerPath,
 }
 
-/// The blob of a [`BlobDatabase::put`] (SPEC §9.6).
+/// The blob of a document (SPEC §9.5, §9.6), for [`Collection::put_with_blob`](crate::Collection::put_with_blob):
+/// bytes to store with it, or a blob [`Db::put_blob`](crate::Db::put_blob) stored before. Bytes are stored, and
+/// durable, before the document is logged; a stored blob must be in this database's store.
 pub enum Blob<'r> {
-    /// Bytes to store, from a reader.
+    /// Bytes to store, from a reader ([`Blob::from_reader`]).
     Reader(Box<dyn Read + 'r>, PutBlobOptions),
-    /// Bytes to store, from a file.
+    /// Bytes to store, from the file at the path ([`Blob::from_path`]).
     Path(PathBuf, PutBlobOptions),
-    /// A blob this database's `put_blob` stored before.
+    /// A blob this database stored before, by its reference.
     Stored(BlobRef),
 }
 
 impl<'r> Blob<'r> {
     /// The bytes `reader` yields, with the default [`PutBlobOptions`].
+    ///
+    /// ```
+    /// use persia::{Blob, Document};
+    ///
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// # let db = persia::Db::open(dir.path().join("app.persia"))?;
+    /// let files = db.create_collection_json(r#"{"name": "files", "fields": {}}"#)?;
+    /// let blob = files.put_with_blob(&Document::new("hello"), Blob::from_reader(&b"hello"[..]))?;
+    /// assert_eq!((blob.size(), blob.mime()), (5, "application/octet-stream"));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn from_reader(reader: impl Read + 'r) -> Self {
         Self::Reader(Box::new(reader), PutBlobOptions::default())
     }
 
-    /// The bytes of the file at `path`, with the default [`PutBlobOptions`].
+    /// The bytes of the file at `path`, with the default [`PutBlobOptions`]. The file is opened when the blob is
+    /// stored; a missing one is `NotFound`, and nothing is logged.
+    ///
+    /// ```
+    /// use persia::{Blob, Document};
+    ///
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// # let db = persia::Db::open(dir.path().join("app.persia"))?;
+    /// let path = dir.path().join("report.txt");
+    /// std::fs::write(&path, "quarterly numbers")?;
+    /// let files = db.create_collection_json(r#"{"name": "files", "fields": {}}"#)?;
+    /// let blob = files.put_with_blob(&Document::new("report"), Blob::from_path(&path))?;
+    /// assert_eq!(db.get_blob_range(&blob, 0..9)?, b"quarterly");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn from_path(path: impl Into<PathBuf>) -> Self {
         Self::Path(path.into(), PutBlobOptions::default())
     }
 
-    /// `options` instead of the defaults; no effect on [`Blob::Stored`].
+    /// `options` instead of the defaults; no effect on [`Blob::Stored`], whose blob keeps what it was stored with.
+    ///
+    /// ```
+    /// use persia::{Blob, Document, PutBlobOptions};
+    ///
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// # let db = persia::Db::open(dir.path().join("app.persia"))?;
+    /// let files = db.create_collection_json(r#"{"name": "files", "fields": {}}"#)?;
+    /// let text = PutBlobOptions { mime: "text/plain".into(), ..PutBlobOptions::default() };
+    /// let blob = files.put_with_blob(&Document::new("a"), Blob::from_reader(&b"hi"[..]).with_options(text))?;
+    /// assert_eq!(blob.mime(), "text/plain");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     #[must_use]
     pub fn with_options(self, options: PutBlobOptions) -> Self {
         match self {
@@ -655,6 +699,25 @@ impl ReadOnlyBlobDatabase<File> {
         )
     }
 
+    /// [`ReadOnlyBlobDatabase::open`] with the documents opened by [`ReadOnlyDatabase::open_with_options`]: `options`
+    /// choose the registry, the block cache and whether the container is mapped (SPEC §4.7, §10.6). The embedded API's
+    /// read-only `Db` opens with this.
+    ///
+    /// # Errors
+    /// As [`ReadOnlyBlobDatabase::open`].
+    pub fn open_with_options(
+        path: impl AsRef<Path>,
+        options: &ReadOnlyOptions,
+    ) -> Result<Self, Error> {
+        let path = path.as_ref();
+        let lease = ReaderLease::take_beside(path).map_err(lease_error)?;
+        Self::with_lease(
+            lease,
+            ReadOnlyDatabase::open_with_options(path, options)?,
+            path,
+        )
+    }
+
     /// `db`, opened read-only from the container at `path`, with a reader lease taken now and its pack opened
     /// read-only beside the container's canonical path: [`ReaderLease::take_beside`], then
     /// [`ReadOnlyBlobDatabase::with_lease`]. The lease comes after the documents, so this fails with
@@ -944,6 +1007,65 @@ impl Error {
             | Self::LeaseElsewhere { .. }
             | Self::NoContainerPath => false,
         }
+    }
+}
+
+impl<S: BlobStore + ?Sized, L: DocumentLog> BlobDatabase<S, L> {
+    /// Logs `doc` of `collection` at `durability`: with [`BlobDatabase::put`] of [`Blob::Stored`] when it carries a
+    /// blob reference (pinned and checked against the store first, SPEC §9.6), else as it is. What the embedded API's
+    /// `put` does: a reference set by hand is held to the same rule as one `put_blob` returned (ADR-0063 item 5).
+    ///
+    /// # Errors
+    /// [`Error::BlobNotStored`] for a reference the store lacks (nothing is logged); then as [`BlobDatabase::put`].
+    pub fn put_document(
+        &mut self,
+        collection: &str,
+        doc: &Document,
+        durability: Durability,
+    ) -> Result<(), Error> {
+        if let Some(blob_ref) = doc.blob_ref() {
+            let stored = Blob::Stored(blob_ref.clone());
+            return self.put(collection, doc, stored, durability).map(drop);
+        }
+        self.release_durable();
+        let logged = self.log.put(collection, doc, durability);
+        self.release_durable();
+        Ok(logged?)
+    }
+}
+
+impl<S: BlobStore + ?Sized, F: ContainerFile + Sync> BlobDatabase<S, Database<F>> {
+    /// [`Database::put_batch`] of `docs`, after pinning every blob reference they carry and checking the store holds
+    /// it (SPEC §9.6): a reference the store lacks rejects the whole batch before anything is logged. The pins are
+    /// held until the batch is durable, as [`BlobDatabase::put`] holds its document's.
+    ///
+    /// # Errors
+    /// [`Error::BlobNotStored`] (nothing is logged); then as [`Database::put_batch`].
+    pub fn put_batch(
+        &mut self,
+        collection: &str,
+        docs: &[Document],
+        durability: Durability,
+    ) -> Result<(), Error> {
+        self.release_durable();
+        let mut pins = Vec::new();
+        for blob_ref in docs.iter().filter_map(Document::blob_ref) {
+            let Some(pinned) = self.blobs.pin_contained(blob_ref)? else {
+                return Err(Error::BlobNotStored {
+                    blob_id: blob_ref.blob_id(),
+                });
+            };
+            pins.push(pinned);
+        }
+        let before = self.log.wal_mark();
+        let logged = self.log.put_batch(collection, docs, durability);
+        let mark = self.log.wal_mark();
+        // As in `put`: a record appended may be on disk, so its blob stays pinned until the mark is durable.
+        if mark > before {
+            self.held.extend(pins.into_iter().map(|p| (mark, p)));
+        }
+        self.release_durable();
+        Ok(logged?)
     }
 }
 

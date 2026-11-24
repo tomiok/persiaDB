@@ -25,7 +25,7 @@ mod config;
 mod evolution;
 mod field;
 mod json;
-pub(crate) use json::{RawRelaxation, relax_from_json};
+pub(crate) use json::{RawRelaxation, relax_from_json, relax_from_value};
 mod validate;
 
 pub(crate) use validate::{collection_name_problem, field_name_problem};
@@ -70,8 +70,8 @@ impl FieldId {
         self.0
     }
 
-    /// Field id `id`, for tests of code that takes ids without a schema.
-    #[cfg(test)]
+    /// Field id `id`, for code that reads ids without a schema: a cursor token's sort (SPEC §7.4), which the search
+    /// checks against its own sort, and tests.
     pub(crate) const fn new(id: u32) -> Self {
         Self(id)
     }

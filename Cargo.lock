@@ -596,10 +596,13 @@ dependencies = [
 name = "persia"
 version = "0.0.0"
 dependencies = [
+ "persia",
  "persia-blob",
  "persia-engine",
  "persia-storage",
  "proptest",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tracing",

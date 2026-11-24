@@ -11,7 +11,7 @@ name = "persia"
 path = "src/main.rs"
 
 [dependencies]
-persia.workspace = true
+persia = { workspace = true, features = ["internal"] }
 # ADR-0020: maintenance commands call the storage layer, segment commands the segment reader, directly.
 persia-storage.workspace = true
 persia-engine.workspace = true

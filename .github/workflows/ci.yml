@@ -70,7 +70,9 @@ jobs:
 
   test-windows:
     # ROADMAP 2.3.9: the `cfg(windows)` code of persia-storage (positioned I/O, reserved names, the writer lock,
-    # directory sync) is compiled and tested nowhere else. Only the crates below it, to keep the job short.
+    # directory sync) is compiled and tested nowhere else. Only the crates below it, to keep the job short, the
+    # engine's read-only mapping tests (ADR-0017 amended: on Windows `MappedReads` defaults to `Never`), and the
+    # embedded API's process tests.
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -84,6 +86,9 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy -p persia-format -p persia-storage --all-targets --all-features -- -D warnings
       - run: cargo test -p persia-format -p persia-storage --no-fail-fast
+      # The embedded API's real-process tests (ROADMAP 10.1.9, 10.2.3): the Windows writer lock, kills and shutdown.
+      - run: cargo test -p persia --test db_process --no-fail-fast
+      - run: cargo test -p persia-engine --test read_only_mapped --no-fail-fast
 
   repo-checks:
     runs-on: ubuntu-latest

@@ -27,6 +27,142 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   segment's documents streamed one at a time). The three exit
   with the statuses of the other commands (1, 3 for corruption, 4 for a file that is not a container); the `persia-cli`
   crate docs hold the table of every command's exit status.
+- `persia`: the error type of the embedded API (ROADMAP 10.1.5, ADR-0063). `persia::Error` is opaque: a stable
+  `ErrorCode` (`code()`), a message, and the engine's own error as `source()`; `persia::Result<T>` is the alias.
+  `ErrorCode` is `#[non_exhaustive]` and has the numbers (`number()`, `from_number`) and names (`as_str()`,
+  `PERSIA_NOT_FOUND`, ...) of the C ABI's error table in `docs/sdk/c-abi.md`, which gains `13 PERSIA_READ_ONLY`,
+  `14 PERSIA_POISONED` and `15 PERSIA_CANCELLED`; `6 PERSIA_UNSUPPORTED` now also covers a URL scheme this build has
+  no backend for. Codes are append-only. `9 PERSIA_BUSY` and `10 PERSIA_PANIC` are reserved for the ABI and never
+  returned from Rust.
+- `persia`: `Db::open(path | url)`, `OpenOptions` and `Db::close` (ROADMAP 10.1.1; SPEC §8.1, §10.2, §14).
+  `Db::open` creates the database when no file is at the path and opens an existing one without replacing it.
+  `OpenOptions` is a builder with SPEC §14's defaults (`create_if_missing`, `read_only`, `memtable_bytes`,
+  `idle_flush`, `commit_interval`, `merge_threads`, `durability`); `persia::Durability` re-exports the engine's.
+  A `memtable_bytes` of 0 is `InvalidArgument` at open; a zero `idle_flush` or `commit_interval` commits at every
+  maintenance round that finds unflushed writes, and `merge_threads(0)` runs each merge on the maintenance thread.
+- `persia`: what a `Db` reads through (ROADMAP 10.2.4, 10.2.5; SPEC §4.7, §10.6). Every `Db` has a block cache of its
+  own, `OpenOptions::block_cache_bytes` in size (8 MiB by default), given to the engine explicitly on a read-write
+  open and in the read-only opens and refreshes (`ReadOnlyDatabase::open_with_options`); `Db::block_cache_stats`
+  (`BlockCacheStats`) reads it. A read-only `Db` maps its container on a local disk by default, except on Windows;
+  `OpenOptions::mapped_reads(false)` forces ordinary reads, and a read-write `Db` never maps.
+  A location is a URL only when it starts with `scheme://`: `file://` (empty host or `localhost`, percent-encoded
+  absolute path) opens the file it names, every other scheme is `Unsupported` (`s3://`, `gs://`, `az://` and `memory://`
+  until their backends exist), and only malformed input is `InvalidArgument`. `close` makes a final commit and releases the writer
+  lock; dropping a `Db` does the same and logs a failure.
+- `persia`: the SQLite-like open rule (ROADMAP 10.1.9; SPEC §8.1, §13.1). `Db::open` creates the missing parent
+  directories of a missing path, then the database; the new directories are durable (each one's parent is synced, SPEC §4.5.2,
+  through `persia_engine::db::create_parent_dirs`); `create_if_missing(false)` and `read_only(true)` (which wins
+  over creation) create nothing, and a missing path fails with `NotFound`. A path under a file that is not a
+  directory is `InvalidArgument` in every mode. Opens racing on one missing path agree: one creates the database,
+  the others open it or fail with `Conflict` as a second writer, and the file is never replaced. A blob pack left at
+  `<name>.persia.blobs` with no database beside it refuses the create with `Conflict`.
+- `persia`: `Collection` handles (ROADMAP 10.1.2; SPEC §6.2). `Db::create_collection` (and `create_collection_json`),
+  `Db::collection`, `Db::collection_names`, `Db::drop_collection`; `Collection::name` and `Collection::schema`. A
+  handle owns a share of the database (no lifetime), is `Send + Sync + Clone`, names its collection (a dropped one
+  is `NotFound`, one created again under the name is reached), and fails with `Closed` once the database is closed.
+  The schema types are re-exported under `persia::` (`CollectionSchema`, `SchemaBuilder`, `Field`, `FieldId`,
+  `FieldKind`, `FieldType`, `TextOptions`, `KeywordOptions`, `AnalyzerRef`, `RankingConfig`, `RelaxationConfig` and
+  the types they name, ADR-0063).
+- `persia`: documents and blobs (ROADMAP 10.1.3, search excepted; SPEC §6.4, §8.1, §8.2, §9.6). `Collection::put`,
+  `put_batch`, `put_json`, `put_with_blob`, `delete`, `get`, `get_json`, `commit` and `with_durability`; `Db::commit`,
+  `Db::put_blob`, `Db::get_blob` (a `BlobReader` that owns a share of the database) and `Db::get_blob_range`.
+  `persia::Blob`, `PutBlobOptions`, `Document`, `Value`, `BlobRef` and `BlobId` are re-exported. A document that
+  carries a blob reference is checked against this database's store (and pinned) before it is logged, as
+  `put_with_blob(doc, Blob::Stored(..))` is; one the store lacks is `NotFound` and logs nothing. Blob bytes are stored
+  before the writer mutex is taken. Writes take the writer mutex one at a time; reads never do.
+- `persia`: search (ROADMAP 10.1.3; SPEC §7; ADR-0062, ADR-0063). `Collection::search(&SearchRequest)` and
+  `Collection::search_json(&str)` lower to the engine's `QueryRequest` and run on the latest published snapshot.
+  `SearchRequest` is a builder (`fields`, `filter`, `soft_filter`, `sort`, `limit`, `offset`, `after`, `facets`,
+  `explain`, `relax`, `proximity`); `SearchResponse` holds `Hit`s (document, score, level, explanation, cursor
+  token), facet counts, `Relaxation` and `query_truncated`, and `next_cursor()`. A damaged or foreign cursor token,
+  and `proximity` on a search that relaxes, are `InvalidArgument`. `Filter`, `FilterValue`, `Sort`, `SortKey`,
+  `Order`, `Missing`, `FacetRequest`, `FacetCounts`, `FacetValue`, `RelaxOptions`, `RelaxLevel` and `Explanation`
+  are re-exported.
+- `persia`: the test hooks (`Db::maintain_now`, `committed_seq`, `is_mapped`, `OpenOptions::{clock, hold_maintenance,
+  drop_wait, detached_into}`, `DetachedSlot`, `Collection::hold_writer_while`) exist only with the non-default
+  `test-hooks` feature, and `persia::internal` is public only with the non-default `internal` feature (which
+  `persia-cli` and the fuzz targets enable): the default public API exposes neither (ADR-0063).
+- `persia-format`: `Error::kind()` and `ErrorKind` (`Corrupt`, `Unsupported`, `OutOfMemory`, `InvalidInput`).
+  `persia-storage`: `container::Error::kind()` and `container::ErrorKind`. `persia-engine`: `error_kinds` re-exports
+  them with `persia_storage::ErrorKind`. `persia` classifies storage and format errors from these kinds, with
+  exhaustive matches, instead of reading their `Debug` text (ADR-0063 item 9).
+- `persia`: typed documents through `serde` (ROADMAP 10.1.4; SPEC §6.4.1). `Collection::put_struct(&T)` is exactly
+  `put_json(serde_json::to_string(&T))`; `Collection::get_struct::<T>(id)` and `Collection::to_struct::<T>(&doc)` read
+  a document's JSON output back. SPEC §6.4.1 is the only mapping. `persia` now depends on `serde` and `serde_json`.
+- `persia`: `Db::refresh` brings a read-only database up to what its writer made durable since (ROADMAP 10.2.1;
+  SPEC §8.4, §8.6); until then it shows one state, from every handle and thread. On a read-write database it does
+  nothing. Every handle is `Send + Sync + 'static` (`BlobReader` is `Send`); a second read-write open of a database
+  fails at once with `Conflict`.
+- `persia`: read-your-writes is documented and tested (ROADMAP 10.2.2; SPEC §8.4): on a read-write `Db`, a read that
+  starts after a write returned sees it from any handle and thread, at every durability, committed or not.
+- `persia`: background commits and merges (ROADMAP 10.2.3; SPEC §8.2, §8.5, §14; ADR-0064). A read-write `Db` runs one
+  thread, `persia-maintenance`, that commits what the commit policy finds due (`idle_flush`, `commit_interval`, a
+  full memtable) and drives the engine's merges, every second while there is work and parked otherwise. `close`
+  stops it and waits: the thread makes the final commit, cancels merges in flight and releases the writer lock;
+  `close` returns the first background error, else the final commit's. `Drop` waits up to 5 s, then detaches the
+  thread (which keeps the writer lock until it ends) and logs. A panic while holding the writer poisons writes
+  (`Poisoned`); reads go on, and the close makes no final commit.
+- `persia`: callers never call `tick` or `merge_step` (ROADMAP 10.2.6): a program that only opens, puts and closes
+  has its writes committed, and `close` (or a drop on time) returns after the maintenance thread and the engine's
+  merge workers stopped.
+- `persia` review fix-ups: an error that reports corruption anywhere (also in a step that failed after the first error)
+  is `Corrupt`; a blob file that does not exist is `NotFound`; `ErrorCode::ALL` is a `&'static [ErrorCode]` slice.
+  `Db::open` at a link to a missing file is `NotFound` naming the target, and racing opens start over with a
+  bounded backoff (1 ms doubling to 128 ms). Concurrent `refresh` calls run one at a time, so none is refused as
+  older. A `BlobReader` serves nothing once its database is closed, even bytes it already holds.
+- `persia-engine`: the whole search request (ROADMAP 10.1.10, ADR-0062; SPEC §7.1.4). `search::request::QueryRequest`
+  holds a request's `q`, `fields`, `filter`, `soft_filter`, `sort`, `limit`, `offset`, `search_after`, `facets`,
+  `relax` and `explain`, built in code (`QueryRequest::new` and its `with_` setters, which also set the projection)
+  or parsed from the request JSON (`QueryRequest::from_json`), read strictly: an unknown or repeated key, `null` for a
+  key, a value of another shape and more than 1 MiB of text (`MAX_REQUEST_JSON_LEN`) are errors. `QueryRequest::run`
+  runs it on a `CollectionSnapshot` with `RunOptions` (threads, deadline, cancellation, budget clock, query limits)
+  and returns a `QueryResponse`: the relaxed search's results when the collection's settings, as the request's `relax`
+  overrides them, relax, the plain search's for `relax: false`, and `query_truncated`. `filter` is hard at every
+  relaxation level and `soft_filter` is what `relax.filters = "last_resort"` drops; a filter given as both is hard.
+  Errors are `QueryRequestError`, whose `interrupt()` tells a deadline or a cancellation from an invalid request.
+- `persia-engine`: the request's `"proximity"` (ROADMAP 10.1.7; SPEC §7.1.4, §7.2). `true` plans the search with the
+  proximity bonus, `false` or no key without it (`QueryRequest::with_proximity`, `proximity`). Only a search that does
+  not relax takes it: on a request whose settings relax (the default), `"proximity": true` is
+  `QueryRequestError::ProximityRelaxed`, whose message names the fix, `"relax": false`. A cursor from a search with
+  the other setting is `RequestError::CursorProximity`.
+- `persia-engine`, `persia-storage`: durable creation of a database file's missing parent directories, for the
+  facade's open (ROADMAP 10.1.9; SPEC §4.5.2): `persia_engine::db::create_parent_dirs(path)` and
+  `create_parent_dirs_in(vfs, path)` create them from the outermost missing one inward and sync each new directory's
+  parent, through `persia_storage::vfs::create_dir_all_synced`, the walk `LocalStorage::open` already used.
+- `persia-engine`: one block cache per database (engine side of ROADMAP 10.2.5; SPEC §10.6). `DatabaseOptions` has
+  `block_cache: Option<Arc<BlockCache>>`: `None` by default, and each open then makes a new 8 MiB cache for that
+  database; `Some` is a cache shared by every database given it. Every segment the database
+  opens reads through it (recovery, flushes, merges and their verifying open, schema changes), no longer through the
+  process-wide `BlockCache::shared()`. `Database::block_cache` and `block_cache_stats` read it. One `Arc` given to
+  several databases is shared by them. `ReadOnlyOptions` (registry, `skip_unregistered_analysis`, `block_cache`) with
+  `ReadOnlyDatabase::open_with_options`, `open_on_with_options` and `open_container_with_options`; a read-only
+  database reads through its cache at the open and at each refresh (`ReadOnlyDatabase::block_cache`,
+  `block_cache_stats`), and the existing `open*` functions give each database a cache of its own.
+- `persia-storage`, `persia-engine`: mapped reads on by default for read-only handles on local disks, except on
+  Windows (engine side of ROADMAP 10.2.4; SPEC §4.7, ADR-0017 amended 2026-11-23). `Container::map_read_only_if_local`
+  is an `unsafe fn` (no safe public function of `persia-storage` maps a file) that maps a read-only container on a
+  local disk file system and refuses a read-write one (`Error::InvalidInput`). It maps only a file Persia opened by
+  path itself (`Container::open` and its reopens): a container on a file given to `open_on`, or opened through a
+  caller's `Vfs`, returns `Ok(false)`. The engine calls it from one module, `db/read_only/mapped.rs`, the only engine
+  file that allows `unsafe` code (its crate root now denies `unsafe_code` instead of forbidding it).
+  `ReadOnlyDatabase::open_with_options` maps by default (`ReadOnlyOptions::mapped_reads`: `MappedReads::IfLocal` by
+  default, `MappedReads::Never` on Windows, where a mapped reader keeps a writer that stopped with a torn tail from
+  reopening until the reader closes, and on a FAT32 or exFAT fixed drive can make the writer's compactions fail), and
+  each refresh that finds something new maps the container it reopened. A read-write `Database` never maps; the older
+  read-only opens and those of a given file or container keep ordinary reads. A mapped reader requires that nothing
+  but Persia writes or truncates the file while it is open (SPEC §4.7).
+- `persia-engine`: a cursor as an opaque token (ROADMAP 10.1.10, ADR-0062; SPEC §7.4): `Cursor::to_token` and
+  `Cursor::from_token`, base64url text of a versioned (`CURSOR_TOKEN_VERSION` 1), checksummed encoding. The request
+  JSON's `search_after` takes one. A token that was cut, changed or written by another version is a
+  `CursorTokenError`, never another cursor. A cursor records its sort's keys (`Cursor::sort`: each key's field or
+  the score, order and placement of missing values), and a search refuses a cursor of another sort, or one naming a
+  segment its view does not have, as `RequestError::Cursor`. The request JSON refuses `-0` as a count and
+  `"sort": []`, each with its own message.
+- `persia-engine`: `CollectionSnapshot::compiler`, the collection's `QueryCompiler` with the analyzers the database
+  indexes with, shared by its snapshots until the schema changes; `DefaultFields::is_for`.
+- `persia-fuzz`: targets `request_json` (any input to `QueryRequest::from_json` never panics, and an accepted request
+  runs without panicking) and `cursor_token` (any token never panics, and an accepted one is the one encoding of its
+  cursor).
 - `persia-engine`: relaxation metrics (ROADMAP 8.3.3; SPEC §7.6, §12.4). Each collection counts its relaxed queries
   (searches without a cursor): how many, how many relaxed past L0, how many still found nothing, and how many found
   their hits at each level. Read them as `RelaxationStats` from `CollectionSnapshot::relaxation_stats` or, summed over

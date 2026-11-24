@@ -51,7 +51,7 @@ mod max_score;
 mod phrase;
 mod plan;
 mod proximity;
-mod request;
+pub mod request;
 mod sort;
 mod top_k;
 mod word;

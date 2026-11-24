@@ -123,6 +123,12 @@ impl DefaultFields {
         &self.fields
     }
 
+    /// Whether they were built for `schema` (its [`CollectionSchema::hash`]): [`QueryCompiler::compile`] takes only
+    /// fields of its own schema.
+    pub fn is_for(&self, schema: &CollectionSchema) -> bool {
+        self.schema == schema.hash()
+    }
+
     fn new(schema: &CollectionSchema, fields: Vec<(FieldId, f64)>) -> Self {
         Self {
             fields,
@@ -711,12 +717,22 @@ impl QueryCompiler {
                 _ => Ok(None),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self {
+        Ok(Self::with_analyzers(schema, analyzers))
+    }
+
+    /// A compiler for `schema` with `analyzers`, one per field in field id order (`None` for a field that is not
+    /// `text`): how a collection's compiler takes the analyzers its memtable indexes with
+    /// ([`crate::db::CollectionSnapshot::compiler`]), so a query is analyzed as the documents were.
+    pub(crate) fn with_analyzers(
+        schema: &CollectionSchema,
+        analyzers: Vec<Option<Arc<Analyzer>>>,
+    ) -> Self {
+        Self {
             schema: schema.clone(),
             synonyms: analyzers.iter().map(|_| OnceLock::new()).collect(),
             alternatives: AlternativeCache::default(),
             analyzers,
-        })
+        }
     }
 
     /// The synonym groups of the schema as `text` field `id` analyzes them at query time; `None` for another field.

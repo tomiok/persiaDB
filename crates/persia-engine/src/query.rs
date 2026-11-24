@@ -50,12 +50,26 @@ pub use filter::{Filter, FilterValue, MAX_FILTER_JSON_LEN};
 pub(crate) use fit::{Fit, StepLimits};
 pub use limits::{DEFAULT_MAX_EXPANSIONS, QueryLimits};
 
+/// The longest caller string an error message repeats as written.
+pub(crate) const MAX_SHOWN: usize = 32;
+
+/// A caller's string (a field name, a key, a `fields` entry) as an error message names it: quoted as written up to
+/// [`MAX_SHOWN`] bytes, a longer one by its length, so a message stays short whatever the request holds (a request may
+/// be 1 MiB, SPEC §7.1.4). The error value itself keeps the string whole.
+pub(crate) fn shown_name(name: &str) -> String {
+    if name.len() <= MAX_SHOWN {
+        format!("{name:?}")
+    } else {
+        format!("of {} bytes", name.len())
+    }
+}
+
 /// Why a query, a filter or the options of a compilation are invalid. User text itself never fails to compile.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum QueryError {
-    /// A field name the schema does not have.
-    #[error("unknown field {field:?}")]
+    /// A field name the schema does not have. The message names a long one by its length.
+    #[error("unknown field {}", shown_name(field))]
     UnknownField {
         /// The name.
         field: String,
@@ -168,7 +182,7 @@ pub enum QueryError {
         analyzer: String,
     },
     /// A malformed entry of `fields` (`"name"` or `"name^boost"`, SPEC §7.1), or an empty list.
-    #[error("invalid fields entry {spec:?}")]
+    #[error("invalid fields entry {}", shown_name(spec))]
     InvalidFieldSpec {
         /// The entry (empty for an empty list).
         spec: String,

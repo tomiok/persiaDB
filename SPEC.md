@@ -430,9 +430,41 @@ truncate below the `log_end` that process mapped. A fault on a mapped page (a re
 program) raises `SIGBUS` on Unix (`EXCEPTION_IN_PAGE_ERROR` on Windows) and ends the process; a reader that cannot
 accept that reads with ordinary reads instead.
 
-Mapping is opt-in; ordinary reads are the default (ADR-0017). Turning it on is an `unsafe` call: the embedder states
-that nothing outside Persia writes, truncates or hole-punches the file below the mapped `log_end` while a mapping
-lives. A failed remap falls back to ordinary reads, logs a warning and is counted (`mapping_failures`). The automatic
+Mapping is on by default for read-only handles on local disks, except on Windows, and off for read-write ones
+(ADR-0017, amended 2026-11-23). A read-only database opened by path (`ReadOnlyDatabase::open_with_options`, which the
+embedded API's read-only open is to use, ROADMAP 10.2.4) maps its container when the file is on a local disk file
+system (below), through `Container::map_read_only_if_local`, which refuses a read-write container and maps only a file
+Persia opened by path itself on the operating system's file system (`Container::open` and its reopens). That storage
+call is an `unsafe fn`: no safe public function of `persia-storage` maps a file. The engine calls it from one module
+(`db/read_only/mapped.rs`, the only engine file allowed `unsafe` code, ADR-0017), for the containers its read-only
+open by path opens itself, so the read-only open is the one safe way to a mapping, and its residual (below) is the
+one the owner accepted. A container on a file the caller handed in (`Container::open_on`, or a path opened through
+the caller's own `Vfs`) is never mapped by it: the caller may hold another handle of that file (a clone) and truncate
+it from safe code. Its options set `MappedReads`: `IfLocal` maps as above, `Never` reads with ordinary reads. The
+default is `IfLocal`, except on Windows, where it is `Never`: there a reader's mapping keeps a writer from truncating a
+torn tail and can make its compactions fail on FAT32 or exFAT (below), which a default reader should not impose on
+the writer. A Windows reader asks for `IfLocal` to map. The engine's read-only opens of a given file or container, and its
+older ones that take a registry alone, read with ordinary reads; a container the caller mapped itself and passed to
+such an open is read through its mapping until the first refresh that finds something new, which reopens it unmapped.
+A read-write database never maps: the writer's handle always reads with ordinary reads. The call's checks take on
+the part of the mapping contract that is Persia's own: no Persia writer changes the bytes below a committed `log_end`
+(above), the mapping handle is read-only and its file handle is never handed out, and on the allow-listed local file
+systems the writer lock belongs to the open file, so no second writer can exist in the same process. It cannot take
+on the rest, which stays with the deployment: while a read-only handle is open, nothing but Persia writes, truncates
+or hole-punches the container file, neither another program nor a handle of the file the process opens on its own.
+A write under a mapping is undefined behaviour, a truncation ends the process as above, and a
+slot damaged later stays outside the contract (above). A deployment that cannot rule that out opens with ordinary
+reads. A read-only handle never commits, so it never remaps: a refresh (ADR-0060) reopens the container and, when it
+finds something new, maps the new handle before it opens a segment from it, up to the new `log_end` (after a
+compaction, the file renamed over the path). A snapshot taken before keeps the mapping its segments were opened on,
+and so does the reader itself for segments an incremental refresh reuses: a long-lived reader can hold several
+mappings of the file at once, one per container its live segments were opened from.
+A mapping that fails at an open or a refresh is not an error of either: the handle reads with ordinary reads, and a
+warning is logged.
+
+Mapping anything else (a read-write container, or a file the caller vouches for) is an `unsafe` call
+(`enable_mapped_reads`, ADR-0017): the embedder states that nothing outside Persia writes, truncates or hole-punches
+the file below the mapped `log_end` while a mapping lives. A failed remap falls back to ordinary reads, logs a warning and is counted (`mapping_failures`). The automatic
 choice maps only a container on a local disk file system (`enable_mapped_reads_if_local`): on Linux, those in an
 allow-list of `f_type`s (ext2-4, XFS, Btrfs and other allow-listed local types; ADR-0021), on macOS local volumes other than FUSE, FAT and exFAT, on Windows fixed
 and RAM disks. Network, FUSE, overlay, removable and unlisted file systems keep ordinary reads, since a failed page read
@@ -443,7 +475,12 @@ that succeeded. A frame the mapping covers is read from it; any other (after tha
 Either way the frame is validated on every read (§4.4). On Windows a live mapping keeps the file from being shrunk,
 so a read-write open that must truncate a torn or corrupt tail (§4.4, §8.6) fails with an I/O error and leaves the
 container unchanged until the mapping is gone; a corrupt tail's quarantine copy (§4.4) may be left behind by each
-such attempt.
+such attempt. A reader of a container on a Windows fixed or RAM disk opened with `MappedReads::IfLocal` holds a
+mapping while it is open (or while a snapshot taken from it lives): a writer that stopped uncleanly with a torn or
+corrupt tail cannot open read-write until every such reader has closed. A clean tail needs no truncation and opens.
+On a fixed drive formatted FAT32 or exFAT, which counts as a local disk, the rename of a compaction over a file a
+reader maps may also be refused (above): the writer's compaction then fails without harm for as long as such a
+reader is open. That is why the default on Windows is `MappedReads::Never`; ROADMAP 10.1.22 (v1.1) revisits it.
 
 ### 4.8 Copying and backing up a database
 A database is both of its files (§4). A copy of `<name>.persia` alone keeps every document's `BlobRef` but none of
@@ -1190,6 +1227,9 @@ A document is an `id`, an optional `blob` reference (§9.1) and a value per fiel
   16 MiB, and so is the binary encoding (§6.4.2) of the whole document.
 - **Output.** `get` writes an object with `id`, then `blob` if present, then the fields and extra fields in
   ascending byte order of their names; values in the forms above.
+- **Typed values** (ROADMAP 10.1.4). The embedded API's `put_struct(&value)` is exactly `put` of the document this
+  JSON form reads from `serde_json`'s text of the value, and `get_struct` / `to_struct` read the output above with
+  `serde_json`: these rules are the only mapping between a Rust type and a document.
 
 #### 6.4.2 Binary encoding
 The encoding of a document in `DocStore` (and anywhere else a document is persisted) is CBOR (RFC 8949) restricted so
@@ -1232,10 +1272,11 @@ returned as it is, and copied as bytes, never re-validated.
   "filter": {"term": ["tenant","t1"]},    // hard: no relaxation level drops it
   "soft_filter": { "and": [ {"term": ["brand","nike"]}, {"range": ["price", {"lte": 100}]} ] },  // only L6 may drop it
   "sort": "score",                        // or [{"field":"price","order":"asc"}]
-  "limit": 20, "offset": 0,               // or "search_after": cursor
-  "facets": ["brand"],
+  "limit": 20, "offset": 0,               // or "search_after": a cursor token (§7.4)
+  "facets": ["brand"],                    // or {"field": "brand", "size": 5}
   "relax": { "min_results": 1 },          // overrides collection default
-  "explain": false
+  "explain": false,
+  "proximity": false                      // true scores the proximity bonus (§7.2); needs "relax": false
 }
 ```
 Programmatic query AST (term, combined, phrase, prefix, fuzzy, bool must/should/must_not, filter, boost,
@@ -1432,6 +1473,56 @@ compilation's, which see only those. Defaults, configurable per engine:
 | `max_depth` | 32 | nesting: a leaf is 1, a node one more than its deepest child |
 | `max_text_len` | 8 KiB | bytes of `q` read |
 
+#### 7.1.4 Request JSON
+The request is one JSON object of the keys of §7.1's example (ROADMAP 10.1.10, ADR-0062), each optional. Requests
+are written by programs, so the object is read as strictly as a collection definition (§6.2.1) and a filter (§7.1.2):
+an unknown key, a key repeated at any depth, `null` for a key, a value of another shape than its key's, and text
+longer than 1 MiB are errors, and one about a key names it. Nothing is ignored or guessed. Only the text inside `q`
+never fails (§7.1.1).
+
+| Key | Value | Left out |
+|---|---|---|
+| `q` | a string: the user text (§7.1.1) | `""`, which matches every document |
+| `fields` | an array of one or more `"name"` or `"name^weight"`, distinct `text` fields (§7.1.1) | every `text` field with its `boost` |
+| `filter`, `soft_filter` | one filter object each (§7.1.2) | no filter |
+| `sort` | `"score"` or a non-empty array of keys (§7.4); `[]` is an error, since it names no order | `"score"` |
+| `limit`, `offset` | integers of at least 0, written without a fraction or an exponent (§7.4); `-0` is an error of its own (a facet's `size` too) | 20 and 0 |
+| `search_after` | a cursor token (§7.4) | the page starts at the top |
+| `facets` | an array of at most 16 entries, each a field name or `{"field": name, "size": n}` (§7.5) | no facet |
+| `relax` | `false`, `true` or an object (§7.6) | the collection's settings |
+| `explain` | `true` or `false` (§7.7) | `false` |
+| `proximity` | `true` or `false` (§7.2) | `false` |
+
+Each value is read by the rules of its own section. A `sort` key object takes `field`, `order` and `missing`, or
+`score` alone with an object of `order` (§7.4); a facet object takes `field` and `size` (default 10); any other key in
+either is an error. There is no key for the projection of §7.5.1 yet (ROADMAP 10.1.20): a request built in code sets
+it, and a parsed one returns every stored field. The 1 MiB bound is that of a filter's JSON (§7.1.2), which the
+request holds: inside a request, the request's bound is the one that applies to `filter`, `soft_filter` and `relax`
+(§7.6's 64 KiB is for a `relax` read on its own). A `filter` and a `soft_filter` are each held to §7.1.3's limits
+when parsed. When the request runs, the compiled `q` joined to both (§7.1.1) is held to them again, since the filters
+add their nodes, their terms and a level of depth, and a query over a limit is an error that names it. A page whose
+`offset + limit` is over 10 000 (§7.4), and a cursor that does not fit the search, are errors of the run.
+
+The engine holds the request as one typed value, which a caller also builds in code without JSON (the embedded API,
+ROADMAP 10.1.3): both run through the same function, on one snapshot of a collection and a view of its memtable taken
+then. `q` is compiled with the analyzers the collection indexes its `text` fields with (the database's registry,
+§6.2.2), over `fields`. `filter` joins it hard and `soft_filter` soft (§7.1.1). The relaxation settings are the
+collection's as `relax` overrides them (§7.6). When they relax, the relaxed search runs, with the request's compiled
+query (so its text is stated in `original` and `effective`, and `filter` is hard at every level) and its steps held
+to the same limits. When they run L0 alone (`relax: false`, a collection that disables the cascade, or a plan with no
+level, no fallback and no filter step), the plain search runs: its hits have no level or rank score, an explained
+one has no `relaxed` node (§7.7), and the search is not counted in the relaxation metrics (§7.6, ROADMAP 10.1.21). A
+response states such a search as `level: "exact"` with nothing applied (§7.6; the response JSON is ROADMAP 10.1.13).
+`proximity` (ROADMAP 10.1.7, ADR-0036) plans the plain search with the proximity bonus of §7.2 when `true`
+(`SearchPlan::with_proximity`) and without it when `false` or left out (`SearchPlan::without_proximity`). The
+relaxed search plans every step without the bonus (§7.2), so `"proximity": true` on a request whose settings
+relax, which is the default, is an error that names the fix, `"relax": false`; it is not ignored. The bonus
+across relaxed steps is ROADMAP 10.1.14. A cursor records the setting of its search (§7.4), and the request path
+returns the search's error for a cursor given to a search with the other one.
+A request is built for one schema, whose fields its filters, sort, facets and default fields name by id (§6.2.1):
+run on a snapshot of another schema, default fields of another schema are an error, and the sort, the facets and the
+filters are checked against the snapshot's schema again.
+
 ### 7.2 Scoring: BM25F
 Per term `t` and doc `d` over fields `f` with weights `w_f`:
 ```
@@ -1479,8 +1570,8 @@ term is left out. A `prefix` or `fuzzy` is not a word here, even one that kept a
 pairs: not a `phrase`, `should`, `filter` or `must_not` clauses, a word under `boost` (a `fuzzy` term's weight
 included), nor a field without positions; a single word is no `bool` (§7.1.1). The bonus is **off by default**: a plan
 adds it only when asked (`SearchPlan::with_proximity`). Its measured cost on AND queries buys no nDCG@10 gain yet
-(ADR-0036, Results; §16.1), so it stays opt-in until judged queries it can decide show a gain (ROADMAP 15.1.6). A request cannot ask for it yet (`"proximity"`, ROADMAP 10.1.7), and a
-relaxed search (§7.6) plans every step without it. Without it the bonus is 0 and not added. With
+(ADR-0036, Results; §16.1), so it stays opt-in until judged queries it can decide show a gain (ROADMAP 15.1.6). A request asks for it with `"proximity": true` (§7.1.4, ROADMAP 10.1.7), which only a search that does not relax takes: a
+relaxed search (§7.6) plans every step without it (the bonus across relaxed steps is ROADMAP 10.1.14). Without it the bonus is 0 and not added. With
 `B = Σ_pairs (λ · min(idf_i, idf_j))`, summed in pair order, `bonus ≤ B` exactly: each product is monotonic in
 `π ≤ 1`, and the sum in each addend. `λ` and the window are constants of the scorer: changing them changes ranking
 and goes through the nDCG@10 gate (§16.1).
@@ -1630,8 +1721,11 @@ hit has its score, sorted by it or not.
 The page is `offset` (default 0) hits from the top, then `limit` (default 20); `offset + limit` is at most 10 000
 (a constant, not an option). `search_after` is the cursor of a hit returned before: its sort values (one per key: the score, the key, the
 keyword bytes, or missing) and its location (segment index or memtable, and docid). The page then starts after it:
-only hits that rank after the cursor count, `offset` included. A cursor whose values do not match the sort's keys in
-number and type is an error. The cursor also records the snapshot it came from (the commit `seq`), the collection,
+only hits that rank after the cursor count, `offset` included. The cursor records the sort it was ranked by: each
+key's field (or the score), order and placement of missing values. A cursor of another sort (another key, order or
+placement, or another number of keys; the score descending and the score ascending are different keys) is an error,
+and so is one whose values do not match the sort's keys in number and type, or whose location names a segment the
+view does not have. The cursor also records the snapshot it came from (the commit `seq`), the collection,
 and the memtable view's version. A search on another snapshot, collection, or memtable view is an error: locations
 are indices into the view that returned the cursor, so using it elsewhere would repeat a hit tied with it on every
 key or pass one over. The same snapshot and the same memtable view page exactly. A cursor from a relaxed search
@@ -1639,9 +1733,45 @@ also records its hit's step, its cascade's last step and its hit step (§7.6). I
 (§7.2): a page under a plan with the other setting is an error, since the bonus changes the scores and so the order.
 It records the relaxation settings of its search too, none for a plain search or one of L0 alone, and a page under
 other settings is an error (§7.6, ROADMAP 8.3.1).
-The other plan and query options are not recorded yet (ROADMAP 10.1.7), so paging is exact only when they are
-unchanged between pages. A request cannot change `proximity` today (it has no such field): only a caller building its
-own `SearchPlan` can, and the relaxed search plans with the default (off).
+The cursor does not record the query, its fields and filters, or the limits (ROADMAP 10.1.24), so paging is exact
+only when they are unchanged between pages. A request sets `proximity` (§7.1.4), and a caller building its own
+`SearchPlan` sets it on the plan; the relaxed search always plans without it, so a cursor from a proximity-on search
+pages only a plain search asked with `"proximity": true`.
+
+In JSON a cursor is a *cursor token* (ROADMAP 10.1.10, ADR-0062): a request's `search_after` takes one, and a response
+gives each hit's cursor as one (ROADMAP 10.1.13). A token is opaque text: base64url without padding (RFC 4648 §5) of a
+binary encoding of the cursor that starts with a version byte and ends with the CRC-32C of every byte before it.
+Version 1, integers little-endian, `varint` as §4.1:
+```
+u8      version = 1
+u8      flags: 1 proximity, 2 has step, 4 has relaxation settings, 8 the location is the memtable; other bits 0
+u64     snapshot seq
+u64     memtable view version
+varint  collection name length, then its UTF-8 bytes
+varint  segment index            (absent when the location is the memtable)
+varint  docid (u32)
+varint  number of sort values, then each: u8 tag, 0 missing | 1 score (u64: the f64's bits) | 2 column key (u64) |
+        3 keyword (varint length, bytes)
+varint  number of sort keys (at most 16), then each: u8 bits, 1 a field (else the score) | 2 descending |
+        4 missing first (a field's only); then, for a field, varint field id
+varint  step, varint last step, varint hit step                              (only with "has step")
+varint  level bits (bit i: level Li), varint min_results, u8 1 fill | 2 filters last_resort
+                                                                             (only with "has relaxation settings")
+u32     CRC-32C of every byte above
+```
+Nothing stores a token, so it is not an on-disk format (§15) and has no fixture directory. Clients hold tokens
+between requests, though, and a token outlives the process that made it while its snapshot and memtable view are
+still the ones searched, so the version byte is its compatibility rule: any change to the layout, or to what a field
+means (a new level, a new kind of sort value), takes a new version; a build refuses the versions it does not read;
+and a golden test per version pins the text. Decoding reads the version first (a later version may define the rest
+differently), then the checksum, then each field, and never panics. It accepts only the one encoding of a cursor: no
+unknown flag, tag, level bit, sort key bit or setting bit, no overlong varint, no byte left over, no padding, so encoding a decoded
+cursor gives back the token. Text longer than 1 MiB (a request's bound, §7.1.4), text that is not base64url, another
+version, a checksum that does not match and a field that is not well formed are each an error of the request (an
+invalid argument), not a different cursor. The checksum finds damage, not forgery: a token is not authenticated, so a
+decoded cursor is checked as any cursor is (the checks above), and one from another collection, snapshot, sort or
+`relax` is refused by them. A cursor only says where a page starts in a ranking the caller could already ask for: it
+grants nothing a request without it could not read.
 
 Without a facet, two sorts skip matches; with one, every match is visited (a facet counts them all). Pruning (§7.3)
 applies when the first key is the score descending (`"score"`, or a list led by it): then only the threshold of the
@@ -1774,7 +1904,7 @@ A query's `relax` (ROADMAP 8.3.1, ADR-0045) is `false`, `true` or an object. `fa
 `true` is `{"enabled": true}`. The object takes the keys of §6.2.3's `relaxation`: `enabled`, `min_results`, `levels`,
 `fallback`, `fill`, `filters` and `budget_ms`. No key is for the collection only. The limits a step is held to
 (§7.1.3) are the engine's, not a key. The JSON is read as strictly as a collection definition (§6.2.1). An unknown
-or repeated key, `null` for a key, any other shape, and more than 64 KiB of text are errors. The settings merge one
+or repeated key, `null` for a key, any other shape, and more than 64 KiB of text (of a `relax` read on its own; inside a request the request's bound applies, §7.1.4) are errors. The settings merge one
 key at a time: the query's value, else the collection's, else §6.2.3's default. A collection definition that leaves
 a key out has the default. `levels` is one key, so a list replaces the collection's list whole. Each value the query
 gives is held to §6.2.3's rule, also when the query or the collection disables the cascade: `min_results` in
@@ -2118,7 +2248,7 @@ Metrics (ROADMAP 8.3.3). Each collection counts its relaxed searches since the d
 snapshots share (atomic, so a search on any thread counts without a lock; nothing is stored, a reopened database
 counts from 0). A *query* is a relaxed search that returned a response and was given no cursor: a cursor's page
 continues a query counted on its first page and counts nowhere, while a page by `offset` runs the cascade from the
-top and counts as a query. A plain search (no cascade) counts nowhere. Per query: `queries` counts it; `relaxed` counts
+top and counts as a query. A plain search (no cascade) counts nowhere, so neither does a request whose settings run L0 alone, which runs the plain search (§7.1.4): its zero-result queries are not in `empty` (ROADMAP 10.1.21). Per query: `queries` counts it; `relaxed` counts
 it when the response's `level` is not `exact` (a step after L0 was built and not skipped); `empty` counts it when no
 step of its cascade found a hit, L0 included (the zero-result queries, after whatever relaxation ran, `relax: false`
 included); otherwise the level of its hit step (above) counts it, once. So the per-level counts are the level
@@ -2191,10 +2321,25 @@ open's recovery may still truncate or quarantine an uncommitted tail (§4.5.1). 
   alone, `{ readOnly: true }` alone, and `PERSIA_OPEN_READ_ONLY` alone are that combination, because
   creation defaults on. `PERSIA_OPEN_MUST_EXIST` beside `PERSIA_OPEN_READ_ONLY` is the same open.
 
-A parent that exists and is not a directory is an error. Creating the directories is the facade's step.
-The container create of §4.5.1 still writes a temporary file in a directory that already exists, and still
-refuses to replace a name that is taken. `persia_engine::db::Database` has separate `create` and `open`
-until 10.1.9, and that `create` fails when the parent directory is missing.
+A parent that exists and is not a directory is an error (an invalid argument: the path cannot name a file), for
+every mode, and nothing is created. Creating the directories is the facade's step (`persia::Db`, ROADMAP 10.1.9):
+it creates the missing parents, then the container. The container create of §4.5.1 still writes a temporary file
+in a directory that already exists, and still refuses to replace a name that is taken.
+`persia_engine::db::Database` keeps its separate `create` and `open`, and that `create` fails when the parent
+directory is missing.
+
+**Racing opens.** The facade looks for the file, then opens or creates it, so the file can appear or vanish in
+between. A create that finds the name taken (another open created it first) starts over and opens the file; an
+open that finds the file gone starts over and decides again. So when several read-write opens of one missing path
+race, one of them creates the database and holds it, and each of the others either opens it once the holder
+closed or fails at once as a second writer (§8.4): none is told the file exists, is missing or is damaged, and
+the file is never replaced. A reader racing the create finds no file, or the database (empty until its first
+commit). After 8 starts the open fails as transient. A blob pack left at `<name>.persia.blobs` with no
+container beside it refuses the create (a conflict: the new database could not use it), and nothing is created.
+
+**What a path is.** The argument of `Db::open` is a filesystem path, or a URL (§10.2). It is a URL only when it
+starts with `scheme://`, so `C:\data\app.persia` is a path, and a path is never percent-decoded. An empty
+argument is an invalid argument.
 
 ### 8.2 Flow
 1. Op appended to the **WAL** (batched, group commit). Durability level per call: `Buffered | Async | Fsync`, default `Fsync`
@@ -2211,9 +2356,10 @@ operations, each into one segment of its live documents in docid order (none if 
 deleted), with the tombstone sidecars that delete the older segments' copies of the ids it touched (§8.3), whatever triggered it: `commit()`; a memtable at its size threshold, before the next write to it; or
 `tick()`, which the embedding calls periodically (commits stay on the caller's thread; merge workers only
 merge, ADR-0032) and which commits when any memtable is idle or reached `commit_interval` since its first unflushed
-write. Callers of the public `Db` never call `tick()` or `merge_step()` (ROADMAP 10.2.6): the facade's own
-threads call them, so a commit and a merge both run off the application's thread, and `close` joins those
-threads. On the engine, a commit still runs on the thread that calls `tick` or `merge_step`, and merge
+write. Callers of the public `Db` never call `tick()` or `merge_step()` (ROADMAP 10.2.6): the facade's maintenance
+thread (one per read-write `Db`, a round every second while there is work, ADR-0064) calls them, so a commit and a
+merge both run off the application's thread, and `close` joins it (the engine's merge workers are joined when the
+database drops). On the engine, a commit still runs on the thread that calls `tick` or `merge_step`, and merge
 workers only merge. Operations replayed at an open count as
 written at the open (their age is not logged), so a replayed backlog waits up to one more interval. Flushing all of them makes the
 commit's `wal_start` the end of the log, so a crash never replays a record that is already in a segment. A commit builds every segment before it writes anything, so a failure there changes nothing; a failed
@@ -2378,6 +2524,12 @@ consulted; that hid the new copy after such a merge.) A file with two live copie
   current one without locks and keep it as long as they like; it shows the committed segments plus the memtable's
   writes as of each view taken from it. A memtable a commit flushes stays in the older snapshots and takes no more
   writes, so every snapshot shows a flushed document exactly once: in the memtable before, in the segment after.
+- **Read-your-writes** (the embedded API, ROADMAP 10.2.2). On a read-write `Db`, a read that starts after a write
+  returned sees it, from any handle and any thread, whatever the write's durability, before and after the commit that
+  flushes it: `get` loads the latest snapshot, and the write was applied to the memtable that snapshot reads before
+  the write returned. A `put_batch` that returns `Ok` is seen whole from then on, and none of it before; one that
+  fails shows the documents before the rejected one, as its error says. A read-only `Db` sees a write
+  after a `refresh` that starts once the write is in the file (`Async` or `Fsync`, or a later sync or commit).
 
 ### 8.5 Compaction (merge policy)
 Tiered: group segments by size tier (factor 10), merge when ≥ 8 in a tier or when deleted ratio > 20%.
@@ -3079,8 +3231,10 @@ durability (ADR-0051).
 
 **No dangling references** (ROADMAP 9.5.6). The engine's `Document::set_blob_ref` takes any `BlobRef`, and
 `persia-engine` commits it without looking it up (§9.5), so a reference with no bytes behind it can be committed
-below the public API. The public embedded API (M10, `persia`) never exposes a raw `set_blob_ref`. A document gets a
-blob only through `put(doc, blob)`, where `blob` is either bytes to store (`Blob::from_path`, `Blob::from_reader`),
+below the public API. The public embedded API (M10, `persia`) re-exports `Document` with its `set_blob_ref`, but
+never logs a reference it has not checked: `put(doc)` of a document that carries one is `put(doc,
+Blob::Stored(reference))` (ADR-0063 item 5), and in Rust `put(doc, blob)` is `Collection::put_with_blob`. A document
+gets a blob only through `put(doc, blob)`, where `blob` is either bytes to store (`Blob::from_path`, `Blob::from_reader`),
 which `put` stores first (§9.5), or a `BlobRef` that this database's `put_blob` returned, which `put` checks is bound
 in this database's store (and pinned, §9.5) before it logs the document; a `BlobRef` it does not find is an error
 and logs nothing. The server and the SDKs (M11, M14) go through the same calls. A dangling reference that reaches a
@@ -3233,6 +3387,15 @@ above.
 `memory://`. Scheme selects the backend. **Zero Persia-specific configuration** is required when the ambient environment
 provides credentials.
 
+**Before M12** (ROADMAP 10.1.1, ADR-0063) `persia::Db::open` accepts a path and `file://`. A `file://` URL has an
+empty host or `localhost` (any case) and an absolute path, percent-encoded: `%XX` is the byte it names, on Unix
+any byte but NUL, elsewhere the decoded bytes must be UTF-8 and `/C:/dir` is `C:/dir` on Windows. A host, a
+port, a query, a fragment, or a `%` not followed by two hex digits is an invalid argument: nothing is guessed.
+Every other scheme is *unsupported* (`PERSIA_UNSUPPORTED`, naming the scheme): `s3://`, `gs://`, `az://` and
+`memory://` until their backends exist, and any scheme this build has no backend for. Only malformed input (an
+empty location, a malformed `file://` URL) is an invalid argument. Schemes compare without case. The parser is written by
+hand: no URL crate is a dependency.
+
 ### 10.3 Credentials
 Use each provider's standard chain: env vars, shared config files, IMDS / IRSA / Workload Identity / managed identity.
 Explicit options are overrides, not requirements. Endpoint override supported (MinIO, fake-gcs, Azurite).
@@ -3267,9 +3430,18 @@ segment has its own entries, dropped with it): once a block is in it, term looku
 document fetches reuse it without decompressing it or checking its CRC again. The same cache keeps a `keyword` column's
 dictionary decoded and checked (keyed by open segment and field, its cost its decoded bytes), so sorts and facets
 over it do not decode it per request (ROADMAP 7.5.5); `Segment::verify` reads its own copy. Readers that miss the
-same block at the same time may each decode it; one copy is kept. Segments opened without a given cache share one per process
-(8 MiB, `BlockCache::shared`); the embedded API and the server are to open all their segments with one cache sized
-by their configuration (planned: ROADMAP 10.2.5, 11.4.7). The capacity bounds what the cache keeps: a reader keeps
+same block at the same time may each decode it; one copy is kept. A database reads every segment it opens through
+one such cache (ROADMAP 10.2.5): the segments an open recovers, those a flush and a merge write (the merge worker's
+verifying open included), those a schema change opens again, and those of a read-only database, at its open and at
+each refresh. The cache is an option of the open (`DatabaseOptions::block_cache`; `ReadOnlyOptions::block_cache`
+for a read-only one), unset by default: each open then makes a new one for that database, of 8 MiB
+(`BlockCache::DEFAULT_CAPACITY`), so two databases of one process do not evict each other's blocks, however their
+options were built. One cache given to several databases is shared by them under its
+one budget, as the server is to give its databases one (ROADMAP 11.4.7). Its counters (hits, misses, entries, bytes)
+are read from the database (`Database::block_cache_stats`, `ReadOnlyDatabase::block_cache_stats`). That is the
+engine's side; the embedded API's option for the size (`OpenOptions`) and a default taken from measurements are
+planned (ROADMAP 10.2.5, 15.2.4). A segment opened outside a database without a given cache reads through one per
+process (8 MiB, `BlockCache::shared`). The capacity bounds what the cache keeps: a reader keeps
 the block it is reading in each stream it reads, also after the cache evicts it.
 It holds no state of its own on disk.
 
@@ -3487,6 +3659,8 @@ its output say so, and reproducible numbers, with their method, go in `docs/benc
 
 - Treat every byte read from disk/network as hostile (fuzzing; bounds-checked parsing; decompression-bomb limits).
 - Limits: max doc size, max field count, max query terms, max fuzzy expansions, max result window.
+- A cursor token (§7.4) is client-held input like any other: checksummed against damage, not authenticated, decoded
+  without panicking, and checked against the search it is given to.
 - Path traversal safe (collection/blob names validated); no shelling out.
 - Secrets never logged; redaction in debug output of storage config.
 - Supply chain: `cargo deny`, `cargo audit`, pinned toolchain, reproducible container builds, SBOM.

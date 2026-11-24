@@ -40,7 +40,7 @@ use persia_format::widen::u64_from_usize;
 use persia_format::{Corruption, Reader, Writer};
 
 use crate::vfs::Vfs;
-pub use error::{Error, ReadOnlyReason, Result};
+pub use error::{Error, ErrorKind, ReadOnlyReason, Result};
 pub use file::ContainerFile;
 pub use mapped::MapPermit;
 pub use stream::FrameWriter;

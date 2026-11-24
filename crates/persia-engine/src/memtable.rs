@@ -376,6 +376,20 @@ impl Memtable {
         self
     }
 
+    /// A query compiler with the analyzers this memtable indexes its `text` fields with (SPEC §6.3.4, §7.1.1): what a
+    /// collection compiles its requests' `q` with ([`crate::db::CollectionSnapshot::compiler`]).
+    pub(crate) fn query_compiler(&self) -> crate::query::QueryCompiler {
+        let analyzers = read(&self.shared)
+            .fields
+            .iter()
+            .map(|field| match field {
+                MemField::Text { analyzer, .. } => Some(Arc::clone(analyzer)),
+                MemField::Keyword { .. } | MemField::Column { .. } | MemField::Other => None,
+            })
+            .collect();
+        crate::query::QueryCompiler::with_analyzers(&self.schema, analyzers)
+    }
+
     /// The schema documents are indexed with.
     pub fn schema(&self) -> &CollectionSchema {
         &self.schema

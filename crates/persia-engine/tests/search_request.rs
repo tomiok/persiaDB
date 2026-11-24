@@ -786,8 +786,9 @@ fn bad_requests_are_errors() {
     };
     assert_eq!(run(&edge).unwrap().hits, []);
 
-    let cursor = |values| {
+    let cursor = |sorted: &SearchRequest, values| {
         Some(Cursor {
+            sort: sorted.sort.keys().collect(),
             values,
             location: Located::Memtable(0),
             origin: origin(&snapshot, &memtable),
@@ -796,8 +797,9 @@ fn bad_requests_are_errors() {
             relax: None,
         })
     };
+    let by_tag = sorted([SortKey::field(f.tag, Order::Asc)]);
     let wrong_count = SearchRequest {
-        search_after: cursor(vec![]),
+        search_after: cursor(&SearchRequest::default(), vec![]),
         ..SearchRequest::default()
     };
     assert!(matches!(
@@ -805,23 +807,23 @@ fn bad_requests_are_errors() {
         Err(RequestError::Cursor { .. })
     ));
     let wrong_type = SearchRequest {
-        search_after: cursor(vec![SortValue::Key(1)]),
+        search_after: cursor(&SearchRequest::default(), vec![SortValue::Key(1)]),
         ..SearchRequest::default()
     };
     assert!(matches!(run(&wrong_type), Err(RequestError::Cursor { .. })));
     let nan = SearchRequest {
-        search_after: cursor(vec![SortValue::Score(f64::NAN)]),
+        search_after: cursor(&SearchRequest::default(), vec![SortValue::Score(f64::NAN)]),
         ..SearchRequest::default()
     };
     assert!(matches!(run(&nan), Err(RequestError::Cursor { .. })));
     let keyword = SearchRequest {
-        search_after: cursor(vec![SortValue::Key(1)]),
-        ..sorted([SortKey::field(f.tag, Order::Asc)])
+        search_after: cursor(&by_tag, vec![SortValue::Key(1)]),
+        ..by_tag.clone()
     };
     assert!(matches!(run(&keyword), Err(RequestError::Cursor { .. })));
     let missing_ok = SearchRequest {
-        search_after: cursor(vec![SortValue::Missing]),
-        ..sorted([SortKey::field(f.tag, Order::Asc)])
+        search_after: cursor(&by_tag, vec![SortValue::Missing]),
+        ..by_tag.clone()
     };
     assert!(run(&missing_ok).is_ok());
 
@@ -1064,7 +1066,7 @@ fn beyond() -> FieldId {
 }
 
 #[test]
-fn a_cursor_from_a_location_no_view_has_is_well_defined() {
+fn a_cursor_from_a_segment_no_view_has_is_refused() {
     let db = fixture();
     let f = fields();
     let base = sorted([SortKey::field(f.n, Order::Asc)]);
@@ -1078,10 +1080,12 @@ fn a_cursor_from_a_location_no_view_has_is_well_defined() {
     )
     .unwrap();
     let views = c.views(&memtable).unwrap();
-    // n = -1 is c's; a tie at a segment index past every segment ranks the memtable's ties after it, the
-    // segments' before it.
+    // n = -1 is c's. A segment index past every segment is a forged cursor (SPEC §7.4): refused. A docid past the
+    // last segment's documents is still a place in the ranking: the memtable's ties rank after it, the segments'
+    // before it.
     let at = |location| SearchRequest {
         search_after: Some(Cursor {
+            sort: base.sort.keys().collect(),
             values: vec![SortValue::Key(persia_format::for_codec::i64_to_key(-1))],
             location,
             origin: origin(&snapshot, &memtable),
@@ -1091,20 +1095,36 @@ fn a_cursor_from_a_location_no_view_has_is_well_defined() {
         }),
         ..base.clone()
     };
+    let count = c.segment_views().count();
     for location in [
         Located::Segment {
             index: usize::MAX - 1,
             docid: u32::MAX,
         },
         Located::Segment { index: 7, docid: 0 },
+        Located::Segment {
+            index: count,
+            docid: 0,
+        },
     ] {
-        let hits = views
-            .search(&plan, &at(location), Pruning::default())
-            .unwrap()
-            .hits;
-        let ids: Vec<_> = hits.iter().map(|h| h.document.id()).collect();
-        assert_eq!(ids, ["a", "b"], "{location:?}");
+        assert!(
+            matches!(
+                views.search(&plan, &at(location), Pruning::default()),
+                Err(RequestError::Cursor { .. })
+            ),
+            "{location:?}"
+        );
     }
+    let last = Located::Segment {
+        index: count - 1,
+        docid: u32::MAX,
+    };
+    let hits = views
+        .search(&plan, &at(last), Pruning::default())
+        .unwrap()
+        .hits;
+    let ids: Vec<_> = hits.iter().map(|h| h.document.id()).collect();
+    assert_eq!(ids, ["a", "b"]);
 }
 
 #[test]
