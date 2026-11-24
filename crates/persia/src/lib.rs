@@ -30,6 +30,7 @@ mod error;
 #[doc(hidden)]
 pub mod internal;
 mod location;
+mod maintenance;
 mod options;
 mod typed;
 
@@ -39,6 +40,8 @@ pub use db::Db;
 pub use error::{Error, ErrorCode, Result};
 pub use internal::blob::PutBlobOptions;
 pub use internal::documents::Blob;
+#[doc(hidden)]
+pub use options::DetachedSlot;
 pub use options::OpenOptions;
 // Blob references (SPEC §9.1): plain values (ADR-0064 item 2).
 pub use persia_blob::{BlobId, BlobRef};

@@ -86,6 +86,16 @@ impl Collection {
         self.read(|c| Ok(c.schema().clone()))
     }
 
+    /// Test hook: runs `f` while holding the database's writer mutex, as a long write would (ADR-0065 item 9); a
+    /// panic in `f` poisons the writer as a write that panicked does.
+    ///
+    /// # Errors
+    /// As a write: [`ErrorCode::ReadOnly`], [`ErrorCode::Closed`], [`ErrorCode::Poisoned`].
+    #[doc(hidden)]
+    pub fn hold_writer_while<T>(&self, f: impl FnOnce() -> T) -> Result<T> {
+        self.db.write("hold the writer", |_| Ok(f()))
+    }
+
     /// `f` on the collection in the latest published snapshot (SPEC §8.4): no lock held across it.
     pub(crate) fn read<T>(&self, f: impl FnOnce(&CollectionSnapshot) -> Result<T>) -> Result<T> {
         let snapshot = self.db.snapshot()?;

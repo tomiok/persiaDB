@@ -53,8 +53,11 @@ decisions d, e and o).
    lock, so they can move to other threads and outlive the `Db`; after a close they fail with `Closed`, and the file
    can be reopened while they exist.
 9. **Tests are deterministic.** The clock is injected (`ManualClock`, a hidden `OpenOptions::clock`), a hidden
-   `Db::maintain_now()` asks the thread for one round and waits for it, a hidden hold stops the thread before its
-   next step, and the `Drop` bound is a hidden option. No test sleeps.
+   `Db::maintain_now()` asks the thread for one round and waits for it, a hidden `OpenOptions::hold_maintenance`
+   lets the thread run only those requested rounds (no timed round can interleave), a hidden
+   `Collection::hold_writer_while` holds the writer mutex as a long write would, and the `Drop` bound
+   (`OpenOptions::drop_wait`) and the place a detached thread is put (`OpenOptions::detached_into`, so a test can
+   join it) are hidden options. `Db::committed_seq` shows the latest commit. No test sleeps.
 
 ### Async (decided, implemented in wave 8: ROADMAP 10.1.11)
 

@@ -53,6 +53,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   fails at once with `Conflict`.
 - `persia`: read-your-writes is documented and tested (ROADMAP 10.2.2; SPEC §8.4): on a read-write `Db`, a read that
   starts after a write returned sees it from any handle and thread, at every durability, committed or not.
+- `persia`: background commits and merges (ROADMAP 10.2.3; SPEC §8.2, §8.5, §14; ADR-0065). A read-write `Db` runs one
+  thread, `persia-maintenance`, that commits what the commit policy finds due (`idle_flush`, `commit_interval`, a
+  full memtable) and drives the engine's merges, every second while there is work and parked otherwise. `close`
+  stops it and waits: the thread makes the final commit, cancels merges in flight and releases the writer lock;
+  `close` returns the first background error, else the final commit's. `Drop` waits up to 5 s, then detaches the
+  thread (which keeps the writer lock until it ends) and logs. A panic while holding the writer poisons writes
+  (`Poisoned`); reads go on, and the close makes no final commit.
 - `persia-engine`: relaxation metrics (ROADMAP 8.3.3; SPEC §7.6, §12.4). Each collection counts its relaxed queries
   (searches without a cursor): how many, how many relaxed past L0, how many still found nothing, and how many found
   their hits at each level. Read them as `RelaxationStats` from `CollectionSnapshot::relaxation_stats` or, summed over

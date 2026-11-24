@@ -1,7 +1,8 @@
 //! How a database is opened (SPEC §8.1, §14; ROADMAP 10.1.1).
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use persia_engine::db::{Clock, CommitPolicy, DatabaseOptions};
@@ -11,6 +12,13 @@ use persia_engine::wal::Durability;
 
 use crate::db::Db;
 use crate::{Result, location};
+
+/// How long dropping a `Db` waits for its maintenance thread (ADR-0065 item 6).
+const DROP_WAIT: Duration = Duration::from_secs(5);
+
+/// Test hook: a place for a detached maintenance thread ([`OpenOptions::detached_into`]).
+#[doc(hidden)]
+pub type DetachedSlot = Arc<Mutex<Option<JoinHandle<()>>>>;
 
 /// Options for opening a database: a builder whose defaults are the ones of SPEC §14, with no file to read them
 /// from. [`Db::open`] is `OpenOptions::new().open(..)`.
@@ -57,6 +65,12 @@ pub struct OpenOptions {
     pub(crate) durability: Durability,
     /// Where the database reads the time; the system's clocks when `None`.
     clock: Option<Arc<dyn Clock>>,
+    /// Test hook: the maintenance thread runs only the rounds `Db::maintain_now` asks for.
+    pub(crate) hold_maintenance: bool,
+    /// How long a `Drop` waits for the maintenance thread before it detaches it (ADR-0065 item 6).
+    pub(crate) drop_wait: Duration,
+    /// Test hook: where a `Drop` puts the thread it detached.
+    pub(crate) detached: Option<DetachedSlot>,
 }
 
 impl Default for OpenOptions {
@@ -86,6 +100,9 @@ impl OpenOptions {
             merge_threads: MergeOptions::DEFAULT_THREADS,
             durability: Durability::Fsync,
             clock: None,
+            hold_maintenance: false,
+            drop_wait: DROP_WAIT,
+            detached: None,
         }
     }
 
@@ -201,6 +218,31 @@ impl OpenOptions {
     #[must_use]
     pub fn durability(mut self, durability: Durability) -> Self {
         self.durability = durability;
+        self
+    }
+
+    /// Test hook: the maintenance thread runs only the rounds [`Db::maintain_now`] asks for, so a test decides when
+    /// background commits and merges happen.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn hold_maintenance(mut self, hold: bool) -> Self {
+        self.hold_maintenance = hold;
+        self
+    }
+
+    /// Test hook: how long dropping a `Db` waits for its maintenance thread (5 s by default).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn drop_wait(mut self, wait: Duration) -> Self {
+        self.drop_wait = wait;
+        self
+    }
+
+    /// Test hook: where dropping a `Db` puts the maintenance thread it gave up waiting for, so a test can join it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn detached_into(mut self, slot: DetachedSlot) -> Self {
+        self.detached = Some(slot);
         self
     }
 

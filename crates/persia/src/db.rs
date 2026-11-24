@@ -1,10 +1,11 @@
-//! The database handle (SPEC §8.1, §8.4; ROADMAP 10.1.1, 10.1.9).
+//! The database handle (SPEC §8.1, §8.4; ROADMAP 10.1.1, 10.1.9, 10.2.3; ADR-0065).
 
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
+use std::time::Duration;
 
 use persia_blob::PackStore;
 use persia_engine::db::{DatabaseReader, ReadOnlyDatabase, Snapshot};
@@ -13,6 +14,7 @@ use persia_engine::wal::Durability;
 use crate::error::Classified as _;
 use crate::internal::blob::Blobs;
 use crate::internal::documents::{BlobDatabase, Error as DocumentsError, ReadOnlyBlobDatabase};
+use crate::maintenance::{Signals, Thread};
 use crate::options::OpenOptions;
 use crate::{Error, ErrorCode, Result};
 
@@ -35,6 +37,10 @@ enum Mode {
         writer: Mutex<Option<Box<Writer>>>,
         /// `None` once closed.
         reads: RwLock<Option<ReadSide>>,
+        /// How writes and the close reach the maintenance thread (ADR-0065).
+        signals: Signals,
+        /// The maintenance thread; `None` before it starts and once the close took it.
+        thread: Mutex<Option<Thread>>,
     },
     /// A reader beside whoever writes the file. `None` once closed; a refresh takes the write lock.
     ReadOnly(RwLock<Option<Box<ReadOnlyBlobDatabase>>>),
@@ -138,14 +144,15 @@ impl Db {
         OpenOptions::new().open(location)
     }
 
-    /// Opens the database at the filesystem path `path` as `options` say.
+    /// Opens the database at the filesystem path `path` as `options` say, and starts its maintenance thread when it
+    /// is read-write.
     pub(crate) fn open_at(path: PathBuf, options: &OpenOptions) -> Result<Self> {
         let mode = if options.read_only {
             open_read_only(&path, options)?
         } else {
             open_read_write(&path, options)?
         };
-        Ok(Self {
+        let db = Self {
             inner: Arc::new(Inner {
                 path,
                 durability: options.durability,
@@ -153,7 +160,13 @@ impl Db {
                 closed: AtomicBool::new(false),
                 mode,
             }),
-        })
+        };
+        if let Mode::ReadWrite { thread, .. } = &db.inner.mode {
+            // On an error `db` drops here: with no thread to stop, the drop closes the database itself.
+            let started = Thread::start(&db.inner)?;
+            *lock(thread) = Some(started);
+        }
+        Ok(db)
     }
 
     /// The path the database was opened at: the one given, or the one a `file://` URL named.
@@ -214,11 +227,15 @@ impl Db {
         self.inner.refresh()
     }
 
-    /// Closes the database: commits what is not committed yet, then releases the writer lock, so the next open
-    /// succeeds at once. Returns the first error of that; the database is closed either way.
+    /// Closes the database: stops its maintenance thread, which makes the final commit, cancels the merges in
+    /// flight and releases the writer lock, so the next open succeeds at once (ADR-0065). It waits for that without
+    /// limit, behind a write another thread is making. Returns the first error: the first failure of a background
+    /// commit or merge since the open, else the final commit's. The database is closed either way, and every
+    /// handle on it fails with [`ErrorCode::Closed`] from then on.
     ///
-    /// Dropping a `Db` closes it too, but cannot report an error: call `close` to learn whether the last commit
-    /// reached the disk.
+    /// Dropping a `Db` makes the same request but waits at most 5 seconds and cannot report an error (it is
+    /// logged). Past that bound the thread is left to finish on its own, and **it keeps the writer lock until it
+    /// ends**, so an open right after such a drop can fail with [`ErrorCode::Conflict`]: prefer `close`.
     ///
     /// ```
     /// use persia::Db;
@@ -234,34 +251,102 @@ impl Db {
     /// ```
     ///
     /// # Errors
-    /// [`ErrorCode::Poisoned`] if an earlier write had failed (nothing more was committed); otherwise as the final
-    /// commit fails: [`ErrorCode::Io`], [`ErrorCode::Corrupt`].
+    /// [`ErrorCode::Poisoned`] if a write had failed and stopped the writer, or a thread panicked while it wrote
+    /// (nothing more was committed); otherwise as a background commit or the final commit failed:
+    /// [`ErrorCode::Io`], [`ErrorCode::Corrupt`].
     pub fn close(self) -> Result<()> {
-        self.inner.shut_down()
+        self.inner.shut_down(None)
+    }
+
+    /// Test hook: runs one maintenance round now (a `tick` and a `merge_step`, ADR-0065 item 9) and returns its
+    /// outcome; nothing on a read-only database.
+    #[doc(hidden)]
+    pub fn maintain_now(&self) -> Result<()> {
+        self.inner.check_open()?;
+        match self.inner.signals() {
+            Some(signals) => signals.round_now(),
+            None => Ok(()),
+        }
+    }
+
+    /// Test hook: the `seq` of the latest commit the database shows.
+    #[doc(hidden)]
+    pub fn committed_seq(&self) -> Result<u64> {
+        Ok(self.inner.snapshot()?.seq())
     }
 }
 
 impl Drop for Db {
     fn drop(&mut self) {
-        if let Err(error) = self.inner.shut_down() {
+        let bound = self.inner.options.drop_wait;
+        if let Err(error) = self.inner.shut_down(Some(bound)) {
             tracing::error!(path = %self.inner.path.display(), %error, "closing a dropped database failed");
         }
     }
 }
 
+/// The lock of a mutex whose value stays whole if a holder panicked.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 impl Inner {
-    /// Closes the database once; later calls do nothing.
-    fn shut_down(&self) -> Result<()> {
+    /// Closes the database once; later calls do nothing. `bound` is how long to wait for the maintenance thread:
+    /// without limit for `close`, a while for `Drop`, past which the thread is detached.
+    fn shut_down(&self, bound: Option<Duration>) -> Result<()> {
         if self.closed.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
+        let Mode::ReadWrite {
+            signals, thread, ..
+        } = &self.mode
+        else {
+            return self.finish();
+        };
+        signals.stop();
+        let Some(running) = lock(thread).take() else {
+            // It never started (a failed open): nobody else drops the database.
+            return self.finish();
+        };
+        let joined = match bound {
+            None => running.join(),
+            Some(bound) => match running.join_within(bound) {
+                Ok(joined) => joined,
+                Err(running) => {
+                    let handle = running.detach();
+                    tracing::error!(
+                        path = %self.path.display(),
+                        waited = ?bound,
+                        "a dropped database's maintenance thread is still running: it makes the final commit and \
+                         releases the writer lock when the call holding the writer returns; prefer close()"
+                    );
+                    if let Some(slot) = &self.options.detached {
+                        *lock(slot) = Some(handle);
+                    }
+                    return Ok(());
+                }
+            },
+        };
+        if let Some(result) = joined {
+            return result;
+        }
+        // The thread panicked before its last step: drop the database here, with no final commit.
+        if let Err(error) = self.finish() {
+            tracing::error!(path = %self.path.display(), %error, "closing after the maintenance thread panicked");
+        }
+        Err(Error::writer_panicked())
+    }
+
+    /// The last step of a close: the final commit (none if a thread panicked holding the writer), the merges in flight
+    /// cancelled, then the database dropped, which releases the writer lock. Idempotent.
+    pub(crate) fn finish(&self) -> Result<()> {
         match &self.mode {
             Mode::ReadOnly(db) => {
                 let closed = db.write().unwrap_or_else(PoisonError::into_inner).take();
                 drop(closed);
                 Ok(())
             }
-            Mode::ReadWrite { writer, reads } => {
+            Mode::ReadWrite { writer, reads, .. } => {
                 let (mut writer, panicked) = match writer.lock() {
                     Ok(guard) => (guard, false),
                     Err(poisoned) => (poisoned.into_inner(), true),
@@ -285,6 +370,25 @@ impl Inner {
                 result
             }
         }
+    }
+
+    /// The maintenance thread's signals; `None` on a read-only database.
+    pub(crate) fn signals(&self) -> Option<&Signals> {
+        match &self.mode {
+            Mode::ReadWrite { signals, .. } => Some(signals),
+            Mode::ReadOnly(_) => None,
+        }
+    }
+
+    /// `f` on the writer under the writer mutex, for the maintenance thread: it runs after the close too (its last
+    /// round), so the closed flag is not checked.
+    pub(crate) fn with_writer<T>(&self, f: impl FnOnce(&mut Writer) -> Result<T>) -> Result<T> {
+        let Mode::ReadWrite { writer, .. } = &self.mode else {
+            return Err(Error::read_only("maintain"));
+        };
+        let mut guard = writer.lock().map_err(|_| Error::writer_panicked())?;
+        let db = guard.as_mut().ok_or_else(Error::closed)?;
+        f(db)
     }
 }
 
@@ -382,12 +486,19 @@ impl Inner {
         f: impl FnOnce(&mut Writer) -> Result<T>,
     ) -> Result<T> {
         self.check_open()?;
-        let Mode::ReadWrite { writer, .. } = &self.mode else {
+        let Mode::ReadWrite {
+            writer, signals, ..
+        } = &self.mode
+        else {
             return Err(Error::read_only(what));
         };
         let mut guard = writer.lock().map_err(|_| Error::writer_panicked())?;
         let db = guard.as_mut().ok_or_else(Error::closed)?;
-        f(db)
+        let result = f(db);
+        drop(guard);
+        // Even a write that failed may have logged something: the next rounds look.
+        signals.wrote();
+        result
     }
 }
 
@@ -517,7 +628,7 @@ fn open_read_write(path: &Path, options: &OpenOptions) -> Result<Mode> {
         } else {
             return Err(not_found(path));
         };
-        return Ok(read_write(db));
+        return Ok(read_write(db, options));
     }
     Err(Error::new(
         ErrorCode::Transient,
@@ -528,7 +639,7 @@ fn open_read_write(path: &Path, options: &OpenOptions) -> Result<Mode> {
     ))
 }
 
-fn read_write(db: Writer) -> Mode {
+fn read_write(db: Writer, options: &OpenOptions) -> Mode {
     let reads = ReadSide {
         reader: db.log().reader(),
         blobs: db.blobs().clone(),
@@ -536,5 +647,7 @@ fn read_write(db: Writer) -> Mode {
     Mode::ReadWrite {
         writer: Mutex::new(Some(Box::new(db))),
         reads: RwLock::new(Some(reads)),
+        signals: Signals::new(options.hold_maintenance),
+        thread: Mutex::new(None),
     }
 }
