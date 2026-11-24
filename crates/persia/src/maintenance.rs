@@ -79,7 +79,8 @@ impl Signals {
         self.wake.notify_one();
     }
 
-    /// Asks for one round now and waits for it; its outcome.
+    /// Asks for one round now and waits for it; its outcome. Reached by `Db::maintain_now` (feature `test-hooks`).
+    #[cfg_attr(not(any(test, feature = "test-hooks")), allow(dead_code))]
     pub(crate) fn round_now(&self) -> Result<()> {
         let mut state = lock(&self.state);
         if state.dead {

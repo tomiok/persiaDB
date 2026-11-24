@@ -277,6 +277,7 @@ impl Db {
 
     /// Test hook: runs one maintenance round now (a `tick` and a `merge_step`, ADR-0064 item 9) and returns its
     /// outcome; nothing on a read-only database.
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn maintain_now(&self) -> Result<()> {
         self.inner.check_open()?;
@@ -287,6 +288,7 @@ impl Db {
     }
 
     /// Test hook: the `seq` of the latest commit the database shows.
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn committed_seq(&self) -> Result<u64> {
         Ok(self.inner.snapshot()?.seq())
@@ -320,6 +322,7 @@ impl Db {
     }
 
     /// Test hook: whether a read-only database reads its container through a memory mapping (SPEC §4.7).
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn is_mapped(&self) -> Result<bool> {
         self.inner.check_open()?;

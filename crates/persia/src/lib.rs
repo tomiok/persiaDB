@@ -18,7 +18,7 @@
 //! `serde` type with [`Collection::put_struct`]) and their blobs ([`Blob`], [`Db::put_blob`]). Reads see every write
 //! that returned; commits and merges run on the database's own thread, and [`Db::close`] joins it (ADR-0064). Every
 //! call returns [`Result`], whose [`Error`] carries a stable [`ErrorCode`] (ADR-0063). Search lands with ROADMAP
-//! 10.1.3. The engine (`persia-engine`) and the hidden [`internal`] layer under this crate (ADR-0051) are not stable
+//! 10.1.3. The engine (`persia-engine`) and the hidden `internal` layer under this crate (ADR-0051) are not stable
 //! APIs.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -30,8 +30,15 @@ mod collection;
 mod db;
 mod documents;
 mod error;
+// The hidden layer under the facade (ADR-0051): public only with the `internal` feature, for `persia-cli` and the
+// fuzz targets. Not a stable API.
+#[cfg(feature = "internal")]
 #[doc(hidden)]
 pub mod internal;
+#[cfg(not(feature = "internal"))]
+#[allow(dead_code, unreachable_pub)]
+// Items only `persia-cli` uses (GC, verify) are built but not reached.
+mod internal;
 mod location;
 mod maintenance;
 mod options;
@@ -44,6 +51,7 @@ pub use db::{BlockCacheStats, Db};
 pub use error::{Error, ErrorCode, Result};
 pub use internal::blob::PutBlobOptions;
 pub use internal::documents::Blob;
+#[cfg(feature = "test-hooks")]
 #[doc(hidden)]
 pub use options::DetachedSlot;
 pub use options::OpenOptions;

@@ -17,7 +17,7 @@ use crate::{Result, location};
 /// How long dropping a `Db` waits for its maintenance thread (ADR-0064 item 6).
 const DROP_WAIT: Duration = Duration::from_secs(5);
 
-/// Test hook: a place for a detached maintenance thread ([`OpenOptions::detached_into`]).
+/// Test hook: a place for a detached maintenance thread (`OpenOptions::detached_into`, feature `test-hooks`).
 #[doc(hidden)]
 pub type DetachedSlot = Arc<Mutex<Option<JoinHandle<()>>>>;
 
@@ -271,6 +271,7 @@ impl OpenOptions {
 
     /// Test hook: the maintenance thread runs only the rounds [`Db::maintain_now`] asks for, so a test decides when
     /// background commits and merges happen.
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     #[must_use]
     pub fn hold_maintenance(mut self, hold: bool) -> Self {
@@ -279,6 +280,7 @@ impl OpenOptions {
     }
 
     /// Test hook: how long dropping a `Db` waits for its maintenance thread (5 s by default).
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     #[must_use]
     pub fn drop_wait(mut self, wait: Duration) -> Self {
@@ -287,6 +289,7 @@ impl OpenOptions {
     }
 
     /// Test hook: where dropping a `Db` puts the maintenance thread it gave up waiting for, so a test can join it.
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     #[must_use]
     pub fn detached_into(mut self, slot: DetachedSlot) -> Self {
@@ -295,6 +298,7 @@ impl OpenOptions {
     }
 
     /// Test hook: where the database reads the time, so tests decide when a background commit is due.
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     #[must_use]
     pub fn clock(mut self, clock: Arc<dyn Clock>) -> Self {

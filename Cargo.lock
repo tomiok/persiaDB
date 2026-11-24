@@ -596,6 +596,7 @@ dependencies = [
 name = "persia"
 version = "0.0.0"
 dependencies = [
+ "persia",
  "persia-blob",
  "persia-engine",
  "persia-storage",

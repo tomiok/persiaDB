@@ -15,6 +15,8 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# This crate, with its test hooks, for its integration tests and doctests.
+persia = { workspace = true, features = ["test-hooks"] }
 persia-blob = { workspace = true, features = ["testing"] }
 persia-storage.workspace = true
 proptest.workspace = true
@@ -23,6 +25,10 @@ tempfile.workspace = true
 [features]
 # Extended property tests: gate them with #[cfg(feature = "slow")]; nightly CI runs them.
 slow = []
+# The hidden `persia::internal` layer (ADR-0051): for persia-cli and the fuzz targets. Not a stable API.
+internal = []
+# The test hooks of ADR-0064 item 9 (maintain_now, hold_maintenance, ...), and `internal`: for this crate's tests.
+test-hooks = ["internal"]
 
 [lints]
 workspace = true

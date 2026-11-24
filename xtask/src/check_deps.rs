@@ -2,7 +2,8 @@
 //!
 //! Internal crates: every workspace member must appear in [`ALLOWED`] and may only depend on the crates
 //! listed for it. Normal and build dependencies use that list; dev-dependencies may also use
-//! `persia-testutil`, which is never a normal or build dependency.
+//! `persia-testutil`, which is never a normal or build dependency. Two dev-only exceptions: `persia` may use
+//! `persia-storage` (crash tests drive `SimFs`) and itself (its tests turn on its `test-hooks` feature).
 //!
 //! External crates: every direct dependency must be declared in the root `[workspace.dependencies]`
 //! (the allowed list) and inherited with `.workspace = true`, so versions live in one place. Tiers:
@@ -157,7 +158,10 @@ pub(crate) fn violations(metadata: &Metadata, external: &BTreeSet<String>) -> Ve
                 || (kind == "dev" && target == TESTUTIL && pkg.name != TESTUTIL)
                 // Crash tests of blob GC (`persia` tests) drive `SimFs`. A normal dependency stays forbidden:
                 // `persia` reaches storage through the engine and the blob crate (ROADMAP 9.4.6, 9.5.9).
-                || (kind == "dev" && pkg.name == "persia" && target == "persia-storage");
+                || (kind == "dev" && pkg.name == "persia" && target == "persia-storage")
+                // `persia`'s own tests turn on its `test-hooks` feature through a dev-dependency on itself: the hooks stay out
+                // of the default public API (ADR-0063). No other crate may depend on itself.
+                || (kind == "dev" && pkg.name == "persia" && target == "persia");
             if !ok {
                 errors.push(format!("{} -> {target} ({kind}): not allowed", pkg.name));
             }
@@ -424,6 +428,24 @@ mod tests {
             ),
             Vec::<String>::new()
         );
+    }
+
+    #[test]
+    fn persia_may_dev_depend_on_itself_for_its_test_hooks() {
+        assert_eq!(
+            violations(
+                &metadata(&[("persia", "persia", Some("dev"))], &[]),
+                &ext(&[])
+            ),
+            Vec::<String>::new()
+        );
+        for kind in [None, Some("build")] {
+            assert_ne!(
+                violations(&metadata(&[("persia", "persia", kind)], &[]), &ext(&[])),
+                Vec::<String>::new(),
+                "{kind:?}"
+            );
+        }
     }
 
     #[test]

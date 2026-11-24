@@ -60,6 +60,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   and `proximity` on a search that relaxes, are `InvalidArgument`. `Filter`, `FilterValue`, `Sort`, `SortKey`,
   `Order`, `Missing`, `FacetRequest`, `FacetCounts`, `FacetValue`, `RelaxOptions`, `RelaxLevel` and `Explanation`
   are re-exported.
+- `persia`: the test hooks (`Db::maintain_now`, `committed_seq`, `is_mapped`, `OpenOptions::{clock, hold_maintenance,
+  drop_wait, detached_into}`, `DetachedSlot`, `Collection::hold_writer_while`) exist only with the non-default
+  `test-hooks` feature, and `persia::internal` is public only with the non-default `internal` feature (which
+  `persia-cli` and the fuzz targets enable): the default public API exposes neither (ADR-0063).
 - `persia`: typed documents through `serde` (ROADMAP 10.1.4; SPEC §6.4.1). `Collection::put_struct(&T)` is exactly
   `put_json(serde_json::to_string(&T))`; `Collection::get_struct::<T>(id)` and `Collection::to_struct::<T>(&doc)` read
   a document's JSON output back. SPEC §6.4.1 is the only mapping. `persia` now depends on `serde` and `serde_json`.

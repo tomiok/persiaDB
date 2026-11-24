@@ -30,7 +30,12 @@ would freeze the engine's shape. The owner decided the surface on 2026-11-23 (wa
    a decision recorded here.
 3. **Never public:** `Database`, `DatabaseOptions`, `Snapshot`, `Segment`, `Container`, `Manifest`, `SearchPlan`,
    `Execution`, the query AST, and any error type of the engine, the blob store or the storage layer. No public
-   signature of a facade type names one. (Test hooks are `#[doc(hidden)]`, are not API, and may.)
+   signature of a facade type names one. The test hooks (`Db::maintain_now`, `committed_seq`, `is_mapped`,
+   `OpenOptions::{clock, hold_maintenance, drop_wait, detached_into}`, `DetachedSlot`,
+   `Collection::hold_writer_while`) exist only with the non-default `test-hooks` feature, which the crate's own tests
+   turn on through a dev-dependency on itself; the hidden `persia::internal` layer (ADR-0051) is public only with the
+   non-default `internal` feature, which `persia-cli` and the fuzz targets enable. The default build exposes neither,
+   nor any engine handle or error type.
 4. **The re-exported types keep their own methods**, which are part of the surface whether or not `persia`
    re-exports what they mention: `CollectionSchema::from_json` returns the engine's `SchemaError`, `Document::get`
    takes a `FieldId`. A caller can use such a value (`?` into `Box<dyn Error>`, print it) without naming its type.

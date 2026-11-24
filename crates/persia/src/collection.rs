@@ -91,6 +91,7 @@ impl Collection {
     ///
     /// # Errors
     /// As a write: [`ErrorCode::ReadOnly`], [`ErrorCode::Closed`], [`ErrorCode::Poisoned`].
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn hold_writer_while<T>(&self, f: impl FnOnce() -> T) -> Result<T> {
         self.db.write("hold the writer", |_| Ok(f()))
