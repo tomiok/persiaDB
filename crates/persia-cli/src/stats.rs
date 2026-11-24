@@ -16,7 +16,8 @@
 //!     "bytes":              the end of the valid frames (SPEC §4.6 "Space accounting"),
 //!     "live_bytes":         the prefix, the frames the manifest lists below wal_start, and all from wal_start on,
 //!     "dead_bytes":         bytes - live_bytes: what a compaction reclaims,
-//!     "compaction_due":     whether a writer with the default thresholds would compact (40 % and 1 MiB dead),
+//!     "compaction_due":     whether a writer with the DEFAULT thresholds would compact (40 % and 1 MiB dead):
+//!                           the application's own `CompactionOptions` are not stored, so they cannot be read,
 //!     "uncommitted_frames": valid frames after log_end (SPEC §4.5.1),
 //!     "uncommitted_bytes":  their total length
 //!   },
@@ -49,7 +50,6 @@
 //! The dead bytes are what the manifest does not list. A live writer may still keep some of them for its readers
 //! (obsolete segments a snapshot holds, SPEC §8.5), which only that writer knows.
 
-use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -63,10 +63,6 @@ use persia_storage::container::{FrameRef, SpaceUsage};
 use serde_json::{Value, json};
 
 use crate::open;
-
-/// The blob pack of the container `<name>.persia` is `<name>.persia.blobs` (SPEC §9.3). `persia_blob::pack_path` is
-/// that rule, but the CLI does not depend on `persia-blob` and the facade does not re-export it.
-const PACK_SUFFIX: &str = ".blobs";
 
 /// What `persia stats` reports (the module docs describe each number).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,14 +250,22 @@ fn collection_stats(
 
 /// The size of the blob pack beside the container at `container`; `None` when the database has none.
 fn pack_size(container: &Path) -> Result<Option<u64>> {
-    let mut name = OsString::from(container.as_os_str());
-    name.push(PACK_SUFFIX);
-    let pack = PathBuf::from(name);
+    let pack = persia::internal::pack_path(container);
     match std::fs::metadata(&pack) {
         Ok(meta) => Ok(Some(meta.len())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| format!("reading the size of {}", pack.display())),
     }
+}
+
+/// The `compaction` row: whether a compaction is due, and by which thresholds (the default ones, `options`; the
+/// application's own are not stored in the file).
+fn due_text(due: bool, options: &CompactionOptions) -> String {
+    let state = if due { "due" } else { "not due" };
+    format!(
+        "{state} with the default thresholds ({}% and {} bytes dead)",
+        options.dead_space_percent, options.min_dead_bytes
+    )
 }
 
 /// A `db_uuid` as 32 lowercase hex digits, in the order of its bytes.
@@ -322,12 +326,7 @@ impl Stats {
             ),
             (
                 "compaction",
-                if self.compaction_due {
-                    "due"
-                } else {
-                    "not due"
-                }
-                .to_owned(),
+                due_text(self.compaction_due, &CompactionOptions::default()),
             ),
             (
                 "uncommitted",
@@ -560,7 +559,7 @@ format            1.0
 db_uuid           abababababababababababababababab
 seq               7
 size              20000 bytes (15000 live, 5000 dead, 25%)
-compaction        due
+compaction        due with the default thresholds (40% and 1048576 bytes dead)
 uncommitted       3 frames (480 bytes)
 wal               5 records replayed, 2 frames (320 bytes) after the last commit
 blob pack         4096 bytes
@@ -597,7 +596,7 @@ collection \"notes\"
             text.contains("size              0 bytes (0 live, 0 dead, 0%)\n"),
             "{text}"
         );
-        assert!(text.contains("compaction        not due\n"), "{text}");
+        assert!(text.contains("compaction        not due with the default thresholds (40% and 1048576 bytes dead)\n"), "{text}");
         assert!(text.contains("blob pack         none\n"), "{text}");
     }
 

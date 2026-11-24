@@ -382,7 +382,10 @@ fn stats_text_has_a_row_per_number_and_a_block_per_collection() {
             usage.dead()
         )
     );
-    assert_eq!(row(&top, "compaction"), "not due");
+    assert_eq!(
+        row(&top, "compaction"),
+        "not due with the default thresholds (40% and 1048576 bytes dead)"
+    );
     assert_eq!(row(&top, "blob pack"), "none");
     assert_eq!(row(&top, "collections"), "1");
     assert!(

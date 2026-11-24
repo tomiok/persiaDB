@@ -170,7 +170,7 @@ Every command exits with status 0 on success, 1 on any other failure, 2 on a usa
 
 - `persia stats --json`:
   - `path` (canonical), `format` `{major, minor}`, `db_uuid` (32 hex digits), `seq` (the last commit's);
-  - `container` `{bytes, live_bytes, dead_bytes, compaction_due, uncommitted_frames, uncommitted_bytes}`: `bytes` is the end of the valid frames, `compaction_due` whether a writer with the default thresholds would compact, the `uncommitted_*` the valid frames after the last commit;
+  - `container` `{bytes, live_bytes, dead_bytes, compaction_due, uncommitted_frames, uncommitted_bytes}`: `bytes` is the end of the valid frames, `compaction_due` whether a writer with the default thresholds (40% and 1 MiB dead) would compact, since an application's own `CompactionOptions` are not stored in the file, the `uncommitted_*` the valid frames after the last commit;
   - `wal` `{wal_start, log_end, replayed_records, frames_after_commit, bytes_after_commit}`;
   - `collections`, by name: `{name, schema: {hash, strict, fields: [{name, type}]}, documents, segment_documents, deleted, wal_documents, segment_bytes, segments: [{id, documents, deleted, bytes}]}`; `documents` counts the live documents a reader sees;
   - `blob_pack` `{present, bytes}`, `bytes` `null` without a pack.

@@ -171,9 +171,10 @@ enum Command {
         json: bool,
     },
     /// Prints what a read-only open of a database reports (no lock, no writes, so a live writer may have it open):
-    /// the last commit, the container's live and dead space, the WAL after the last commit, the blob pack's size,
-    /// and each collection's schema, documents and segments. Exits with status 3 on corruption, 4 when the file is
-    /// not a Persia container, and 1 on any other failure.
+    /// the last commit, the container's live and dead space, whether a compaction is due with the DEFAULT thresholds
+    /// (40% and 1 MiB dead; an application's own are not stored in the file), the WAL after the last commit, the
+    /// blob pack's size, and each collection's schema, documents and segments. Exits with status 3 on corruption, 4
+    /// when the file is not a Persia container, and 1 on any other failure.
     Stats {
         /// The container file.
         path: PathBuf,

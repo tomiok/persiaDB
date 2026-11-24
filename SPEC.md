@@ -381,7 +381,8 @@ backlog larger than the default memtable, or retire a cut commit (§8.6), so the
 above the last commit before the command. Otherwise the WAL records after the last commit stay WAL records. It
 prints the space before and after (`--json` for one JSON object, keys in the README's command-line section). It has the built-in analyzers only, so a database
 whose schema names a registered analyzer (§6.2.2) fails that read-write open, and is compacted by its application.
-It never opens the blob pack (§9.3), whose space blob GC reclaims (§9.5). Like every compaction it puts the read-only
+It never opens the blob pack (§9.3), whose space blob GC reclaims (§9.5). `persia stats` reports whether a
+compaction is due by the default thresholds only, and says so: the application's own are not in the file. Like every compaction it puts the read-only
 handles of other processes behind until they refresh (§9.5), and it must not run during a copy taken with the files
 in use (§4.8).
 
@@ -2704,7 +2705,8 @@ does.
 lock, nothing written, and no reader lease, since neither reads a blob. Like `verify` they skip the analysis of a
 `text` field whose registered analyzer they lack. `stats` prints the last commit's `seq`, the container's live and
 dead bytes (§4.6, counted from the manifest alone: a live writer may still hold obsolete frames for its readers,
-§8.5), the valid frames and WAL chunks after `log_end`, the replayed WAL records, the blob pack's size if there is
+§8.5) and whether a compaction is due with the default thresholds (§14; an application's own thresholds are not
+stored, so the output says which it used), the valid frames and WAL chunks after `log_end`, the replayed WAL records, the blob pack's size if there is
 one (§9.3), and per collection its schema, its segments (documents, deleted, size) and its live documents as a
 reader sees them. `--json` writes one JSON object whose keys the README's command-line section lists (as for
 `compact` and `bench`); keys are only ever added to it. `dump documents --collection <name>` writes the live documents of that snapshot as JSON Lines, each in
