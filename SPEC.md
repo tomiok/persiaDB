@@ -1216,6 +1216,9 @@ A document is an `id`, an optional `blob` reference (§9.1) and a value per fiel
   16 MiB, and so is the binary encoding (§6.4.2) of the whole document.
 - **Output.** `get` writes an object with `id`, then `blob` if present, then the fields and extra fields in
   ascending byte order of their names; values in the forms above.
+- **Typed values** (ROADMAP 10.1.4). The embedded API's `put_struct(&value)` is exactly `put` of the document this
+  JSON form reads from `serde_json`'s text of the value, and `get_struct` / `to_struct` read the output above with
+  `serde_json`: these rules are the only mapping between a Rust type and a document.
 
 #### 6.4.2 Binary encoding
 The encoding of a document in `DocStore` (and anywhere else a document is persisted) is CBOR (RFC 8949) restricted so
@@ -2307,10 +2310,25 @@ open's recovery may still truncate or quarantine an uncommitted tail (§4.5.1). 
   alone, `{ readOnly: true }` alone, and `PERSIA_OPEN_READ_ONLY` alone are that combination, because
   creation defaults on. `PERSIA_OPEN_MUST_EXIST` beside `PERSIA_OPEN_READ_ONLY` is the same open.
 
-A parent that exists and is not a directory is an error. Creating the directories is the facade's step.
-The container create of §4.5.1 still writes a temporary file in a directory that already exists, and still
-refuses to replace a name that is taken. `persia_engine::db::Database` has separate `create` and `open`
-until 10.1.9, and that `create` fails when the parent directory is missing.
+A parent that exists and is not a directory is an error (an invalid argument: the path cannot name a file), for
+every mode, and nothing is created. Creating the directories is the facade's step (`persia::Db`, ROADMAP 10.1.9):
+it creates the missing parents, then the container. The container create of §4.5.1 still writes a temporary file
+in a directory that already exists, and still refuses to replace a name that is taken.
+`persia_engine::db::Database` keeps its separate `create` and `open`, and that `create` fails when the parent
+directory is missing.
+
+**Racing opens.** The facade looks for the file, then opens or creates it, so the file can appear or vanish in
+between. A create that finds the name taken (another open created it first) starts over and opens the file; an
+open that finds the file gone starts over and decides again. So when several read-write opens of one missing path
+race, one of them creates the database and holds it, and each of the others either opens it once the holder
+closed or fails at once as a second writer (§8.4): none is told the file exists, is missing or is damaged, and
+the file is never replaced. A reader racing the create finds no file, or the database (empty until its first
+commit). After 8 starts the open fails as transient. A blob pack left at `<name>.persia.blobs` with no
+container beside it refuses the create (a conflict: the new database could not use it), and nothing is created.
+
+**What a path is.** The argument of `Db::open` is a filesystem path, or a URL (§10.2). It is a URL only when it
+starts with `scheme://`, so `C:\data\app.persia` is a path, and a path is never percent-decoded. An empty
+argument is an invalid argument.
 
 ### 8.2 Flow
 1. Op appended to the **WAL** (batched, group commit). Durability level per call: `Buffered | Async | Fsync`, default `Fsync`
@@ -2327,9 +2345,10 @@ operations, each into one segment of its live documents in docid order (none if 
 deleted), with the tombstone sidecars that delete the older segments' copies of the ids it touched (§8.3), whatever triggered it: `commit()`; a memtable at its size threshold, before the next write to it; or
 `tick()`, which the embedding calls periodically (commits stay on the caller's thread; merge workers only
 merge, ADR-0032) and which commits when any memtable is idle or reached `commit_interval` since its first unflushed
-write. Callers of the public `Db` never call `tick()` or `merge_step()` (ROADMAP 10.2.6): the facade's own
-threads call them, so a commit and a merge both run off the application's thread, and `close` joins those
-threads. On the engine, a commit still runs on the thread that calls `tick` or `merge_step`, and merge
+write. Callers of the public `Db` never call `tick()` or `merge_step()` (ROADMAP 10.2.6): the facade's maintenance
+thread (one per read-write `Db`, a round every second while there is work, ADR-0064) calls them, so a commit and a
+merge both run off the application's thread, and `close` joins it (the engine's merge workers are joined when the
+database drops). On the engine, a commit still runs on the thread that calls `tick` or `merge_step`, and merge
 workers only merge. Operations replayed at an open count as
 written at the open (their age is not logged), so a replayed backlog waits up to one more interval. Flushing all of them makes the
 commit's `wal_start` the end of the log, so a crash never replays a record that is already in a segment. A commit builds every segment before it writes anything, so a failure there changes nothing; a failed
@@ -2494,6 +2513,12 @@ consulted; that hid the new copy after such a merge.) A file with two live copie
   current one without locks and keep it as long as they like; it shows the committed segments plus the memtable's
   writes as of each view taken from it. A memtable a commit flushes stays in the older snapshots and takes no more
   writes, so every snapshot shows a flushed document exactly once: in the memtable before, in the segment after.
+- **Read-your-writes** (the embedded API, ROADMAP 10.2.2). On a read-write `Db`, a read that starts after a write
+  returned sees it, from any handle and any thread, whatever the write's durability, before and after the commit that
+  flushes it: `get` loads the latest snapshot, and the write was applied to the memtable that snapshot reads before
+  the write returned. A `put_batch` that returns `Ok` is seen whole from then on, and none of it before; one that
+  fails shows the documents before the rejected one, as its error says. A read-only `Db` sees a write
+  after a `refresh` that starts once the write is in the file (`Async` or `Fsync`, or a later sync or commit).
 
 ### 8.5 Compaction (merge policy)
 Tiered: group segments by size tier (factor 10), merge when ≥ 8 in a tier or when deleted ratio > 20%.
@@ -3181,8 +3206,10 @@ durability (ADR-0051).
 
 **No dangling references** (ROADMAP 9.5.6). The engine's `Document::set_blob_ref` takes any `BlobRef`, and
 `persia-engine` commits it without looking it up (§9.5), so a reference with no bytes behind it can be committed
-below the public API. The public embedded API (M10, `persia`) never exposes a raw `set_blob_ref`. A document gets a
-blob only through `put(doc, blob)`, where `blob` is either bytes to store (`Blob::from_path`, `Blob::from_reader`),
+below the public API. The public embedded API (M10, `persia`) re-exports `Document` with its `set_blob_ref`, but
+never logs a reference it has not checked: `put(doc)` of a document that carries one is `put(doc,
+Blob::Stored(reference))` (ADR-0063 item 5), and in Rust `put(doc, blob)` is `Collection::put_with_blob`. A document
+gets a blob only through `put(doc, blob)`, where `blob` is either bytes to store (`Blob::from_path`, `Blob::from_reader`),
 which `put` stores first (§9.5), or a `BlobRef` that this database's `put_blob` returned, which `put` checks is bound
 in this database's store (and pinned, §9.5) before it logs the document; a `BlobRef` it does not find is an error
 and logs nothing. The server and the SDKs (M11, M14) go through the same calls. A dangling reference that reaches a
@@ -3334,6 +3361,15 @@ above.
 `persia::open("app.persia")`, `file:///…`, `s3://bucket/prefix`, `gs://bucket/prefix`, `az://account/container/prefix`,
 `memory://`. Scheme selects the backend. **Zero Persia-specific configuration** is required when the ambient environment
 provides credentials.
+
+**Before M12** (ROADMAP 10.1.1, ADR-0063) `persia::Db::open` accepts a path and `file://`. A `file://` URL has an
+empty host or `localhost` (any case) and an absolute path, percent-encoded: `%XX` is the byte it names, on Unix
+any byte but NUL, elsewhere the decoded bytes must be UTF-8 and `/C:/dir` is `C:/dir` on Windows. A host, a
+port, a query, a fragment, or a `%` not followed by two hex digits is an invalid argument: nothing is guessed.
+Every other scheme is *unsupported* (`PERSIA_UNSUPPORTED`, naming the scheme): `s3://`, `gs://`, `az://` and
+`memory://` until their backends exist, and any scheme this build has no backend for. Only malformed input (an
+empty location, a malformed `file://` URL) is an invalid argument. Schemes compare without case. The parser is written by
+hand: no URL crate is a dependency.
 
 ### 10.3 Credentials
 Use each provider's standard chain: env vars, shared config files, IMDS / IRSA / Workload Identity / managed identity.

@@ -102,7 +102,36 @@ pub enum Error {
     },
 }
 
+/// The class of an [`Error`] (the module docs' four classes, with corruption split from an unsupported input): what a
+/// layer above maps from, so that it never reads a variant's name. Not `#[non_exhaustive]`, like [`Error`]: a new class is a
+/// compile error where kinds are mapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ErrorKind {
+    /// [`Error::Corrupt`] or [`Error::CorruptBlock`]: the input violates the format.
+    Corrupt,
+    /// [`Error::Unsupported`]: a valid input of a format or feature this build does not read.
+    Unsupported,
+    /// [`Error::OutOfMemory`]: an allocation failed; the input may be fine.
+    OutOfMemory,
+    /// [`Error::OutOfBounds`], [`Error::RangeOutOfBounds`], [`Error::NeedMoreBytes`], [`Error::InvalidInputLen`]: a
+    /// caller passed an argument the reader cannot take.
+    InvalidInput,
+}
+
 impl Error {
+    /// The error's class.
+    pub const fn kind(&self) -> ErrorKind {
+        match self {
+            Self::Corrupt { .. } | Self::CorruptBlock { .. } => ErrorKind::Corrupt,
+            Self::Unsupported { .. } => ErrorKind::Unsupported,
+            Self::OutOfMemory { .. } => ErrorKind::OutOfMemory,
+            Self::OutOfBounds { .. }
+            | Self::RangeOutOfBounds { .. }
+            | Self::NeedMoreBytes { .. }
+            | Self::InvalidInputLen { .. } => ErrorKind::InvalidInput,
+        }
+    }
+
     /// Whether the input was corrupt ([`Error::Corrupt`] or [`Error::CorruptBlock`]), as opposed to a caller,
     /// resource or [`Error::Unsupported`] error.
     pub const fn is_corruption(&self) -> bool {
@@ -533,6 +562,70 @@ pub(crate) fn to_u64(n: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_variant_has_its_kind() {
+        let reason = Corruption::InvalidCompressedData;
+        let unsupported = Unsupported::FormatMajor {
+            major: 2,
+            supported: 1,
+        };
+        let rows = [
+            (ErrorKind::Corrupt, Error::Corrupt { offset: 3, reason }),
+            (
+                ErrorKind::Corrupt,
+                Error::CorruptBlock {
+                    index: 1,
+                    offset: 3,
+                    reason,
+                },
+            ),
+            (
+                ErrorKind::Unsupported,
+                Error::Unsupported {
+                    offset: 8,
+                    reason: unsupported,
+                },
+            ),
+            (ErrorKind::OutOfMemory, Error::OutOfMemory { bytes: None }),
+            (
+                ErrorKind::InvalidInput,
+                Error::OutOfBounds { index: 5, len: 4 },
+            ),
+            (
+                ErrorKind::InvalidInput,
+                Error::RangeOutOfBounds {
+                    start: 1,
+                    end: 9,
+                    available_start: 2,
+                    available_end: 8,
+                },
+            ),
+            (
+                ErrorKind::InvalidInput,
+                Error::NeedMoreBytes {
+                    needed: 2,
+                    available: 1,
+                },
+            ),
+            (
+                ErrorKind::InvalidInput,
+                Error::InvalidInputLen {
+                    len: 9,
+                    min: 1,
+                    max: 4,
+                },
+            ),
+        ];
+        for (kind, error) in rows {
+            assert_eq!(error.kind(), kind, "{error:?}");
+            assert_eq!(
+                error.is_corruption(),
+                kind == ErrorKind::Corrupt,
+                "{error:?}"
+            );
+        }
+    }
 
     #[test]
     fn error_classes() {

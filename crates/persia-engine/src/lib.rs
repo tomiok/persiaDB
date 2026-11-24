@@ -29,3 +29,13 @@ pub mod wal;
 /// ([`db::DatabaseOptions::registry`]) and the analyzers a caller registers in it (ROADMAP 6.6.8), for crates that
 /// reach the engine only, such as the CLI.
 pub use persia_analysis as analysis;
+
+/// The classes of the storage and format errors the engine's errors carry ([`db::DatabaseError::Container`],
+/// [`db::DatabaseError::Storage`], the decode errors): what a layer above maps from, by `kind()`, without depending
+/// on `persia-storage` or `persia-format` and without reading a variant's name. The enums are not
+/// `#[non_exhaustive]`, so a new class is a compile error where they are matched.
+pub mod error_kinds {
+    pub use persia_format::ErrorKind as FormatErrorKind;
+    pub use persia_storage::ErrorKind as StorageErrorKind;
+    pub use persia_storage::container::ErrorKind as ContainerErrorKind;
+}
