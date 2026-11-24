@@ -10,7 +10,7 @@ use persia_format::mmap::MmapFile;
 use persia_format::source::ByteSource;
 use persia_format::superblock::{FIRST_FRAME_OFFSET, Superblock};
 
-use super::{Container, Error, Mapped, Result};
+use super::{Container, Error, Mapped, Mode, Result};
 
 /// Maps the committed frames `12288..log_end` of the container in `file`, whose committed superblock is `sb`.
 ///
@@ -190,6 +190,123 @@ impl Container<File> {
         Ok(true)
     }
 
+    /// Maps this read-only container's committed frames if it is on a local disk: the default of read handles (SPEC
+    /// §4.7, ROADMAP 10.2.4; ADR-0017 as amended 2026-11-23). Returns whether it mapped; `false` leaves the container
+    /// reading with `pread`, as it does off the local file systems of [`is_on_local_disk`](Container::is_on_local_disk)
+    /// (network, FUSE, overlay, removable, unknown), where a failed page read would end the process.
+    ///
+    /// Only a container Persia opened by path on the operating system's file system maps ([`Container::open`],
+    /// [`Container::open_with`], and the [`reopen_read_only`](Container::reopen_read_only) of one): a container on a
+    /// file given to [`Container::open_on`], or opened through [`Container::open_in`] with a caller's
+    /// [`Vfs`](crate::vfs::Vfs), returns `Ok(false)`, since its caller may hold other handles of the file (a
+    /// `try_clone`) through which safe code could truncate it under the mapping. Such a caller maps with the `unsafe`
+    /// [`enable_mapped_reads`](Container::enable_mapped_reads), stating the contract itself.
+    ///
+    /// For a read-only handle on a local disk opened by path, Persia itself keeps the parts of the mapping contract
+    /// that are about Persia (the `SAFETY` comment inside lists them). It cannot keep the part about everything else,
+    /// so this is an `unsafe fn` (ADR-0017, amended): no safe public function of this crate maps. Its one caller in
+    /// the workspace is the engine's read-only open (`persia_engine::db::ReadOnlyDatabase::open_with_options`, from its
+    /// module `db/read_only/mapped.rs`), where the owner accepted that residual as the default of read handles
+    /// (decision n). A read-only handle never commits, so the mapping is made once and not again: a handle that
+    /// follows a writer reopens the container ([`reopen_read_only`](Container::reopen_read_only)) and calls this on
+    /// the new handle, which maps the frames committed since, or the file a compaction renamed over the path. On
+    /// Windows the mapping keeps a read-write open elsewhere from truncating a torn or corrupt tail until it is gone
+    /// (SPEC §4.7).
+    ///
+    /// ```
+    /// use persia_storage::container::{Container, Mode};
+    ///
+    /// # let dir = tempfile::tempdir()?;
+    /// # let path = dir.path().join("app.persia");
+    /// # drop(Container::create(&path)?);
+    /// let mut reader = Container::open(&path, Mode::ReadOnly)?;
+    /// // SAFETY: nothing but Persia containers writes this file while it is mapped.
+    /// let mapped = unsafe { reader.map_read_only_if_local()? };
+    /// assert_eq!(mapped, reader.is_mapped());
+    /// // The writer's handle is never mapped this way.
+    /// let mut writer = Container::open(&path, Mode::ReadWrite)?;
+    /// // SAFETY: as above; the call refuses a read-write container before it maps anything.
+    /// assert!(unsafe { writer.map_read_only_if_local() }.is_err());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Safety
+    /// While a mapping this call makes, or a `ByteSource` taken from one, is alive:
+    /// - **nothing but Persia writes, truncates or hole-punches the file** below its committed `log_end`: not another
+    ///   program, and not a handle of the file this process opened on its own. A write changes bytes behind the
+    ///   mapping, which is undefined behavior; a truncation ends the process with `SIGBUS` (Unix) or
+    ///   `EXCEPTION_IN_PAGE_ERROR` (Windows) at the next read of a lost page;
+    /// - no superblock slot is damaged after this handle read it, which could make a writer's recovery truncate below
+    ///   the mapped `log_end`, with the same end (ADR-0010 decision 5).
+    ///
+    /// Persia's own containers keep to this (SPEC §4.7). Where it cannot be excluded, read with `pread` instead.
+    ///
+    /// # Errors
+    /// [`Error::InvalidInput`] for a container opened read-write: a writer truncates torn tails and remaps at every
+    /// commit, so it maps only through [`enable_mapped_reads`](Container::enable_mapped_reads).
+    /// [`Error::Io`] if the mapping fails (no address space); reads then go on with `pread`. A file system that cannot
+    /// be queried counts as not local: `Ok(false)`.
+    pub unsafe fn map_read_only_if_local(&mut self) -> Result<bool> {
+        let local = self.is_on_local_disk().unwrap_or(false);
+        // SAFETY: the caller keeps this function's contract, which is `map_read_only`'s.
+        unsafe { self.map_read_only(local) }
+    }
+
+    /// [`map_read_only_if_local`](Container::map_read_only_if_local), given whether the file is on a local disk
+    /// (ADR-0021's answer for this file, and nothing else: the safety argument below rests on it).
+    ///
+    /// # Safety
+    /// As [`map_read_only_if_local`](Container::map_read_only_if_local).
+    unsafe fn map_read_only(&mut self, local: bool) -> Result<bool> {
+        if self.mode() != Mode::ReadOnly {
+            return Err(Error::InvalidInput(
+                "only a read-only container maps by default: a read-write one opts in with enable_mapped_reads"
+                    .into(),
+            ));
+        }
+        // A file a caller handed in (`open_on`, or a path opened through a caller's `Vfs`, and their reopens): the caller
+        // may hold other handles of it (a `try_clone`), and a `set_len` through one would fault this mapping from safe
+        // code. Only a file Persia opened by path on the operating system's file system is mapped here.
+        let own_file = self.location.as_ref().is_some_and(|l| l.own_file);
+        if !local || !own_file {
+            return Ok(false);
+        }
+        // SAFETY: `enable_mapped_reads`' contract (ADR-0010 decision 3; ADR-0017, amended 2026-11-23) asks that
+        // nothing writes, truncates or hole-punches the file below the mapped `log_end` while a mapping, or a
+        // `ByteSource` taken from one, is alive. It has a part Persia vouches for here and a part it cannot.
+        //
+        // What Persia vouches for itself, by the checks above and its own write rules:
+        // 1. Persia's own writers, in any process. No Persia container truncates, hole-punches or rewrites a file
+        //    below a `log_end` it opened with or committed: recovery truncates only past `log_end` (SPEC §8.6),
+        //    compaction writes a new file and renames it over this one (§4.6), create never truncates (§4.5.1), and
+        //    frames are append-only (§4.4).
+        // 2. This handle. It is read-only (checked above, and a handle's mode never changes), so it never appends,
+        //    commits, truncates or compacts. Its one mapping is the one made here, of `12288..log_end` of the
+        //    superblock it read on this file (`map_committed`); nothing remaps it over a file this handle changed.
+        //    Its `File` is one Persia opened itself, by path on the operating system's file system (`own_file`,
+        //    checked above: `Container::open` and `create`, and the reopens and compactions of those, never a file
+        //    given to `open_on` or opened through a caller's `Vfs`). The container never hands its `File` out, so no
+        //    caller holds a clone of this handle through which safe code could write or truncate the file.
+        // 3. A second writer where the lock is per process. `enable_mapped_reads` names that exception for file
+        //    systems whose `flock` is emulated with POSIX locks (NFS, some FUSE and CIFS mounts), where two read-write
+        //    containers of one process are not excluded and the second appends over frames the first committed.
+        //    `local` is true only on the allow-listed local disk file systems (ADR-0021), where the writer lock
+        //    belongs to the open file and keeps a second read-write container out, in this process or another.
+        //
+        // What Persia cannot vouch for, which is why this function is `unsafe` and its caller states it (this
+        // function's `# Safety`):
+        // - a write, truncation or hole-punch below the mapped `log_end` by another program, or by another handle to
+        //   the file that this process opened on its own (a `File::open` of the path, a tool that rewrites the file in
+        //   place): as for another program, opening the path again is outside what Persia controls. A write changes
+        //   bytes behind a live `&[u8]`: undefined behavior. A truncation faults the next read of a lost page and ends
+        //   the process. No check made here can exclude either. It is the residual every database that maps its file
+        //   accepts (ADR-0010 decision 3).
+        // - a superblock slot damaged after this handle read it: a writer's recovery may then fall back to the older
+        //   slot and truncate below the mapped `log_end` (ADR-0010 decision 5), which ends this process the same way.
+        unsafe { self.enable_mapped_reads()? };
+        Ok(true)
+    }
+
     /// The absolute range of the file that frames are read from the mapping, if one is live.
     pub fn mapped_range(&self) -> Option<Range<u64>> {
         let window = self.mapped.as_ref()?.window.as_ref()?;
@@ -319,6 +436,99 @@ mod tests {
         assert_eq!(mapped.failures, 1);
         c.mapped = Some(mapped);
         assert!(c.is_mapped());
+    }
+
+    /// What `map_read_only` does with the file system's answer: a read-write container is refused whatever it is, and
+    /// a read-only one off a local disk maps nothing and reads on.
+    #[test]
+    fn a_read_only_container_off_a_local_disk_is_not_mapped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.persia");
+        let mut w = Container::create(&path).unwrap();
+        let wal = w
+            .append(FrameKind::WalChunk, b"wal", Compression::None)
+            .unwrap();
+        w.sync().unwrap();
+        let manifest = w
+            .append(FrameKind::Manifest, b"m", Compression::None)
+            .unwrap();
+        w.commit(Commit {
+            manifest,
+            wal_start: wal.offset,
+            fence_token: 0,
+        })
+        .unwrap();
+        for local in [false, true] {
+            assert!(matches!(map_ro(&mut w, local), Err(Error::InvalidInput(_))));
+            assert!(!w.is_mapped());
+        }
+        drop(w);
+        let mut reader = Container::open(&path, Mode::ReadOnly).unwrap();
+        assert!(!map_ro(&mut reader, false).unwrap());
+        assert!(!reader.is_mapped());
+        assert_eq!(reader.mapped_range(), None);
+        assert_eq!(
+            &*reader.read_frame(wal.offset, 1 << 20).unwrap().payload,
+            b"wal"
+        );
+        // The same handle, told it is local, maps.
+        assert!(map_ro(&mut reader, true).unwrap());
+        assert_eq!(reader.mapped_range(), Some(F..reader.superblock().log_end));
+    }
+
+    /// Only a file Persia opened by path itself maps: a file given to `open_on` (whose caller may hold a clone that
+    /// truncates it), one opened through a caller's `Vfs`, and their reopens are read with `pread`, even on a local
+    /// disk; `Container::open` and its reopens map.
+    #[test]
+    fn a_read_only_container_on_a_given_file_is_not_mapped() {
+        use std::sync::Arc;
+
+        use crate::vfs::RealFs;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.persia");
+        let mut w = Container::create(&path).unwrap();
+        let manifest = w
+            .append(FrameKind::Manifest, b"m", Compression::None)
+            .unwrap();
+        w.commit(Commit {
+            manifest,
+            wal_start: manifest.end(),
+            fence_token: 0,
+        })
+        .unwrap();
+        drop(w);
+        let given = |c: &mut Container<File>| {
+            assert!(!map_ro(c, true).unwrap());
+            assert!(!c.is_mapped());
+            assert_eq!(
+                &*c.read_frame(manifest.offset, 1 << 10).unwrap().payload,
+                b"m"
+            );
+        };
+        let file = File::open(&path).unwrap();
+        let clone = file.try_clone().unwrap();
+        let mut on = Container::open_on(file, Mode::ReadOnly).unwrap();
+        given(&mut on);
+        // Its reopen clones the given handle: still the caller's file.
+        given(&mut on.reopen_read_only().unwrap());
+        drop(clone);
+        let mut through = Container::open_in(Arc::new(RealFs), &path, Mode::ReadOnly).unwrap();
+        given(&mut through);
+        given(&mut through.reopen_read_only().unwrap());
+        // Persia's own open, and its reopen, map.
+        let mut own = Container::open(&path, Mode::ReadOnly).unwrap();
+        assert!(map_ro(&mut own, true).unwrap());
+        let mut again = own.reopen_read_only().unwrap();
+        assert!(map_ro(&mut again, true).unwrap());
+        assert!(own.is_mapped() && again.is_mapped());
+    }
+
+    /// [`Container::map_read_only`] on a container of a file this test owns.
+    fn map_ro(c: &mut Container<File>, local: bool) -> Result<bool> {
+        // SAFETY: each test's file lives in its own temporary directory, and nothing but this test's containers
+        // writes it; the slots are never damaged.
+        unsafe { c.map_read_only(local) }
     }
 
     const F: u64 = FIRST_FRAME_OFFSET;

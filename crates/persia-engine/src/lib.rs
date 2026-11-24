@@ -1,7 +1,9 @@
 //! Persia DB search engine: segments, indexing, WAL, compaction, query, scoring, relaxation.
 //!
 //! Synchronous and storage-agnostic: all I/O goes through `persia_storage::Storage`.
-#![forbid(unsafe_code)]
+// `deny`, not `forbid`: the read-only open's mapping module (`db/read_only/mapped.rs`) must be able to `allow` it, and
+// it alone may (ADR-0017 amended, `UNSAFE_ALLOWED` in `xtask/src/repo_checks.rs`).
+#![deny(unsafe_code)]
 // Sizes and offsets convert with `From`, `persia_format::widen` or `try_from`, never a silent `as` (CLAUDE.md checked
 // ops, ROADMAP 0.6.5).
 #![cfg_attr(not(test), deny(clippy::as_conversions))]

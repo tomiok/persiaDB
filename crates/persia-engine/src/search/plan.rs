@@ -183,7 +183,8 @@ impl SearchPlan {
 
     /// This plan with the proximity bonus (SPEC §7.2, ADR-0036): each `bool` adds, after its `must` clauses, the
     /// closeness of its adjacent `must` words in fields with positions. Off by default until it is evaluated on
-    /// judged queries (ROADMAP 15.1.6); a request's `"proximity"` option is ROADMAP 10.1.7.
+    /// judged queries (ROADMAP 15.1.6). A request asks for it with `"proximity": true`, which only a search that does
+    /// not relax takes (SPEC §7.1.4, ROADMAP 10.1.7).
     ///
     /// ```
     /// use persia_engine::query::{BoolQuery, Query, TermQuery};

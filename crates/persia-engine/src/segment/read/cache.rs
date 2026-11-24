@@ -111,10 +111,11 @@ pub struct CacheStats {
 ///
 /// Every open [`super::Segment`] reads its block-framed sections through one, which keeps at most its capacity, in
 /// decoded bytes, for all the segments that use it: the process-wide [`BlockCache::shared`] (of
-/// [`BlockCache::DEFAULT_CAPACITY`]) unless [`super::Segment::open_with_cache`] gives it another. The embedded database
-/// and the server are to open all their segments with one cache sized by their configuration (planned: ROADMAP
-/// 10.2.5, 11.4.7). Blocks are decoded outside the lock, so readers of other blocks do not wait; two readers that
-/// miss the same block at once may both decode it, and one copy is kept.
+/// [`BlockCache::DEFAULT_CAPACITY`]) unless [`super::Segment::open_with_cache`] gives it another. A database opens
+/// every segment with the cache of its options ([`crate::db::DatabaseOptions::block_cache`], by default one of its
+/// own, ROADMAP 10.2.5), and the server is to give its databases one sized by its configuration (planned: ROADMAP
+/// 11.4.7). Blocks are decoded outside the lock, so readers of other blocks do not wait; two readers that miss the same
+/// block at once may both decode it, and one copy is kept.
 ///
 /// The capacity bounds what the cache keeps, not what readers hold. A reader keeps the framed block it is reading in
 /// each stream it reads (a posting list up to four: postings, frequencies, skip entries and positions; a norms cursor

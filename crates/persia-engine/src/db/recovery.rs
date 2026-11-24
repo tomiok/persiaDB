@@ -35,7 +35,7 @@ use super::{
 use crate::manifest::{Layout, MAX_MANIFEST_LEN, Manifest, ManifestDiff, SegmentEntry};
 use crate::memtable::{Memtable, MemtableError};
 use crate::schema::CollectionSchema;
-use crate::segment::SegmentError;
+use crate::segment::{BlockCache, SegmentError};
 use crate::tombstone::TombstoneSidecar;
 use crate::wal::{MAX_CHUNK_LEN, ReplayError, WalRecord, WalWriter, apply, decode_chunk};
 
@@ -46,13 +46,14 @@ impl<F: ContainerFile + Sync> Database<F> {
         options: DatabaseOptions,
     ) -> Result<Self, DatabaseError> {
         let options = options.with_builtins();
-        let (manifest, collections) = load(&container, |name, schema| {
+        let block_cache = options.cache();
+        let (manifest, collections) = load(&container, &block_cache, |name, schema| {
             check_analyzers(name, schema, &options.registry)?;
             Ok(super::new_memtable(schema, &options)?)
         })?;
         let wal = WalWriter::resume(container, BTreeMap::new())
             .with_chunk_target(options.wal_chunk_target);
-        let mut db = Self::assemble(wal, manifest, collections, options);
+        let mut db = Self::assemble(wal, manifest, collections, options, block_cache);
         db.replay()?;
         db.retire_uncommitted_manifest()?;
         // Replayed operations count as written at the open: their age is not logged (SPEC §8.2).
@@ -148,11 +149,12 @@ fn is_capacity(error: &MemtableError) -> bool {
 }
 
 /// Steps 2 and 3 of the open sequence (module docs): the committed manifest, and each collection with its segments
-/// open and an empty memtable from `memtable`, which gets the collection's name and schema. It runs for every
-/// collection before any segment is opened, so an analyzer the registry lacks fails the open before any segment is
-/// read (SPEC §6.2.2, ADR-0059 item 5), whichever collection names it.
+/// open, reading through `cache` (SPEC §10.6), and an empty memtable from `memtable`, which gets the collection's name
+/// and schema. It runs for every collection before any segment is opened, so an analyzer the registry lacks fails the
+/// open before any segment is read (SPEC §6.2.2, ADR-0059 item 5), whichever collection names it.
 pub(super) fn load<F: ContainerFile + Sync>(
     container: &Container<F>,
+    cache: &Arc<BlockCache>,
     mut memtable: impl FnMut(&str, &CollectionSchema) -> Result<Memtable, DatabaseError>,
 ) -> Result<(Manifest, BTreeMap<String, Collection>), DatabaseError> {
     let manifest = read_manifest(container)?;
@@ -168,18 +170,11 @@ pub(super) fn load<F: ContainerFile + Sync>(
             let name = entry.name();
             let mut segments = Vec::with_capacity(entry.segments().len());
             for segment in entry.segments() {
-                segments.push(open_segment(&objects, name, segment, &schema)?);
+                segments.push(open_segment(&objects, name, segment, &schema, cache)?);
             }
-            let collection = Collection {
-                memtable,
-                schema,
-                segments,
-                first_write: None,
-                last_write: None,
-                // Fresh counters: an open starts them at zero, and so does a read-only handle's full reload, which
-                // runs this too and keeps no count of the state it replaces (ROADMAP 11.4.8).
-                relaxation: Arc::default(),
-            };
+            // Fresh counters: an open starts them at zero, and so does a read-only handle's full reload, which runs
+            // this too and keeps no count of the state it replaces (ROADMAP 11.4.8).
+            let collection = Collection::new(schema, segments, memtable);
             collections.insert(name.to_owned(), collection);
         }
     }
@@ -299,17 +294,18 @@ fn check_slot(manifest: &Manifest, sb: &Superblock) -> Result<(), DatabaseError>
 }
 
 /// Opens a committed segment and its tombstone sidecar through the container's objects, which check their frames
-/// (ROADMAP 6.3.6, 6.3.7), and checks both against the manifest entry.
+/// (ROADMAP 6.3.6, 6.3.7), and checks both against the manifest entry. The segment reads its blocks through `cache`.
 pub(super) fn open_segment<F: ContainerFile + Sync>(
     objects: &ContainerObjects<'_, F>,
     collection: &str,
     entry: &SegmentEntry,
     schema: &CollectionSchema,
+    cache: &Arc<BlockCache>,
 ) -> Result<LiveSegment, DatabaseError> {
     let key = persia_storage::Key::new(objects::segment_key(collection, entry))
         .map_err(persia_storage::Error::from)?;
     let source = objects.get_range(&key, 0..entry.size)?;
-    let segment = open_source(source, collection, entry, schema)?;
+    let segment = open_source(source, collection, entry, schema, cache)?;
     let deleted = match entry.tombstones {
         None => None,
         Some(t) => {

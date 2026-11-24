@@ -1,5 +1,7 @@
-//! What a search asks for beside its query (SPEC §7.4, §7.5, §7.5.1): the errors of a sort, a page, a cursor, a facet
-//! or a projection that does not fit the schema, and the projection itself.
+//! What a search asks for (SPEC §7.1, §7.4, §7.5, §7.5.1): the whole request ([`QueryRequest`]), typed or parsed
+//! from its JSON, and the function that runs it ([`QueryRequest::run`], ADR-0062); the cursor token `search_after`
+//! takes ([`crate::db::Cursor::to_token`]); the errors of a sort, a page, a cursor, a facet or a projection that does
+//! not fit the schema, and the projection itself.
 
 use std::collections::BTreeSet;
 
@@ -8,6 +10,15 @@ use crate::document::Document;
 use crate::relax::RelaxSettings;
 use crate::schema::{CollectionSchema, FieldId};
 use crate::segment::ReadError;
+
+mod base64url;
+mod cursor;
+mod json;
+mod query;
+
+pub use cursor::{CURSOR_TOKEN_VERSION, CursorTokenError, MAX_CURSOR_TOKEN_LEN};
+pub use json::MAX_REQUEST_JSON_LEN;
+pub use query::{QueryRequest, QueryRequestError, QueryResponse, QueryResults, RunOptions};
 
 /// The largest `offset + limit` of a page (SPEC §7.4): deeper pages use a cursor.
 pub const MAX_WINDOW: usize = 10_000;
