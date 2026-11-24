@@ -676,7 +676,7 @@ Deps: M1, M2.
 Deps: M6, M7, M8, M9. First user-facing release: `v0.1`.
 
 ## 10.1 Public API design
-- [ ] 10.1.1 `Db::open(path|url)`, `OpenOptions`, `Db::close`
+- [x] 10.1.1 `Db::open(path|url)`, `OpenOptions`, `Db::close` Done as: `persia::Db::open` (a path or a hand-parsed `file://` URL; every other scheme `Unsupported`, SPEC §10.2), `OpenOptions` (SPEC §14 defaults), `Db::close` (final commit, writer lock released) and a bounded `Drop`; `tests/open.rs`, the `location` property tests and the `db_location` fuzz target (ADR-0063, ADR-0064).
 - [x] 10.1.2 `Collection` handle: create/get/drop, schema inspection Done as: `persia::Collection` (an `Arc` of the database, no lock, `Closed` after close) and `Db::create_collection`/`create_collection_json`/`collection`/`collection_names`/`drop_collection`, `Collection::name`/`schema`; schema types re-exported (ADR-0063); `tests/collections.rs`.
 - [ ] 10.1.3 `put`, `put_batch`, `delete`, `get`, `commit`, `search`, `blob` APIs
 - [x] 10.1.4 Typed documents via `serde` (`put_struct`) + dynamic `Document` Done as: `Collection::put_struct` (exactly `put_json(serde_json::to_string(&T))`), `get_struct` and `to_struct` (on `Collection`: a `Document` needs the schema for names); SPEC §6.4.1 "Typed values"; `tests/typed.rs` with a round-trip property test.
