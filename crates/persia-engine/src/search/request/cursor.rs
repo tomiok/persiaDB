@@ -18,6 +18,8 @@
 //! varint  docid (u32)
 //! varint  number of sort values, then each: u8 tag, 0 missing | 1 score (u64, the f64's bits) | 2 key (u64) |
 //!         3 keyword (varint length, bytes)
+//! varint  number of sort keys, at most 16, then each: u8 bits, 1 field (else the score) | 2 descending | 4 missing
+//!         first (a field's only); then for a field, varint field id
 //! varint  step, varint last, varint hit                      (only with "has step")
 //! varint  level bits, varint min_results, u8 1 fill | 2 filters last_resort   (only with "has relaxation settings")
 //! u32     CRC-32C of every byte above
@@ -36,8 +38,9 @@ use persia_format::{Reader, Writer};
 use super::base64url;
 use crate::db::{Cursor, CursorOrigin, Located, StepCursor};
 use crate::relax::RelaxSettings;
+use crate::schema::FieldId;
 use crate::schema::FilterRelaxation;
-use crate::search::SortValue;
+use crate::search::{MAX_SORT_KEYS, Missing, Order, SortKey, SortValue};
 
 /// The version of the tokens [`Cursor::to_token`] writes, and the only one [`Cursor::from_token`] reads.
 pub const CURSOR_TOKEN_VERSION: u8 = 1;
@@ -55,6 +58,10 @@ const MISSING: u8 = 0;
 const SCORE: u8 = 1;
 const KEY: u8 = 2;
 const KEYWORD: u8 = 3;
+
+const FIELD: u8 = 1;
+const DESC: u8 = 2;
+const MISSING_FIRST: u8 = 4;
 
 const FILL: u8 = 1;
 const LAST_RESORT: u8 = 2;
@@ -99,10 +106,11 @@ impl Cursor {
     ///
     /// ```
     /// use persia_engine::db::{Cursor, CursorOrigin, Located};
-    /// use persia_engine::search::SortValue;
+    /// use persia_engine::search::{SortKey, SortValue};
     /// use persia_engine::search::request::CursorTokenError;
     ///
     /// let cursor = Cursor {
+    ///     sort: vec![SortKey::score()],
     ///     values: vec![SortValue::Score(1.5)],
     ///     location: Located::Segment { index: 0, docid: 7 },
     ///     origin: CursorOrigin { seq: 3, version: 0, collection: "items".into() },
@@ -184,6 +192,10 @@ fn encode(cursor: &Cursor) -> Vec<u8> {
             }
         }
     }
+    w.write_varint_u64(u64_from_usize(cursor.sort.len()));
+    for key in &cursor.sort {
+        write_key(&mut w, *key);
+    }
     if let Some(StepCursor { step, last, hit }) = cursor.relaxed {
         for n in [step, last, hit] {
             w.write_varint_u64(u64_from_usize(n));
@@ -205,6 +217,27 @@ fn encode(cursor: &Cursor) -> Vec<u8> {
     let checksum = crc32c(w.as_slice());
     w.write_u32(checksum);
     w.into_inner()
+}
+
+/// One sort key: its bits, then a field's id.
+fn write_key(w: &mut Writer, key: SortKey) {
+    let desc = |order| if order == Order::Desc { DESC } else { 0 };
+    match key {
+        SortKey::Score { order } => w.write_u8(desc(order)),
+        SortKey::Field {
+            field,
+            order,
+            missing,
+        } => {
+            let first = if missing == Missing::First {
+                MISSING_FIRST
+            } else {
+                0
+            };
+            w.write_u8(FIELD | desc(order) | first);
+            w.write_varint_u32(field.get());
+        }
+    }
 }
 
 fn write_bytes(w: &mut Writer, bytes: &[u8]) {
@@ -255,6 +288,14 @@ fn decode(bytes: &[u8]) -> Result<Cursor, CursorTokenError> {
     for _ in 0..count {
         values.push(read_value(&mut r)?);
     }
+    let keys = read_usize(&mut r, "no sort keys")?;
+    if keys > MAX_SORT_KEYS {
+        return Err(malformed("more sort keys than a sort has"));
+    }
+    let mut sort = Vec::with_capacity(keys);
+    for _ in 0..keys {
+        sort.push(read_key(&mut r)?);
+    }
     let relaxed = if flags & HAS_STEP != 0 {
         let step = read_usize(&mut r, "no step")?;
         let last = read_usize(&mut r, "no step")?;
@@ -272,6 +313,7 @@ fn decode(bytes: &[u8]) -> Result<Cursor, CursorTokenError> {
         return Err(malformed("bytes after its last field"));
     }
     Ok(Cursor {
+        sort,
         values,
         location,
         origin: CursorOrigin {
@@ -293,6 +335,36 @@ fn read_value(r: &mut Reader<'_>) -> Result<SortValue, CursorTokenError> {
         KEY => SortValue::Key(r.read_u64().map_err(cut)?),
         KEYWORD => SortValue::Keyword(read_bytes(r, "a sort value cut short")?.to_vec()),
         _ => return Err(malformed("an unknown kind of sort value")),
+    })
+}
+
+fn read_key(r: &mut Reader<'_>) -> Result<SortKey, CursorTokenError> {
+    let cut = |_| malformed("a sort key cut short");
+    let bits = r.read_u8().map_err(cut)?;
+    if bits & !(FIELD | DESC | MISSING_FIRST) != 0 {
+        return Err(malformed("an unknown kind of sort key"));
+    }
+    let order = if bits & DESC == 0 {
+        Order::Asc
+    } else {
+        Order::Desc
+    };
+    if bits & FIELD == 0 {
+        if bits & MISSING_FIRST != 0 {
+            return Err(malformed("a score key with a placement of missing values"));
+        }
+        return Ok(SortKey::Score { order });
+    }
+    let missing = if bits & MISSING_FIRST == 0 {
+        Missing::Last
+    } else {
+        Missing::First
+    };
+    let field = FieldId::new(r.read_varint_u32().map_err(cut)?);
+    Ok(SortKey::Field {
+        field,
+        order,
+        missing,
     })
 }
 
@@ -337,6 +409,7 @@ mod tests {
 
     fn plain() -> Cursor {
         Cursor {
+            sort: vec![SortKey::score()],
             values: vec![SortValue::Score(1.5)],
             location: Located::Segment { index: 2, docid: 7 },
             origin: CursorOrigin {
@@ -360,6 +433,24 @@ mod tests {
         };
         let plan = RelaxPlan::new(&RelaxationConfig::default(), &options).unwrap();
         Cursor {
+            sort: vec![
+                SortKey::Field {
+                    field: FieldId::new(3),
+                    order: Order::Asc,
+                    missing: Missing::First,
+                },
+                SortKey::Score { order: Order::Asc },
+                SortKey::Field {
+                    field: FieldId::new(u32::MAX),
+                    order: Order::Desc,
+                    missing: Missing::Last,
+                },
+                SortKey::Field {
+                    field: FieldId::new(0),
+                    order: Order::Desc,
+                    missing: Missing::First,
+                },
+            ],
             values: vec![
                 SortValue::Missing,
                 SortValue::Score(-0.0),
@@ -389,12 +480,12 @@ mod tests {
         let golden = [
             (
                 plain(),
-                "AQADAAAAAAAAAAkAAAAAAAAABWl0ZW1zAgcBAQAAAAAAAPg_3DR36A",
+                "AQADAAAAAAAAAAkAAAAAAAAABWl0ZW1zAgcBAQAAAAAAAPg_AQKTxg4c",
             ),
             (
                 full(),
                 "AQ___________wAAAAAAAQAADXphcGF0aWxsYXMgw7H_____DwQAAQAAAAAAAACAAv__________A\
-                 wVuaWtl_wKsAgR_BQOBlPsM",
+                 wVuaWtl_wQFAwAD_____w8HAAKsAgR_BQPl6RfX",
             ),
         ];
         for (cursor, token) in golden {
@@ -510,6 +601,11 @@ mod tests {
         assert_eq!(what(longer), "bytes after its last field");
         assert_eq!(
             what(base[..base.len() - 1].to_vec()),
+            "a sort key cut short"
+        );
+        assert_eq!(what(base[..base.len() - 2].to_vec()), "no sort keys");
+        assert_eq!(
+            what(base[..base.len() - 3].to_vec()),
             "a sort value cut short"
         );
         assert_eq!(what(vec![1]), "no flags");
@@ -611,6 +707,64 @@ mod tests {
                 (fill, filters, 7)
             );
         }
+    }
+
+    /// The sort keys (SPEC §7.4): each field, order and placement comes back as written, and only the one encoding of
+    /// each key decodes.
+    #[test]
+    fn sort_keys_are_checked_key_by_key() {
+        let what = |bytes: Vec<u8>| match decode(&summed(bytes)) {
+            Err(CursorTokenError::Malformed { what }) => what,
+            other => panic!("{other:?}"),
+        };
+        for order in [Order::Asc, Order::Desc] {
+            for missing in [Missing::Last, Missing::First] {
+                let cursor = Cursor {
+                    sort: vec![
+                        SortKey::Field {
+                            field: FieldId::new(300),
+                            order,
+                            missing,
+                        },
+                        SortKey::Score { order },
+                    ],
+                    values: vec![SortValue::Key(1), SortValue::Score(2.0)],
+                    ..plain()
+                };
+                assert_eq!(Cursor::from_token(&cursor.to_token()).unwrap(), cursor);
+            }
+        }
+        // `plain`'s body ends with one key, the score descending: bits 2.
+        let base = body(&plain());
+        let end = base.len();
+        assert_eq!(base[end - 2..], [1, DESC]);
+        for bits in [8, 16, 128] {
+            let mut bytes = base.clone();
+            bytes[end - 1] |= bits;
+            assert_eq!(what(bytes), "an unknown kind of sort key", "{bits}");
+        }
+        let mut placed = base.clone();
+        placed[end - 1] |= MISSING_FIRST;
+        assert_eq!(
+            what(placed),
+            "a score key with a placement of missing values"
+        );
+        // A field key cut before its id.
+        let mut field = base.clone();
+        field[end - 1] = FIELD;
+        assert_eq!(what(field), "a sort key cut short");
+        // More keys than a sort has, and more than the bytes left.
+        let mut many = base[..end - 2].to_vec();
+        many.push(17);
+        many.extend([0; 17]);
+        assert_eq!(what(many), "more sort keys than a sort has");
+        let mut short = base[..end - 2].to_vec();
+        short.push(16);
+        assert_eq!(what(short), "a sort key cut short");
+        // No key at all decodes (a forged cursor): the search refuses it as a cursor of another sort.
+        let mut none = base[..end - 2].to_vec();
+        none.push(0);
+        assert_eq!(decode(&summed(none)).unwrap().sort, []);
     }
 
     #[test]

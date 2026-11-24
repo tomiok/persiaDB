@@ -72,7 +72,13 @@ segment index, a docid, relaxation settings) that no client should build or read
 12. **The checksum is not authentication.** It turns a token that was cut or mistyped into an error instead of
     another cursor. A client can still build any cursor it likes, so a decoded cursor is checked exactly as a typed
     one is: against the sort, the snapshot and memtable view, the collection, the proximity setting and the
-    relaxation settings (SPEC §7.4). A cursor only names a place in a ranking the caller may already read, so there is
+    relaxation settings (SPEC §7.4). To be checked against the sort, a cursor records it: version 1 holds the sort's
+    keys (each key's field or the score, its order and its placement of missing values) after the sort values, and a
+    search refuses a cursor whose keys are not its sort's (`RequestError::Cursor`). Values of the right types alone
+    would let a token of `price` ascending page `stock` descending, or a score ascending page the score descending.
+    The keys went into version 1 itself, before any response writes tokens (ROADMAP 10.1.13), so no token without
+    them exists (found in the wave 7 review). A forged location is checked too: a segment index the view does not
+    have is `RequestError::Cursor`. A cursor only names a place in a ranking the caller may already read, so there is
     nothing for a signature to protect, and a key would be state the embedded database does not have.
 
 ## Consequences

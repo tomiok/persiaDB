@@ -187,6 +187,10 @@ fn plain_ids(r: &SearchResults) -> Vec<&str> {
 fn every_key_parses_to_its_typed_value() {
     let schema = schema();
     let cursor = Cursor {
+        sort: vec![
+            SortKey::score(),
+            SortKey::field(schema.field("price").unwrap().id(), Order::Asc),
+        ],
         values: vec![SortValue::Score(1.5), SortValue::Key(7)],
         location: Located::Memtable(3),
         origin: CursorOrigin {
@@ -306,9 +310,9 @@ fn sort_forms() {
         order,
         missing,
     };
-    let cases: [(J, Sort); 9] = [
+    // `[]` names no order: an error (`negative_zero_and_an_empty_sort_are_refused`).
+    let cases: [(J, Sort); 8] = [
         (json!("score"), Sort::score()),
-        (json!([]), Sort::score()),
         (json!(["score"]), Sort::score()),
         (json!([{"score": {}}]), Sort::score()),
         (json!([{"score": {"order": "desc"}}]), Sort::score()),
@@ -1711,6 +1715,29 @@ fn any_score() -> impl Strategy<Value = f64> {
     ]
 }
 
+/// A sort key of [`schema`]'s fields or the score, in any order and placement.
+fn any_sort_key() -> impl Strategy<Value = SortKey> {
+    let ids: Vec<FieldId> = schema()
+        .fields()
+        .iter()
+        .map(persia_engine::schema::Field::id)
+        .collect();
+    let order = || prop_oneof![Just(Order::Asc), Just(Order::Desc)];
+    prop_oneof![
+        order().prop_map(|order| SortKey::Score { order }),
+        (
+            proptest::sample::select(ids),
+            order(),
+            prop_oneof![Just(Missing::Last), Just(Missing::First)]
+        )
+            .prop_map(|(field, order, missing)| SortKey::Field {
+                field,
+                order,
+                missing
+            }),
+    ]
+}
+
 fn any_cursor() -> impl Strategy<Value = Cursor> {
     let value = prop_oneof![
         Just(SortValue::Missing),
@@ -1735,7 +1762,10 @@ fn any_cursor() -> impl Strategy<Value = Cursor> {
             .settings()
     });
     (
-        proptest::collection::vec(value, 0..6),
+        (
+            proptest::collection::vec(any_sort_key(), 0..6),
+            proptest::collection::vec(value, 0..6),
+        ),
         location,
         (any::<u64>(), any::<u64>(), ".{0,24}"),
         step,
@@ -1743,17 +1773,20 @@ fn any_cursor() -> impl Strategy<Value = Cursor> {
         relax,
     )
         .prop_map(
-            |(values, location, (seq, version, collection), relaxed, proximity, relax)| Cursor {
-                values,
-                location,
-                origin: CursorOrigin {
-                    seq,
-                    version,
-                    collection,
-                },
-                relaxed,
-                proximity,
-                relax,
+            |((sort, values), location, (seq, version, collection), relaxed, proximity, relax)| {
+                Cursor {
+                    sort,
+                    values,
+                    location,
+                    origin: CursorOrigin {
+                        seq,
+                        version,
+                        collection,
+                    },
+                    relaxed,
+                    proximity,
+                    relax,
+                }
             },
         )
 }
@@ -1896,9 +1929,10 @@ fn any_model() -> impl Strategy<Value = Model> {
         weight().prop_map(|w| vec![("body", w)]),
         (weight(), weight()).prop_map(|(a, b)| vec![("body", a), ("title", b)]),
     ];
+    // A list of at least one key: `[]` is an error (SPEC §7.1.4).
     let sort = proptest::option::of(proptest::option::of(proptest::collection::vec(
         any_key(),
-        0..5,
+        1..5,
     )));
     let facets = proptest::collection::vec(
         proptest::option::of(proptest::option::of(1..=1_000_usize)),
@@ -2156,12 +2190,44 @@ fn a_forged_cursor_never_panics() {
             let _ = parsed.run(c, &options());
             // And with the settings the search itself records, so the settings check passes too.
             let relax = RelaxPlan::new(c.schema().relaxation(), parsed.relax()).unwrap();
+            // And with the request's own sort, so the sort check passes and the values' and steps' checks run.
             let matching = Cursor {
                 relax: relax.settings(),
+                sort: parsed.page().sort.keys().collect(),
                 ..forged
             };
             let _ = parsed.with_search_after(matching).run(c, &options());
             Ok(())
         })
         .unwrap();
+}
+
+/// Nothing is guessed (SPEC §7.1.4): `-0` is no count and `"sort": []` names no order; each has its own message.
+#[test]
+fn negative_zero_and_an_empty_sort_are_refused() {
+    for json in [
+        r#"{"limit": -0}"#,
+        r#"{"offset": -0}"#,
+        r#"{"facets": [{"field": "brand", "size": -0}]}"#,
+    ] {
+        let error = parse(json).unwrap_err();
+        assert!(matches!(kind(&error), Kind::Json), "{json}: {error:?}");
+        assert!(
+            error.to_string().contains("-0 is not a valid count"),
+            "{json}: {error}"
+        );
+    }
+    // 0 itself is a count.
+    assert_eq!(parse(r#"{"limit": 0}"#).unwrap().page().limit, 0);
+    let error = parse(r#"{"sort": []}"#).unwrap_err();
+    assert!(matches!(kind(&error), Kind::Json), "{error:?}");
+    assert!(error.to_string().contains("names no order"), "{error}");
+    // `"score"` is how to ask for the default.
+    assert!(
+        parse(r#"{"sort": "score"}"#)
+            .unwrap()
+            .page()
+            .sort
+            .is_score()
+    );
 }

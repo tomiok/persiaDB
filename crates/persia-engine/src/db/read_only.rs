@@ -375,7 +375,10 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
     /// [`ReadOnlyDatabase::open_container`] as `options` say: their registry, whether a missing analyzer fails the
     /// open, and the block cache every segment reads through (SPEC §10.6), at this open and at each refresh. It reads
     /// with ordinary reads whatever [`ReadOnlyOptions::mapped_reads`] says: only
-    /// [`ReadOnlyDatabase::open_with_options`], which opens the file itself, maps (SPEC §4.7).
+    /// [`ReadOnlyDatabase::open_with_options`], which opens the file itself, maps (SPEC §4.7). A `container` the caller
+    /// mapped itself ([`Container::enable_mapped_reads`]) is read through that mapping until the first refresh that
+    /// finds something new: the refresh reopens the container ([`Container::reopen_read_only`]), and the reopened
+    /// handle is not mapped.
     ///
     /// # Errors
     /// As [`ReadOnlyDatabase::open_container`]; with [`ReadOnlyOptions::skip_unregistered_analysis`], never

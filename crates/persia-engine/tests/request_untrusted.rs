@@ -36,14 +36,14 @@ use persia_engine::document::{Document, Value};
 use persia_engine::query::{QueryError, QueryLimits};
 use persia_engine::relax::{RelaxOptions, RelaxPlan};
 use persia_engine::schema::{
-    CollectionSchema, FieldKind, FilterRelaxation, KeywordOptions, RelaxationConfig, SchemaBuilder,
-    TextOptions,
+    CollectionSchema, FieldId, FieldKind, FilterRelaxation, KeywordOptions, RelaxationConfig,
+    SchemaBuilder, TextOptions,
 };
 use persia_engine::search::request::{
     CURSOR_TOKEN_VERSION, CursorTokenError, QueryRequest, QueryRequestError, QueryResults,
     RunOptions,
 };
-use persia_engine::search::{RequestError, SortValue};
+use persia_engine::search::{Missing, Order, RequestError, SortKey, SortValue};
 use persia_engine::wal::Durability;
 use persia_format::checksum::crc32c;
 use persia_storage::container::sim::SimFile;
@@ -190,6 +190,7 @@ fn refused_as_damage(token: &str) -> Result<(), String> {
 
 fn plain_cursor() -> Cursor {
     Cursor {
+        sort: vec![SortKey::score()],
         values: vec![SortValue::Score(1.5)],
         location: Located::Segment { index: 2, docid: 7 },
         origin: CursorOrigin {
@@ -212,6 +213,20 @@ fn full_cursor() -> Cursor {
         ..RelaxOptions::default()
     };
     Cursor {
+        sort: vec![
+            SortKey::Field {
+                field: id("stock"),
+                order: Order::Asc,
+                missing: Missing::First,
+            },
+            SortKey::Score { order: Order::Asc },
+            SortKey::field(id("price"), Order::Desc),
+            SortKey::Field {
+                field: id("brand"),
+                order: Order::Desc,
+                missing: Missing::First,
+            },
+        ],
         values: vec![
             SortValue::Missing,
             SortValue::Score(-0.0),
@@ -250,6 +265,34 @@ fn runner(cases: u32) -> TestRunner {
     })
 }
 
+/// The id of [`schema`]'s field `name`.
+fn id(name: &str) -> FieldId {
+    schema().field(name).unwrap().id()
+}
+
+/// A sort key of [`schema`]'s fields or the score, in any order and placement.
+fn any_sort_key() -> impl Strategy<Value = SortKey> {
+    let ids: Vec<FieldId> = schema()
+        .fields()
+        .iter()
+        .map(persia_engine::schema::Field::id)
+        .collect();
+    let order = || prop_oneof![Just(Order::Asc), Just(Order::Desc)];
+    prop_oneof![
+        order().prop_map(|order| SortKey::Score { order }),
+        (
+            proptest::sample::select(ids),
+            order(),
+            prop_oneof![Just(Missing::Last), Just(Missing::First)]
+        )
+            .prop_map(|(field, order, missing)| SortKey::Field {
+                field,
+                order,
+                missing
+            }),
+    ]
+}
+
 fn any_cursor() -> impl Strategy<Value = Cursor> {
     let value = prop_oneof![
         Just(SortValue::Missing),
@@ -284,7 +327,10 @@ fn any_cursor() -> impl Strategy<Value = Cursor> {
                 .settings()
         });
     (
-        proptest::collection::vec(value, 0..4),
+        (
+            proptest::collection::vec(any_sort_key(), 0..4),
+            proptest::collection::vec(value, 0..4),
+        ),
         location,
         (any::<u64>(), any::<u64>(), ".{0,12}"),
         step,
@@ -292,17 +338,20 @@ fn any_cursor() -> impl Strategy<Value = Cursor> {
         relax,
     )
         .prop_map(
-            |(values, location, (seq, version, collection), relaxed, proximity, relax)| Cursor {
-                values,
-                location,
-                origin: CursorOrigin {
-                    seq,
-                    version,
-                    collection,
-                },
-                relaxed,
-                proximity,
-                relax,
+            |((sort, values), location, (seq, version, collection), relaxed, proximity, relax)| {
+                Cursor {
+                    sort,
+                    values,
+                    location,
+                    origin: CursorOrigin {
+                        seq,
+                        version,
+                        collection,
+                    },
+                    relaxed,
+                    proximity,
+                    relax,
+                }
             },
         )
 }
@@ -391,7 +440,6 @@ fn text_near_a_token_is_not_one() {
         &format!("{token}\n"),
         &format!("{}\n{}", &token[..8], &token[8..]),
         &format!("\"{token}\""),
-        &token.to_lowercase(),
     ] {
         assert_eq!(
             Cursor::from_token(text).map(|c| c.to_token()),
@@ -399,6 +447,9 @@ fn text_near_a_token_is_not_one() {
             "{text:?}"
         );
     }
+    // Lowercased, the text is still base64url: whether its last character sets unused bits depends on the token, so
+    // it is refused as damage of any kind (here the first byte reads as another version).
+    refused_as_damage(&token.to_lowercase()).unwrap();
 }
 
 // --- 2: another version -----------------------------------------------------------------------------------------------
@@ -876,4 +927,86 @@ fn escaped_keys_are_the_keys_they_spell() {
     }
     // Text that is no JSON string: a lone surrogate.
     assert_eq!(kind_of(parse(r#"{"q": "\ud800"}"#)), "json");
+}
+
+/// Invariant 3: a token of another sort is refused even when its values are of the request's key types (SPEC §7.4,
+/// ADR-0062 decision 12): another order, another field of the same type, another placement of missing values, the
+/// score in the other order, or another number of keys. The same sort pages on.
+#[test]
+fn a_token_of_another_sort_is_refused_whatever_its_values() {
+    let db = database();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let request = |sort: &J| json!({"q": "red", "relax": false, "limit": 1, "sort": sort});
+    let token_of = |sort: &J| hits(run(c, &request(sort)).unwrap())[0].1.to_token();
+    let after = |sort: &J, token: &str| {
+        let mut json = request(sort);
+        json["search_after"] = json!(token);
+        run(c, &json)
+    };
+    for (from, to) in [
+        (
+            json!([{"field": "price"}]),
+            json!([{"field": "price", "order": "desc"}]),
+        ),
+        (json!([{"field": "price"}]), json!([{"field": "stock"}])),
+        (
+            json!([{"field": "price", "missing": "first"}]),
+            json!([{"field": "price"}]),
+        ),
+        (
+            json!([{"field": "price"}]),
+            json!([{"field": "price", "missing": "first"}]),
+        ),
+        (json!("score"), json!([{"score": {"order": "asc"}}])),
+        (json!([{"score": {"order": "asc"}}]), json!("score")),
+        (json!(["score", {"field": "price"}]), json!(["score"])),
+    ] {
+        let token = token_of(&from);
+        assert!(after(&from, &token).is_ok(), "{from}");
+        assert!(
+            matches!(
+                after(&to, &token),
+                Err(QueryRequestError::Request(RequestError::Cursor { .. }))
+            ),
+            "{from} -> {to}"
+        );
+    }
+}
+
+/// A forged token whose location names a segment past the view's is refused, not ranked (SPEC §7.4).
+#[test]
+fn a_token_naming_a_segment_the_view_lacks_is_refused() {
+    let db = database();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let sort = json!([{"field": "price"}]);
+    let request = json!({"q": "red", "relax": false, "limit": 1, "sort": sort});
+    let (_, cursor) = hits(run(c, &request).unwrap()).remove(0);
+    let segments = c.segments().len();
+    for index in [segments, segments + 1, usize::MAX] {
+        let forged = Cursor {
+            location: Located::Segment { index, docid: 0 },
+            ..cursor.clone()
+        };
+        let mut json = request.clone();
+        json["search_after"] = json!(forged.to_token());
+        assert!(
+            matches!(
+                run(c, &json),
+                Err(QueryRequestError::Request(RequestError::Cursor { .. }))
+            ),
+            "{index}"
+        );
+    }
+    let last = Cursor {
+        location: Located::Segment {
+            index: segments - 1,
+            docid: u32::MAX,
+        },
+        ..cursor
+    };
+    let mut json = request;
+    json["search_after"] = json!(last.to_token());
+    assert!(run(c, &json).is_ok());
 }

@@ -5,6 +5,8 @@
 //! the collection's by the sort, then location (segment order, the memtable last, docid). With facets every match is
 //! visited, and each view's matching bitmap is counted. The page's hits then get their documents, projected.
 
+use std::sync::Arc;
+
 use roaring::RoaringBitmap;
 
 use super::exec::{Execution, Thresholds, ViewWatch};
@@ -15,8 +17,8 @@ use crate::document::Document;
 use crate::relax::RelaxSettings;
 use crate::search::{
     Explanation, FacetCounter, FacetCounts, FacetRequest, Interruptible, MAX_FACETS, MAX_WINDOW,
-    Projection, Pruning, RequestError, SearchPlan, Selections, Sort, SortValue, Steps, Ties, Watch,
-    collect_where, top_sorted,
+    Projection, Pruning, RequestError, SearchPlan, Selections, Sort, SortKey, SortValue, Steps,
+    Ties, Watch, collect_where, top_sorted,
 };
 use crate::view::{SearchView, SegmentView};
 
@@ -75,10 +77,14 @@ pub struct CursorOrigin {
 /// ([`RequestError::CursorProximity`]). Another view is [`RequestError::CursorView`]: locations are indices into the
 /// view that returned the hit, so a cursor from elsewhere would repeat a tied hit or pass one over. It also records the
 /// relaxation settings of its search ([`Self::relax`]), and a page under others is [`RequestError::CursorRelax`]
-/// (ROADMAP 8.3.1). The query, its fields and filters and the limits are not recorded (ROADMAP 10.1.24): paging is
-/// exact only when they are unchanged.
+/// (ROADMAP 8.3.1). It records the sort's keys ([`Self::sort`]), and a page under another sort is
+/// [`RequestError::Cursor`]. The query, its fields and filters and the limits are not recorded (ROADMAP 10.1.24):
+/// paging is exact only when they are unchanged.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cursor {
+    /// The keys of the sort that ranked the hit, in order (SPEC §7.4): a page under other keys (another field, order
+    /// or placement of missing values) would rank otherwise, and is [`RequestError::Cursor`].
+    pub sort: Vec<SortKey>,
     /// One value per sort key.
     pub values: Vec<SortValue>,
     /// The hit's document.
@@ -134,6 +140,8 @@ pub struct SearchHit {
     pub(super) proximity: bool,
     /// Its search's relaxation settings. [`Self::cursor`] copies it.
     pub(super) relax: Option<RelaxSettings>,
+    /// The keys of the sort that ranked it, shared by the hits of a page. [`Self::cursor`] copies them.
+    pub(super) sort_keys: Arc<[SortKey]>,
 }
 
 impl SearchHit {
@@ -142,6 +150,7 @@ impl SearchHit {
     /// [`RelaxedHit::cursor`](crate::db::RelaxedHit::cursor) gives.
     pub fn cursor(&self) -> Cursor {
         Cursor {
+            sort: self.sort_keys.to_vec(),
             values: self.sort.clone(),
             location: self.location,
             origin: self.origin.clone(),
@@ -269,6 +278,7 @@ impl CollectionViews<'_> {
                 &segments,
                 page,
                 explanations,
+                &request.sort,
                 &request.projection,
                 plan.proximity(),
             )?,
@@ -333,6 +343,17 @@ impl CollectionViews<'_> {
                     seq: origin.seq,
                     version: origin.version,
                     collection: origin.collection,
+                });
+            }
+            // After the origin: a cursor of another collection is reported as that, though its keys name other ids.
+            request.sort.check_keys(&cursor.sort)?;
+            // A token is not authenticated (SPEC §7.4): one forged with the right origin may still name a segment the
+            // view does not have.
+            if let Located::Segment { index, .. } = cursor.location
+                && index >= self.segments().len()
+            {
+                return Err(RequestError::Cursor {
+                    reason: "its segment is not one of the view's",
                 });
             }
             if cursor.proximity != proximity {
@@ -416,10 +437,12 @@ impl CollectionViews<'_> {
         segments: &[SegmentView<'_>],
         page: Vec<Ranked>,
         explanations: Vec<Option<Explanation>>,
+        sort: &Sort,
         projection: &Projection,
         proximity: bool,
     ) -> Result<Vec<SearchHit>, RequestError> {
         let mut explanations = explanations.into_iter();
+        let sort_keys: Arc<[SortKey]> = sort.keys().collect();
         let origin = self.cursor_origin();
         let mut hits = Vec::with_capacity(page.len());
         for hit in page {
@@ -440,6 +463,7 @@ impl CollectionViews<'_> {
                 relaxed: None,
                 proximity,
                 relax: None,
+                sort_keys: Arc::clone(&sort_keys),
             });
         }
         Ok(hits)

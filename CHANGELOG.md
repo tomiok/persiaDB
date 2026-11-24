@@ -34,17 +34,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `block_cache_stats`), and the existing `open*` functions give each database a cache of its own.
 - `persia-storage`, `persia-engine`: mapped reads on by default for read-only handles on local disks (engine side of
   ROADMAP 10.2.4; SPEC §4.7, ADR-0017 amended 2026-11-23). `Container::map_read_only_if_local` is a safe call that
-  maps a read-only container on a local disk file system and refuses a read-write one (`Error::InvalidInput`).
+  maps a read-only container on a local disk file system and refuses a read-write one (`Error::InvalidInput`). It maps
+  only a file Persia opened by path itself (`Container::open` and its reopens): a container on a file given to
+  `open_on`, or opened through a caller's `Vfs`, returns `Ok(false)`.
   `ReadOnlyDatabase::open_with_options` maps by default (`ReadOnlyOptions::mapped_reads`, `MappedReads::IfLocal`;
   `MappedReads::Never` forces ordinary reads), and each refresh that finds something new maps the container it
   reopened. A read-write `Database` never maps; the older read-only opens and those of a given file or container keep
   ordinary reads. A mapped reader requires that nothing but Persia writes or truncates the file while it is open
   (SPEC §4.7). On Windows a mapped reader keeps a writer that stopped with a torn tail from reopening until the reader
-  closes.
+  closes, and on a FAT32 or exFAT fixed drive it can make the writer's compactions fail.
 - `persia-engine`: a cursor as an opaque token (ROADMAP 10.1.10, ADR-0062; SPEC §7.4): `Cursor::to_token` and
   `Cursor::from_token`, base64url text of a versioned (`CURSOR_TOKEN_VERSION` 1), checksummed encoding. The request
   JSON's `search_after` takes one. A token that was cut, changed or written by another version is a
-  `CursorTokenError`, never another cursor.
+  `CursorTokenError`, never another cursor. A cursor records its sort's keys (`Cursor::sort`: each key's field or
+  the score, order and placement of missing values), and a search refuses a cursor of another sort, or one naming a
+  segment its view does not have, as `RequestError::Cursor`. The request JSON refuses `-0` as a count and
+  `"sort": []`, each with its own message.
 - `persia-engine`: `CollectionSnapshot::compiler`, the collection's `QueryCompiler` with the analyzers the database
   indexes with, shared by its snapshots until the schema changes; `DefaultFields::is_for`.
 - `persia-fuzz`: targets `request_json` (any input to `QueryRequest::from_json` never panics, and an accepted request

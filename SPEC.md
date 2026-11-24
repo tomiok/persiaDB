@@ -422,19 +422,26 @@ accept that reads with ordinary reads instead.
 Mapping is on by default for read-only handles on local disks, and off for read-write ones (ADR-0017, amended
 2026-11-23). A read-only database opened by path (`ReadOnlyDatabase::open_with_options`, which the embedded API's
 read-only open is to use, ROADMAP 10.2.4) maps its container when the file is on a local disk file system (below),
-through a safe call (`Container::map_read_only_if_local`) that refuses a read-write container; its options can force
-ordinary reads (`MappedReads::Never`). The engine's read-only opens of a given file or container, and its older ones
-that take a registry alone, read with ordinary reads. A read-write database never maps: the writer's handle always
-reads with ordinary reads. The safe call takes on the part of the mapping contract that is Persia's own: no Persia
-writer changes the bytes below a committed `log_end` (above), the mapping handle is read-only, and on the
-allow-listed local file systems the writer lock belongs to the open file, so no second writer can exist in the same
-process. It cannot take on the rest, which stays with the deployment: while a read-only handle is open, nothing but
-Persia writes, truncates or hole-punches the container file, neither another program nor another handle of the file
-in the same process. A write under a mapping is undefined behaviour, a truncation ends the process as above, and a
+through a safe call (`Container::map_read_only_if_local`) that refuses a read-write container and maps only a file
+Persia opened by path itself on the operating system's file system (`Container::open` and its reopens). A container
+on a file the caller handed in (`Container::open_on`, or a path opened through the caller's own `Vfs`) is never
+mapped by it: the caller may hold another handle of that file (a clone) and truncate it from safe code. Its options
+can force ordinary reads (`MappedReads::Never`). The engine's read-only opens of a given file or container, and its
+older ones that take a registry alone, read with ordinary reads; a container the caller mapped itself and passed to
+such an open is read through its mapping until the first refresh that finds something new, which reopens it unmapped.
+A read-write database never maps: the writer's handle always reads with ordinary reads. The safe call takes on the
+part of the mapping contract that is Persia's own: no Persia writer changes the bytes below a committed `log_end`
+(above), the mapping handle is read-only and its file handle is never handed out, and on the allow-listed local file
+systems the writer lock belongs to the open file, so no second writer can exist in the same process. It cannot take
+on the rest, which stays with the deployment: while a read-only handle is open, nothing but Persia writes, truncates
+or hole-punches the container file, neither another program nor a handle of the file the process opens on its own.
+A write under a mapping is undefined behaviour, a truncation ends the process as above, and a
 slot damaged later stays outside the contract (above). A deployment that cannot rule that out opens with ordinary
 reads. A read-only handle never commits, so it never remaps: a refresh (ADR-0060) reopens the container and, when it
 finds something new, maps the new handle before it opens a segment from it, up to the new `log_end` (after a
-compaction, the file renamed over the path). A snapshot taken before keeps the mapping its segments were opened on.
+compaction, the file renamed over the path). A snapshot taken before keeps the mapping its segments were opened on,
+and so does the reader itself for segments an incremental refresh reuses: a long-lived reader can hold several
+mappings of the file at once, one per container its live segments were opened from.
 A mapping that fails at an open or a refresh is not an error of either: the handle reads with ordinary reads, and a
 warning is logged.
 
@@ -454,8 +461,10 @@ container unchanged until the mapping is gone; a corrupt tail's quarantine copy 
 such attempt. With mapping on by default for read-only handles, every reader of a container on a Windows fixed or RAM
 disk holds a mapping while it is open (or while a snapshot taken from it lives): a writer that stopped uncleanly with
 a torn or corrupt tail cannot open read-write until every such reader has closed or reads with ordinary reads. A
-clean tail needs no truncation and opens. Whether Windows read handles should default to ordinary reads instead is
-open (ROADMAP 10.1.22).
+clean tail needs no truncation and opens. On a fixed drive formatted FAT32 or exFAT, which counts as a local disk,
+the rename of a compaction over a file a reader maps may also be refused (above): the writer's compaction then fails
+without harm for as long as such a reader is open. Whether Windows read handles should default to ordinary reads
+instead is open (ROADMAP 10.1.22).
 
 ### 4.8 Copying and backing up a database
 A database is both of its files (§4). A copy of `<name>.persia` alone keeps every document's `BlobRef` but none of
@@ -1457,8 +1466,8 @@ never fails (§7.1.1).
 | `q` | a string: the user text (§7.1.1) | `""`, which matches every document |
 | `fields` | an array of one or more `"name"` or `"name^weight"`, distinct `text` fields (§7.1.1) | every `text` field with its `boost` |
 | `filter`, `soft_filter` | one filter object each (§7.1.2) | no filter |
-| `sort` | `"score"` or an array of keys (§7.4) | `"score"` |
-| `limit`, `offset` | integers of at least 0, written without a fraction or an exponent (§7.4) | 20 and 0 |
+| `sort` | `"score"` or a non-empty array of keys (§7.4); `[]` is an error, since it names no order | `"score"` |
+| `limit`, `offset` | integers of at least 0, written without a fraction or an exponent (§7.4); `-0` is an error of its own (a facet's `size` too) | 20 and 0 |
 | `search_after` | a cursor token (§7.4) | the page starts at the top |
 | `facets` | an array of at most 16 entries, each a field name or `{"field": name, "size": n}` (§7.5) | no facet |
 | `relax` | `false`, `true` or an object (§7.6) | the collection's settings |
@@ -1693,8 +1702,11 @@ hit has its score, sorted by it or not.
 The page is `offset` (default 0) hits from the top, then `limit` (default 20); `offset + limit` is at most 10 000
 (a constant, not an option). `search_after` is the cursor of a hit returned before: its sort values (one per key: the score, the key, the
 keyword bytes, or missing) and its location (segment index or memtable, and docid). The page then starts after it:
-only hits that rank after the cursor count, `offset` included. A cursor whose values do not match the sort's keys in
-number and type is an error. The cursor also records the snapshot it came from (the commit `seq`), the collection,
+only hits that rank after the cursor count, `offset` included. The cursor records the sort it was ranked by: each
+key's field (or the score), order and placement of missing values. A cursor of another sort (another key, order or
+placement, or another number of keys; the score descending and the score ascending are different keys) is an error,
+and so is one whose values do not match the sort's keys in number and type, or whose location names a segment the
+view does not have. The cursor also records the snapshot it came from (the commit `seq`), the collection,
 and the memtable view's version. A search on another snapshot, collection, or memtable view is an error: locations
 are indices into the view that returned the cursor, so using it elsewhere would repeat a hit tied with it on every
 key or pass one over. The same snapshot and the same memtable view page exactly. A cursor from a relaxed search
@@ -1721,6 +1733,8 @@ varint  segment index            (absent when the location is the memtable)
 varint  docid (u32)
 varint  number of sort values, then each: u8 tag, 0 missing | 1 score (u64: the f64's bits) | 2 column key (u64) |
         3 keyword (varint length, bytes)
+varint  number of sort keys (at most 16), then each: u8 bits, 1 a field (else the score) | 2 descending |
+        4 missing first (a field's only); then, for a field, varint field id
 varint  step, varint last step, varint hit step                              (only with "has step")
 varint  level bits (bit i: level Li), varint min_results, u8 1 fill | 2 filters last_resort
                                                                              (only with "has relaxation settings")
@@ -1732,7 +1746,7 @@ still the ones searched, so the version byte is its compatibility rule: any chan
 means (a new level, a new kind of sort value), takes a new version; a build refuses the versions it does not read;
 and a golden test per version pins the text. Decoding reads the version first (a later version may define the rest
 differently), then the checksum, then each field, and never panics. It accepts only the one encoding of a cursor: no
-unknown flag, tag, level bit or setting bit, no overlong varint, no byte left over, no padding, so encoding a decoded
+unknown flag, tag, level bit, sort key bit or setting bit, no overlong varint, no byte left over, no padding, so encoding a decoded
 cursor gives back the token. Text longer than 1 MiB (a request's bound, §7.1.4), text that is not base64url, another
 version, a checksum that does not match and a field that is not well formed are each an error of the request (an
 invalid argument), not a different cursor. The checksum finds damage, not forgery: a token is not authenticated, so a

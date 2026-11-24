@@ -123,16 +123,22 @@ impl MergeJob {
         if self.cancelled() {
             return Err(MergeError::Cancelled);
         }
-        let verify = |source| MergeError::Verify { source };
-        let source = ByteSource::new(bytes.clone());
-        let segment = Segment::open_with_cache(source, &self.schema, Arc::clone(&self.cache))
-            .map_err(verify)?;
-        segment.verify().map_err(verify)?;
+        self.open_output(&bytes)?;
         Ok(Some(Merged {
             bytes,
             doc_count: merged.doc_count(),
             docids: merged.into_docid_map(),
         }))
+    }
+
+    /// Opens the output `bytes` through the database's block cache (SPEC §10.6) and verifies it.
+    fn open_output(&self, bytes: &Bytes) -> Result<Segment, MergeError> {
+        let verify = |source| MergeError::Verify { source };
+        let source = ByteSource::new(bytes.clone());
+        let segment = Segment::open_with_cache(source, &self.schema, Arc::clone(&self.cache))
+            .map_err(verify)?;
+        segment.verify().map_err(verify)?;
+        Ok(segment)
     }
 
     /// [`Self::run`], with a panic reported as [`MergeError::Internal`] instead of losing the job.
@@ -329,6 +335,44 @@ mod tests {
             write_options: WriteOptions::default(),
             cancel: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// The worker's verifying open reads through the job's cache, the database's (SPEC §10.6), not the process-wide
+    /// one; damaged output is a `Verify` error.
+    #[test]
+    fn the_output_is_opened_through_the_jobs_cache() {
+        use crate::document::{Document, Value};
+        use crate::schema::{FieldKind, TextOptions};
+        use crate::segment::{SegmentBuilder, SegmentMeta, SegmentWriter};
+
+        let schema = SchemaBuilder::new("a")
+            .field("body", FieldKind::Text(TextOptions::default()))
+            .build()
+            .expect("schema");
+        let body = schema.field("body").expect("field").id();
+        let mut b = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin()).expect("builder");
+        b.add(&Document::new("d").with(body, Value::String("some text".into())))
+            .expect("add");
+        let meta = SegmentMeta {
+            segment_id: 1,
+            created_at: 0,
+            merge_generation: 0,
+        };
+        let bytes = Bytes::from(SegmentWriter::new(&b, meta).finish().expect("write"));
+        let job = MergeJob {
+            schema: Arc::new(schema),
+            cache: Arc::new(BlockCache::new(1 << 20)),
+            ..drop_job()
+        };
+        let segment = job.open_output(&bytes).expect("open");
+        assert!(Arc::ptr_eq(segment.cache(), &job.cache));
+        assert!(!Arc::ptr_eq(segment.cache(), &BlockCache::shared()));
+        let mut damaged = bytes.to_vec();
+        damaged.truncate(damaged.len() - 1);
+        assert!(matches!(
+            job.open_output(&Bytes::from(damaged)),
+            Err(MergeError::Verify { .. })
+        ));
     }
 
     #[test]

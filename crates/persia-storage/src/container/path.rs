@@ -32,6 +32,11 @@ pub(super) struct Location<F> {
     pub(super) path: PathBuf,
     /// The writer lock held beside the container ([`Vfs::lock_beside`], Windows), if any.
     pub(super) lock: Option<F>,
+    /// Persia opened the file itself on the operating system's file system ([`Container::open`],
+    /// [`Container::create`], and the reopens and compactions of those): no handle of it came from a caller or from a
+    /// caller's [`Vfs`]. Only such a read-only container maps by default (SPEC §4.7,
+    /// [`Container::map_read_only_if_local`]).
+    pub(super) own_file: bool,
 }
 
 /// `<dir>/<name><suffix>.<nonce>.<n>`, a fresh temporary name next to `path`.
@@ -59,7 +64,7 @@ impl Container<File> {
     /// # Errors
     /// See [`Container::create_in`].
     pub fn create(path: impl AsRef<Path>) -> Result<Self> {
-        Self::create_in(Arc::new(RealFs), path)
+        Self::create_located(Arc::new(RealFs), path.as_ref(), true)
     }
 
     /// [`Container::open_in`] on the operating system's file system.
@@ -67,7 +72,7 @@ impl Container<File> {
     /// # Errors
     /// See [`Container::open_in`].
     pub fn open(path: impl AsRef<Path>, mode: Mode) -> Result<Self> {
-        Self::open_in(Arc::new(RealFs), path, mode)
+        Self::open_located(Arc::new(RealFs), path.as_ref(), mode, Repair::Safe, true)
     }
 
     /// [`Container::open_in_with`] on the operating system's file system.
@@ -75,7 +80,7 @@ impl Container<File> {
     /// # Errors
     /// See [`Container::open_in_with`].
     pub fn open_with(path: impl AsRef<Path>, mode: Mode, repair: Repair) -> Result<Self> {
-        Self::open_in_with(Arc::new(RealFs), path, mode, repair)
+        Self::open_located(Arc::new(RealFs), path.as_ref(), mode, repair, true)
     }
 }
 
@@ -92,7 +97,11 @@ impl<F: ContainerFile + 'static> Container<F> {
     /// syncing the directory or canonicalizing `path` comes after the link: the container then exists at `path`,
     /// unlocked, and a retry gets `AlreadyExists`.
     pub fn create_in(vfs: Arc<dyn Vfs<File = F>>, path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
+        Self::create_located(vfs, path.as_ref(), false)
+    }
+
+    /// [`Container::create_in`]; `own_file` marks a file Persia creates on the operating system's file system.
+    fn create_located(vfs: Arc<dyn Vfs<File = F>>, path: &Path, own_file: bool) -> Result<Self> {
         let dir = parent_or_cwd(path);
         let mut beside = super::UnlockOnDrop::new(match lock_beside(&*vfs, path) {
             // A writer holds the lock beside the path: a container is open there, or being created.
@@ -137,6 +146,7 @@ impl<F: ContainerFile + 'static> Container<F> {
             vfs,
             path: canon,
             lock: beside.take(),
+            own_file,
         });
         Ok(container)
     }
@@ -168,8 +178,19 @@ impl<F: ContainerFile + 'static> Container<F> {
         mode: Mode,
         repair: Repair,
     ) -> Result<Self> {
+        Self::open_located(vfs, path.as_ref(), mode, repair, false)
+    }
+
+    /// [`Container::open_in_with`]; `own_file` marks a file Persia opens on the operating system's file system.
+    fn open_located(
+        vfs: Arc<dyn Vfs<File = F>>,
+        path: &Path,
+        mode: Mode,
+        repair: Repair,
+        own_file: bool,
+    ) -> Result<Self> {
         // Canonical, so compaction renames over the real file, not over a symbolic link to it.
-        let path = vfs.canonicalize(path.as_ref()).map_err(Error::io("open"))?;
+        let path = vfs.canonicalize(path).map_err(Error::io("open"))?;
         let mut beside = super::UnlockOnDrop::new(match mode {
             Mode::ReadWrite => lock_beside(&*vfs, &path)?,
             Mode::ReadOnly => None,
@@ -203,6 +224,7 @@ impl<F: ContainerFile + 'static> Container<F> {
                 vfs,
                 path,
                 lock: beside.take(),
+                own_file,
             });
             return Ok(container);
         }
@@ -242,7 +264,13 @@ impl<F: ContainerFile + 'static> Container<F> {
     /// [`ContainerFile::try_clone_handle`].
     pub fn reopen_read_only(&self) -> Result<Self> {
         if let Some(location) = &self.location {
-            return Self::open_in(Arc::clone(&location.vfs), &location.path, Mode::ReadOnly);
+            return Self::open_located(
+                Arc::clone(&location.vfs),
+                &location.path,
+                Mode::ReadOnly,
+                Repair::Safe,
+                location.own_file,
+            );
         }
         let file = self
             .file
@@ -324,6 +352,7 @@ impl<F: ContainerFile + 'static> Container<F> {
             vfs,
             path,
             lock: self.location.as_mut().and_then(|l| l.lock.take()),
+            own_file: self.location.as_ref().is_some_and(|l| l.own_file),
         });
         new.poisoned = synced.is_err();
         new.mapped = self.mapped.take().map(|mut mapped| {

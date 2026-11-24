@@ -143,8 +143,17 @@ fn boolean(key: &str, value: &J) -> Result<bool, QueryRequestError> {
         .ok_or_else(|| wrong(key, "true or false", value))
 }
 
-/// A count of hits: an integer of at least 0, written without a fraction or an exponent.
+/// A count of hits: an integer of at least 0, written without a fraction or an exponent. `-0`, which JSON reads as a
+/// number of its own (a negative zero), is refused with its own message (SPEC §7.1.4).
 fn count(key: &str, value: &J) -> Result<usize, QueryRequestError> {
+    if value
+        .as_f64()
+        .is_some_and(|n| n == 0.0 && n.is_sign_negative())
+    {
+        return Err(shape(format!(
+            "`{key}` takes an integer of at least 0: -0 is not a valid count, write 0"
+        )));
+    }
     value
         .as_u64()
         .and_then(|n| usize::try_from(n).ok())
@@ -177,6 +186,10 @@ fn field<'s>(schema: &'s CollectionSchema, name: &str) -> Result<&'s Field, Quer
 fn sort(value: &J, schema: &CollectionSchema) -> Result<Sort, QueryRequestError> {
     match value {
         J::String(s) if s == "score" => Ok(Sort::score()),
+        // Nothing is guessed (SPEC §7.1.4): an empty list names no order, and `"score"` is how to ask for the default.
+        J::Array(keys) if keys.is_empty() => Err(shape(
+            "`sort` takes \"score\" or a non-empty array of sort keys: [] names no order",
+        )),
         J::Array(keys) => {
             let keys = keys
                 .iter()

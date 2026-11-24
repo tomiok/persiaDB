@@ -213,6 +213,20 @@ impl Sort {
         )
     }
 
+    /// Checks that `keys` (a cursor's: the sort that ranked its hit) are this sort's keys, in order (SPEC §7.4).
+    ///
+    /// # Errors
+    /// [`RequestError::Cursor`] when they are not.
+    pub(crate) fn check_keys(&self, keys: &[SortKey]) -> Result<(), RequestError> {
+        if self.keys().eq(keys.iter().copied()) {
+            Ok(())
+        } else {
+            Err(RequestError::Cursor {
+                reason: "a cursor of another sort: other keys, orders or placements of missing values",
+            })
+        }
+    }
+
     /// Checks that `values` (a cursor's) has one value per key, of the key's type.
     ///
     /// # Errors

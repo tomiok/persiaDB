@@ -70,8 +70,8 @@ impl FieldId {
         self.0
     }
 
-    /// Field id `id`, for tests of code that takes ids without a schema.
-    #[cfg(test)]
+    /// Field id `id`, for code that reads ids without a schema: a cursor token's sort (SPEC §7.4), which the search
+    /// checks against its own sort, and tests.
     pub(crate) const fn new(id: u32) -> Self {
         Self(id)
     }
