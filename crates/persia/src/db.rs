@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use persia_blob::PackStore;
-use persia_engine::db::{DatabaseReader, Snapshot};
+use persia_engine::db::{DatabaseReader, ReadOnlyDatabase, Snapshot};
 use persia_engine::wal::Durability;
 
 use crate::error::Classified as _;
@@ -45,6 +45,8 @@ pub(crate) struct Inner {
     path: PathBuf,
     /// The durability of writes through handles that did not choose their own.
     durability: Durability,
+    /// The options of the open, for what a refresh opens again.
+    options: OpenOptions,
     /// Set first by a close or a drop: later calls on any handle fail with [`ErrorCode::Closed`].
     closed: AtomicBool,
     mode: Mode,
@@ -58,6 +60,10 @@ pub(crate) struct Inner {
 ///
 /// A database has one writer at a time, across processes (SPEC §8.4): a second read-write open fails at once.
 /// Other processes, and other handles in this one, open it read-only ([`OpenOptions::read_only`]).
+///
+/// Reads take no lock and never wait for a write: each one loads the latest published state of the database (SPEC
+/// §8.4), so it sees every write that returned before it started. A read-only `Db` shows one state, the one its
+/// open found, until [`Db::refresh`].
 ///
 /// ```
 /// use persia::Db;
@@ -139,6 +145,7 @@ impl Db {
             inner: Arc::new(Inner {
                 path,
                 durability: options.durability,
+                options: options.clone(),
                 closed: AtomicBool::new(false),
                 mode,
             }),
@@ -173,6 +180,34 @@ impl Db {
     #[must_use]
     pub fn is_read_only(&self) -> bool {
         matches!(self.inner.mode, Mode::ReadOnly(_))
+    }
+
+    /// Brings a read-only database up to what its writer has made durable since the open or the last refresh: its
+    /// commits and its logged writes (SPEC §8.4, §8.6). A read-only `Db` shows one fixed state until then: calls made
+    /// meanwhile, from any thread, read the same state, and a call that runs during the refresh reads the state before
+    /// it or after it, never a mix. A read-write `Db` always reads its latest writes: there, `refresh` does nothing.
+    ///
+    /// ```
+    /// use persia::OpenOptions;
+    ///
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// # let path = dir.path().join("app.persia");
+    /// let writer = persia::Db::open(&path)?;
+    /// let reader = OpenOptions::new().read_only(true).open(&path)?;
+    /// writer.create_collection_json(r#"{"name": "notes", "fields": {}}"#)?;
+    /// assert!(reader.collection("notes").is_err()); // the state the reader opened
+    /// reader.refresh()?;
+    /// assert!(reader.collection("notes").is_ok());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// [`ErrorCode::Conflict`] if the file at the path is not this database any more (replaced, or an older copy
+    /// restored); [`ErrorCode::Corrupt`] if it is damaged; [`ErrorCode::Io`]; [`ErrorCode::Closed`]. The database
+    /// keeps the state it had on any error.
+    pub fn refresh(&self) -> Result<()> {
+        self.inner.refresh()
     }
 
     /// Closes the database: commits what is not committed yet, then releases the writer lock, so the next open
@@ -285,6 +320,24 @@ impl Inner {
                 None => Err(Error::closed()),
             },
         }
+    }
+
+    /// [`Db::refresh`]: a new read-only open of the documents, taken without any lock so reads go on meanwhile, then
+    /// paired with the pack and swapped in under the write lock ([`ReadOnlyBlobDatabase::refresh`], ADR-0060).
+    pub(crate) fn refresh(&self) -> Result<()> {
+        self.check_open()?;
+        let Mode::ReadOnly(lock) = &self.mode else {
+            return Ok(());
+        };
+        let registry = self.options.database_options().registry;
+        let reopened = ReadOnlyDatabase::open(&self.path, &registry).map_err(|e| {
+            Error::wrap(e).context(format_args!("refreshing {}", self.path.display()))
+        })?;
+        let mut guard = lock.write().unwrap_or_else(PoisonError::into_inner);
+        let db = guard.as_mut().ok_or_else(Error::closed)?;
+        db.refresh(reopened)
+            .map(drop)
+            .map_err(|e| Error::wrap(e).context(format_args!("refreshing {}", self.path.display())))
     }
 
     /// [`Db::commit`]: every collection's unflushed writes flushed and committed, under the writer mutex.

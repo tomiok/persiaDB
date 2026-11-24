@@ -47,6 +47,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia`: typed documents through `serde` (ROADMAP 10.1.4; SPEC §6.4.1). `Collection::put_struct(&T)` is exactly
   `put_json(serde_json::to_string(&T))`; `Collection::get_struct::<T>(id)` and `Collection::to_struct::<T>(&doc)` read
   a document's JSON output back. SPEC §6.4.1 is the only mapping. `persia` now depends on `serde` and `serde_json`.
+- `persia`: `Db::refresh` brings a read-only database up to what its writer made durable since (ROADMAP 10.2.1;
+  SPEC §8.4, §8.6); until then it shows one state, from every handle and thread. On a read-write database it does
+  nothing. Every handle is `Send + Sync + 'static` (`BlobReader` is `Send`); a second read-write open of a database
+  fails at once with `Conflict`.
 - `persia-engine`: relaxation metrics (ROADMAP 8.3.3; SPEC §7.6, §12.4). Each collection counts its relaxed queries
   (searches without a cursor): how many, how many relaxed past L0, how many still found nothing, and how many found
   their hits at each level. Read them as `RelaxationStats` from `CollectionSnapshot::relaxation_stats` or, summed over

@@ -110,8 +110,8 @@ impl OpenOptions {
     }
 
     /// Whether the database is opened read-only (SPEC §8.1, §8.4): no writer lock, no write, beside a writer in
-    /// this process or another. It shows the committed state the open found. A read-only open never creates the
-    /// database, whatever [`create_if_missing`](Self::create_if_missing) says.
+    /// this process or another. It shows what the writer had made durable when the open ran, and what each
+    /// [`Db::refresh`] finds later. A read-only open never creates the database, whatever [`create_if_missing`](Self::create_if_missing) says.
     ///
     /// ```
     /// use persia::{Db, ErrorCode, OpenOptions};
