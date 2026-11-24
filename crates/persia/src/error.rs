@@ -107,7 +107,7 @@ impl ErrorCode {
     /// assert_eq!(ErrorCode::ALL.len(), 15);
     /// assert!(ErrorCode::ALL.windows(2).all(|pair| pair[0].number() < pair[1].number()));
     /// ```
-    pub const ALL: [Self; 15] = [
+    pub const ALL: &'static [Self] = &[
         Self::NotFound,
         Self::AlreadyExists,
         Self::Conflict,
@@ -187,7 +187,10 @@ impl ErrorCode {
     /// ```
     #[must_use]
     pub fn from_number(number: i32) -> Option<Self> {
-        Self::ALL.into_iter().find(|code| code.number() == number)
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|code| code.number() == number)
     }
 }
 

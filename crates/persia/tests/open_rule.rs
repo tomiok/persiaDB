@@ -152,3 +152,18 @@ fn a_create_that_fails_reports_its_own_error() {
         Err(err) => assert_eq!(err.code(), ErrorCode::Io, "{err}"),
     }
 }
+
+// Unix only: on Windows a symbolic link needs a privilege (or developer mode) that CI runners do not grant.
+#[cfg(unix)]
+#[test]
+fn a_dangling_link_is_not_found_and_names_its_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("gone.persia");
+    let link = dir.path().join("app.persia");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let err = Db::open(&link).unwrap_err();
+    assert_eq!(err.code(), ErrorCode::NotFound, "{err}");
+    assert!(err.message().contains("gone.persia"), "{err}");
+    assert!(!target.exists(), "nothing created through the link");
+    assert_eq!(files_in(dir.path()), ["app.persia"]);
+}

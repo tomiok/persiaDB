@@ -162,3 +162,40 @@ fn a_refresh_onto_another_database_is_a_conflict_and_keeps_the_state() {
     let c = reader.collection("c").unwrap();
     assert!(c.get("old").unwrap().is_some(), "the state it had");
 }
+
+#[test]
+fn concurrent_refreshes_around_commits_never_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let writer = Db::open(&path).unwrap();
+    let w = writer
+        .create_collection_json(r#"{"name": "c", "fields": {}}"#)
+        .unwrap();
+    let reader = Arc::new(OpenOptions::new().read_only(true).open(&path).unwrap());
+    let rounds = 20;
+    let barrier = Arc::new(Barrier::new(3));
+    let refreshers: Vec<_> = (0..2)
+        .map(|_| {
+            let (reader, barrier) = (Arc::clone(&reader), Arc::clone(&barrier));
+            std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..rounds {
+                    // Without one refresh at a time, the later swap could find the other's newer state and refuse
+                    // its own reopen as older (a false `Conflict`).
+                    reader.refresh().unwrap();
+                }
+            })
+        })
+        .collect();
+    barrier.wait();
+    for i in 0..rounds {
+        w.put(&Document::new(format!("d{i}"))).unwrap();
+        writer.commit().unwrap();
+    }
+    for r in refreshers {
+        r.join().unwrap();
+    }
+    reader.refresh().unwrap();
+    let c = reader.collection("c").unwrap();
+    assert!((0..rounds).all(|i| c.get(&format!("d{i}")).unwrap().is_some()));
+}

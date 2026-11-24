@@ -45,6 +45,8 @@ struct State {
     /// Only requested rounds run (a test hook: [`crate::OpenOptions::hold_maintenance`]).
     held: bool,
     stop: bool,
+    /// The thread ended, normally or by a panic: no round will be served any more.
+    dead: bool,
 }
 
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -80,20 +82,27 @@ impl Signals {
     /// Asks for one round now and waits for it; its outcome.
     pub(crate) fn round_now(&self) -> Result<()> {
         let mut state = lock(&self.state);
+        if state.dead {
+            return Err(Error::writer_panicked());
+        }
         if state.stop {
             return Err(Error::closed());
         }
         state.requested = state.requested.wrapping_add(1);
         let ticket = state.requested;
         self.wake.notify_one();
-        while state.done < ticket && !state.stop {
+        while state.done < ticket && !state.stop && !state.dead {
             state = self
                 .served
                 .wait(state)
                 .unwrap_or_else(PoisonError::into_inner);
         }
         if state.done < ticket {
-            return Err(Error::closed());
+            return Err(if state.stop {
+                Error::closed()
+            } else {
+                Error::writer_panicked()
+            });
         }
         match state.last.clone() {
             None | Some(Ok(())) => Ok(()),
@@ -244,11 +253,23 @@ impl Thread {
     }
 }
 
+/// Sets [`State::dead`] when dropped, and wakes the callers waiting for a round.
+struct Dead<'a>(&'a Signals);
+
+impl Drop for Dead<'_> {
+    fn drop(&mut self) {
+        lock(&self.0.state).dead = true;
+        self.0.served.notify_all();
+    }
+}
+
 /// The thread's body: rounds until a stop, then the last step ([`Inner::finish`]).
 fn run(inner: &Inner, send: &SyncSender<Result<()>>) {
     let Some(signals) = inner.signals() else {
         return;
     };
+    // Marks the thread dead when this function ends, also by a panic, so no caller of `round_now` waits forever.
+    let _dead = Dead(signals);
     let mut first_error: Option<Error> = None;
     // An open may have replayed writes: start active.
     let mut busy = true;
@@ -338,7 +359,24 @@ mod tests {
             last: None,
             held,
             stop,
+            dead: false,
         }
+    }
+
+    #[test]
+    fn a_dead_thread_never_leaves_a_round_waiting() {
+        let signals = Signals::new(true);
+        std::thread::scope(|s| {
+            let waiting = s.spawn(|| signals.round_now());
+            // Once the request is in, the thread dies (a panic in a round) without serving it.
+            while lock(&signals.state).requested == 0 {
+                std::thread::yield_now();
+            }
+            drop(Dead(&signals));
+            let err = waiting.join().unwrap().unwrap_err();
+            assert_eq!(err.code(), ErrorCode::Poisoned, "{err}");
+        });
+        assert_eq!(signals.round_now().unwrap_err().code(), ErrorCode::Poisoned);
     }
 
     #[test]

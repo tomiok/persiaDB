@@ -42,34 +42,51 @@ pub const DEFAULT_BIND_BUDGET: Duration = Duration::from_secs(60);
 /// those chunks while that write is still in flight. `gc` (ROADMAP 9.5.2, #108) rejects a shorter grace.
 pub const MAX_BIND_BUDGET: Duration = Duration::from_hours(1);
 
-/// What `put_blob` stores beside the bytes (SPEC §9.6).
+/// What a blob is stored with beside its bytes (SPEC §9.1, §9.6): for [`Db::put_blob`](crate::Db::put_blob) and
+/// [`Blob::with_options`](crate::Blob::with_options). Start from `PutBlobOptions::default()` and set the fields you
+/// need.
+///
+/// ```
+/// use persia::PutBlobOptions;
+///
+/// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+/// # let dir = tempfile::tempdir()?;
+/// # let db = persia::Db::open(dir.path().join("app.persia"))?;
+/// let options = PutBlobOptions {
+///     mime: "image/png".into(),
+///     expected_size: Some(4),
+///     ..PutBlobOptions::default()
+/// };
+/// let blob = db.put_blob(&b"\x89PNG"[..], &options)?;
+/// assert_eq!((blob.mime(), blob.size()), ("image/png", 4));
+/// // Five bytes where four were promised: refused, nothing stored.
+/// let err = db.put_blob(&b"\x89PNG!"[..], &options).unwrap_err();
+/// assert_eq!(err.code(), persia::ErrorCode::InvalidArgument);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PutBlobOptions {
-    /// The blob's MIME type: 1..=255 bytes of printable ASCII (SPEC §9.1). [`DEFAULT_MIME`] by default.
+    /// The blob's MIME type: 1..=255 bytes of printable ASCII (SPEC §9.1). `application/octet-stream` by default.
     pub mime: String,
     /// The blob's user metadata (SPEC §9.1 limits). Searchable metadata belongs in document fields.
     pub user_meta: BTreeMap<String, String>,
-    /// The id the caller expects the bytes to hash to; a mismatch is [`Error::BlobIdMismatch`] and binds nothing.
+    /// The id the caller expects the bytes to hash to (SHA-256, ADR-0002); a mismatch is `InvalidArgument` and
+    /// stores nothing.
     pub expected_id: Option<BlobId>,
-    /// The length in bytes the caller expects the whole blob to have; a mismatch is [`Error::BlobSizeMismatch`] and
-    /// binds nothing. The reader is read at most one byte past it: a longer reader is that mismatch as soon as the
-    /// extra byte is read, and nothing past the blob is staged; a shorter one is checked when it ends, after
-    /// `expected_id`. A resume needs this or `expected_id` ([`Error::ResumeUnchecked`]): a reader that ends where the
-    /// kept run ends would otherwise bind that shorter blob (ROADMAP 9.3.7).
+    /// The length in bytes the caller expects the whole blob to have; a mismatch is `InvalidArgument` and stores
+    /// nothing. The reader is read at most one byte past it. A resume needs this or `expected_id`: a reader that ends
+    /// where the kept part ends would otherwise store that shorter blob (ROADMAP 9.3.7).
     pub expected_size: Option<u64>,
-    /// The chunk size to store a new blob with, at least [`ChunkSize::MIN`] (SPEC §9.2); 4 MiB by default. A
-    /// duplicate keeps the bound blob's.
+    /// The chunk size to store a new blob with, at least 64 KiB (SPEC §9.2); 4 MiB by default. A blob already stored
+    /// keeps its own.
     pub chunk_size: ChunkSize,
-    /// How long a bind whose outcome is unknown is retried, with backoff ([`super::retry::backoff`]), before
-    /// `put_blob` fails with the unknown outcome; at least one attempt is made. [`DEFAULT_BIND_BUDGET`] by default, at
-    /// most [`MAX_BIND_BUDGET`].
+    /// How long a store whose outcome is unknown is retried, with backoff, before the call fails with `Transient`
+    /// (storing again is safe: blobs are content-addressed); at least one attempt is made. 60 s by default, at most
+    /// an hour.
     pub bind_budget: Duration,
-    /// The upload to resume (SPEC §9.4, ROADMAP 9.3.4, ADR-0053): the token of an [`Error::UploadInterrupted`], with
-    /// a reader that yields the blob from its start, and `expected_id` or `expected_size` set
-    /// ([`Error::ResumeUnchecked`] otherwise, ROADMAP 9.3.7). `None` (the default) starts a new upload. A store that
-    /// cannot resume (the pack) fails with [`Error::ResumeUnsupported`] before any byte is read. A token is not checked
-    /// against the store: one of an unknown upload, or of another prefix or bucket, stages the blob under its upload
-    /// id, or under a new one when chunks there conflict ([`ResumeToken`]).
+    /// The upload to resume (SPEC §9.4): the token of an interrupted upload, with a reader that yields the blob from
+    /// its start and `expected_id` or `expected_size` set. `None` (the default) starts a new upload. The local blob
+    /// pack cannot resume: there, a token is `Unsupported` before any byte is read.
     pub resume: Option<ResumeToken>,
 }
 

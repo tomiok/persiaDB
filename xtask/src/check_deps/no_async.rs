@@ -6,8 +6,9 @@
 //! synchronous API. The direct-dependency rules ([`super::violations`]) cannot see this: a runtime arrives through
 //! a library that is itself allowed.
 //!
-//! The graph is the one `cargo metadata` resolves (the `resolve` object: one node per package, with the edges cargo
-//! would build, features unified across the workspace, every target platform included). From an embedded crate the
+//! The graph is the one `cargo metadata --all-features` resolves (the `resolve` object: one node per package, with the
+//! edges cargo would build, every feature of every workspace member on, every target platform included). With the
+//! default features only, an optional dependency behind a feature nobody enables by default would escape the walk. From an embedded crate the
 //! walk follows every kind of edge; from any other package only normal and build edges, since a dependency's
 //! dev-dependencies are not built for its dependents.
 
@@ -110,7 +111,12 @@ impl NodeDep {
     }
 }
 
-/// One message per embedded crate and runtime it reaches, with the shortest path to it.
+/// The error of an embedded crate the resolved graph lacks: renamed or removed, it would escape the rule silently.
+const MISSING: &str = "not in the resolved dependency graph, so the no-async rule cannot check it (ADR-0065): \
+                       update EMBEDDED in xtask/src/check_deps/no_async.rs";
+
+/// One message per embedded crate and runtime it reaches, with the shortest path to it, and one per embedded crate
+/// the graph lacks.
 pub(crate) fn violations<'g>(graph: &'g Graph) -> Vec<String> {
     let names: BTreeMap<&str, &str> = graph
         .packages
@@ -134,6 +140,7 @@ pub(crate) fn violations<'g>(graph: &'g Graph) -> Vec<String> {
             .find(|p| p.name == *root && nodes.contains_key(p.id.as_str()))
             .map(|p| p.id.as_str())
         else {
+            errors.push(format!("{root}: {MISSING}"));
             continue;
         };
         // Breadth-first, so the path recorded for each package is a shortest one.
@@ -180,6 +187,14 @@ pub(crate) fn violations<'g>(graph: &'g Graph) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`super::violations`] of a fake graph, without the errors of the embedded crates it does not list.
+    fn violations(graph: &Graph) -> Vec<String> {
+        super::violations(graph)
+            .into_iter()
+            .filter(|e| !e.ends_with(MISSING))
+            .collect()
+    }
 
     /// A resolved graph with one package per name in `edges` (from, to, kind) and in `extra`.
     fn graph(edges: &[(&str, &str, Option<&str>)], extra: &[&str]) -> Graph {
@@ -436,6 +451,105 @@ mod tests {
         assert_eq!(
             violations(&graph),
             ["persia -> tokio (dev): async runtime in the embedded stack (ADR-0065)"]
+        );
+    }
+
+    #[test]
+    fn an_embedded_crate_missing_from_the_graph_is_an_error() {
+        let g = graph(&[("persia-engine", "rayon", None)], &[]);
+        let missing: Vec<String> = super::violations(&g)
+            .into_iter()
+            .filter(|e| e.ends_with(MISSING))
+            .collect();
+        let named: Vec<&str> = missing.iter().filter_map(|e| e.split(':').next()).collect();
+        let expected: Vec<&str> = EMBEDDED
+            .iter()
+            .copied()
+            .filter(|c| *c != "persia-engine")
+            .collect();
+        assert_eq!(named, expected);
+    }
+
+    /// A throwaway workspace on disk: an embedded crate (`persia-engine`) whose `Cargo.toml` dependency section is
+    /// `deps`, and a local crate named `tokio` it can depend on by path. Removed on drop.
+    struct Workspace(std::path::PathBuf);
+
+    impl Workspace {
+        fn new(name: &str, features: &str, deps: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "persia-no-async-{name}-{}-{nanos}",
+                std::process::id()
+            ));
+            let write = |path: &str, text: &str| {
+                let path = root.join(path);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, text).unwrap();
+            };
+            write(
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"engine\", \"tokio\"]\nresolver = \"2\"\n",
+            );
+            write(
+                "engine/Cargo.toml",
+                &format!(
+                    "[package]\nname = \"persia-engine\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n\
+                     [features]\n{features}\n\n[dependencies]\n{deps}\n"
+                ),
+            );
+            write("engine/src/lib.rs", "");
+            write(
+                "tokio/Cargo.toml",
+                "[package]\nname = \"tokio\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+            );
+            write("tokio/src/lib.rs", "");
+            Self(root)
+        }
+
+        /// The workspace's violations, without the embedded crates it does not have.
+        fn violations(&self) -> Vec<String> {
+            let json =
+                super::super::cargo_metadata(&self.0, &["--all-features", "--offline"]).unwrap();
+            let graph: Graph = serde_json::from_slice(&json).unwrap();
+            violations(&graph)
+        }
+    }
+
+    impl Drop for Workspace {
+        fn drop(&mut self) {
+            // A leftover directory in the temp dir is harmless; the test's assertions are what matter.
+            if let Err(e) = std::fs::remove_dir_all(&self.0) {
+                eprintln!("leaving {}: {e}", self.0.display());
+            }
+        }
+    }
+
+    #[test]
+    fn a_runtime_behind_a_feature_nobody_enables_by_default_is_caught() {
+        let ws = Workspace::new(
+            "feature",
+            "net = [\"dep:tokio\"]",
+            "tokio = { path = \"../tokio\", optional = true }",
+        );
+        assert_eq!(
+            ws.violations(),
+            ["persia-engine -> tokio (normal): async runtime in the embedded stack (ADR-0065)"]
+        );
+    }
+
+    #[test]
+    fn a_renamed_runtime_is_caught_by_its_package_name() {
+        let ws = Workspace::new(
+            "renamed",
+            "",
+            "rt = { package = \"tokio\", path = \"../tokio\" }",
+        );
+        assert_eq!(
+            ws.violations(),
+            ["persia-engine -> tokio (normal): async runtime in the embedded stack (ADR-0065)"]
         );
     }
 }

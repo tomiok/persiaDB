@@ -14,9 +14,12 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! Every call returns [`Result`], whose [`Error`] carries a stable [`ErrorCode`] (ADR-0064). The API is being
-//! built leaf by leaf (ROADMAP 10.1, 10.2): collections, documents, blobs and search follow. The engine
-//! (`persia-engine`) and the hidden [`internal`] layer under this crate (ADR-0051) are not stable APIs.
+//! A [`Db`] holds [`Collection`]s of [`Document`]s (put as values, as JSON with [`Collection::put_json`], or as any
+//! `serde` type with [`Collection::put_struct`]) and their blobs ([`Blob`], [`Db::put_blob`]). Reads see every write
+//! that returned; commits and merges run on the database's own thread, and [`Db::close`] joins it (ADR-0065). Every
+//! call returns [`Result`], whose [`Error`] carries a stable [`ErrorCode`] (ADR-0064). Search lands with ROADMAP
+//! 10.1.3. The engine (`persia-engine`) and the hidden [`internal`] layer under this crate (ADR-0051) are not stable
+//! APIs.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 // Sizes and offsets convert with `From` or `try_from`, never a silent `as` (CLAUDE.md checked ops).

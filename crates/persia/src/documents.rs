@@ -137,6 +137,7 @@ impl Collection {
     /// [`Blob::Stored`] reference [`Db::put_blob`] returned, which must be in this database's store. Returns the
     /// reference the document carries. The bytes are read before the writer is taken, so a large blob does not hold
     /// up other writes.
+    /// As for [`Db::put_blob`], a reader must not call back into this database.
     ///
     /// ```
     /// use persia::{Blob, Document};

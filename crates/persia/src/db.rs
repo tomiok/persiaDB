@@ -55,6 +55,9 @@ pub(crate) struct Inner {
     options: OpenOptions,
     /// Set first by a close or a drop: later calls on any handle fail with [`ErrorCode::Closed`].
     closed: AtomicBool,
+    /// One refresh at a time, from its reopen to its swap: two racing ones would otherwise swap in their reopens out of
+    /// order, and the later swap would refuse the older one as `RefreshedOlder`. Reads never take it.
+    refreshing: Mutex<()>,
     mode: Mode,
 }
 
@@ -73,7 +76,7 @@ pub(crate) struct Inner {
 ///
 /// **Read-your-writes** (SPEC §8.4): on a read-write `Db`, a read that starts after a write returned sees it, from
 /// any handle and any thread, at every [`Durability`], committed or not. A [`Collection::put_batch`](crate::Collection::put_batch)
-/// is seen whole once it returns. Durability decides what survives a crash, not what reads see.
+/// that returns `Ok` is seen whole from then on. Durability decides what survives a crash, not what reads see.
 ///
 /// **Background work** (ADR-0065): a read-write `Db` commits and merges on its own maintenance thread, as the open's
 /// [`OpenOptions`] say (`idle_flush`, `commit_interval`, `memtable_bytes`, `merge_threads`). A program only opens,
@@ -162,6 +165,7 @@ impl Db {
                 durability: options.durability,
                 options: options.clone(),
                 closed: AtomicBool::new(false),
+                refreshing: Mutex::new(()),
                 mode,
             }),
         };
@@ -233,7 +237,8 @@ impl Db {
 
     /// Closes the database: stops its maintenance thread, which makes the final commit, cancels the merges in
     /// flight and releases the writer lock, so the next open succeeds at once (ADR-0065). It waits for that without
-    /// limit, behind a write another thread is making. Returns the first error: the first failure of a background
+    /// limit, behind a write another thread is making and behind a blob upload in flight (whose bytes are stored
+    /// before its document takes the writer). Returns the first error: the first failure of a background
     /// commit or merge since the open, else the final commit's. The database is closed either way, and every
     /// handle on it fails with [`ErrorCode::Closed`] from then on.
     ///
@@ -434,18 +439,19 @@ impl Inner {
         }
     }
 
-    /// [`Db::refresh`]: a new read-only open of the documents, taken without any lock so reads go on meanwhile, then
-    /// paired with the pack and swapped in under the write lock ([`ReadOnlyBlobDatabase::refresh`], ADR-0060).
+    /// [`Db::refresh`]: a new read-only open of the documents, taken without the state's lock so reads go on meanwhile
+    /// (only another refresh waits), then paired with the pack and swapped in under the write lock ([`ReadOnlyBlobDatabase::refresh`], ADR-0060).
     pub(crate) fn refresh(&self) -> Result<()> {
         self.check_open()?;
-        let Mode::ReadOnly(lock) = &self.mode else {
+        let Mode::ReadOnly(state) = &self.mode else {
             return Ok(());
         };
+        let _one_at_a_time = lock(&self.refreshing);
         let registry = self.options.database_options().registry;
         let reopened = ReadOnlyDatabase::open(&self.path, &registry).map_err(|e| {
             Error::wrap(e).context(format_args!("refreshing {}", self.path.display()))
         })?;
-        let mut guard = lock.write().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = state.write().unwrap_or_else(PoisonError::into_inner);
         let db = guard.as_mut().ok_or_else(Error::closed)?;
         db.refresh(reopened)
             .map(drop)
@@ -550,6 +556,11 @@ fn open_read_only(path: &Path, options: &OpenOptions) -> Result<Mode> {
 /// How many times an open starts over when the file appears or vanishes under it (SPEC §8.1, "Racing opens").
 const OPEN_ATTEMPTS: usize = 8;
 
+/// The pause before the first new start of an open; it doubles before each next one, up to [`MAX_OPEN_BACKOFF`], so the
+/// starts of racing opens spread out instead of meeting again (at most about a quarter of a second in all).
+const FIRST_OPEN_BACKOFF: Duration = Duration::from_millis(1);
+const MAX_OPEN_BACKOFF: Duration = Duration::from_millis(128);
+
 /// Fails with [`ErrorCode::InvalidArgument`] when the nearest ancestor of `path` that exists is not a directory: the
 /// path cannot name a file (SPEC §8.1), whatever the mode. Nothing is created.
 fn check_parents(path: &Path) -> Result<()> {
@@ -602,7 +613,12 @@ fn create_parents(path: &Path) -> Result<()> {
 
 fn open_read_write(path: &Path, options: &OpenOptions) -> Result<Mode> {
     check_parents(path)?;
-    for _ in 0..OPEN_ATTEMPTS {
+    let mut backoff = FIRST_OPEN_BACKOFF;
+    for attempt in 0..OPEN_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(backoff);
+            backoff = backoff.saturating_mul(2).min(MAX_OPEN_BACKOFF);
+        }
         let db = if exists(path)? {
             match BlobDatabase::open(path, options.database_options()) {
                 Ok(db) => db,
@@ -624,6 +640,10 @@ fn open_read_write(path: &Path, options: &OpenOptions) -> Result<Mode> {
                             pack.display()
                         ),
                     ));
+                }
+                // A link to a file that does not exist: `exists` follows it, the create refuses the taken name.
+                Err(e) if e.code() == ErrorCode::AlreadyExists && is_dangling_link(path)? => {
+                    return Err(dangling(path));
                 }
                 // Another open created the file first: open it.
                 Err(e) if e.code() == ErrorCode::AlreadyExists => continue,
@@ -654,4 +674,33 @@ fn read_write(db: Writer, options: &OpenOptions) -> Mode {
         signals: Signals::new(options.hold_maintenance),
         thread: Mutex::new(None),
     }
+}
+
+/// Whether `path` is a symbolic link whose target does not exist.
+fn is_dangling_link(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Ok(!exists(path)?),
+        Ok(_) => Ok(false),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(Error::with_source(
+            ErrorCode::Io,
+            format_args!("looking at {}", path.display()),
+            source,
+        )),
+    }
+}
+
+/// The error of an open at a link to nothing: the database is not there, and the link is not replaced by one.
+fn dangling(path: &Path) -> Error {
+    let target = std::fs::read_link(path).map_or_else(
+        |_| "a missing file".to_owned(),
+        |target| target.display().to_string(),
+    );
+    Error::new(
+        ErrorCode::NotFound,
+        format!(
+            "{} is a link to {target}, which does not exist: no database is created through it",
+            path.display()
+        ),
+    )
 }

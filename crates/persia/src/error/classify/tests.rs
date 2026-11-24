@@ -1002,7 +1002,7 @@ fn database_rows() -> Vec<(ErrorCode, DatabaseError)> {
         (FALLBACK, DatabaseError::Internal { what: "order" }),
         (Io, DatabaseError::MergeThread(os_error())),
         (Poisoned, DatabaseError::Poisoned),
-        // The first failure decides, whatever followed it.
+        // The first failure decides, whatever followed it, unless what followed is corruption.
         (
             NotFound,
             DatabaseError::ThenFailed {
@@ -1012,7 +1012,15 @@ fn database_rows() -> Vec<(ErrorCode, DatabaseError)> {
             },
         ),
         (
-            Limit,
+            Corrupt,
+            DatabaseError::ThenFailed {
+                error: Box::new(DatabaseError::NoSuchCollection { name: c() }),
+                step: "syncing the WAL",
+                later: Box::new(DatabaseError::CorruptTail { offset: 0 }),
+            },
+        ),
+        (
+            Corrupt,
             DatabaseError::ThenFailed {
                 error: Box::new(DatabaseError::ThenFailed {
                     error: Box::new(DatabaseError::Record(RecordError::DocumentLen { len: 0 })),
@@ -1231,10 +1239,17 @@ fn blob_and_documents_errors() {
     let seqs = (3, 2, 5, 4, 900, 800);
     let mut rows = vec![
         (
-            Io,
+            NotFound,
             DocumentsError::Open {
                 path: PathBuf::from("photo.jpg"),
                 source: io::Error::from(io::ErrorKind::NotFound),
+            },
+        ),
+        (
+            Io,
+            DocumentsError::Open {
+                path: PathBuf::from("photo.jpg"),
+                source: io::Error::from(io::ErrorKind::PermissionDenied),
             },
         ),
         (

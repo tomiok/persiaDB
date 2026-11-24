@@ -249,7 +249,7 @@ fn blobs_stored_read_and_referenced() {
             Blob::from_path(dir.path().join("missing.bin")),
         )
         .unwrap_err();
-    assert_eq!(missing.code(), ErrorCode::Io, "{missing}");
+    assert_eq!(missing.code(), ErrorCode::NotFound, "{missing}");
     assert!(files.get("nofile").unwrap().is_none());
 
     // Stored on its own, then referenced: by `Blob::Stored`, or carried by the document.
@@ -396,4 +396,25 @@ fn a_read_only_database_reads_no_blob_bytes() {
         .unwrap_err();
     assert_eq!(err.code(), ErrorCode::ReadOnly, "{err}");
     assert_eq!(reads.load(Ordering::SeqCst), 0, "refused before reading");
+}
+
+#[test]
+fn a_blob_reader_serves_nothing_once_closed_even_from_its_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path().join("app.persia")).unwrap();
+    let blob = db
+        .put_blob(&b"0123456789"[..], &PutBlobOptions::default())
+        .unwrap();
+    let mut reader = db.get_blob(&blob).unwrap();
+    let mut first = [0u8; 1];
+    reader.read_exact(&mut first).unwrap();
+    assert_eq!(&first, b"0", "the window now holds the other nine bytes");
+    db.close().unwrap();
+    let io = reader.read(&mut [0u8; 4]).unwrap_err();
+    let inner = io
+        .get_ref()
+        .unwrap()
+        .downcast_ref::<persia::Error>()
+        .unwrap();
+    assert_eq!(inner.code(), ErrorCode::Closed);
 }

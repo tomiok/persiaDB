@@ -345,6 +345,11 @@ impl Classified for LayoutError {
 
 impl Classified for DatabaseError {
     fn code(&self) -> ErrorCode {
+        // Corruption anywhere, also in a step that failed after the first error (`ThenFailed::later`), is what the
+        // caller must learn: a damaged file is never reported as the lesser failure in front of it.
+        if self.is_corruption() {
+            return ErrorCode::Corrupt;
+        }
         match self {
             Self::Container(e) => container(e.is_corruption(), e),
             Self::Storage(e) => storage_kind(&e.kind()),
@@ -379,7 +384,8 @@ impl Classified for DatabaseError {
             Self::Evolution { source, .. } => source.code(),
             Self::Internal { .. } => FALLBACK,
             Self::MergeThread(_) => ErrorCode::Io,
-            // The first failure is the one the operation reports (`DatabaseError::primary`).
+            // The first failure is the one the operation reports (`DatabaseError::primary`), unless a later one is
+            // corruption (above).
             Self::ThenFailed { error, .. } => error.code(),
             Self::Poisoned => ErrorCode::Poisoned,
         }
@@ -437,9 +443,15 @@ impl Classified for persia_blob::Error {
 
 impl Classified for DocumentsError {
     fn code(&self) -> ErrorCode {
+        if self.is_corruption() {
+            return ErrorCode::Corrupt;
+        }
         match self {
             Self::Blob(e) => e.code(),
             Self::Database(e) => e.code(),
+            Self::Open { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+                ErrorCode::NotFound
+            }
             Self::Open { .. } => ErrorCode::Io,
             Self::BlobNotStored { .. } => ErrorCode::NotFound,
             Self::PackExists { .. } => ErrorCode::AlreadyExists,

@@ -53,6 +53,9 @@ impl Db {
     /// with [`Collection::put_with_blob`](crate::Collection::put_with_blob) and [`Blob::Stored`], or store the bytes
     /// and the document in one call with [`Blob::from_reader`].
     ///
+    /// `reader` runs while the database is held open for the upload: it must not call back into this `Db` (to close it,
+    /// or to store another blob), or that call may wait for the upload, and the upload for it.
+    ///
     /// ```
     /// use persia::PutBlobOptions;
     ///
@@ -175,6 +178,8 @@ impl BlobReader {
 
 impl Read for BlobReader {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        // Closed first, also with bytes in the window: a reader serves nothing once its database is closed.
+        self.db.check_open().map_err(io::Error::other)?;
         if self.pos >= self.buf.len() {
             let size = self.blob_ref.size();
             if self.offset >= size || out.is_empty() {

@@ -2389,7 +2389,8 @@ consulted; that hid the new copy after such a merge.) A file with two live copie
 - **Read-your-writes** (the embedded API, ROADMAP 10.2.2). On a read-write `Db`, a read that starts after a write
   returned sees it, from any handle and any thread, whatever the write's durability, before and after the commit that
   flushes it: `get` loads the latest snapshot, and the write was applied to the memtable that snapshot reads before
-  the write returned. A `put_batch` is seen whole once it returns, and not before. A read-only `Db` sees a write
+  the write returned. A `put_batch` that returns `Ok` is seen whole from then on, and none of it before; one that
+  fails shows the documents before the rejected one, as its error says. A read-only `Db` sees a write
   after a `refresh` that starts once the write is in the file (`Async` or `Fsync`, or a later sync or commit).
 
 ### 8.5 Compaction (merge policy)

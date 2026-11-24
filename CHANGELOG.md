@@ -63,6 +63,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia`: callers never call `tick` or `merge_step` (ROADMAP 10.2.6): a program that only opens, puts and closes
   has its writes committed, and `close` (or a drop on time) returns after the maintenance thread and the engine's
   merge workers stopped.
+- `persia` review fix-ups: an error that reports corruption anywhere (also in a step that failed after the first error)
+  is `Corrupt`; a blob file that does not exist is `NotFound`; `ErrorCode::ALL` is a `&'static [ErrorCode]` slice.
+  `Db::open` at a link to a missing file is `NotFound` naming the target, and racing opens start over with a
+  bounded backoff (1 ms doubling to 128 ms). Concurrent `refresh` calls run one at a time, so none is refused as
+  older. A `BlobReader` serves nothing once its database is closed, even bytes it already holds.
 - `persia-engine`: relaxation metrics (ROADMAP 8.3.3; SPEC §7.6, §12.4). Each collection counts its relaxed queries
   (searches without a cursor): how many, how many relaxed past L0, how many still found nothing, and how many found
   their hits at each level. Read them as `RelaxationStats` from `CollectionSnapshot::relaxation_stats` or, summed over

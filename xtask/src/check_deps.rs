@@ -267,9 +267,10 @@ pub(crate) fn run(root: &Path) -> Result<bool> {
     let external = workspace_dependencies(&read_toml(&root.join("Cargo.toml"))?)?;
     let mut errors = violations(&metadata, &external);
     errors.extend(build_scripts(&metadata));
-    // The resolved graph, every platform's dependencies included: where a runtime would arrive transitively.
-    let graph: no_async::Graph = serde_json::from_slice(&cargo_metadata(root, &[])?)
-        .context("parsing cargo metadata (resolved graph)")?;
+    // The resolved graph, every feature and every platform included: where a runtime would arrive transitively.
+    let graph: no_async::Graph =
+        serde_json::from_slice(&cargo_metadata(root, &["--all-features"])?)
+            .context("parsing cargo metadata (resolved graph)")?;
     errors.extend(no_async::violations(&graph));
     for pkg in &metadata.packages {
         errors.extend(not_inherited(

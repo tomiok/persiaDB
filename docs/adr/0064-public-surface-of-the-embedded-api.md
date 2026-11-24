@@ -76,6 +76,18 @@ would freeze the engine's shape. The owner decided the surface on 2026-11-23 (wa
   `persia_analysis`) would let `classify.rs` match on variants; the table test would stay as it is.
 - `IO` covers "none of the above". A caller cannot tell a bug from a failed disk by the code; a dedicated code
   (`16 PERSIA_INTERNAL`) can be appended if that matters.
+- **What the re-exports freeze.** Item 4 makes every public method and field of the re-exported types part of
+  `persia`'s surface, including some that are engine detail: `CollectionSchema::hash`, `hash_at` and
+  `canonical_index_definition`; `CollectionSchema::from_json_in` and `AnalyzerRef::parse_in`, which name
+  `persia_analysis::AnalyzerRegistry`; `Document::encode`, `decode` and `encoded_id` (the binary encoding of SPEC
+  §6.4.2); `Document::extra` and `insert_extra`, which expose `serde_json::Value`; and the schema types that are not
+  `#[non_exhaustive]` (`TextOptions`, `KeywordOptions`, `RankingConfig`, `RelaxationConfig`, `FieldKind`, `FieldType`,
+  `Level`, `Fallback`, `FilterRelaxation`, `RankFn`, `StaticRank`), whose public fields and variants cannot grow
+  without a breaking change. Marking them `#[non_exhaustive]` and trimming that surface is ROADMAP 10.1.16, due
+  before the first publish (10.5.1).
+- **A classification rule beyond the tables:** corruption wins. An engine or documents error that reports
+  corruption anywhere (`is_corruption()`, also in the later step of a `ThenFailed`) is `CORRUPT`, whatever came
+  first: a damaged file is never reported as the lesser failure in front of it.
 
 ## Alternatives considered
 
