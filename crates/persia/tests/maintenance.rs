@@ -231,3 +231,35 @@ fn a_maintenance_round_after_close_is_closed() {
         ErrorCode::Closed
     );
 }
+
+#[test]
+fn a_zero_idle_flush_or_interval_commits_at_every_round_with_unflushed_writes() {
+    for (idle, interval) in [
+        (Duration::ZERO, Duration::from_secs(60)),
+        (Duration::from_secs(10), Duration::ZERO),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = Arc::new(ManualClock::new(START));
+        let db = held(&clock)
+            .idle_flush(idle)
+            .commit_interval(interval)
+            .open(dir.path().join("app.persia"))
+            .unwrap();
+        let c = collection(&db);
+        let created = db.committed_seq().unwrap();
+        db.maintain_now().unwrap();
+        assert_eq!(
+            db.committed_seq().unwrap(),
+            created,
+            "nothing unflushed: no commit"
+        );
+        c.put(&Document::new("a")).unwrap();
+        db.maintain_now().unwrap();
+        assert_eq!(
+            db.committed_seq().unwrap(),
+            created + 1,
+            "{idle:?} {interval:?}"
+        );
+        db.close().unwrap();
+    }
+}

@@ -20,8 +20,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `Db::open` creates the database when no file is at the path and opens an existing one without replacing it.
   `OpenOptions` is a builder with SPEC §14's defaults (`create_if_missing`, `read_only`, `memtable_bytes`,
   `idle_flush`, `commit_interval`, `merge_threads`, `durability`); `persia::Durability` re-exports the engine's.
-  A `memtable_bytes` of 0 or an `idle_flush` or `commit_interval` of zero is `InvalidArgument` at open;
-  `merge_threads(0)` runs each merge on the maintenance thread.
+  A `memtable_bytes` of 0 is `InvalidArgument` at open; a zero `idle_flush` or `commit_interval` commits at every
+  maintenance round that finds unflushed writes, and `merge_threads(0)` runs each merge on the maintenance thread.
+- `persia`: what a `Db` reads through (ROADMAP 10.2.4, 10.2.5; SPEC §4.7, §10.6). Every `Db` has a block cache of its
+  own, `OpenOptions::block_cache_bytes` in size (8 MiB by default), given to the engine explicitly on a read-write
+  open and in the read-only opens and refreshes (`ReadOnlyDatabase::open_with_options`); `Db::block_cache_stats`
+  (`BlockCacheStats`) reads it. A read-only `Db` maps its container on a local disk by default, except on Windows;
+  `OpenOptions::mapped_reads(false)` forces ordinary reads, and a read-write `Db` never maps.
   A location is a URL only when it starts with `scheme://`: `file://` (empty host or `localhost`, percent-encoded
   absolute path) opens the file it names, every other scheme is `Unsupported` (`s3://`, `gs://`, `az://` and `memory://`
   until their backends exist), and only malformed input is `InvalidArgument`. `close` makes a final commit and releases the writer

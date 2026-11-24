@@ -22,7 +22,9 @@ pub use persia_blob::pack::lease::ReaderLease;
 use persia_blob::pack::lease::leases_dir;
 use persia_blob::pack::{ContainerFile, Vfs};
 use persia_blob::{BlobId, BlobRef, BlobStore, PackStore, pack_path};
-use persia_engine::db::{Database, DatabaseError, DatabaseOptions, ReadOnlyDatabase};
+use persia_engine::db::{
+    Database, DatabaseError, DatabaseOptions, ReadOnlyDatabase, ReadOnlyOptions,
+};
 use persia_engine::document::Document;
 use persia_engine::wal::{Durability, WalMark};
 
@@ -693,6 +695,25 @@ impl ReadOnlyBlobDatabase<File> {
         Self::with_lease(
             lease,
             ReadOnlyDatabase::open(path, &options.registry)?,
+            path,
+        )
+    }
+
+    /// [`ReadOnlyBlobDatabase::open`] with the documents opened by [`ReadOnlyDatabase::open_with_options`]: `options`
+    /// choose the registry, the block cache and whether the container is mapped (SPEC §4.7, §10.6). The embedded API's
+    /// read-only `Db` opens with this.
+    ///
+    /// # Errors
+    /// As [`ReadOnlyBlobDatabase::open`].
+    pub fn open_with_options(
+        path: impl AsRef<Path>,
+        options: &ReadOnlyOptions,
+    ) -> Result<Self, Error> {
+        let path = path.as_ref();
+        let lease = ReaderLease::take_beside(path).map_err(lease_error)?;
+        Self::with_lease(
+            lease,
+            ReadOnlyDatabase::open_with_options(path, options)?,
             path,
         )
     }

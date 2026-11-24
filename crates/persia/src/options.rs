@@ -5,9 +5,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use persia_engine::db::{Clock, CommitPolicy, DatabaseOptions};
+use persia_engine::db::{Clock, CommitPolicy, DatabaseOptions, MappedReads, ReadOnlyOptions};
 use persia_engine::memtable::FlushPolicy;
 use persia_engine::merge::MergeOptions;
+use persia_engine::segment::BlockCache;
 use persia_engine::wal::Durability;
 
 use crate::db::Db;
@@ -32,6 +33,8 @@ pub type DetachedSlot = Arc<Mutex<Option<JoinHandle<()>>>>;
 /// | [`commit_interval`](Self::commit_interval) | 60 s | `commit_interval` |
 /// | [`merge_threads`](Self::merge_threads) | 1 | `merge_threads` |
 /// | [`durability`](Self::durability) | [`Durability::Fsync`] | `fsync_policy` |
+/// | [`block_cache_bytes`](Self::block_cache_bytes) | 8 MiB | (SPEC §10.6) |
+/// | [`mapped_reads`](Self::mapped_reads) | on a local disk, not on Windows | (SPEC §4.7) |
 ///
 /// No option is stored in the database: each open chooses its own.
 ///
@@ -63,6 +66,10 @@ pub struct OpenOptions {
     commit_interval: Duration,
     merge_threads: usize,
     pub(crate) durability: Durability,
+    /// The size of the `Db`'s block cache, in decoded bytes.
+    block_cache_bytes: u64,
+    /// Whether a read-only open maps its container; the engine's default when `None`.
+    mapped_reads: Option<bool>,
     /// Where the database reads the time; the system's clocks when `None`.
     clock: Option<Arc<dyn Clock>>,
     /// Test hook: the maintenance thread runs only the rounds `Db::maintain_now` asks for.
@@ -99,6 +106,8 @@ impl OpenOptions {
             commit_interval: CommitPolicy::DEFAULT_INTERVAL,
             merge_threads: MergeOptions::DEFAULT_THREADS,
             durability: Durability::Fsync,
+            block_cache_bytes: BlockCache::DEFAULT_CAPACITY,
+            mapped_reads: None,
             clock: None,
             hold_maintenance: false,
             drop_wait: DROP_WAIT,
@@ -161,7 +170,8 @@ impl OpenOptions {
     }
 
     /// How long a collection's writes must pause before they are flushed and committed in the background
-    /// (SPEC §8.2 step 3). 10 s by default. Zero is refused at open.
+    /// (SPEC §8.2 step 3). 10 s by default. Zero commits at every maintenance round (about once a
+    /// second) that finds unflushed writes.
     ///
     /// ```
     /// use std::time::Duration;
@@ -177,7 +187,8 @@ impl OpenOptions {
 
     /// The longest a write stays unflushed while writes never pause: a background commit flushes it once this
     /// long has passed since the first unflushed write (SPEC §14 `commit_interval`), which bounds what an open
-    /// after a crash replays. 60 s by default. Zero is refused at open.
+    /// after a crash replays. 60 s by default. Zero commits at every maintenance round that finds
+    /// unflushed writes.
     ///
     /// ```
     /// use std::time::Duration;
@@ -219,6 +230,42 @@ impl OpenOptions {
     #[must_use]
     pub fn durability(mut self, durability: Durability) -> Self {
         self.durability = durability;
+        self
+    }
+
+    /// The size of the database's block cache, in decoded bytes (SPEC §10.6, ROADMAP 10.2.5): every segment the
+    /// `Db` opens reads its blocks through this one cache, its own, not one shared with other databases.
+    /// 8 MiB by default (SPEC §14, until ROADMAP 15.2.4 measures a better one); 0 caches nothing.
+    /// [`Db::block_cache_stats`] reads how it is used.
+    ///
+    /// ```
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// let db = persia::OpenOptions::new().block_cache_bytes(64 << 20).open(dir.path().join("app.persia"))?;
+    /// assert_eq!(db.block_cache_stats()?.capacity, 64 << 20);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn block_cache_bytes(mut self, bytes: u64) -> Self {
+        self.block_cache_bytes = bytes;
+        self
+    }
+
+    /// Whether a read-only open reads its container through a memory mapping (SPEC §4.7, ROADMAP 10.2.4): `true` maps
+    /// it when it is on a local disk, `false` always reads with ordinary reads (`pread`). By default it maps on a
+    /// local disk, except on Windows, where it does not (ADR-0017, amended). A read-write `Db` never maps, whatever
+    /// this says. A mapped reader needs that no other program writes or truncates the file while it is open.
+    ///
+    /// ```
+    /// use persia::OpenOptions;
+    ///
+    /// // A file another program may rewrite under the reader: read it with ordinary reads.
+    /// let options = OpenOptions::new().read_only(true).mapped_reads(false);
+    /// # let _ = options;
+    /// ```
+    #[must_use]
+    pub fn mapped_reads(mut self, mapped: bool) -> Self {
+        self.mapped_reads = Some(mapped);
         self
     }
 
@@ -271,24 +318,20 @@ impl OpenOptions {
     /// ```
     ///
     /// # Errors
-    /// [`ErrorCode::InvalidArgument`](crate::ErrorCode::InvalidArgument) for a `memtable_bytes` of 0 or an
-    /// `idle_flush` or `commit_interval` of zero, which would commit at every write or every round; then as
-    /// [`Db::open`].
+    /// [`ErrorCode::InvalidArgument`](crate::ErrorCode::InvalidArgument) for a `memtable_bytes` of 0, which would
+    /// flush a segment before every write; then as [`Db::open`].
     pub fn open(&self, location: impl AsRef<Path>) -> Result<Db> {
         self.validate()?;
         let path = location::path_of(location.as_ref())?;
         Db::open_at(path, self)
     }
 
-    /// Refuses the settings that have no useful meaning (see [`OpenOptions::open`]). `merge_threads(0)` is not one:
-    /// it runs each merge on the maintenance thread.
+    /// Refuses the settings that have no useful meaning (see [`OpenOptions::open`]). `merge_threads(0)` is not one
+    /// (each merge runs on the maintenance thread), nor a zero `idle_flush` or `commit_interval` (every maintenance
+    /// round that finds unflushed writes commits them).
     fn validate(&self) -> Result<()> {
         let refused = if self.memtable_bytes == 0 {
             Some("memtable_bytes must be at least 1: 0 would flush a segment at every write")
-        } else if self.idle_flush.is_zero() {
-            Some("idle_flush must be above zero: zero would commit at every maintenance round")
-        } else if self.commit_interval.is_zero() {
-            Some("commit_interval must be above zero: zero would commit at every maintenance round")
         } else {
             None
         };
@@ -301,9 +344,11 @@ impl OpenOptions {
     }
 
     /// The engine's options for one open (they are not `Clone`: each open draws its own segment ids).
-    pub(crate) fn database_options(&self) -> DatabaseOptions {
+    pub(crate) fn database_options(&self, cache: &Arc<BlockCache>) -> DatabaseOptions {
         let defaults = DatabaseOptions::default();
         DatabaseOptions {
+            // Given explicitly, not the per-open default: the `Db` reads its stats ([`Db::block_cache_stats`]).
+            block_cache: Some(Arc::clone(cache)),
             policy: CommitPolicy {
                 flush: FlushPolicy {
                     memtable_bytes: self.memtable_bytes,
@@ -319,6 +364,22 @@ impl OpenOptions {
             ..defaults
         }
     }
+
+    /// The engine's options for one read-only open or refresh: the registry of the read-write ones, `cache`, and the
+    /// mapping [`OpenOptions::mapped_reads`] chose (the engine's default unless set).
+    pub(crate) fn read_only_options(&self, cache: &Arc<BlockCache>) -> ReadOnlyOptions {
+        let options = ReadOnlyOptions::new().block_cache(Arc::clone(cache));
+        match self.mapped_reads {
+            None => options,
+            Some(true) => options.mapped_reads(MappedReads::IfLocal),
+            Some(false) => options.mapped_reads(MappedReads::Never),
+        }
+    }
+
+    /// A new block cache of the size these options say, for one `Db` (SPEC §10.6).
+    pub(crate) fn new_block_cache(&self) -> Arc<BlockCache> {
+        Arc::new(BlockCache::new(self.block_cache_bytes))
+    }
 }
 
 #[cfg(test)]
@@ -332,13 +393,13 @@ mod tests {
         let options = OpenOptions::new();
         assert!(options.create_if_missing && !options.read_only);
         assert_eq!(options.durability, Durability::Fsync);
-        let engine = options.database_options();
+        let engine = options.database_options(&Arc::new(BlockCache::default()));
         assert_eq!(engine.policy, CommitPolicy::default());
         assert_eq!(engine.policy.flush.memtable_bytes, 64 << 20);
         assert_eq!(engine.policy.flush.idle, Duration::from_secs(10));
         assert_eq!(engine.policy.interval, Duration::from_secs(60));
         assert_eq!(engine.merge.threads, 1);
-        let by_default = OpenOptions::default().database_options();
+        let by_default = OpenOptions::default().database_options(&Arc::new(BlockCache::default()));
         assert_eq!(by_default.policy, engine.policy);
     }
 
@@ -364,14 +425,14 @@ mod tests {
         assert!(!defaults.hold_maintenance && defaults.detached.is_none());
         assert_eq!(defaults.drop_wait, Duration::from_secs(5));
         assert_eq!(options.durability, Durability::Buffered);
-        let engine = options.database_options();
+        let engine = options.database_options(&Arc::new(BlockCache::default()));
         assert_eq!(engine.policy.flush.memtable_bytes, 1 << 20);
         assert_eq!(engine.policy.flush.idle, Duration::from_secs(2));
         assert_eq!(engine.policy.interval, Duration::from_secs(7));
         assert_eq!(engine.merge.threads, 3);
         assert_eq!(engine.clock.unix_micros(), 1_000, "the injected clock");
         // Without one, the system's: not 1970.
-        let system = OpenOptions::new().database_options();
+        let system = OpenOptions::new().database_options(&Arc::new(BlockCache::default()));
         assert!(system.clock.unix_micros() > 1_000_000_000_000_000);
     }
 }

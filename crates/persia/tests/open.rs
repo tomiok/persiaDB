@@ -183,34 +183,25 @@ fn options_are_reusable_and_cloneable() {
 }
 
 #[test]
-fn settings_without_a_meaning_are_refused_before_anything_is_created() {
+fn a_memtable_of_zero_bytes_is_refused_before_anything_is_created() {
     use std::time::Duration;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sub").join("app.persia");
-    for (options, knob) in [
-        (OpenOptions::new().memtable_bytes(0), "memtable_bytes"),
-        (OpenOptions::new().idle_flush(Duration::ZERO), "idle_flush"),
-        (
-            OpenOptions::new().commit_interval(Duration::ZERO),
-            "commit_interval",
-        ),
-        (
-            OpenOptions::new()
-                .read_only(true)
-                .commit_interval(Duration::ZERO),
-            "commit_interval",
-        ),
+    for options in [
+        OpenOptions::new().memtable_bytes(0),
+        OpenOptions::new().read_only(true).memtable_bytes(0),
     ] {
         let err = options.open(&path).unwrap_err();
-        assert_eq!(err.code(), ErrorCode::InvalidArgument, "{knob}: {err}");
-        assert!(err.message().starts_with(knob), "{err}");
+        assert_eq!(err.code(), ErrorCode::InvalidArgument, "{err}");
+        assert!(err.message().starts_with("memtable_bytes"), "{err}");
     }
     assert!(files_in(dir.path()).is_empty(), "nothing was created");
-    // The smallest values that mean something open, and so does `merge_threads(0)`: merges on the maintenance thread.
+    // The smallest size opens, and so do zero durations (tests/maintenance.rs: every round commits) and
+    // `merge_threads(0)` (merges on the maintenance thread).
     OpenOptions::new()
         .memtable_bytes(1)
-        .idle_flush(Duration::from_nanos(1))
-        .commit_interval(Duration::from_nanos(1))
+        .idle_flush(Duration::ZERO)
+        .commit_interval(Duration::ZERO)
         .merge_threads(0)
         .open(&path)
         .unwrap()

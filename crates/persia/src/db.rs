@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use persia_blob::PackStore;
 use persia_engine::db::{DatabaseReader, ReadOnlyDatabase, Snapshot, create_parent_dirs};
+use persia_engine::segment::BlockCache;
 use persia_engine::wal::Durability;
 
 use crate::error::Classified as _;
@@ -58,6 +59,9 @@ pub(crate) struct Inner {
     /// One refresh at a time, from its reopen to its swap: two racing ones would otherwise swap in their reopens out of
     /// order, and the later swap would refuse the older one as `RefreshedOlder`. Reads never take it.
     refreshing: Mutex<()>,
+    /// The database's own block cache (SPEC §10.6): every segment it opens, at the open, in a refresh, a flush or a merge,
+    /// reads through it.
+    block_cache: Arc<BlockCache>,
     mode: Mode,
 }
 
@@ -156,10 +160,11 @@ impl Db {
     /// Opens the database at the filesystem path `path` as `options` say, and starts its maintenance thread when it
     /// is read-write.
     pub(crate) fn open_at(path: PathBuf, options: &OpenOptions) -> Result<Self> {
+        let block_cache = options.new_block_cache();
         let mode = if options.read_only {
-            open_read_only(&path, options)?
+            open_read_only(&path, options, &block_cache)?
         } else {
-            open_read_write(&path, options)?
+            open_read_write(&path, options, &block_cache)?
         };
         let db = Self {
             inner: Arc::new(Inner {
@@ -168,6 +173,7 @@ impl Db {
                 options: options.clone(),
                 closed: AtomicBool::new(false),
                 refreshing: Mutex::new(()),
+                block_cache,
                 mode,
             }),
         };
@@ -285,8 +291,63 @@ impl Db {
     pub fn committed_seq(&self) -> Result<u64> {
         Ok(self.inner.snapshot()?.seq())
     }
+
+    /// How the database's block cache is used (SPEC §10.6, ROADMAP 10.2.5), for metrics: every segment the `Db`
+    /// opens reads through this one cache, sized by [`OpenOptions::block_cache_bytes`].
+    ///
+    /// ```
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// let db = persia::Db::open(dir.path().join("app.persia"))?;
+    /// let stats = db.block_cache_stats()?;
+    /// assert_eq!((stats.capacity, stats.hits, stats.bytes), (8 << 20, 0, 0)); // nothing read yet
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// [`ErrorCode::Closed`].
+    pub fn block_cache_stats(&self) -> Result<BlockCacheStats> {
+        self.inner.check_open()?;
+        let cache = &self.inner.block_cache;
+        let stats = cache.stats();
+        Ok(BlockCacheStats {
+            hits: stats.hits,
+            misses: stats.misses,
+            entries: stats.blocks,
+            bytes: stats.bytes,
+            capacity: cache.capacity(),
+        })
+    }
+
+    /// Test hook: whether a read-only database reads its container through a memory mapping (SPEC §4.7).
+    #[doc(hidden)]
+    pub fn is_mapped(&self) -> Result<bool> {
+        self.inner.check_open()?;
+        match &self.inner.mode {
+            Mode::ReadWrite { .. } => Ok(false),
+            Mode::ReadOnly(state) => read_lock(state)
+                .as_ref()
+                .map(|db| db.database().container().is_mapped())
+                .ok_or_else(Error::closed),
+        }
+    }
 }
 
+/// How a database's block cache is used ([`Db::block_cache_stats`]): counts since the open, and what it holds now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BlockCacheStats {
+    /// Reads served from the cache.
+    pub hits: u64,
+    /// Reads that decoded what they read.
+    pub misses: u64,
+    /// Entries cached now: decoded blocks and `keyword` dictionaries.
+    pub entries: u64,
+    /// Decoded bytes cached now.
+    pub bytes: u64,
+    /// The most decoded bytes it holds ([`OpenOptions::block_cache_bytes`]).
+    pub capacity: u64,
+}
 impl Drop for Db {
     fn drop(&mut self) {
         let bound = self.inner.options.drop_wait;
@@ -449,10 +510,11 @@ impl Inner {
             return Ok(());
         };
         let _one_at_a_time = lock(&self.refreshing);
-        let registry = self.options.database_options().registry;
-        let reopened = ReadOnlyDatabase::open(&self.path, &registry).map_err(|e| {
-            Error::wrap(e).context(format_args!("refreshing {}", self.path.display()))
-        })?;
+        let reopened = ReadOnlyDatabase::open_with_options(
+            &self.path,
+            &self.options.read_only_options(&self.block_cache),
+        )
+        .map_err(|e| Error::wrap(e).context(format_args!("refreshing {}", self.path.display())))?;
         let mut guard = state.write().unwrap_or_else(PoisonError::into_inner);
         let db = guard.as_mut().ok_or_else(Error::closed)?;
         db.refresh(reopened)
@@ -545,12 +607,12 @@ fn opening(path: &Path, error: DocumentsError) -> Error {
     Error::wrap(error).context(format_args!("opening {}", path.display()))
 }
 
-fn open_read_only(path: &Path, options: &OpenOptions) -> Result<Mode> {
+fn open_read_only(path: &Path, options: &OpenOptions, cache: &Arc<BlockCache>) -> Result<Mode> {
     check_parents(path)?;
     if !exists(path)? {
         return Err(not_found(path));
     }
-    let db = ReadOnlyBlobDatabase::open(path, &options.database_options())
+    let db = ReadOnlyBlobDatabase::open_with_options(path, &options.read_only_options(cache))
         .map_err(|e| opening(path, e))?;
     Ok(Mode::ReadOnly(RwLock::new(Some(Box::new(db)))))
 }
@@ -628,7 +690,7 @@ fn create_parents_with(path: &Path, create: impl FnOnce(&Path) -> io::Result<()>
     })
 }
 
-fn open_read_write(path: &Path, options: &OpenOptions) -> Result<Mode> {
+fn open_read_write(path: &Path, options: &OpenOptions, cache: &Arc<BlockCache>) -> Result<Mode> {
     check_parents(path)?;
     let mut backoff = FIRST_OPEN_BACKOFF;
     for attempt in 0..OPEN_ATTEMPTS {
@@ -637,7 +699,7 @@ fn open_read_write(path: &Path, options: &OpenOptions) -> Result<Mode> {
             backoff = backoff.saturating_mul(2).min(MAX_OPEN_BACKOFF);
         }
         let db = if exists(path)? {
-            match BlobDatabase::open(path, options.database_options()) {
+            match BlobDatabase::open(path, options.database_options(cache)) {
                 Ok(db) => db,
                 // The file vanished between the look and the open: decide again.
                 Err(_) if !exists(path)? => continue,
@@ -645,7 +707,7 @@ fn open_read_write(path: &Path, options: &OpenOptions) -> Result<Mode> {
             }
         } else if options.create_if_missing {
             create_parents(path)?;
-            match BlobDatabase::create(path, options.database_options()) {
+            match BlobDatabase::create(path, options.database_options(cache)) {
                 Ok(db) => db,
                 Err(DocumentsError::PackExists { path: pack }) => {
                     return Err(Error::new(

@@ -39,7 +39,7 @@ mod typed;
 
 pub use blob::BlobReader;
 pub use collection::Collection;
-pub use db::Db;
+pub use db::{BlockCacheStats, Db};
 pub use error::{Error, ErrorCode, Result};
 pub use internal::blob::PutBlobOptions;
 pub use internal::documents::Blob;
