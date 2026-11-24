@@ -1,6 +1,7 @@
-//! The database handle (SPEC §8.1, §8.4; ROADMAP 10.1.1).
+//! The database handle (SPEC §8.1, §8.4; ROADMAP 10.1.1, 10.1.9).
 
 use std::fmt;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
@@ -9,8 +10,9 @@ use persia_blob::PackStore;
 use persia_engine::db::DatabaseReader;
 use persia_engine::wal::Durability;
 
+use crate::error::Classified as _;
 use crate::internal::blob::Blobs;
-use crate::internal::documents::{BlobDatabase, ReadOnlyBlobDatabase};
+use crate::internal::documents::{BlobDatabase, Error as DocumentsError, ReadOnlyBlobDatabase};
 use crate::options::OpenOptions;
 use crate::{Error, ErrorCode, Result};
 
@@ -93,13 +95,19 @@ impl Db {
     /// `C:\data\app.persia` is a path. The only scheme this build opens is `file://`, with an empty host or
     /// `localhost` and a percent-encoded absolute path: `file:///var/lib/app.persia`.
     ///
+    /// The open is SQLite-like (SPEC §8.1): when no file is at the path it creates the missing parent directories,
+    /// then the database; an existing database is opened, never replaced. Opens that race on a missing path agree:
+    /// one creates the database, and each other one opens it or fails as a second writer.
+    ///
     /// ```
     /// use persia::{Db, ErrorCode};
     ///
     /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
     /// # let dir = tempfile::tempdir()?;
-    /// let db = Db::open(dir.path().join("app.persia"))?;
+    /// let path = dir.path().join("data/2026/app.persia");
+    /// let db = Db::open(&path)?; // creates data/ and data/2026/, then the database
     /// db.close()?;
+    /// assert!(path.is_file());
     ///
     /// // Cloud schemes are named by SPEC §10.2 and have no backend in this build.
     /// assert_eq!(Db::open("s3://bucket/app").unwrap_err().code(), ErrorCode::Unsupported);
@@ -108,13 +116,16 @@ impl Db {
     /// ```
     ///
     /// # Errors
-    /// - [`ErrorCode::InvalidArgument`]: an empty location, a malformed `file://` URL, an unknown scheme;
+    /// - [`ErrorCode::InvalidArgument`]: an empty location, a malformed `file://` URL, an unknown scheme, a path
+    ///   under a file that is not a directory;
     /// - [`ErrorCode::Unsupported`]: `s3://`, `gs://`, `az://` or `memory://` (no backend in this build), or a
     ///   file written by a newer format;
     /// - [`ErrorCode::NotFound`]: no file at the path, and the open does not create one;
     /// - [`ErrorCode::Conflict`]: another read-write handle has the database open, in this process or another;
+    ///   or a blob pack (`<name>.persia.blobs`) is at the path of a database to create;
     /// - [`ErrorCode::Corrupt`]: the file is not a database, or is damaged;
-    /// - [`ErrorCode::Io`]: the file system failed.
+    /// - [`ErrorCode::Io`]: the file system failed;
+    /// - [`ErrorCode::Transient`]: the file kept appearing and vanishing while it was opened.
     pub fn open(location: impl AsRef<Path>) -> Result<Self> {
         OpenOptions::new().open(location)
     }
@@ -261,31 +272,124 @@ fn not_found(path: &Path) -> Error {
     )
 }
 
+/// The engine's or the pack's failure to open the database at `path`, with the path in front.
+fn opening(path: &Path, error: DocumentsError) -> Error {
+    Error::wrap(error).context(format_args!("opening {}", path.display()))
+}
+
 fn open_read_only(path: &Path, options: &OpenOptions) -> Result<Mode> {
+    check_parents(path)?;
     if !exists(path)? {
         return Err(not_found(path));
     }
     let db = ReadOnlyBlobDatabase::open(path, &options.database_options())
-        .map_err(|e| Error::wrap(e).context(format_args!("opening {}", path.display())))?;
+        .map_err(|e| opening(path, e))?;
     Ok(Mode::ReadOnly(RwLock::new(Some(Box::new(db)))))
 }
 
-fn open_read_write(path: &Path, options: &OpenOptions) -> Result<Mode> {
-    let opened = if exists(path)? {
-        BlobDatabase::open(path, options.database_options())
-    } else if options.create_if_missing {
-        BlobDatabase::create(path, options.database_options())
-    } else {
-        return Err(not_found(path));
+/// How many times an open starts over when the file appears or vanishes under it (SPEC §8.1, "Racing opens").
+const OPEN_ATTEMPTS: usize = 8;
+
+/// Fails with [`ErrorCode::InvalidArgument`] when the nearest ancestor of `path` that exists is not a directory: the
+/// path cannot name a file (SPEC §8.1), whatever the mode. Nothing is created.
+fn check_parents(path: &Path) -> Result<()> {
+    for ancestor in path.ancestors().skip(1) {
+        if ancestor.as_os_str().is_empty() {
+            return Ok(()); // a relative path: the current directory
+        }
+        match std::fs::metadata(ancestor) {
+            Ok(meta) if meta.is_dir() => return Ok(()),
+            Ok(_) => {
+                return Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    format!(
+                        "{} cannot name a database: {} is not a directory",
+                        path.display(),
+                        ancestor.display()
+                    ),
+                ));
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) => {}
+            Err(source) => {
+                return Err(Error::with_source(
+                    ErrorCode::Io,
+                    format_args!("looking for {}", ancestor.display()),
+                    source,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Creates the missing parent directories of `path` (SPEC §8.1: the facade's step, not the container's).
+fn create_parents(path: &Path) -> Result<()> {
+    let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return Ok(());
     };
-    let db =
-        opened.map_err(|e| Error::wrap(e).context(format_args!("opening {}", path.display())))?;
+    std::fs::create_dir_all(parent).map_err(|source| {
+        Error::with_source(
+            ErrorCode::Io,
+            format_args!("creating the directory {}", parent.display()),
+            source,
+        )
+    })
+}
+
+fn open_read_write(path: &Path, options: &OpenOptions) -> Result<Mode> {
+    check_parents(path)?;
+    for _ in 0..OPEN_ATTEMPTS {
+        let db = if exists(path)? {
+            match BlobDatabase::open(path, options.database_options()) {
+                Ok(db) => db,
+                // The file vanished between the look and the open: decide again.
+                Err(_) if !exists(path)? => continue,
+                Err(e) => return Err(opening(path, e)),
+            }
+        } else if options.create_if_missing {
+            create_parents(path)?;
+            match BlobDatabase::create(path, options.database_options()) {
+                Ok(db) => db,
+                Err(DocumentsError::PackExists { path: pack }) => {
+                    return Err(Error::new(
+                        ErrorCode::Conflict,
+                        format!(
+                            "cannot create {}: a blob pack is at {} with no database beside it, and a new \
+                             database could not use it",
+                            path.display(),
+                            pack.display()
+                        ),
+                    ));
+                }
+                // Another open created the file first: open it.
+                Err(e) if e.code() == ErrorCode::AlreadyExists => continue,
+                Err(e) => return Err(opening(path, e)),
+            }
+        } else {
+            return Err(not_found(path));
+        };
+        return Ok(read_write(db));
+    }
+    Err(Error::new(
+        ErrorCode::Transient,
+        format!(
+            "opening {}: the file appeared or vanished {OPEN_ATTEMPTS} times while it was opened",
+            path.display()
+        ),
+    ))
+}
+
+fn read_write(db: Writer) -> Mode {
     let reads = ReadSide {
         reader: db.log().reader(),
         blobs: db.blobs().clone(),
     };
-    Ok(Mode::ReadWrite {
+    Mode::ReadWrite {
         writer: Mutex::new(Some(Box::new(db))),
         reads: RwLock::new(Some(reads)),
-    })
+    }
 }

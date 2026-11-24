@@ -2180,10 +2180,25 @@ open's recovery may still truncate or quarantine an uncommitted tail (§4.5.1). 
   alone, `{ readOnly: true }` alone, and `PERSIA_OPEN_READ_ONLY` alone are that combination, because
   creation defaults on. `PERSIA_OPEN_MUST_EXIST` beside `PERSIA_OPEN_READ_ONLY` is the same open.
 
-A parent that exists and is not a directory is an error. Creating the directories is the facade's step.
-The container create of §4.5.1 still writes a temporary file in a directory that already exists, and still
-refuses to replace a name that is taken. `persia_engine::db::Database` has separate `create` and `open`
-until 10.1.9, and that `create` fails when the parent directory is missing.
+A parent that exists and is not a directory is an error (an invalid argument: the path cannot name a file), for
+every mode, and nothing is created. Creating the directories is the facade's step (`persia::Db`, ROADMAP 10.1.9):
+it creates the missing parents, then the container. The container create of §4.5.1 still writes a temporary file
+in a directory that already exists, and still refuses to replace a name that is taken.
+`persia_engine::db::Database` keeps its separate `create` and `open`, and that `create` fails when the parent
+directory is missing.
+
+**Racing opens.** The facade looks for the file, then opens or creates it, so the file can appear or vanish in
+between. A create that finds the name taken (another open created it first) starts over and opens the file; an
+open that finds the file gone starts over and decides again. So when several read-write opens of one missing path
+race, one of them creates the database and holds it, and each of the others either opens it once the holder
+closed or fails at once as a second writer (§8.4): none is told the file exists, is missing or is damaged, and
+the file is never replaced. A reader racing the create finds no file, or the database (empty until its first
+commit). After 8 starts the open fails as transient. A blob pack left at `<name>.persia.blobs` with no
+container beside it refuses the create (a conflict: the new database could not use it), and nothing is created.
+
+**What a path is.** The argument of `Db::open` is a filesystem path, or a URL (§10.2). It is a URL only when it
+starts with `scheme://`, so `C:\data\app.persia` is a path, and a path is never percent-decoded. An empty
+argument is an invalid argument.
 
 ### 8.2 Flow
 1. Op appended to the **WAL** (batched, group commit). Durability level per call: `Buffered | Async | Fsync`, default `Fsync`

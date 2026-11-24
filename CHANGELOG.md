@@ -24,6 +24,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   absolute path) opens the file it names, `s3://`, `gs://`, `az://` and `memory://` are `Unsupported` until their
   backends exist, and any other scheme is `InvalidArgument`. `close` makes a final commit and releases the writer
   lock; dropping a `Db` does the same and logs a failure.
+- `persia`: the SQLite-like open rule (ROADMAP 10.1.9; SPEC §8.1, §13.1). `Db::open` creates the missing parent
+  directories of a missing path, then the database; `create_if_missing(false)` and `read_only(true)` (which wins
+  over creation) create nothing, and a missing path fails with `NotFound`. A path under a file that is not a
+  directory is `InvalidArgument` in every mode. Opens racing on one missing path agree: one creates the database,
+  the others open it or fail with `Conflict` as a second writer, and the file is never replaced. A blob pack left at
+  `<name>.persia.blobs` with no database beside it refuses the create with `Conflict`.
 - `persia-engine`: relaxation metrics (ROADMAP 8.3.3; SPEC §7.6, §12.4). Each collection counts its relaxed queries
   (searches without a cursor): how many, how many relaxed past L0, how many still found nothing, and how many found
   their hits at each level. Read them as `RelaxationStats` from `CollectionSnapshot::relaxation_stats` or, summed over
