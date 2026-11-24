@@ -1,4 +1,4 @@
-//! The database handle (SPEC §8.1, §8.4; ROADMAP 10.1.1, 10.1.9, 10.2.3; ADR-0065).
+//! The database handle (SPEC §8.1, §8.4; ROADMAP 10.1.1, 10.1.9, 10.2.3; ADR-0064).
 
 use std::fmt;
 use std::io;
@@ -37,7 +37,7 @@ enum Mode {
         writer: Mutex<Option<Box<Writer>>>,
         /// `None` once closed.
         reads: RwLock<Option<ReadSide>>,
-        /// How writes and the close reach the maintenance thread (ADR-0065).
+        /// How writes and the close reach the maintenance thread (ADR-0064).
         signals: Signals,
         /// The maintenance thread; `None` before it starts and once the close took it.
         thread: Mutex<Option<Thread>>,
@@ -78,7 +78,7 @@ pub(crate) struct Inner {
 /// any handle and any thread, at every [`Durability`], committed or not. A [`Collection::put_batch`](crate::Collection::put_batch)
 /// that returns `Ok` is seen whole from then on. Durability decides what survives a crash, not what reads see.
 ///
-/// **Background work** (ADR-0065): a read-write `Db` commits and merges on its own maintenance thread, as the open's
+/// **Background work** (ADR-0064): a read-write `Db` commits and merges on its own maintenance thread, as the open's
 /// [`OpenOptions`] say (`idle_flush`, `commit_interval`, `memtable_bytes`, `merge_threads`). A program only opens,
 /// writes and closes; [`Db::close`] joins that thread.
 ///
@@ -236,7 +236,7 @@ impl Db {
     }
 
     /// Closes the database: stops its maintenance thread, which makes the final commit, cancels the merges in
-    /// flight and releases the writer lock, so the next open succeeds at once (ADR-0065). It waits for that without
+    /// flight and releases the writer lock, so the next open succeeds at once (ADR-0064). It waits for that without
     /// limit, behind a write another thread is making and behind a blob upload in flight (whose bytes are stored
     /// before its document takes the writer). Returns the first error: the first failure of a background
     /// commit or merge since the open, else the final commit's. The database is closed either way, and every
@@ -267,7 +267,7 @@ impl Db {
         self.inner.shut_down(None)
     }
 
-    /// Test hook: runs one maintenance round now (a `tick` and a `merge_step`, ADR-0065 item 9) and returns its
+    /// Test hook: runs one maintenance round now (a `tick` and a `merge_step`, ADR-0064 item 9) and returns its
     /// outcome; nothing on a read-only database.
     #[doc(hidden)]
     pub fn maintain_now(&self) -> Result<()> {
@@ -488,7 +488,7 @@ impl Inner {
         }
     }
 
-    /// `f` on the writer, under the writer mutex: one write at a time (ADR-0065 item 1). `what` names the write for
+    /// `f` on the writer, under the writer mutex: one write at a time (ADR-0064 item 1). `what` names the write for
     /// the error of a read-only database.
     pub(crate) fn write<T>(
         &self,

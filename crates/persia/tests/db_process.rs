@@ -1,5 +1,5 @@
-//! Real-process tests of the public `Db` (ROADMAP 10.1.9, 10.2.3, 10.2.6; SPEC §8.1, §8.2, §8.2.1, §8.4; ADR-0064,
-//! ADR-0065): hard kills between a write and the close, kills inside a maintenance round, a second process beside the
+//! Real-process tests of the public `Db` (ROADMAP 10.1.9, 10.2.3, 10.2.6; SPEC §8.1, §8.2, §8.2.1, §8.4; ADR-0063,
+//! ADR-0064): hard kills between a write and the close, kills inside a maintenance round, a second process beside the
 //! writer, a clean shutdown in a process of its own, and creates racing across processes.
 //!
 //! Children are this test binary re-executed with [`ROLE_ENV`] set: [`child_role`] then plays the role the variable
@@ -30,7 +30,7 @@
 //! 3. [`a_put_then_a_hard_kill_before_close`]: one fixed sequence, killed while the child waits between its writes and
 //!    its close.
 //! 4. [`a_second_process_beside_the_writer`] and [`a_second_process_is_refused_as_a_writer`]: a read-write open while
-//!    another process holds the writer is `Conflict` (ADR-0064's code for the container's `Locked`), a read-only open
+//!    another process holds the writer is `Conflict` (ADR-0063's code for the container's `Locked`), a read-only open
 //!    beside it succeeds and sees new writes after `refresh`; the lock goes with a killed holder.
 //! 5. [`a_child_that_closes_exits_cleanly`] and [`a_child_that_drops_makes_the_final_commit`]: `close` returns `Ok`,
 //!    no `persia-` thread is left, the process exits 0; a `Drop` without `close` makes the final commit too (owner
@@ -1533,7 +1533,7 @@ fn a_second_process_is_refused_as_a_writer() {
 
     let config = Config::default().with("ids", &"p0,p1,p2");
     let mut probe = Proc::spawn("probe", &path, &config, ctx);
-    // Locked, as ADR-0064 maps it: `Conflict`, whether the open would create or must find the file.
+    // Locked, as ADR-0063 maps it: `Conflict`, whether the open would create or must find the file.
     assert_eq!(probe.expect_prefix("rw"), "PERSIA_CONFLICT");
     assert_eq!(probe.expect_prefix("rw"), "PERSIA_CONFLICT");
     assert_eq!(probe.expect_prefix("ro"), "p0");

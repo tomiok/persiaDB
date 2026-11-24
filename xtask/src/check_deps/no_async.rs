@@ -1,4 +1,4 @@
-//! No async runtime in the embedded stack (ROADMAP 0.6.11, ADR-0065).
+//! No async runtime in the embedded stack (ROADMAP 0.6.11, ADR-0064).
 //!
 //! The crates a program embeds ([`EMBEDDED`]) are synchronous: threads are ours (`std::thread`, joined on close).
 //! None of them may have an async runtime ([`ASYNC_RUNTIMES`]) anywhere in its resolved dependency graph, as a
@@ -112,7 +112,7 @@ impl NodeDep {
 }
 
 /// The error of an embedded crate the resolved graph lacks: renamed or removed, it would escape the rule silently.
-const MISSING: &str = "not in the resolved dependency graph, so the no-async rule cannot check it (ADR-0065): \
+const MISSING: &str = "not in the resolved dependency graph, so the no-async rule cannot check it (ADR-0064): \
                        update EMBEDDED in xtask/src/check_deps/no_async.rs";
 
 /// One message per embedded crate and runtime it reaches, with the shortest path to it, and one per embedded crate
@@ -176,7 +176,7 @@ pub(crate) fn violations<'g>(graph: &'g Graph) -> Vec<String> {
             }
             path.reverse();
             errors.push(format!(
-                "{} ({first_kind}): async runtime in the embedded stack (ADR-0065)",
+                "{} ({first_kind}): async runtime in the embedded stack (ADR-0064)",
                 path.join(" -> ")
             ));
         }
@@ -240,7 +240,7 @@ mod tests {
         let g = graph(&[("persia-engine", "tokio", None)], &[]);
         assert_eq!(
             violations(&g),
-            ["persia-engine -> tokio (normal): async runtime in the embedded stack (ADR-0065)"]
+            ["persia-engine -> tokio (normal): async runtime in the embedded stack (ADR-0064)"]
         );
     }
 
@@ -257,7 +257,7 @@ mod tests {
         assert_eq!(
             violations(&g),
             [
-                "persia-storage -> object_store -> reqwest -> tokio (normal): async runtime in the embedded stack (ADR-0065)"
+                "persia-storage -> object_store -> reqwest -> tokio (normal): async runtime in the embedded stack (ADR-0064)"
             ]
         );
     }
@@ -275,9 +275,9 @@ mod tests {
         assert_eq!(
             violations(&g),
             [
-                "persia -> persia-engine -> persia-storage -> smol (normal): async runtime in the embedded stack (ADR-0065)",
-                "persia-engine -> persia-storage -> smol (normal): async runtime in the embedded stack (ADR-0065)",
-                "persia-storage -> smol (normal): async runtime in the embedded stack (ADR-0065)",
+                "persia -> persia-engine -> persia-storage -> smol (normal): async runtime in the embedded stack (ADR-0064)",
+                "persia-engine -> persia-storage -> smol (normal): async runtime in the embedded stack (ADR-0064)",
+                "persia-storage -> smol (normal): async runtime in the embedded stack (ADR-0064)",
             ]
         );
     }
@@ -287,7 +287,7 @@ mod tests {
         let g = graph(&[("persia", "tokio", Some("dev"))], &[]);
         assert_eq!(
             violations(&g),
-            ["persia -> tokio (dev): async runtime in the embedded stack (ADR-0065)"]
+            ["persia -> tokio (dev): async runtime in the embedded stack (ADR-0064)"]
         );
         // Also behind a dev-dependency that is itself harmless.
         let g = graph(
@@ -300,7 +300,7 @@ mod tests {
         assert_eq!(
             violations(&g),
             [
-                "persia-cli -> assert_cmd -> async-std (dev): async runtime in the embedded stack (ADR-0065)"
+                "persia-cli -> assert_cmd -> async-std (dev): async runtime in the embedded stack (ADR-0064)"
             ]
         );
     }
@@ -318,13 +318,13 @@ mod tests {
         assert_eq!(
             violations(&g),
             [
-                "persia-format -> zstd-sys -> fetcher -> futures-executor (normal): async runtime in the embedded stack (ADR-0065)"
+                "persia-format -> zstd-sys -> fetcher -> futures-executor (normal): async runtime in the embedded stack (ADR-0064)"
             ]
         );
         let g = graph(&[("persia-analysis", "blocking", Some("build"))], &[]);
         assert_eq!(
             violations(&g),
-            ["persia-analysis -> blocking (build): async runtime in the embedded stack (ADR-0065)"]
+            ["persia-analysis -> blocking (build): async runtime in the embedded stack (ADR-0064)"]
         );
     }
 
@@ -370,7 +370,7 @@ mod tests {
         assert_eq!(
             violations(&g),
             [
-                "persia -> persia-testutil -> tokio (dev): async runtime in the embedded stack (ADR-0065)"
+                "persia -> persia-testutil -> tokio (dev): async runtime in the embedded stack (ADR-0064)"
             ]
         );
     }
@@ -405,7 +405,7 @@ mod tests {
             assert_eq!(
                 violations(&g),
                 [format!(
-                    "persia-blob -> a -> b -> {runtime} (normal): async runtime in the embedded stack (ADR-0065)"
+                    "persia-blob -> a -> b -> {runtime} (normal): async runtime in the embedded stack (ADR-0064)"
                 )]
             );
         }
@@ -450,7 +450,7 @@ mod tests {
         let graph: Graph = serde_json::from_str(json).unwrap();
         assert_eq!(
             violations(&graph),
-            ["persia -> tokio (dev): async runtime in the embedded stack (ADR-0065)"]
+            ["persia -> tokio (dev): async runtime in the embedded stack (ADR-0064)"]
         );
     }
 
@@ -536,7 +536,7 @@ mod tests {
         );
         assert_eq!(
             ws.violations(),
-            ["persia-engine -> tokio (normal): async runtime in the embedded stack (ADR-0065)"]
+            ["persia-engine -> tokio (normal): async runtime in the embedded stack (ADR-0064)"]
         );
     }
 
@@ -549,7 +549,7 @@ mod tests {
         );
         assert_eq!(
             ws.violations(),
-            ["persia-engine -> tokio (normal): async runtime in the embedded stack (ADR-0065)"]
+            ["persia-engine -> tokio (normal): async runtime in the embedded stack (ADR-0064)"]
         );
     }
 }

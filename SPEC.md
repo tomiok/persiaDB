@@ -2219,7 +2219,7 @@ deleted), with the tombstone sidecars that delete the older segments' copies of 
 `tick()`, which the embedding calls periodically (commits stay on the caller's thread; merge workers only
 merge, ADR-0032) and which commits when any memtable is idle or reached `commit_interval` since its first unflushed
 write. Callers of the public `Db` never call `tick()` or `merge_step()` (ROADMAP 10.2.6): the facade's maintenance
-thread (one per read-write `Db`, a round every second while there is work, ADR-0065) calls them, so a commit and a
+thread (one per read-write `Db`, a round every second while there is work, ADR-0064) calls them, so a commit and a
 merge both run off the application's thread, and `close` joins it (the engine's merge workers are joined when the
 database drops). On the engine, a commit still runs on the thread that calls `tick` or `merge_step`, and merge
 workers only merge. Operations replayed at an open count as
@@ -3081,7 +3081,7 @@ durability (ADR-0051).
 `persia-engine` commits it without looking it up (§9.5), so a reference with no bytes behind it can be committed
 below the public API. The public embedded API (M10, `persia`) re-exports `Document` with its `set_blob_ref`, but
 never logs a reference it has not checked: `put(doc)` of a document that carries one is `put(doc,
-Blob::Stored(reference))` (ADR-0064 item 5), and in Rust `put(doc, blob)` is `Collection::put_with_blob`. A document
+Blob::Stored(reference))` (ADR-0063 item 5), and in Rust `put(doc, blob)` is `Collection::put_with_blob`. A document
 gets a blob only through `put(doc, blob)`, where `blob` is either bytes to store (`Blob::from_path`, `Blob::from_reader`),
 which `put` stores first (§9.5), or a `BlobRef` that this database's `put_blob` returned, which `put` checks is bound
 in this database's store (and pinned, §9.5) before it logs the document; a `BlobRef` it does not find is an error
@@ -3235,7 +3235,7 @@ above.
 `memory://`. Scheme selects the backend. **Zero Persia-specific configuration** is required when the ambient environment
 provides credentials.
 
-**Before M12** (ROADMAP 10.1.1, ADR-0064) `persia::Db::open` accepts a path and `file://`. A `file://` URL has an
+**Before M12** (ROADMAP 10.1.1, ADR-0063) `persia::Db::open` accepts a path and `file://`. A `file://` URL has an
 empty host or `localhost` (any case) and an absolute path, percent-encoded: `%XX` is the byte it names, on Unix
 any byte but NUL, elsewhere the decoded bytes must be UTF-8 and `/C:/dir` is `C:/dir` on Windows. A host, a
 port, a query, a fragment, or a `%` not followed by two hex digits is an invalid argument: nothing is guessed.

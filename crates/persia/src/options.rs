@@ -13,7 +13,7 @@ use persia_engine::wal::Durability;
 use crate::db::Db;
 use crate::{Result, location};
 
-/// How long dropping a `Db` waits for its maintenance thread (ADR-0065 item 6).
+/// How long dropping a `Db` waits for its maintenance thread (ADR-0064 item 6).
 const DROP_WAIT: Duration = Duration::from_secs(5);
 
 /// Test hook: a place for a detached maintenance thread ([`OpenOptions::detached_into`]).
@@ -67,7 +67,7 @@ pub struct OpenOptions {
     clock: Option<Arc<dyn Clock>>,
     /// Test hook: the maintenance thread runs only the rounds `Db::maintain_now` asks for.
     pub(crate) hold_maintenance: bool,
-    /// How long a `Drop` waits for the maintenance thread before it detaches it (ADR-0065 item 6).
+    /// How long a `Drop` waits for the maintenance thread before it detaches it (ADR-0064 item 6).
     pub(crate) drop_wait: Duration,
     /// Test hook: where a `Drop` puts the thread it detached.
     pub(crate) detached: Option<DetachedSlot>,

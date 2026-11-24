@@ -1,5 +1,5 @@
 //! The maintenance thread: background commits and merges, and the shutdown of `close` and `Drop` (ROADMAP
-//! 10.2.3; SPEC §8.2, §8.5, §14; ADR-0065). Time is a `ManualClock` and rounds run on `maintain_now`: no sleeps.
+//! 10.2.3; SPEC §8.2, §8.5, §14; ADR-0064). Time is a `ManualClock` and rounds run on `maintain_now`: no sleeps.
 #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)] // Tests: inputs are fixed.
 
 use std::panic::AssertUnwindSafe;

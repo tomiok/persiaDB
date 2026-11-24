@@ -132,7 +132,7 @@ report the wrong call.
 | 15 | `PERSIA_CANCELLED` | The call was cancelled or ran past its deadline | `ErrorCode::Cancelled` |
 
 Codes are append-only: a number never changes its meaning, within an ABI major or across them. The Rust
-error type is the source of the mapping (ROADMAP 10.1.5, ADR-0064): `persia::ErrorCode` has these numbers
+error type is the source of the mapping (ROADMAP 10.1.5, ADR-0063): `persia::ErrorCode` has these numbers
 (`ErrorCode::number`) and these names (`ErrorCode::as_str`), and a test in `crates/persia/src/error.rs`
 fails when this table and the enum disagree. `persia::Error` is opaque: a code, a message, and the engine's
 own error as `source()`. Storage kinds that are an internal detail (a short read inside the container)

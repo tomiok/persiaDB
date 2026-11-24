@@ -1,4 +1,4 @@
-//! Callers never drive the engine (ROADMAP 10.2.6; SPEC §8.2, §8.5; ADR-0065): a program that only opens, puts and
+//! Callers never drive the engine (ROADMAP 10.2.6; SPEC §8.2, §8.5; ADR-0064): a program that only opens, puts and
 //! closes names neither `tick` nor `merge_step`, its writes are committed, and `close` returns after the background
 //! threads stopped. One test in its own binary, so the process's threads are this test's alone.
 #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)] // Tests: inputs are fixed.

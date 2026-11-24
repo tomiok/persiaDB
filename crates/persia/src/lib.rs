@@ -16,8 +16,8 @@
 //!
 //! A [`Db`] holds [`Collection`]s of [`Document`]s (put as values, as JSON with [`Collection::put_json`], or as any
 //! `serde` type with [`Collection::put_struct`]) and their blobs ([`Blob`], [`Db::put_blob`]). Reads see every write
-//! that returned; commits and merges run on the database's own thread, and [`Db::close`] joins it (ADR-0065). Every
-//! call returns [`Result`], whose [`Error`] carries a stable [`ErrorCode`] (ADR-0064). Search lands with ROADMAP
+//! that returned; commits and merges run on the database's own thread, and [`Db::close`] joins it (ADR-0064). Every
+//! call returns [`Result`], whose [`Error`] carries a stable [`ErrorCode`] (ADR-0063). Search lands with ROADMAP
 //! 10.1.3. The engine (`persia-engine`) and the hidden [`internal`] layer under this crate (ADR-0051) are not stable
 //! APIs.
 #![forbid(unsafe_code)]
@@ -46,13 +46,13 @@ pub use internal::documents::Blob;
 #[doc(hidden)]
 pub use options::DetachedSlot;
 pub use options::OpenOptions;
-// Blob references (SPEC §9.1): plain values (ADR-0064 item 2).
+// Blob references (SPEC §9.1): plain values (ADR-0063 item 2).
 pub use persia_blob::{BlobId, BlobRef};
-// Documents (SPEC §6.4): plain values (ADR-0064 item 2).
+// Documents (SPEC §6.4): plain values (ADR-0063 item 2).
 pub use persia_engine::document::{Document, Value};
 /// How durable a write is before its call returns (SPEC §8.2.1): `Buffered`, `Async` or `Fsync` (the default).
 pub use persia_engine::wal::Durability;
-// Collection schemas (SPEC §6.2): plain values, re-exported as the engine has them (ADR-0064 item 2).
+// Collection schemas (SPEC §6.2): plain values, re-exported as the engine has them (ADR-0063 item 2).
 pub use persia_engine::schema::{
     AnalyzerRef, BuiltinAnalyzer, CollectionSchema, Fallback, Field, FieldId, FieldKind, FieldType,
     FilterRelaxation, KeywordOptions, Level, Levels, RankFn, RankingConfig, RelaxationConfig,

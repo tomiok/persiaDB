@@ -992,7 +992,7 @@ impl Error {
 impl<S: BlobStore + ?Sized, L: DocumentLog> BlobDatabase<S, L> {
     /// Logs `doc` of `collection` at `durability`: with [`BlobDatabase::put`] of [`Blob::Stored`] when it carries a
     /// blob reference (pinned and checked against the store first, SPEC §9.6), else as it is. What the embedded API's
-    /// `put` does: a reference set by hand is held to the same rule as one `put_blob` returned (ADR-0064 item 5).
+    /// `put` does: a reference set by hand is held to the same rule as one `put_blob` returned (ADR-0063 item 5).
     ///
     /// # Errors
     /// [`Error::BlobNotStored`] for a reference the store lacks (nothing is logged); then as [`BlobDatabase::put`].

@@ -158,7 +158,7 @@ impl Collection {
     pub fn put_with_blob(&self, doc: &Document, blob: Blob<'_>) -> Result<BlobRef> {
         let durability = self.durability();
         self.db.check_writable("put a document")?;
-        // Stored first, outside the writer mutex (ADR-0065 item 1); its pins hold it until the document is logged.
+        // Stored first, outside the writer mutex (ADR-0064 item 1); its pins hold it until the document is logged.
         let (blob_ref, _pins) = match blob {
             Blob::Stored(blob_ref) => (blob_ref, None),
             bytes => {

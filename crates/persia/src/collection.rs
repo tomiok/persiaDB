@@ -86,7 +86,7 @@ impl Collection {
         self.read(|c| Ok(c.schema().clone()))
     }
 
-    /// Test hook: runs `f` while holding the database's writer mutex, as a long write would (ADR-0065 item 9); a
+    /// Test hook: runs `f` while holding the database's writer mutex, as a long write would (ADR-0064 item 9); a
     /// panic in `f` poisons the writer as a write that panicked does.
     ///
     /// # Errors

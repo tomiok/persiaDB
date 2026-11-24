@@ -9,7 +9,7 @@
 //! [`BINARY_ONLY`] crates only in [`BINARIES`] (or as dev-dependencies), [`DEV_ONLY`] crates only as
 //! dev-dependencies, [`TOOLING_ONLY`] crates only in `xtask`, [`SYS_ONLY`] crates only in `persia-storage`. Build scripts are not allowed.
 //! Async runtimes: none in the resolved graph of the embedded stack, dev-dependencies included ([`no_async`],
-//! ROADMAP 0.6.11, ADR-0065); `persia-server` may use one.
+//! ROADMAP 0.6.11, ADR-0064); `persia-server` may use one.
 //! Licenses, advisories and banned crates in the full graph are cargo-deny's job (`deny.toml`).
 
 mod no_async;

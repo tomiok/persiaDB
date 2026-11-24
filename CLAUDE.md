@@ -108,7 +108,7 @@ Always run fmt, clippy and tests before declaring a task done.
 **Architecture**
 - `persia-engine` is **synchronous** and storage-agnostic; it talks to I/O only through the `Storage` trait.
   The embedded stack (`persia`, `persia-engine`, `persia-blob`, `persia-storage`, `persia-format`, `persia-analysis`,
-  `persia-cli`) is synchronous and has no async runtime: its threads are `std::thread`, joined on close (ADR-0065).
+  `persia-cli`) is synchronous and has no async runtime: its threads are `std::thread`, joined on close (ADR-0064).
   `async` lives in `persia-server`, which uses the embedded crates only through their synchronous API. The cloud
   backends of M12 cannot bring a runtime into `persia-storage`: where their async I/O lives is M12's decision.
 - Dependencies point downward. No cycles, no upward edges (enforced by `cargo xtask check-deps`; `ALLOWED` in `xtask/src/check_deps.rs` is the source of truth):
@@ -133,7 +133,7 @@ Always run fmt, clippy and tests before declaring a task done.
 - Repo tooling only (`xtask`, which counts as a binary): `toml` (ADR-0003).
 - The allowed list lives in root `[workspace.dependencies]`; `cargo xtask check-deps` rejects any direct dependency not
   declared there, and `deny.toml` bans engines and checks licenses/advisories for the whole graph. See ADR-0001.
-- **No async runtime in the embedded stack** (ADR-0065, ROADMAP 0.6.11): `cargo xtask check-deps` also walks the
+- **No async runtime in the embedded stack** (ADR-0064, ROADMAP 0.6.11): `cargo xtask check-deps` also walks the
   resolved dependency graph (normal, build and dev edges) of `persia`, `persia-engine`, `persia-blob`,
   `persia-storage`, `persia-format`, `persia-analysis` and `persia-cli`, and fails if it reaches `tokio`, `async-std`,
   `smol` or an executor they are built from (`ASYNC_RUNTIMES` in `xtask/src/check_deps/no_async.rs`), also

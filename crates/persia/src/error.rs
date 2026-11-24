@@ -1,4 +1,4 @@
-//! The error type of the embedded API and its stable codes (ROADMAP 10.1.5, ADR-0064).
+//! The error type of the embedded API and its stable codes (ROADMAP 10.1.5, ADR-0063).
 //!
 //! Every fallible call of this crate returns [`Result`], whose error is the opaque [`Error`]: a stable
 //! [`ErrorCode`], a message for people, and the underlying error as [`source`](std::error::Error::source). The

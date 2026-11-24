@@ -1,4 +1,4 @@
-//! The maintenance thread of a read-write database (SPEC §8.2, §8.5; ROADMAP 10.2.3, 10.2.6; ADR-0065).
+//! The maintenance thread of a read-write database (SPEC §8.2, §8.5; ROADMAP 10.2.3, 10.2.6; ADR-0064).
 //!
 //! One thread per read-write [`Db`](crate::Db), named `persia-maintenance`, none per collection and none on a
 //! read-only database. A round is one `tick` (the commit the engine's `CommitPolicy` finds due on the database's

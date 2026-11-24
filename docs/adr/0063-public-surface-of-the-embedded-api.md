@@ -1,4 +1,4 @@
-# ADR-0064: The public surface of the embedded API: facade types, a fixed re-export list, one opaque error with stable codes
+# ADR-0063: The public surface of the embedded API: facade types, a fixed re-export list, one opaque error with stable codes
 
 - Status: proposed
 - Date: 2026-11-23

@@ -1,4 +1,4 @@
-//! Which [`ErrorCode`] each error of the layers below gets (ROADMAP 10.1.5, ADR-0064).
+//! Which [`ErrorCode`] each error of the layers below gets (ROADMAP 10.1.5, ADR-0063).
 //!
 //! One function per error enum, each an exhaustive `match` with no wildcard arm wherever the enum allows it: a
 //! variant added below does not compile here until someone gives it a code. Two kinds of enum do not allow it:

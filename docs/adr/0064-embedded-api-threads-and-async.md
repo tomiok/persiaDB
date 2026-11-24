@@ -1,16 +1,16 @@
-# ADR-0065: Threads of the embedded API: one maintenance thread per read-write `Db`, a bounded `Drop`, and an async API we own
+# ADR-0064: Threads of the embedded API: one maintenance thread per read-write `Db`, a bounded `Drop`, and an async API we own
 
 - Status: proposed
 - Date: 2026-11-23
 - Related: SPEC §8.1, §8.2, §8.4, §8.5, §14; ROADMAP 10.1.6, 10.1.11, 10.2.1–10.2.3, 10.2.6; ADR-0029, ADR-0032,
-  ADR-0064; `docs/sdk/c-abi.md`
+  ADR-0063; `docs/sdk/c-abi.md`
 
 ## Context
 
 The engine commits and merges only when it is driven: `Database::tick` commits what the commit policy finds due,
 `Database::merge_step` commits finished merges and starts new ones, and both take `&mut self` (ADR-0029, ADR-0032).
 An application that embeds Persia must not have to call either, and its `put` must not be the call that happens to
-pay for a merge commit. The public `Db` is `Send + Sync` with every method on `&self` (ADR-0064), so it needs a
+pay for a merge commit. The public `Db` is `Send + Sync` with every method on `&self` (ADR-0063), so it needs a
 writer mutex, and something must decide what happens to background work when a `Db` is closed, dropped, or dropped
 while a thread is still inside a call. Separately, ROADMAP 10.1.6 asked for an async wrapper as a `tokio` feature,
 and no crate of the embedded stack may depend on an async runtime. The owner decided these on 2026-11-23 (wave 7,

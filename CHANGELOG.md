@@ -9,7 +9,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
-- `persia`: the error type of the embedded API (ROADMAP 10.1.5, ADR-0064). `persia::Error` is opaque: a stable
+- `persia`: the error type of the embedded API (ROADMAP 10.1.5, ADR-0063). `persia::Error` is opaque: a stable
   `ErrorCode` (`code()`), a message, and the engine's own error as `source()`; `persia::Result<T>` is the alias.
   `ErrorCode` is `#[non_exhaustive]` and has the numbers (`number()`, `from_number`) and names (`as_str()`,
   `PERSIA_NOT_FOUND`, ...) of the C ABI's error table in `docs/sdk/c-abi.md`, which gains `13 PERSIA_READ_ONLY`,
@@ -36,7 +36,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   is `NotFound`, one created again under the name is reached), and fails with `Closed` once the database is closed.
   The schema types are re-exported under `persia::` (`CollectionSchema`, `SchemaBuilder`, `Field`, `FieldId`,
   `FieldKind`, `FieldType`, `TextOptions`, `KeywordOptions`, `AnalyzerRef`, `RankingConfig`, `RelaxationConfig` and
-  the types they name, ADR-0064).
+  the types they name, ADR-0063).
 - `persia`: documents and blobs (ROADMAP 10.1.3, search excepted; SPEC §6.4, §8.1, §8.2, §9.6). `Collection::put`,
   `put_batch`, `put_json`, `put_with_blob`, `delete`, `get`, `get_json`, `commit` and `with_durability`; `Db::commit`,
   `Db::put_blob`, `Db::get_blob` (a `BlobReader` that owns a share of the database) and `Db::get_blob_range`.
@@ -53,7 +53,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   fails at once with `Conflict`.
 - `persia`: read-your-writes is documented and tested (ROADMAP 10.2.2; SPEC §8.4): on a read-write `Db`, a read that
   starts after a write returned sees it from any handle and thread, at every durability, committed or not.
-- `persia`: background commits and merges (ROADMAP 10.2.3; SPEC §8.2, §8.5, §14; ADR-0065). A read-write `Db` runs one
+- `persia`: background commits and merges (ROADMAP 10.2.3; SPEC §8.2, §8.5, §14; ADR-0064). A read-write `Db` runs one
   thread, `persia-maintenance`, that commits what the commit policy finds due (`idle_flush`, `commit_interval`, a
   full memtable) and drives the engine's merges, every second while there is work and parked otherwise. `close`
   stops it and waits: the thread makes the final commit, cancels merges in flight and releases the writer lock;
