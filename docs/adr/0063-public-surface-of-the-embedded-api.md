@@ -67,12 +67,13 @@ would freeze the engine's shape. The owner decided the surface on 2026-11-23 (wa
    - **Fallbacks.** A failure that fits no code, an allocation that failed or an internal invariant that did not
      hold (`DatabaseError::Internal`, `ApplyError`), is `IO`. The engine's `#[non_exhaustive]` enums are all errors of
      a search request: a variant this build does not know is `INVALID_ARGUMENT`.
-9. **Storage errors are classified by name.** `persia` may not depend on `persia-storage` or `persia-format`
-   (`cargo xtask check-deps`), and the engine re-exports none of their error types, so `persia` cannot match on the
-   container's error or on the storage error kind. It uses the methods they have (`is_corruption`, `kind`) and, where
-   none tells (`Locked`, `ReadOnly`, `Poisoned`, the kinds), the variant's name as `Debug` prints it. The table test
-   names those types through `persia`'s dev-dependency on `persia-storage` and matches on them exhaustively, so a
-   variant added or renamed fails that test. An unknown name is `IO`.
+9. **Storage and format errors are classified by kind.** `persia` may not depend on `persia-storage` or
+   `persia-format` (`cargo xtask check-deps`). Each of their errors has a `kind()`: `persia_format::ErrorKind`,
+   `persia_storage::container::ErrorKind` and `persia_storage::ErrorKind`, plain enums (not `#[non_exhaustive]`) that
+   the engine re-exports as `persia_engine::error_kinds`. `classify.rs` maps them with exhaustive matches, so a class
+   added or renamed below fails to compile there, and a table test lists every class with its code. Nothing is read
+   from an error's `Debug` or `Display` text. (Until 2026-11-24 the variant's `Debug` name was read; replaced in
+   review.)
 10. **The surface is guarded by a committed snapshot** (ROADMAP 10.1.12), recorded with that leaf. `cargo semver-checks`
     waits for the first publish (ROADMAP 10.5.1).
 
@@ -82,8 +83,8 @@ would freeze the engine's shape. The owner decided the surface on 2026-11-23 (wa
   change the re-exported value types without one: the allow-list is where the engine's shape is frozen.
 - A caller branches on fifteen codes, never on an engine error. Detail the codes lose (which document of a batch
   was rejected, the resume token of an interrupted upload) is in the message and behind `source()` only.
-- Item 9 is a workaround. A re-export of the storage error types from `persia-engine` (as it re-exports
-  `persia_analysis`) would let `classify.rs` match on variants; the table test would stay as it is.
+- Item 9 adds a small, stable classification API to `persia-format` and `persia-storage` (one `kind()` each), and
+  one re-export module to the engine, instead of re-exporting their whole error types.
 - `IO` covers "none of the above". A caller cannot tell a bug from a failed disk by the code; a dedicated code
   (`16 PERSIA_INTERNAL`) can be appended if that matters.
 - **What the re-exports freeze.** Item 4 makes every public method and field of the re-exported types part of

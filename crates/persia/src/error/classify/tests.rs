@@ -104,7 +104,7 @@ fn key() -> Key {
     Key::new("segments/c/1.seg").unwrap()
 }
 
-/// The name `classify::container` looks for, by an exhaustive match: a new variant does not compile here.
+/// Each variant's name, by an exhaustive match: a new variant does not compile here.
 fn container_name(error: &ContainerError) -> &'static str {
     match error {
         ContainerError::Io { .. } => "Io",
@@ -122,8 +122,8 @@ fn container_name(error: &ContainerError) -> &'static str {
 }
 
 /// Every variant of the container's error that can be built here, with its code. `CompactedNotDurable` holds a
-/// relocation table only a compaction can build: its name is not one `classify::container` knows, so it takes the
-/// fallback like `Io`, which the unknown-name test covers.
+/// relocation table only a compaction can build here: its kind's code is in [`every_storage_and_format_kind_has_its_code`],
+/// and `persia-storage` tests its kind.
 fn container_cases() -> Vec<(ErrorCode, ContainerError)> {
     format_error!(corrupt, corrupt);
     format_error!(corrupt, corrupt_tail);
@@ -175,18 +175,9 @@ fn container_errors_by_variant() {
     for (expected, error) in container_cases() {
         let name = container_name(&error);
         seen.insert(name);
-        assert_eq!(
-            variant(&error).0,
-            name,
-            "Debug prints the variant's name first"
-        );
         let shown = error.to_string();
         // Directly, and through each engine error that carries one.
-        assert_eq!(
-            container(error.is_corruption(), &error),
-            expected,
-            "{shown}"
-        );
+        assert_eq!(container_kind(error.kind()), expected, "{shown}");
         assert_eq!(DatabaseError::Container(error).code(), expected, "{shown}");
     }
     // Every variant but the one that cannot be built here (see `container_cases`).
@@ -212,7 +203,7 @@ fn container_errors_by_variant() {
     }
 }
 
-/// The name `classify::storage_kind` looks for, by an exhaustive match.
+/// Each kind's name, by an exhaustive match.
 fn storage_kind_name(kind: ErrorKind) -> &'static str {
     match kind {
         ErrorKind::NotFound => "NotFound",
@@ -302,8 +293,7 @@ fn storage_errors_by_kind() {
         assert_eq!(error.kind(), kind);
         let name = storage_kind_name(kind);
         kinds.insert(name);
-        assert_eq!(variant(&kind).0, name);
-        assert_eq!(storage_kind(&kind), expected, "{name}");
+        assert_eq!(storage_kind(kind), expected, "{name}");
         assert_eq!(DatabaseError::Storage(error).code(), expected, "{name}");
     }
     assert_eq!(kinds.len(), 7, "every storage kind has a row");
@@ -317,64 +307,116 @@ fn storage_errors_by_kind() {
     }
 }
 
+/// Every class of every lower error, with its code. The `match`es in [`every_kind_is_listed`] have no wildcard, so a
+/// class added or renamed in `persia-storage` or `persia-format` fails to compile until it has a row here.
 #[test]
-fn a_name_the_classifier_does_not_know_falls_back() {
-    #[derive(Debug)]
-    #[allow(dead_code)] // Read through `Debug` only.
-    enum Later {
-        AddedLater,
-        Format(Inner),
-    }
-    #[derive(Debug)]
-    enum Inner {
-        AddedLater,
-        Unsupported,
-    }
+fn every_storage_and_format_kind_has_its_code() {
+    use persia_engine::error_kinds::{
+        ContainerErrorKind as C, FormatErrorKind as F, StorageErrorKind as S,
+    };
+    let formats = [
+        (F::Corrupt, Corrupt),
+        (F::Unsupported, Unsupported),
+        (F::OutOfMemory, FALLBACK),
+        (F::InvalidInput, FALLBACK),
+    ];
+    let containers = [
+        (C::Io, FALLBACK),
+        (C::CompactedNotDurable, FALLBACK),
+        (C::Corrupt, Corrupt),
+        (C::Unsupported, Unsupported),
+        (C::OutOfMemory, FALLBACK),
+        (C::FormatInput, FALLBACK),
+        (C::Locked, Conflict),
+        (C::AlreadyExists, AlreadyExists),
+        (C::ReadOnly, ReadOnly),
+        (C::Poisoned, Poisoned),
+        (C::InvalidInput, InvalidArgument),
+        (C::Encode, FALLBACK),
+    ];
+    let storages = [
+        (S::NotFound, NotFound),
+        (S::Conflict, Conflict),
+        (S::Transient, Transient),
+        (S::Corrupt, Corrupt),
+        (S::Io, FALLBACK),
+        (S::InvalidInput, InvalidArgument),
+        (S::Unsupported, Unsupported),
+    ];
     assert_eq!(FALLBACK, Io);
-    assert_eq!(container(false, &Later::AddedLater), FALLBACK);
-    assert_eq!(
-        container(false, &Later::Format(Inner::AddedLater)),
-        FALLBACK
+    for (kind, code) in formats {
+        assert_eq!(format_kind(kind), code, "{kind:?}");
+    }
+    for (kind, code) in containers {
+        assert_eq!(container_kind(kind), code, "{kind:?}");
+    }
+    for (kind, code) in storages {
+        assert_eq!(storage_kind(kind), code, "{kind:?}");
+    }
+    every_kind_is_listed(
+        &formats.map(|r| r.0),
+        &containers.map(|r| r.0),
+        &storages.map(|r| r.0),
     );
-    assert_eq!(
-        container(false, &Later::Format(Inner::Unsupported)),
-        Unsupported
-    );
-    // Corruption is asked of the error itself, before any name.
-    assert_eq!(container(true, &Later::AddedLater), Corrupt);
-    assert_eq!(storage_kind(&Later::AddedLater), FALLBACK);
-    assert_eq!(format(false, &Inner::AddedLater), FALLBACK);
-    assert_eq!(format(false, &Inner::Unsupported), Unsupported);
-    assert_eq!(format(true, &Inner::AddedLater), Corrupt);
 }
 
-#[test]
-fn variant_reads_the_first_two_names_and_stops_early() {
-    #[derive(Debug)]
-    #[allow(dead_code)] // Read through `Debug` only.
-    enum Shape {
-        Unit,
-        Tuple(&'static str),
-        Named { op: u8 },
-    }
-    assert_eq!(variant(&Shape::Unit), ("Unit".to_owned(), String::new()));
-    assert_eq!(variant(&Shape::Tuple("Locked")).0, "Tuple");
-    assert_eq!(
-        variant(&Shape::Named { op: 1 }),
-        ("Named".to_owned(), "op".to_owned())
+/// Fails to compile when a class is added, and fails when a listed class has no row.
+fn every_kind_is_listed(
+    formats: &[FormatErrorKind],
+    containers: &[ContainerErrorKind],
+    storages: &[StorageErrorKind],
+) {
+    use persia_engine::error_kinds::{
+        ContainerErrorKind as C, FormatErrorKind as F, StorageErrorKind as S,
+    };
+    let format_count = |k: F| match k {
+        F::Corrupt | F::Unsupported | F::OutOfMemory | F::InvalidInput => 4,
+    };
+    let container_count = |k: C| match k {
+        C::Io
+        | C::CompactedNotDurable
+        | C::Corrupt
+        | C::Unsupported
+        | C::OutOfMemory
+        | C::FormatInput
+        | C::Locked
+        | C::AlreadyExists
+        | C::ReadOnly
+        | C::Poisoned
+        | C::InvalidInput
+        | C::Encode => 12,
+    };
+    let storage_count = |k: S| match k {
+        S::NotFound
+        | S::Conflict
+        | S::Transient
+        | S::Corrupt
+        | S::Io
+        | S::InvalidInput
+        | S::Unsupported => 7,
+    };
+    let distinct = |n: usize, count: usize| assert_eq!(n, count, "a class without a row");
+    distinct(
+        formats
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        format_count(F::Corrupt),
     );
-    assert_eq!(variant(&""), (String::new(), String::new()));
-    // A megabyte of `Debug` output is cut at the head.
-    let long = "x".repeat(1 << 20);
-    let (first, second) = variant(&long);
-    assert!(
-        first.len() <= Head::MAX && second.is_empty(),
-        "{}",
-        first.len()
+    distinct(
+        containers
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        container_count(C::Io),
     );
-    // Multi-byte characters are counted in bytes and never split.
-    let (first, _) = variant(&"é".repeat(200));
-    assert!(first.is_empty(), "{first}"); // not ASCII identifiers
+    distinct(
+        storages
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        storage_count(S::Io),
+    );
 }
 
 /// Asserts each row's code, directly and behind `Error::wrap`, whose message is the source's.

@@ -7,19 +7,15 @@
 //!   `RelaxError`, `ScoreError`, `Interrupt`): a match must have a wildcard. They are all errors of a search
 //!   request, so a variant this build does not know is [`ErrorCode::InvalidArgument`] ([`REQUEST_FALLBACK`]);
 //!   `Interrupt`'s is [`ErrorCode::Cancelled`].
-//! - Enums of `persia-storage` and `persia-format` (the container's error, the storage error and its kind, the
-//!   format's decode error). `persia` may not depend on those crates (`cargo xtask check-deps`), and the engine
-//!   re-exports none of their error types, so this crate cannot name them and cannot match on them. They are
-//!   classified by the methods they have (`is_corruption`, `kind`) and, where no method tells, by the name of
-//!   their variant as `Debug` prints it ([`variant`]). An unknown name is [`FALLBACK`]. The table test at the end
-//!   of this file names those types through the dev-dependency on `persia-storage` and matches on them
-//!   exhaustively, so a variant added or renamed there fails that test instead of falling back silently. Only
-//!   `persia_format::Error` cannot be named even there: anything but corruption and `Unsupported` falls back.
+//! - Errors of `persia-storage` and `persia-format` (the container's error, the storage error, the format's decode
+//!   error). `persia` may not depend on those crates (`cargo xtask check-deps`), so it maps them from their `kind()`,
+//!   whose enums the engine re-exports (`persia_engine::error_kinds`): exhaustive matches, so a class added or
+//!   renamed below does not compile here. Nothing is read from an error's `Debug` or `Display` text.
 //!
 //! [`FALLBACK`] is [`ErrorCode::Io`]: the code of a failure that fits no other code (an allocation that failed, an
 //! internal invariant that did not hold).
 
-use std::fmt::{self, Write as _};
+use persia_engine::error_kinds::{ContainerErrorKind, FormatErrorKind, StorageErrorKind};
 
 use persia_engine::db::{DatabaseError, RelaxedSearchError};
 use persia_engine::document::{DecodeError, DocumentError};
@@ -51,96 +47,47 @@ pub(crate) trait Classified {
     fn code(&self) -> ErrorCode;
 }
 
-/// Collects the first bytes of a `Debug` output and then stops the formatter.
-struct Head {
-    text: String,
-}
-
-impl Head {
-    /// Enough for two variant names; a `Debug` output can be megabytes (a relocation table).
-    const MAX: usize = 96;
-}
-
-impl fmt::Write for Head {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for c in s.chars() {
-            if self.text.len() >= Self::MAX {
-                return Err(fmt::Error);
-            }
-            self.text.push(c);
-        }
-        Ok(())
+/// A `persia_format::Error`'s class (decoding), as its `kind()` gives it.
+fn format_kind(kind: FormatErrorKind) -> ErrorCode {
+    match kind {
+        FormatErrorKind::Corrupt => ErrorCode::Corrupt,
+        FormatErrorKind::Unsupported => ErrorCode::Unsupported,
+        // An allocation that failed, and the caller errors of the format's readers, which only a bug in the layers
+        // between could cause.
+        FormatErrorKind::OutOfMemory | FormatErrorKind::InvalidInput => FALLBACK,
     }
 }
 
-/// The first two identifiers of `value`'s `Debug` output: for a derived `Debug` of an enum, the variant's name and,
-/// for a tuple variant holding another enum, that one's (`Format(Corrupt { .. })` gives `("Format", "Corrupt")`).
-/// Only for the enums this crate cannot name (module docs).
-fn variant(value: &dyn fmt::Debug) -> (String, String) {
-    let mut head = Head {
-        text: String::new(),
-    };
-    // An error here is the head being full, which is the point.
-    let _full = write!(head, "{value:?}");
-    let mut names = head
-        .text
-        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned);
-    (
-        names.next().unwrap_or_default(),
-        names.next().unwrap_or_default(),
-    )
-}
-
-/// `persia_format::Error` by its variant name `name`, after its `is_corruption()`.
-fn format_named(corrupt: bool, name: &str) -> ErrorCode {
-    if corrupt {
-        return ErrorCode::Corrupt;
-    }
-    match name {
-        "Unsupported" => ErrorCode::Unsupported,
-        // `OutOfMemory`, and the caller errors of the format's readers, which only a bug in the layers between
-        // could cause.
-        _ => FALLBACK,
+/// A `persia_storage::container::Error`'s class, as its `kind()` gives it.
+fn container_kind(kind: ContainerErrorKind) -> ErrorCode {
+    match kind {
+        ContainerErrorKind::Corrupt => ErrorCode::Corrupt,
+        ContainerErrorKind::Unsupported => ErrorCode::Unsupported,
+        ContainerErrorKind::Locked => ErrorCode::Conflict,
+        ContainerErrorKind::AlreadyExists => ErrorCode::AlreadyExists,
+        ContainerErrorKind::ReadOnly => ErrorCode::ReadOnly,
+        ContainerErrorKind::Poisoned => ErrorCode::Poisoned,
+        ContainerErrorKind::InvalidInput => ErrorCode::InvalidArgument,
+        // An I/O failure (`CompactedNotDurable` also poisons the handle: later calls say so); an allocation, a
+        // format reader's caller error or an encoding that failed fit no other code.
+        ContainerErrorKind::Io
+        | ContainerErrorKind::CompactedNotDurable
+        | ContainerErrorKind::OutOfMemory
+        | ContainerErrorKind::FormatInput
+        | ContainerErrorKind::Encode => FALLBACK,
     }
 }
 
-/// A `persia_format::Error` (decoding).
-fn format(corrupt: bool, error: &dyn fmt::Debug) -> ErrorCode {
-    format_named(corrupt, &variant(error).0)
-}
-
-/// A `persia_storage::container::Error`.
-fn container(corrupt: bool, error: &dyn fmt::Debug) -> ErrorCode {
-    if corrupt {
-        return ErrorCode::Corrupt;
-    }
-    let (name, inner) = variant(error);
-    match name.as_str() {
-        "Locked" => ErrorCode::Conflict,
-        "AlreadyExists" => ErrorCode::AlreadyExists,
-        "ReadOnly" => ErrorCode::ReadOnly,
-        "Poisoned" => ErrorCode::Poisoned,
-        "InvalidInput" => ErrorCode::InvalidArgument,
-        "Format" => format_named(false, &inner),
-        // `Io` and `CompactedNotDurable` (an I/O failure that also poisons the handle: later calls say so);
-        // `OutOfMemory` and `Encode` fit no other code.
-        _ => FALLBACK,
-    }
-}
-
-/// A `persia_storage::ErrorKind`, as `persia_storage::Error::kind` gives it.
-fn storage_kind(kind: &dyn fmt::Debug) -> ErrorCode {
-    match variant(kind).0.as_str() {
-        "NotFound" => ErrorCode::NotFound,
-        "Conflict" => ErrorCode::Conflict,
-        "Transient" => ErrorCode::Transient,
-        "Corrupt" => ErrorCode::Corrupt,
-        "InvalidInput" => ErrorCode::InvalidArgument,
-        "Unsupported" => ErrorCode::Unsupported,
-        // `Io`.
-        _ => FALLBACK,
+/// A `persia_storage::Error`'s class, as its `kind()` gives it.
+fn storage_kind(kind: StorageErrorKind) -> ErrorCode {
+    match kind {
+        StorageErrorKind::NotFound => ErrorCode::NotFound,
+        StorageErrorKind::Conflict => ErrorCode::Conflict,
+        StorageErrorKind::Transient => ErrorCode::Transient,
+        StorageErrorKind::Corrupt => ErrorCode::Corrupt,
+        StorageErrorKind::InvalidInput => ErrorCode::InvalidArgument,
+        StorageErrorKind::Unsupported => ErrorCode::Unsupported,
+        StorageErrorKind::Io => FALLBACK,
     }
 }
 
@@ -213,7 +160,7 @@ impl Classified for DecodeError {
     fn code(&self) -> ErrorCode {
         match self {
             Self::Corrupt { .. } => ErrorCode::Corrupt,
-            Self::BlobRef(e) => format(e.is_corruption(), e),
+            Self::BlobRef(e) => format_kind(e.kind()),
             Self::UnsupportedVersion { .. } => ErrorCode::Unsupported,
         }
     }
@@ -226,8 +173,8 @@ impl Classified for ReadError {
             Self::Corrupt { .. } | Self::Section { .. } | Self::Tombstone { .. } => {
                 ErrorCode::Corrupt
             }
-            Self::Block { source, .. } => format(source.is_corruption(), source),
-            Self::Format(e) => format(e.is_corruption(), e),
+            Self::Block { source, .. } => format_kind(source.kind()),
+            Self::Format(e) => format_kind(e.kind()),
             Self::Unsupported { .. } => ErrorCode::Unsupported,
             Self::Document { source, .. } => source.code(),
             Self::Interrupted(interrupt) => interrupt.code(),
@@ -304,7 +251,7 @@ impl Classified for ReplayError {
             Self::UnknownCollection { .. } => ErrorCode::Corrupt,
             Self::Document { error, .. } => error.code(),
             Self::Memtable { error, .. } => error.code(),
-            Self::Container(e) => container(e.is_corruption(), e),
+            Self::Container(e) => container_kind(e.kind()),
         }
     }
 }
@@ -352,8 +299,8 @@ impl Classified for DatabaseError {
             return ErrorCode::Corrupt;
         }
         match self {
-            Self::Container(e) => container(e.is_corruption(), e),
-            Self::Storage(e) => storage_kind(&e.kind()),
+            Self::Container(e) => container_kind(e.kind()),
+            Self::Storage(e) => storage_kind(e.kind()),
             Self::Manifest(e) => e.code(),
             Self::ManifestEncode(e) => e.code(),
             Self::Apply(e) => e.code(),
@@ -375,7 +322,7 @@ impl Classified for DatabaseError {
             Self::BatchRejected { source, .. } => source.code(),
             Self::Record(e) => e.code(),
             Self::Wal(e) => match e {
-                WalWriteError::Log(log) => container(log.is_corruption(), log),
+                WalWriteError::Log(log) => container_kind(log.kind()),
                 WalWriteError::Poisoned => ErrorCode::Poisoned,
                 WalWriteError::ChunkFull(_) => ErrorCode::Limit,
             },
@@ -428,12 +375,12 @@ impl Classified for persia_blob::Error {
             }
             Self::PackPoisoned => ErrorCode::Poisoned,
             Self::PackReadOnly => ErrorCode::ReadOnly,
-            Self::Storage(e) => storage_kind(&e.kind()),
+            Self::Storage(e) => storage_kind(e.kind()),
             // What stopped the upload decides; the wrapper only adds that it can be resumed.
             Self::UploadInterrupted { source, .. } => source.code(),
             // "Open again": the lease's file raced a writer's sweep.
             Self::LeaseContended { .. } => ErrorCode::Transient,
-            Self::Container(e) => container(e.is_corruption(), e),
+            Self::Container(e) => container_kind(e.kind()),
             // Misuse of the store by the layer above it: a bug.
             Self::ChunkerFailed | Self::InvalidManifest { .. } | Self::ChunkNotStaged { .. } => {
                 FALLBACK

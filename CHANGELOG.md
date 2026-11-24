@@ -64,6 +64,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   drop_wait, detached_into}`, `DetachedSlot`, `Collection::hold_writer_while`) exist only with the non-default
   `test-hooks` feature, and `persia::internal` is public only with the non-default `internal` feature (which
   `persia-cli` and the fuzz targets enable): the default public API exposes neither (ADR-0063).
+- `persia-format`: `Error::kind()` and `ErrorKind` (`Corrupt`, `Unsupported`, `OutOfMemory`, `InvalidInput`).
+  `persia-storage`: `container::Error::kind()` and `container::ErrorKind`. `persia-engine`: `error_kinds` re-exports
+  them with `persia_storage::ErrorKind`. `persia` classifies storage and format errors from these kinds, with
+  exhaustive matches, instead of reading their `Debug` text (ADR-0063 item 9).
 - `persia`: typed documents through `serde` (ROADMAP 10.1.4; SPEC §6.4.1). `Collection::put_struct(&T)` is exactly
   `put_json(serde_json::to_string(&T))`; `Collection::get_struct::<T>(id)` and `Collection::to_struct::<T>(&doc)` read
   a document's JSON output back. SPEC §6.4.1 is the only mapping. `persia` now depends on `serde` and `serde_json`.
