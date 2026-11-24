@@ -8,7 +8,11 @@
 //! (the allowed list) and inherited with `.workspace = true`, so versions live in one place. Tiers:
 //! [`BINARY_ONLY`] crates only in [`BINARIES`] (or as dev-dependencies), [`DEV_ONLY`] crates only as
 //! dev-dependencies, [`TOOLING_ONLY`] crates only in `xtask`, [`SYS_ONLY`] crates only in `persia-storage`. Build scripts are not allowed.
+//! Async runtimes: none in the resolved graph of the embedded stack, dev-dependencies included ([`no_async`],
+//! ROADMAP 0.6.11, ADR-0065); `persia-server` may use one.
 //! Licenses, advisories and banned crates in the full graph are cargo-deny's job (`deny.toml`).
+
+mod no_async;
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -238,10 +242,11 @@ fn read_toml(path: &Path) -> Result<toml::Table> {
         .with_context(|| format!("parsing {}", path.display()))
 }
 
-/// Runs the check on the workspace at `root`; prints violations and returns whether it passed.
-pub(crate) fn run(root: &Path) -> Result<bool> {
+/// `cargo metadata` for the workspace at `root`, with `extra` arguments.
+fn cargo_metadata(root: &Path, extra: &[&str]) -> Result<Vec<u8>> {
     let output = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned()))
-        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .args(["metadata", "--format-version", "1"])
+        .args(extra)
         .current_dir(root)
         .output()
         .context("running cargo metadata")?;
@@ -251,12 +256,21 @@ pub(crate) fn run(root: &Path) -> Result<bool> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let metadata: Metadata =
-        serde_json::from_slice(&output.stdout).context("parsing cargo metadata")?;
+    Ok(output.stdout)
+}
+
+/// Runs the check on the workspace at `root`; prints violations and returns whether it passed.
+pub(crate) fn run(root: &Path) -> Result<bool> {
+    let metadata: Metadata = serde_json::from_slice(&cargo_metadata(root, &["--no-deps"])?)
+        .context("parsing cargo metadata")?;
 
     let external = workspace_dependencies(&read_toml(&root.join("Cargo.toml"))?)?;
     let mut errors = violations(&metadata, &external);
     errors.extend(build_scripts(&metadata));
+    // The resolved graph, every platform's dependencies included: where a runtime would arrive transitively.
+    let graph: no_async::Graph = serde_json::from_slice(&cargo_metadata(root, &[])?)
+        .context("parsing cargo metadata (resolved graph)")?;
+    errors.extend(no_async::violations(&graph));
     for pkg in &metadata.packages {
         errors.extend(not_inherited(
             &pkg.name,
