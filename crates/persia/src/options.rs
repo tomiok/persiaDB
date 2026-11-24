@@ -329,8 +329,16 @@ mod tests {
             .commit_interval(Duration::from_secs(7))
             .merge_threads(3)
             .durability(Durability::Buffered)
-            .clock(clock);
+            .clock(clock)
+            .hold_maintenance(true)
+            .drop_wait(Duration::from_millis(7))
+            .detached_into(Arc::default());
         assert!(!options.create_if_missing && options.read_only);
+        assert!(options.hold_maintenance && options.detached.is_some());
+        assert_eq!(options.drop_wait, Duration::from_millis(7));
+        let defaults = OpenOptions::new();
+        assert!(!defaults.hold_maintenance && defaults.detached.is_none());
+        assert_eq!(defaults.drop_wait, Duration::from_secs(5));
         assert_eq!(options.durability, Durability::Buffered);
         let engine = options.database_options();
         assert_eq!(engine.policy.flush.memtable_bytes, 1 << 20);
