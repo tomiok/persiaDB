@@ -7,6 +7,8 @@
 //! 3. The mapping follows a refresh: after a commit it covers the new `log_end`, after a compaction it is of the new
 //!    file. A snapshot taken before keeps reading what it showed.
 //! 4. Mapped or not, a reader shows the same documents.
+//! 5. The default is `MappedReads::Never` on Windows and `MappedReads::IfLocal` elsewhere; the tests that need a
+//!    mapping ask for `IfLocal`.
 //!
 //! The files live in temporary directories, which are on a local disk on the platforms the mapped tests run on (the
 //! storage crate's `a_container_on_a_local_disk_is_mapped_automatically` asserts it), so the mapped path really runs.
@@ -90,6 +92,33 @@ fn holds(snapshot: &Snapshot, ids: &[&str], absent: &[&str]) {
     }
 }
 
+/// Options that ask for mapped reads, whatever the platform's default.
+fn mapping() -> ReadOnlyOptions {
+    ReadOnlyOptions::new().mapped_reads(MappedReads::IfLocal)
+}
+
+/// Invariant 5: the default is `Never` on Windows and `IfLocal` elsewhere (SPEC §4.7, ADR-0017 amended).
+#[test]
+fn the_default_is_never_on_windows_and_if_local_elsewhere() {
+    let expected = if cfg!(windows) {
+        MappedReads::Never
+    } else {
+        MappedReads::IfLocal
+    };
+    assert_eq!(MappedReads::default(), expected);
+    #[cfg(windows)]
+    assert_eq!(MappedReads::default(), MappedReads::Never);
+    // And a default read-only open on Windows reads with ordinary reads.
+    let dir = tempfile::tempdir().unwrap();
+    let path = path(&dir);
+    let _db = writer(&path);
+    let reader = ReadOnlyDatabase::open_with_options(&path, &ReadOnlyOptions::new()).unwrap();
+    if cfg!(windows) {
+        assert!(!reader.container().is_mapped());
+    }
+    holds(&reader.snapshot(), &["a", "b"], &["z"]);
+}
+
 /// The committed frames of `reader`'s current container: what a mapping of it covers.
 fn committed(reader: &ReadOnlyDatabase) -> std::ops::Range<u64> {
     FIRST_FRAME_OFFSET..reader.container().superblock().log_end
@@ -101,18 +130,17 @@ fn an_open_with_options_maps_a_container_on_a_local_disk() {
     let dir = tempfile::tempdir().unwrap();
     let path = path(&dir);
     let db = writer(&path);
-    let reader = ReadOnlyDatabase::open_with_options(&path, &ReadOnlyOptions::new()).unwrap();
+    let reader = ReadOnlyDatabase::open_with_options(&path, &mapping()).unwrap();
     let container = reader.container();
     assert!(container.is_on_local_disk().unwrap());
     assert!(container.is_mapped());
     assert_eq!(container.mapped_range(), Some(committed(&reader)));
     assert_eq!(container.mapping_failures(), 0);
     holds(&reader.snapshot(), &["a", "b"], &["z"]);
-    // The default, said out loud, is the same.
-    let said = ReadOnlyOptions::new().mapped_reads(MappedReads::IfLocal);
-    let reader = ReadOnlyDatabase::open_with_options(&path, &said).unwrap();
-    assert!(reader.container().is_mapped());
-    assert_eq!(MappedReads::default(), MappedReads::IfLocal);
+    // The default maps too, except on Windows (invariant 5).
+    let default = ReadOnlyDatabase::open_with_options(&path, &ReadOnlyOptions::new()).unwrap();
+    assert_eq!(default.container().is_mapped(), !cfg!(windows));
+    holds(&default.snapshot(), &["a", "b"], &["z"]);
     // The writer next to it is not mapped.
     assert!(!db.container().is_mapped());
 }
@@ -181,7 +209,7 @@ fn a_refresh_maps_the_commits_since() {
     let dir = tempfile::tempdir().unwrap();
     let path = path(&dir);
     let mut db = writer(&path);
-    let reader = ReadOnlyDatabase::open_with_options(&path, &ReadOnlyOptions::new()).unwrap();
+    let reader = ReadOnlyDatabase::open_with_options(&path, &mapping()).unwrap();
     let first = reader.snapshot();
     let before = committed(&reader);
     assert_eq!(reader.container().mapped_range(), Some(before.clone()));
@@ -230,7 +258,7 @@ fn a_refresh_after_a_compaction_maps_the_new_file() {
     let path = path(&dir);
     let mut db = writer(&path);
     commit(&mut db, &["c"]);
-    let reader = ReadOnlyDatabase::open_with_options(&path, &ReadOnlyOptions::new()).unwrap();
+    let reader = ReadOnlyDatabase::open_with_options(&path, &mapping()).unwrap();
     let first = reader.snapshot();
     let old = reader.container();
     let before = committed(&reader);
@@ -253,7 +281,7 @@ fn a_refresh_after_a_compaction_maps_the_new_file() {
     assert_eq!(old.mapped_range(), Some(before));
     holds(&first, &["a", "b", "c"], &[]);
     // A reader opened now sees what the refreshed one sees.
-    let fresh = ReadOnlyDatabase::open_with_options(&path, &ReadOnlyOptions::new()).unwrap();
+    let fresh = ReadOnlyDatabase::open_with_options(&path, &mapping()).unwrap();
     assert_eq!(fresh.seq(), reader.seq());
     assert_eq!(*fresh.manifest(), *reader.manifest());
     holds(&fresh.snapshot(), &["b", "c"], &["a"]);

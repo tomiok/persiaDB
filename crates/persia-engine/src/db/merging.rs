@@ -352,7 +352,7 @@ impl<F: ContainerFile + Sync + 'static> Database<F> {
             plan,
             schema: Arc::clone(&c.schema),
             registry: self.options.registry.clone(),
-            cache: Arc::clone(&self.options.block_cache),
+            cache: Arc::clone(&self.block_cache),
             inputs,
             segment_id,
             created_at: self.options.clock.unix_micros(),

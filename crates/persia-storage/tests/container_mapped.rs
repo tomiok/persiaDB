@@ -60,6 +60,12 @@ fn map_reads(c: &mut Container) -> persia_storage::container::Result<()> {
     unsafe { c.enable_mapped_reads() }
 }
 
+/// [`Container::map_read_only_if_local`] on a container this test owns.
+fn map_if_local(c: &mut Container) -> persia_storage::container::Result<bool> {
+    // SAFETY: as `map_reads`.
+    unsafe { c.map_read_only_if_local() }
+}
+
 fn is_mapped(c: &Container, offset: u64) -> bool {
     let a = c.read_frame_source(offset, MAX).unwrap().payload;
     let b = c.read_frame_source(offset, MAX).unwrap().payload;
@@ -467,16 +473,16 @@ fn a_container_on_a_local_disk_is_mapped_automatically() {
     }
 }
 
-// --- The safe entry for read-only containers (ROADMAP 10.2.4; SPEC §4.7; ADR-0017, amended 2026-11-23) ---
+// --- The read-only entry of mapped reads (ROADMAP 10.2.4; SPEC §4.7; ADR-0017, amended 2026-11-23) ---
 
 /// The temporary directory is on a local disk on every CI platform (`a_container_on_a_local_disk_is_mapped_automatically`).
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[test]
-fn a_read_only_container_on_a_local_disk_maps_with_the_safe_call() {
+fn a_read_only_container_on_a_local_disk_maps_with_the_read_only_call() {
     let dir = tempfile::tempdir().unwrap();
     let (mut c, frames) = committed(&path(&dir));
     assert!(c.is_on_local_disk().unwrap());
-    assert!(c.map_read_only_if_local().unwrap());
+    assert!(map_if_local(&mut c).unwrap());
     assert!(c.is_mapped());
     assert_eq!(c.mapped_range(), Some(F..c.superblock().log_end));
     for (f, want) in frames
@@ -490,12 +496,12 @@ fn a_read_only_container_on_a_local_disk_maps_with_the_safe_call() {
 }
 
 #[test]
-fn the_safe_call_never_maps_a_read_write_container() {
+fn the_read_only_call_never_maps_a_read_write_container() {
     let dir = tempfile::tempdir().unwrap();
     let path = path(&dir);
     let mut w = Container::create(&path).unwrap();
     let frames = commit_batch(&mut w, &[b"wal"], b"manifest 1");
-    let err = w.map_read_only_if_local().unwrap_err();
+    let err = map_if_local(&mut w).unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err}");
     assert!(!w.is_mapped());
     assert_eq!(w.mapped_range(), None);
@@ -507,10 +513,7 @@ fn the_safe_call_never_maps_a_read_write_container() {
     drop(w);
     // Opened again read-write: refused too.
     let mut w = Container::open(&path, Mode::ReadWrite).unwrap();
-    assert!(matches!(
-        w.map_read_only_if_local(),
-        Err(Error::InvalidInput(_))
-    ));
+    assert!(matches!(map_if_local(&mut w), Err(Error::InvalidInput(_))));
     assert!(!w.is_mapped());
 }
 
@@ -535,7 +538,7 @@ fn a_reopened_reader_maps_the_commits_since_and_the_file_a_compaction_moved_to()
     .unwrap();
 
     let mut first = Container::open(&path, Mode::ReadOnly).unwrap();
-    assert!(first.map_read_only_if_local().unwrap());
+    assert!(map_if_local(&mut first).unwrap());
     let first_range = first.mapped_range().unwrap();
     assert_eq!(first_range, F..w.superblock().log_end);
 
@@ -543,7 +546,7 @@ fn a_reopened_reader_maps_the_commits_since_and_the_file_a_compaction_moved_to()
     let later = commit_batch(&mut w, &[b"more wal"], b"manifest 2");
     let mut second = first.reopen_read_only().unwrap();
     assert!(!second.is_mapped());
-    assert!(second.map_read_only_if_local().unwrap());
+    assert!(map_if_local(&mut second).unwrap());
     assert_eq!(second.mapped_range(), Some(F..w.superblock().log_end));
     assert!(second.mapped_range().unwrap().end > first_range.end);
     assert!(is_mapped(&second, later[0].offset));
@@ -563,7 +566,7 @@ fn a_reopened_reader_maps_the_commits_since_and_the_file_a_compaction_moved_to()
         )
         .unwrap();
     let mut third = second.reopen_read_only().unwrap();
-    assert!(third.map_read_only_if_local().unwrap());
+    assert!(map_if_local(&mut third).unwrap());
     assert_eq!(third.mapped_range(), Some(F..w.superblock().log_end));
     let moved = relocation.get(seg.offset).unwrap();
     assert!(is_mapped(&third, moved.offset));

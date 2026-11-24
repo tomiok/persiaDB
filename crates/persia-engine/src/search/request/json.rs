@@ -89,7 +89,10 @@ impl QueryRequest {
         let mut request = Self::default();
         for (key, value) in object {
             if value.is_null() {
-                return Err(shape(format!("`{key}` is null")));
+                return Err(shape(match key.len() {
+                    0..=MAX_SHOWN => format!("`{key}` is null"),
+                    len => format!("a key of {len} bytes is null"),
+                }));
             }
             match key.as_str() {
                 "q" => request.q = string(&key, value)?,
@@ -111,7 +114,7 @@ impl QueryRequest {
                 "relax" => request.relax = RelaxOptions::from_value(value)?,
                 "explain" => request.page.explain = boolean(&key, &value)?,
                 "proximity" => request.proximity = boolean(&key, &value)?,
-                _ => return Err(shape(format!("unknown key {key:?}"))),
+                _ => return Err(shape(format!("unknown key {}", shown_key(&key)))),
             }
         }
         Ok(request)
@@ -236,7 +239,7 @@ fn score_key(key: &Map<String, J>, options: &J) -> Result<SortKey, QueryRequestE
 /// An error unless every key of `object` is one of `allowed`.
 fn only(object: &Map<String, J>, what: &str, allowed: &[&str]) -> Result<(), QueryRequestError> {
     match object.keys().find(|k| !allowed.contains(&k.as_str())) {
-        Some(key) => Err(shape(format!("unknown key {key:?} in {what}"))),
+        Some(key) => Err(shape(format!("unknown key {} in {what}", shown_key(key)))),
         None => Ok(()),
     }
 }
@@ -315,7 +318,20 @@ fn facets(value: &J, schema: &CollectionSchema) -> Result<Vec<FacetRequest>, Que
 /// whatever the request holds.
 fn shown(value: &J) -> String {
     match value {
-        J::String(s) if s.len() <= 32 => format!("{s:?}"),
+        J::String(s) if s.len() <= MAX_SHOWN => format!("{s:?}"),
         other => json_kind(other).to_owned(),
+    }
+}
+
+/// The longest string an error message repeats as written.
+const MAX_SHOWN: usize = 32;
+
+/// An object's key as an error names it: as [`shown`] gives a short one, a longer one by its length, so a message
+/// stays short whatever the request holds (a key may be up to the request's 1 MiB).
+fn shown_key(key: &str) -> String {
+    if key.len() <= MAX_SHOWN {
+        shown(&J::String(key.to_owned()))
+    } else {
+        format!("of {} bytes", key.len())
     }
 }

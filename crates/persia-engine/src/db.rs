@@ -405,11 +405,12 @@ pub struct DatabaseOptions {
     /// When the container is compacted on its own (SPEC §4.6).
     pub compaction: CompactionOptions,
     /// The cache of decoded blocks every segment this database opens reads through (SPEC §10.6, ROADMAP 10.2.5): the
-    /// segments its open recovers, those its flushes and merges write, and those a schema change opens again. By
-    /// default a new cache of [`BlockCache::DEFAULT_CAPACITY`] (8 MiB) for this database alone; give several
-    /// databases the same `Arc` and they share it, under its one budget. [`Database::block_cache_stats`] reads its
-    /// counters.
-    pub block_cache: Arc<BlockCache>,
+    /// segments its open recovers, those its flushes and merges write, and those a schema change opens again. `None`
+    /// (the default): each open makes a new cache of [`BlockCache::DEFAULT_CAPACITY`] (8 MiB) for that database
+    /// alone, however many opens use options built alike. `Some`: that cache, shared by every database
+    /// given the same `Arc`, under its one budget. [`Database::block_cache`] and [`Database::block_cache_stats`]
+    /// read the one in use.
+    pub block_cache: Option<Arc<BlockCache>>,
     /// Caps each memtable's docids, so tests reach the limit.
     #[cfg(test)]
     pub(crate) memtable_max_docs: Option<u32>,
@@ -426,7 +427,7 @@ impl Default for DatabaseOptions {
             wal_chunk_target: DEFAULT_CHUNK_TARGET,
             merge: MergeOptions::default(),
             compaction: CompactionOptions::default(),
-            block_cache: Arc::new(BlockCache::default()),
+            block_cache: None,
             #[cfg(test)]
             memtable_max_docs: None,
         }
@@ -438,6 +439,14 @@ impl DatabaseOptions {
     fn with_builtins(mut self) -> Self {
         self.registry = std::mem::take(&mut self.registry).with_builtins();
         self
+    }
+
+    /// The cache an open with these options reads through (SPEC §10.6): the one given, else a new one of
+    /// [`BlockCache::DEFAULT_CAPACITY`] for that database alone.
+    fn cache(&self) -> Arc<BlockCache> {
+        self.block_cache
+            .clone()
+            .unwrap_or_else(|| Arc::new(BlockCache::default()))
     }
 }
 
@@ -603,6 +612,8 @@ pub struct Database<F = File> {
     /// [`Database::referenced_blobs`]). Dead ones are dropped at each publish.
     retired: Vec<blob_refs::RetiredView>,
     options: DatabaseOptions,
+    /// The cache every segment this database opens reads through: its options' or, by default, its own (SPEC §10.6).
+    block_cache: Arc<BlockCache>,
     poisoned: bool,
     /// While an open replays the WAL, the position of the chunk it is in: a commit then keeps `wal_start` there, since
     /// the records from there on may not be in a memtable yet (ROADMAP 6.6.5).
@@ -706,7 +717,14 @@ impl<F: ContainerFile + Sync> Database<F> {
         let options = options.with_builtins();
         let wal = WalWriter::resume(container, BTreeMap::new())
             .with_chunk_target(options.wal_chunk_target);
-        let mut db = Self::assemble(wal, Manifest::empty(), BTreeMap::new(), options);
+        let block_cache = options.cache();
+        let mut db = Self::assemble(
+            wal,
+            Manifest::empty(),
+            BTreeMap::new(),
+            options,
+            block_cache,
+        );
         db.commit_guarded(Vec::new(), ManifestDiff::default(), Structural::None)?;
         Ok(db)
     }
@@ -716,6 +734,7 @@ impl<F: ContainerFile + Sync> Database<F> {
         manifest: Manifest,
         collections: BTreeMap<String, Collection>,
         options: DatabaseOptions,
+        block_cache: Arc<BlockCache>,
     ) -> Self {
         let manifest = Arc::new(manifest);
         let snapshot = snapshot_of(&manifest, &collections);
@@ -727,6 +746,7 @@ impl<F: ContainerFile + Sync> Database<F> {
             retired: Vec::new(),
             merges: merging::Merges::new(options.merge.threads),
             options,
+            block_cache,
             poisoned: false,
             replaying: None,
             compactions: CompactionStats::default(),
@@ -801,7 +821,7 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// The cache every segment of this database reads its blocks through ([`DatabaseOptions::block_cache`], SPEC
     /// §10.6): this database's own unless its options were given one shared with others.
     pub fn block_cache(&self) -> &Arc<BlockCache> {
-        &self.options.block_cache
+        &self.block_cache
     }
 
     /// The counters of [`Self::block_cache`], read now: reads served from it, reads that decoded their block, and the
@@ -819,7 +839,7 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn block_cache_stats(&self) -> CacheStats {
-        self.options.block_cache.stats()
+        self.block_cache.stats()
     }
 
     /// A handle that loads the latest published snapshot from any thread.
@@ -1451,7 +1471,7 @@ impl<F: ContainerFile + Sync> Database<F> {
                     what: "a committed segment is not in its manifest",
                 })?;
             let source = ByteSource::new(flushed.bytes.into());
-            let cache = &self.options.block_cache;
+            let cache = &self.block_cache;
             let segment = open_source(source, &p.collection, entry, &c.schema, cache)?;
             c.segments.push(LiveSegment::new(segment, None));
         }

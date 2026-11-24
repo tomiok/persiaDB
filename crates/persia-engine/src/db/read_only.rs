@@ -31,6 +31,8 @@ use persia_format::hash::xxh3_128;
 use persia_storage::container::{Container, ContainerFile, FrameRef, Mode};
 
 use super::recovery::{for_each_record, load, open_segment, read_manifest, wal_chunks};
+
+mod mapped;
 use super::{Collection, ContainerObjects, DatabaseError, Snapshot, check_analyzers, snapshot_of};
 use crate::manifest::{CollectionEntry, Manifest};
 use crate::memtable::Memtable;
@@ -162,7 +164,8 @@ impl<F> fmt::Debug for ReadOnlyDatabase<F> {
 
 /// How a [`ReadOnlyDatabase`] is opened ([`ReadOnlyDatabase::open_with_options`]). No option is stored in the
 /// container. The default analyzes with the built-in analyzers, requires every `text` field's analyzer, gives the
-/// database a block cache of its own, and maps the container where it is on a local disk ([`MappedReads::IfLocal`]).
+/// database a block cache of its own, and maps the container where it is on a local disk ([`MappedReads::IfLocal`]),
+/// except on Windows ([`MappedReads::default`]).
 ///
 /// ```
 /// use std::sync::Arc;
@@ -202,21 +205,42 @@ impl Default for ReadOnlyOptions {
 /// amended 2026-11-23): [`ReadOnlyOptions::mapped_reads`]. Only [`ReadOnlyDatabase::open_with_options`], which opens
 /// the file at a path, maps: the opens of a given file or container read with ordinary reads whatever this says, and
 /// a read-write [`super::Database`] never maps.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// The default is [`Self::IfLocal`], except on Windows, where it is [`Self::Never`] (SPEC §4.7, ADR-0017 amended):
+/// there a reader's mapping keeps a writer that stopped with a torn tail from truncating it at its next open, and on a
+/// FAT32 or exFAT drive it can make the writer's compactions fail. A Windows reader that wants mapped reads asks for
+/// [`Self::IfLocal`] (ROADMAP 10.1.22 revisits the default).
+///
+/// ```
+/// use persia_engine::db::MappedReads;
+///
+/// let expected = if cfg!(windows) { MappedReads::Never } else { MappedReads::IfLocal };
+/// assert_eq!(MappedReads::default(), expected);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MappedReads {
     /// Mapped where the container is on a local disk file system
-    /// ([`Container::map_read_only_if_local`]), ordinary reads everywhere else: the default.
+    /// ([`Container::map_read_only_if_local`]), ordinary reads everywhere else: the default outside Windows.
     ///
     /// Persia keeps its own side of the mapping contract. The other side is the deployment's: while the database is
     /// open, no other program, and no other handle of the file in this process, writes or truncates the container
     /// file. A write under a mapping is undefined behavior, and a truncation ends the process (`SIGBUS`, or
     /// `EXCEPTION_IN_PAGE_ERROR` on Windows). Where that cannot be excluded, use [`Self::Never`]. On Windows a reader's
     /// mapping also keeps a writer from truncating a torn tail when it opens (SPEC §4.7).
-    #[default]
     IfLocal,
-    /// Ordinary reads (`pread`) everywhere: a read error is an error, never a fault.
+    /// Ordinary reads (`pread`) everywhere: a read error is an error, never a fault. The default on Windows.
     Never,
+}
+
+impl Default for MappedReads {
+    fn default() -> Self {
+        if cfg!(windows) {
+            Self::Never
+        } else {
+            Self::IfLocal
+        }
+    }
 }
 
 /// Maps a container this handle opened or reopened ([`Container::map_read_only_if_local`] for a file). A function
@@ -269,8 +293,8 @@ impl ReadOnlyOptions {
         self
     }
 
-    /// Whether [`ReadOnlyDatabase::open_with_options`] maps the container (SPEC §4.7): [`MappedReads::IfLocal`] by
-    /// default, [`MappedReads::Never`] for ordinary reads. A refresh keeps the open's choice.
+    /// Whether [`ReadOnlyDatabase::open_with_options`] maps the container (SPEC §4.7): [`MappedReads::default`] unless
+    /// set ([`MappedReads::IfLocal`], or [`MappedReads::Never`] on Windows). A refresh keeps the open's choice.
     #[must_use]
     pub fn mapped_reads(mut self, mapped_reads: MappedReads) -> Self {
         self.mapped_reads = mapped_reads;
@@ -291,7 +315,8 @@ fn new_cache() -> Arc<BlockCache> {
 impl ReadOnlyDatabase<File> {
     /// Opens the database in the container file at `path` read-only, as `options` say: their registry and analysis,
     /// their block cache for every segment (SPEC §10.6), and whether the container is mapped (SPEC §4.7; by default
-    /// where it is on a local disk, [`MappedReads::IfLocal`], with the conditions stated there). The open and every
+    /// where it is on a local disk, [`MappedReads::IfLocal`], with the conditions stated there, and never on Windows).
+    /// The open and every
     /// refresh that finds something new map the container they read, before they open a segment from it.
     ///
     /// ```
@@ -300,7 +325,8 @@ impl ReadOnlyDatabase<File> {
     /// # let dir = tempfile::tempdir()?;
     /// let path = dir.path().join("app.persia");
     /// let db = Database::create(&path, DatabaseOptions::default())?;
-    /// let reader = ReadOnlyDatabase::open_with_options(&path, &ReadOnlyOptions::new())?;
+    /// let mapping = ReadOnlyOptions::new().mapped_reads(MappedReads::IfLocal);
+    /// let reader = ReadOnlyDatabase::open_with_options(&path, &mapping)?;
     /// assert_eq!(reader.container().is_mapped(), reader.container().is_on_local_disk()?);
     /// // The writer's handle never is.
     /// assert!(!db.container().is_mapped());
@@ -317,7 +343,7 @@ impl ReadOnlyDatabase<File> {
         options: &ReadOnlyOptions,
     ) -> Result<Self, DatabaseError> {
         let map: Option<MapReads<File>> = match options.mapped_reads {
-            MappedReads::IfLocal => Some(Container::<File>::map_read_only_if_local),
+            MappedReads::IfLocal => Some(mapped::map_read_only_if_local),
             MappedReads::Never => None,
         };
         let container = Container::open(path, Mode::ReadOnly)?;
@@ -734,8 +760,7 @@ fn plan<F: ContainerFile + Sync>(
 /// Takes `next`, a later commit [`plan`] found compatible, into `live`: each collection's segments as `next` lists
 /// them, sharing those whose entry is unchanged and opening the others, and an empty memtable for each new collection,
 /// analyzed with `reader`'s registry as an open would, the opened segments reading through its block cache. Returns
-/// the fields whose analysis is skipped. `live` changes only once
-/// every segment opened.
+/// the fields whose analysis is skipped. `live` changes only once every segment opened.
 fn take_manifest<F: ContainerFile + Sync>(
     live: &mut Live,
     container: &Container<F>,
@@ -799,8 +824,7 @@ fn take_manifest<F: ContainerFile + Sync>(
 }
 
 /// The open sequence (SPEC §8.6) on `container`, with `registry` and `analysis`, its segments reading through `cache`:
-/// the state readers see, and the
-/// memtables behind it.
+/// the state readers see, and the memtables behind it.
 fn opened<F: ContainerFile + Sync>(
     container: Container<F>,
     registry: &AnalyzerRegistry,

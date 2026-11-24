@@ -125,15 +125,19 @@ fn read(snapshot: &Snapshot, ids: &[&str]) {
 
 #[test]
 fn a_database_has_a_cache_of_its_own_by_default() {
-    let (a, b) = (DatabaseOptions::default(), DatabaseOptions::default());
-    assert!(!Arc::ptr_eq(&a.block_cache, &b.block_cache));
-    assert!(!Arc::ptr_eq(&a.block_cache, &BlockCache::shared()));
-    assert_eq!(a.block_cache.capacity(), BlockCache::DEFAULT_CAPACITY);
+    // The default names no cache: each open makes its own.
+    assert!(DatabaseOptions::default().block_cache.is_none());
     assert_eq!(BlockCache::DEFAULT_CAPACITY, 8 << 20);
 
+    // Two options values built alike (`DatabaseOptions` is not `Clone`: its `SegmentIds` must not repeat) give each
+    // database a cache of its own; so does a reopen below.
     let mut first = Database::create_on(SimFile::new(), [1; 16], unmerged()).unwrap();
     let mut second = Database::create_on(SimFile::new(), [2; 16], unmerged()).unwrap();
     assert!(!Arc::ptr_eq(first.block_cache(), second.block_cache()));
+    for db in [&first, &second] {
+        assert_eq!(db.block_cache().capacity(), BlockCache::DEFAULT_CAPACITY);
+        assert!(!Arc::ptr_eq(db.block_cache(), &BlockCache::shared()));
+    }
     for db in [&mut first, &mut second] {
         db.create_collection(schema()).unwrap();
         commit(db, &["a", "b"]);
@@ -158,7 +162,7 @@ fn a_database_has_a_cache_of_its_own_by_default() {
 fn one_cache_given_to_several_databases_is_shared() {
     let cache = Arc::new(BlockCache::new(1 << 20));
     let with = || DatabaseOptions {
-        block_cache: Arc::clone(&cache),
+        block_cache: Some(Arc::clone(&cache)),
         ..unmerged()
     };
     let mut first = Database::create_on(SimFile::new(), [1; 16], with()).unwrap();
@@ -193,7 +197,7 @@ fn flushed_merged_recovered_and_evolved_segments_read_through_it() {
     let file = SimFile::new();
     let cache = Arc::new(BlockCache::new(BlockCache::DEFAULT_CAPACITY));
     let with = |threads| DatabaseOptions {
-        block_cache: Arc::clone(&cache),
+        block_cache: Some(Arc::clone(&cache)),
         ..options(threads)
     };
     let mut db = Database::create_on(file.clone(), [3; 16], with(0)).unwrap();
@@ -219,7 +223,7 @@ fn flushed_merged_recovered_and_evolved_segments_read_through_it() {
     // An open recovers its segments through the cache of the options it is given: another one here.
     let other = Arc::new(BlockCache::new(1 << 16));
     let reopened = DatabaseOptions {
-        block_cache: Arc::clone(&other),
+        block_cache: Some(Arc::clone(&other)),
         ..options(0)
     };
     let db = Database::open_on(file, reopened).unwrap();
@@ -238,7 +242,7 @@ fn flushed_merged_recovered_and_evolved_segments_read_through_it() {
 fn a_merge_worker_verifies_its_output_through_it() {
     let cache = Arc::new(BlockCache::new(BlockCache::DEFAULT_CAPACITY));
     let with = DatabaseOptions {
-        block_cache: Arc::clone(&cache),
+        block_cache: Some(Arc::clone(&cache)),
         ..options(1)
     };
     let mut db = Database::create_on(SimFile::new(), [4; 16], with).unwrap();
@@ -370,7 +374,7 @@ fn a_shared_cache_keeps_the_blocks_of_its_databases_apart() {
     let mut dbs = Vec::new();
     for word in ["alpha", "omega"] {
         let with = DatabaseOptions {
-            block_cache: Arc::clone(&cache),
+            block_cache: Some(Arc::clone(&cache)),
             ..unmerged()
         };
         let mut db = Database::create_on(SimFile::new(), [9; 16], with).unwrap();
@@ -425,7 +429,7 @@ fn a_shared_cache_holds_at_most_its_capacity_for_all_its_databases() {
     let mut dbs = Vec::new();
     for n in 0..3_u8 {
         let with = DatabaseOptions {
-            block_cache: Arc::clone(&cache),
+            block_cache: Some(Arc::clone(&cache)),
             ..unmerged()
         };
         let mut db = Database::create_on(SimFile::new(), [n; 16], with).unwrap();
@@ -464,7 +468,7 @@ fn closing_a_database_frees_its_entries_in_a_shared_cache() {
     let cache = Arc::new(BlockCache::new(BlockCache::DEFAULT_CAPACITY));
     let open = |id: u8| {
         let with = DatabaseOptions {
-            block_cache: Arc::clone(&cache),
+            block_cache: Some(Arc::clone(&cache)),
             ..unmerged()
         };
         let mut db = Database::create_on(SimFile::new(), [id; 16], with).unwrap();

@@ -2231,3 +2231,28 @@ fn negative_zero_and_an_empty_sort_are_refused() {
             .is_score()
     );
 }
+
+/// A key of any length is named in a bounded message (SPEC §7.1.4 allows a 1 MiB request): unknown at the top, `null`
+/// at the top, and unknown inside a key object.
+#[test]
+fn a_huge_key_is_not_repeated_in_its_error() {
+    let huge = "k".repeat(1 << 16);
+    for json in [
+        json!({ huge.as_str(): 1 }),
+        json!({ huge.as_str(): null }),
+        json!({"sort": [{"field": "price", huge.as_str(): 1}]}),
+        json!({"facets": [{"field": "brand", huge.as_str(): 1}]}),
+    ] {
+        let error = parse(&json.to_string()).unwrap_err();
+        assert!(matches!(kind(&error), Kind::Json), "{error:?}");
+        let message = error.to_string();
+        assert!(message.len() < 120, "{} bytes", message.len());
+        assert!(
+            message.contains(&format!("{} bytes", huge.len())),
+            "{message}"
+        );
+    }
+    // A short key is still named as written.
+    let message = parse(r#"{"query": 1}"#).unwrap_err().to_string();
+    assert_eq!(message, r#"request: unknown key "query""#);
+}

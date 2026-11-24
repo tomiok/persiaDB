@@ -29,24 +29,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `create_parent_dirs_in(vfs, path)` create them from the outermost missing one inward and sync each new directory's
   parent, through `persia_storage::vfs::create_dir_all_synced`, the walk `LocalStorage::open` already used.
 - `persia-engine`: one block cache per database (engine side of ROADMAP 10.2.5; SPEC §10.6). `DatabaseOptions` has
-  `block_cache: Arc<BlockCache>`, by default a new cache of 8 MiB for that database, and every segment the database
+  `block_cache: Option<Arc<BlockCache>>`: `None` by default, and each open then makes a new 8 MiB cache for that
+  database; `Some` is a cache shared by every database given it. Every segment the database
   opens reads through it (recovery, flushes, merges and their verifying open, schema changes), no longer through the
   process-wide `BlockCache::shared()`. `Database::block_cache` and `block_cache_stats` read it. One `Arc` given to
   several databases is shared by them. `ReadOnlyOptions` (registry, `skip_unregistered_analysis`, `block_cache`) with
   `ReadOnlyDatabase::open_with_options`, `open_on_with_options` and `open_container_with_options`; a read-only
   database reads through its cache at the open and at each refresh (`ReadOnlyDatabase::block_cache`,
   `block_cache_stats`), and the existing `open*` functions give each database a cache of its own.
-- `persia-storage`, `persia-engine`: mapped reads on by default for read-only handles on local disks (engine side of
-  ROADMAP 10.2.4; SPEC §4.7, ADR-0017 amended 2026-11-23). `Container::map_read_only_if_local` is a safe call that
-  maps a read-only container on a local disk file system and refuses a read-write one (`Error::InvalidInput`). It maps
-  only a file Persia opened by path itself (`Container::open` and its reopens): a container on a file given to
-  `open_on`, or opened through a caller's `Vfs`, returns `Ok(false)`.
-  `ReadOnlyDatabase::open_with_options` maps by default (`ReadOnlyOptions::mapped_reads`, `MappedReads::IfLocal`;
-  `MappedReads::Never` forces ordinary reads), and each refresh that finds something new maps the container it
-  reopened. A read-write `Database` never maps; the older read-only opens and those of a given file or container keep
-  ordinary reads. A mapped reader requires that nothing but Persia writes or truncates the file while it is open
-  (SPEC §4.7). On Windows a mapped reader keeps a writer that stopped with a torn tail from reopening until the reader
-  closes, and on a FAT32 or exFAT fixed drive it can make the writer's compactions fail.
+- `persia-storage`, `persia-engine`: mapped reads on by default for read-only handles on local disks, except on
+  Windows (engine side of ROADMAP 10.2.4; SPEC §4.7, ADR-0017 amended 2026-11-23). `Container::map_read_only_if_local`
+  is an `unsafe fn` (no safe public function of `persia-storage` maps a file) that maps a read-only container on a
+  local disk file system and refuses a read-write one (`Error::InvalidInput`). It maps only a file Persia opened by
+  path itself (`Container::open` and its reopens): a container on a file given to `open_on`, or opened through a
+  caller's `Vfs`, returns `Ok(false)`. The engine calls it from one module, `db/read_only/mapped.rs`, the only engine
+  file that allows `unsafe` code (its crate root now denies `unsafe_code` instead of forbidding it).
+  `ReadOnlyDatabase::open_with_options` maps by default (`ReadOnlyOptions::mapped_reads`: `MappedReads::IfLocal` by
+  default, `MappedReads::Never` on Windows, where a mapped reader keeps a writer that stopped with a torn tail from
+  reopening until the reader closes, and on a FAT32 or exFAT fixed drive can make the writer's compactions fail), and
+  each refresh that finds something new maps the container it reopened. A read-write `Database` never maps; the older
+  read-only opens and those of a given file or container keep ordinary reads. A mapped reader requires that nothing
+  but Persia writes or truncates the file while it is open (SPEC §4.7).
 - `persia-engine`: a cursor as an opaque token (ROADMAP 10.1.10, ADR-0062; SPEC §7.4): `Cursor::to_token` and
   `Cursor::from_token`, base64url text of a versioned (`CURSOR_TOKEN_VERSION` 1), checksummed encoding. The request
   JSON's `search_after` takes one. A token that was cut, changed or written by another version is a

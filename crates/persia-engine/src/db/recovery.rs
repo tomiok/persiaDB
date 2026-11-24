@@ -46,13 +46,14 @@ impl<F: ContainerFile + Sync> Database<F> {
         options: DatabaseOptions,
     ) -> Result<Self, DatabaseError> {
         let options = options.with_builtins();
-        let (manifest, collections) = load(&container, &options.block_cache, |name, schema| {
+        let block_cache = options.cache();
+        let (manifest, collections) = load(&container, &block_cache, |name, schema| {
             check_analyzers(name, schema, &options.registry)?;
             Ok(super::new_memtable(schema, &options)?)
         })?;
         let wal = WalWriter::resume(container, BTreeMap::new())
             .with_chunk_target(options.wal_chunk_target);
-        let mut db = Self::assemble(wal, manifest, collections, options);
+        let mut db = Self::assemble(wal, manifest, collections, options, block_cache);
         db.replay()?;
         db.retire_uncommitted_manifest()?;
         // Replayed operations count as written at the open: their age is not logged (SPEC §8.2).
@@ -149,9 +150,8 @@ fn is_capacity(error: &MemtableError) -> bool {
 
 /// Steps 2 and 3 of the open sequence (module docs): the committed manifest, and each collection with its segments
 /// open, reading through `cache` (SPEC §10.6), and an empty memtable from `memtable`, which gets the collection's name
-/// and schema. It runs for every
-/// collection before any segment is opened, so an analyzer the registry lacks fails the open before any segment is
-/// read (SPEC §6.2.2, ADR-0059 item 5), whichever collection names it.
+/// and schema. It runs for every collection before any segment is opened, so an analyzer the registry lacks fails the
+/// open before any segment is read (SPEC §6.2.2, ADR-0059 item 5), whichever collection names it.
 pub(super) fn load<F: ContainerFile + Sync>(
     container: &Container<F>,
     cache: &Arc<BlockCache>,
