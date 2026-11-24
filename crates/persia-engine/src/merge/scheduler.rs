@@ -22,7 +22,7 @@ use super::merger::{DocidMap, MergeError, MergeSource, merge_until};
 use super::policy::{MergePlan, MergePolicy, MergeReason};
 use crate::manifest::SegmentId;
 use crate::schema::CollectionSchema;
-use crate::segment::{Segment, Tombstones, WriteOptions};
+use crate::segment::{BlockCache, Segment, Tombstones, WriteOptions};
 
 /// How a database merges in the background (SPEC §8.5, §14 `merge_threads`, `merge.*`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +61,8 @@ pub(crate) struct MergeJob {
     /// The schema the inputs were opened with and the output is written with.
     pub schema: Arc<CollectionSchema>,
     pub registry: AnalyzerRegistry,
+    /// The database's block cache (SPEC §10.6), through which the worker reads the output it verifies.
+    pub cache: Arc<BlockCache>,
     /// Each input of `plan`, in its order, with its deletions at the version the plan read.
     pub inputs: Vec<(Arc<Segment>, Option<Arc<Tombstones>>)>,
     /// The output's id, reserved against flushes while the job runs.
@@ -122,8 +124,9 @@ impl MergeJob {
             return Err(MergeError::Cancelled);
         }
         let verify = |source| MergeError::Verify { source };
-        let segment =
-            Segment::open(ByteSource::new(bytes.clone()), &self.schema).map_err(verify)?;
+        let source = ByteSource::new(bytes.clone());
+        let segment = Segment::open_with_cache(source, &self.schema, Arc::clone(&self.cache))
+            .map_err(verify)?;
         segment.verify().map_err(verify)?;
         Ok(Some(Merged {
             bytes,
@@ -319,6 +322,7 @@ mod tests {
             },
             schema: Arc::new(schema),
             registry: AnalyzerRegistry::builtin(),
+            cache: Arc::new(BlockCache::new(0)),
             inputs: Vec::new(),
             segment_id: SegmentId::new(1),
             created_at: 0,

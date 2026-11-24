@@ -352,6 +352,7 @@ impl<F: ContainerFile + Sync + 'static> Database<F> {
             plan,
             schema: Arc::clone(&c.schema),
             registry: self.options.registry.clone(),
+            cache: Arc::clone(&self.options.block_cache),
             inputs,
             segment_id,
             created_at: self.options.clock.unix_micros(),
@@ -547,8 +548,8 @@ impl<F: ContainerFile + Sync + 'static> Database<F> {
                     .collection(&job.collection)
                     .and_then(|e| e.segment(job.segment_id))
                     .ok_or(internal("a committed segment is not in its manifest"))?;
-                let segment =
-                    open_source(ByteSource::new(bytes), &job.collection, entry, &c.schema)?;
+                let source = ByteSource::new(bytes);
+                let segment = open_source(source, &job.collection, entry, &c.schema, &job.cache)?;
                 let tombstones = if deleted.is_empty() {
                     None
                 } else {

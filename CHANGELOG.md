@@ -24,6 +24,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   not relax takes it: on a request whose settings relax (the default), `"proximity": true` is
   `QueryRequestError::ProximityRelaxed`, whose message names the fix, `"relax": false`. A cursor from a search with
   the other setting is `RequestError::CursorProximity`.
+- `persia-engine`: one block cache per database (engine side of ROADMAP 10.2.5; SPEC §10.6). `DatabaseOptions` has
+  `block_cache: Arc<BlockCache>`, by default a new cache of 8 MiB for that database, and every segment the database
+  opens reads through it (recovery, flushes, merges and their verifying open, schema changes), no longer through the
+  process-wide `BlockCache::shared()`. `Database::block_cache` and `block_cache_stats` read it. One `Arc` given to
+  several databases is shared by them. `ReadOnlyOptions` (registry, `skip_unregistered_analysis`, `block_cache`) with
+  `ReadOnlyDatabase::open_with_options`, `open_on_with_options` and `open_container_with_options`; a read-only
+  database reads through its cache at the open and at each refresh (`ReadOnlyDatabase::block_cache`,
+  `block_cache_stats`), and the existing `open*` functions give each database a cache of its own.
+- `persia-storage`, `persia-engine`: mapped reads on by default for read-only handles on local disks (engine side of
+  ROADMAP 10.2.4; SPEC §4.7, ADR-0017 amended 2026-11-23). `Container::map_read_only_if_local` is a safe call that
+  maps a read-only container on a local disk file system and refuses a read-write one (`Error::InvalidInput`).
+  `ReadOnlyDatabase::open_with_options` maps by default (`ReadOnlyOptions::mapped_reads`, `MappedReads::IfLocal`;
+  `MappedReads::Never` forces ordinary reads), and each refresh that finds something new maps the container it
+  reopened. A read-write `Database` never maps; the older read-only opens and those of a given file or container keep
+  ordinary reads. A mapped reader requires that nothing but Persia writes or truncates the file while it is open
+  (SPEC §4.7). On Windows a mapped reader keeps a writer that stopped with a torn tail from reopening until the reader
+  closes.
 - `persia-engine`: a cursor as an opaque token (ROADMAP 10.1.10, ADR-0062; SPEC §7.4): `Cursor::to_token` and
   `Cursor::from_token`, base64url text of a versioned (`CURSOR_TOKEN_VERSION` 1), checksummed encoding. The request
   JSON's `search_after` takes one. A token that was cut, changed or written by another version is a

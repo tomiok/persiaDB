@@ -2,7 +2,7 @@
 
 - Status: proposed
 - Date: 2026-10-17
-- Related: SPEC §4.4, §4.6, §4.7; amends ADR-0010 (decisions 2 and 6); ADR-0016; ROADMAP 2.3.6, 2.3.10, 0.6.7, 0.6.8
+- Related: SPEC §4.4, §4.6, §4.7; amends ADR-0010 (decisions 2 and 6); ADR-0016; ROADMAP 2.3.6, 2.3.10, 0.6.7, 0.6.8; amended 2026-11-23 for ROADMAP 10.2.4 (ADR-0021, ADR-0060)
 
 ## Context
 
@@ -84,3 +84,62 @@ site lives, how much to map at once (one mapping per frame, or one window over `
   the unsoundness ADR-0010 rejected.
 - **Automatic choice now, by parsing `/proc/self/mountinfo`**: Linux only, and racy against remounts; not worth it
   before 2.3.10 picks a portable approach.
+
+## Amendment (2026-11-23): read-only handles map by default on local disks
+
+Decision 3 kept mapping opt-in and `unsafe` "for now", with the automatic choice left to ROADMAP 2.3.10. ADR-0021
+since gave the file system type (`enable_mapped_reads_if_local`), and ROADMAP 10.2.4 asks that read handles map where
+the container is on a local disk, on by default. The owner decided (wave 7, decision n) how:
+
+1. **A safe entry for read-only containers.** `Container::<File>::map_read_only_if_local` maps `12288..log_end` when
+   the container was opened read-only and its file is on an allow-listed local disk file system (ADR-0021), and
+   returns `false` otherwise; a read-write container is refused. It lives in `persia_storage::container::mapped`,
+   the module decision 1 already allows to call `MmapFile::map`: no new file relaxes the `unsafe_code` lint
+   (`UNSAFE_ALLOWED` is unchanged), and `persia-engine` keeps `#![forbid(unsafe_code)]`.
+2. **What Persia vouches for, and what it does not.** The `unsafe` contract of decision 3 has parts that are about
+   Persia's own code, and the safe entry takes exactly those on: no Persia writer truncates, hole-punches or rewrites
+   below a committed `log_end` (SPEC §4.7); the mapping handle is read-only, so it never changes the file and never
+   remaps over one it changed; and on the allow-listed file systems the writer lock belongs to the open file, so the
+   per-process-lock exception of decision 3 (a second read-write container of the same process on NFS) cannot arise.
+   The rest of the contract is about everything that is not Persia, and no code can take it on: another program, or
+   another handle of the file in the same process, that writes or truncates the container while it is mapped, and a
+   slot damaged after the reader read it. For those the outcome is what ADR-0010 states: undefined behaviour for a
+   write under a live slice, `SIGBUS` / `EXCEPTION_IN_PAGE_ERROR` for a truncation. The safe entry therefore moves that
+   residual from an `unsafe` block the embedder writes to a documented condition of deploying a read-only handle with
+   the default, as databases that map their file by default leave it. A deployment that cannot exclude
+   other writers of the file opens with ordinary reads.
+3. **On by default for read-only databases, never for the writer.** "Read handles" means read-only opens. The
+   engine's `ReadOnlyDatabase::open_with_options` maps by default (`MappedReads::IfLocal`) and can force ordinary reads
+   (`MappedReads::Never`); the embedded API's `OpenOptions` is to take that default (ROADMAP 10.2.4). The engine's older
+   read-only opens, which take a registry alone, keep ordinary reads, so nothing that calls them changes; so do the
+   opens of a given file or container (`open_on_with_options`, `open_container_with_options`): they are generic over
+   the file, and their caller holds the file or container, possibly with other handles of it. A read-write
+   `Database` never maps and has no option for it: on Windows a live mapping would keep a read-write open from
+   truncating a torn tail (Consequences, above), and a writer would map again at every commit. A caller that wants a
+   mapped writer still has decision 3's `unsafe` opt-in on a container it opens itself.
+4. **A refresh maps again.** A read-only handle never commits, so `Mapped::remap` never runs for it. Following a
+   writer, `ReadOnlyDatabase::refresh` reopens the container (ADR-0060) and maps the new handle before it opens any
+   segment on it: after a commit, up to the new `log_end`; after a compaction, the file renamed over the path. A
+   refresh that finds nothing new maps nothing. Segments are slices of the mapping they were opened on, so a snapshot
+   taken before keeps that mapping, and after a compaction the old file's blocks, until it is dropped.
+5. **A mapping that fails is not an error of the open or the refresh.** As decision 2 and the Consequences say for a
+   failed remap: reads fall back to `pread`, which reports its own errors, and a `tracing` warning says so. The handle
+   shows it (`Container::is_mapped`).
+
+Consequences of the amendment:
+
+- An uncompressed segment frame read by a mapped read-only database is a slice of the mapping (decision 4), not a
+  heap copy of the frame; every read still validates the frame.
+- **Windows.** The Consequences above already say that a live mapping keeps a read-write open elsewhere from
+  truncating a torn or corrupt tail. With the default on, that is no longer a choice an embedder made: every reader
+  open on a fixed or RAM disk holds a mapping for as long as it is open (a refresh replaces it with a newer mapping
+  of the same file; a mapping kept alive by an old snapshot counts too). So after a writer stops uncleanly and leaves
+  a torn or corrupt tail, its next read-write open fails with an I/O error, the container unchanged, until every
+  reader process of that file has closed or been opened with `MappedReads::Never`; each attempt on a corrupt tail may
+  leave a quarantine copy behind (ADR-0014). A clean tail needs no truncation and opens. Compaction's rename is not
+  blocked on NTFS (ADR-0016). This amendment does not choose another default for Windows: ROADMAP 10.1.22 asks the
+  owner whether Windows read handles should default to ordinary reads.
+- The blob pack (`persia-blob`) still maps only through `MapPermit::new`, an `unsafe fn`, which `persia` cannot call:
+  its read handle keeps `pread` until it has a safe permit of its own (ROADMAP 10.1.23).
+- The residual of item 2 is now reachable from safe code. It is stated in SPEC §4.7 and in the function's
+  documentation, and is the reason the option to turn mapping off exists.

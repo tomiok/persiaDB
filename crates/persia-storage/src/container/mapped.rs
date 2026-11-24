@@ -10,7 +10,7 @@ use persia_format::mmap::MmapFile;
 use persia_format::source::ByteSource;
 use persia_format::superblock::{FIRST_FRAME_OFFSET, Superblock};
 
-use super::{Container, Error, Mapped, Result};
+use super::{Container, Error, Mapped, Mode, Result};
 
 /// Maps the committed frames `12288..log_end` of the container in `file`, whose committed superblock is `sb`.
 ///
@@ -190,6 +190,96 @@ impl Container<File> {
         Ok(true)
     }
 
+    /// Maps this read-only container's committed frames if it is on a local disk: the default of read handles (SPEC
+    /// §4.7, ROADMAP 10.2.4; ADR-0017 as amended 2026-11-23). Returns whether it mapped; `false` leaves the container
+    /// reading with `pread`, as it does off the local file systems of [`is_on_local_disk`](Container::is_on_local_disk)
+    /// (network, FUSE, overlay, removable, unknown), where a failed page read would end the process.
+    ///
+    /// Unlike [`enable_mapped_reads`](Container::enable_mapped_reads) this is a safe call: for a read-only handle on a
+    /// local disk, Persia itself keeps the parts of the mapping contract that are about Persia. It keeps none of the
+    /// part that is about everything else, which stays with whoever deploys the database:
+    ///
+    /// - **Nothing but Persia may write the file while it is mapped.** Another program, or another handle to the file
+    ///   in this process that is not a Persia container, must not write, truncate or hole-punch it below its committed
+    ///   `log_end`. A write changes bytes behind the mapping, which is undefined behavior in a Rust program; a
+    ///   truncation ends the process with `SIGBUS` (Unix) or `EXCEPTION_IN_PAGE_ERROR` (Windows) at the next read of a
+    ///   lost page. That is the residual risk of every database that maps its file. Where it cannot be excluded, do not
+    ///   call this (the engine's read-only open has an option for ordinary reads).
+    /// - A superblock slot damaged after this handle read it may make a writer's recovery truncate below the mapped
+    ///   `log_end`, with the same end (ADR-0010 decision 5).
+    ///
+    /// A read-only handle never commits, so the mapping is made once and not again: a handle that follows a writer
+    /// reopens the container ([`reopen_read_only`](Container::reopen_read_only)) and calls this on the new handle,
+    /// which maps the frames committed since, or the file a compaction renamed over the path. On Windows the mapping
+    /// keeps a read-write open elsewhere from truncating a torn or corrupt tail until it is gone (SPEC §4.7).
+    ///
+    /// ```
+    /// use persia_storage::container::{Container, Mode};
+    ///
+    /// # let dir = tempfile::tempdir()?;
+    /// # let path = dir.path().join("app.persia");
+    /// # drop(Container::create(&path)?);
+    /// let mut reader = Container::open(&path, Mode::ReadOnly)?;
+    /// let mapped = reader.map_read_only_if_local()?;
+    /// assert_eq!(mapped, reader.is_mapped());
+    /// // The writer's handle is never mapped this way.
+    /// let mut writer = Container::open(&path, Mode::ReadWrite)?;
+    /// assert!(writer.map_read_only_if_local().is_err());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// [`Error::InvalidInput`] for a container opened read-write: a writer truncates torn tails and remaps at every
+    /// commit, so it maps only through the `unsafe` opt-in. [`Error::Io`] if the mapping fails (no address space);
+    /// reads then go on with `pread`. A file system that cannot be queried counts as not local: `Ok(false)`.
+    pub fn map_read_only_if_local(&mut self) -> Result<bool> {
+        let local = self.is_on_local_disk().unwrap_or(false);
+        self.map_read_only(local)
+    }
+
+    /// [`map_read_only_if_local`](Container::map_read_only_if_local), given whether the file is on a local disk
+    /// (ADR-0021's answer for this file, and nothing else: the safety argument below rests on it).
+    fn map_read_only(&mut self, local: bool) -> Result<bool> {
+        if self.mode() != Mode::ReadOnly {
+            return Err(Error::InvalidInput(
+                "only a read-only container maps by default: a read-write one opts in with enable_mapped_reads"
+                    .into(),
+            ));
+        }
+        if !local {
+            return Ok(false);
+        }
+        // SAFETY: `enable_mapped_reads`' contract (ADR-0010 decision 3; ADR-0017, amended 2026-11-23) asks that
+        // nothing writes, truncates or hole-punches the file below the mapped `log_end` while a mapping, or a
+        // `ByteSource` taken from one, is alive. It has a part Persia vouches for here and a part it cannot.
+        //
+        // What Persia vouches for, which is why this function is safe to call:
+        // 1. Persia's own writers, in any process. No Persia container truncates, hole-punches or rewrites a file
+        //    below a `log_end` it opened with or committed: recovery truncates only past `log_end` (SPEC §8.6),
+        //    compaction writes a new file and renames it over this one (§4.6), create never truncates (§4.5.1), and
+        //    frames are append-only (§4.4).
+        // 2. This handle. It is read-only (checked above, and a handle's mode never changes), so it never appends,
+        //    commits, truncates or compacts. Its one mapping is the one made here, of `12288..log_end` of the
+        //    superblock it read on this file (`map_committed`); nothing remaps it over a file this handle changed.
+        // 3. A second writer where the lock is per process. `enable_mapped_reads` names that exception for file
+        //    systems whose `flock` is emulated with POSIX locks (NFS, some FUSE and CIFS mounts), where two read-write
+        //    containers of one process are not excluded and the second appends over frames the first committed.
+        //    `local` is true only on the allow-listed local disk file systems (ADR-0021), where the writer lock
+        //    belongs to the open file and keeps a second read-write container out, in this process or another.
+        //
+        // What Persia cannot vouch for, and what this function's documentation hands to whoever deploys it:
+        // - a write, truncation or hole-punch below the mapped `log_end` by another program, or by another handle to
+        //   the file in this process that is not a Persia container (a `File::open` of the path, a tool that rewrites
+        //   the file in place). A write changes bytes behind a live `&[u8]`: undefined behavior. A truncation faults
+        //   the next read of a lost page and ends the process. No check made here can exclude either. It is the
+        //   residual every database that maps its file accepts (ADR-0010 decision 3), and ADR-0017's amendment
+        //   accepts it for read-only handles on local disks; a deployment that cannot exclude it reads with `pread`.
+        // - a superblock slot damaged after this handle read it: a writer's recovery may then fall back to the older
+        //   slot and truncate below the mapped `log_end` (ADR-0010 decision 5), which ends this process the same way.
+        unsafe { self.enable_mapped_reads()? };
+        Ok(true)
+    }
+
     /// The absolute range of the file that frames are read from the mapping, if one is live.
     pub fn mapped_range(&self) -> Option<Range<u64>> {
         let window = self.mapped.as_ref()?.window.as_ref()?;
@@ -319,6 +409,47 @@ mod tests {
         assert_eq!(mapped.failures, 1);
         c.mapped = Some(mapped);
         assert!(c.is_mapped());
+    }
+
+    /// What `map_read_only` does with the file system's answer: a read-write container is refused whatever it is, and
+    /// a read-only one off a local disk maps nothing and reads on.
+    #[test]
+    fn a_read_only_container_off_a_local_disk_is_not_mapped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.persia");
+        let mut w = Container::create(&path).unwrap();
+        let wal = w
+            .append(FrameKind::WalChunk, b"wal", Compression::None)
+            .unwrap();
+        w.sync().unwrap();
+        let manifest = w
+            .append(FrameKind::Manifest, b"m", Compression::None)
+            .unwrap();
+        w.commit(Commit {
+            manifest,
+            wal_start: wal.offset,
+            fence_token: 0,
+        })
+        .unwrap();
+        for local in [false, true] {
+            assert!(matches!(
+                w.map_read_only(local),
+                Err(Error::InvalidInput(_))
+            ));
+            assert!(!w.is_mapped());
+        }
+        drop(w);
+        let mut reader = Container::open(&path, Mode::ReadOnly).unwrap();
+        assert!(!reader.map_read_only(false).unwrap());
+        assert!(!reader.is_mapped());
+        assert_eq!(reader.mapped_range(), None);
+        assert_eq!(
+            &*reader.read_frame(wal.offset, 1 << 20).unwrap().payload,
+            b"wal"
+        );
+        // The same handle, told it is local, maps.
+        assert!(reader.map_read_only(true).unwrap());
+        assert_eq!(reader.mapped_range(), Some(F..reader.superblock().log_end));
     }
 
     const F: u64 = FIRST_FRAME_OFFSET;

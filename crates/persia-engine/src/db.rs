@@ -84,7 +84,7 @@ pub use objects::ContainerObjects;
 use obsolete::Pin;
 pub use obsolete::{ObsoleteKind, ObsoleteObject};
 pub use policy::{CommitPolicy, CommitReason, MemtableState};
-pub use read_only::{ReadOnlyDatabase, Refreshed, SkippedAnalysis};
+pub use read_only::{MappedReads, ReadOnlyDatabase, ReadOnlyOptions, Refreshed, SkippedAnalysis};
 pub use relaxed::{
     Correction, Relaxation, RelaxationStats, RelaxedHit, RelaxedQuery, RelaxedResults,
     RelaxedSearchError,
@@ -105,7 +105,9 @@ use crate::memtable::{Logged, Memtable, MemtableError};
 use crate::merge::MergeOptions;
 use crate::query::QueryCompiler;
 use crate::schema::{CollectionSchema, EvolutionError, FieldKind};
-use crate::segment::{ReadError, Segment, SegmentError, SegmentMeta, Tombstones, WriteOptions};
+use crate::segment::{
+    BlockCache, CacheStats, ReadError, Segment, SegmentError, SegmentMeta, Tombstones, WriteOptions,
+};
 use crate::tombstone::{SidecarError, TombstoneSidecar};
 use crate::view::{SearchView, SegmentView};
 use crate::wal::{
@@ -400,6 +402,12 @@ pub struct DatabaseOptions {
     pub merge: MergeOptions,
     /// When the container is compacted on its own (SPEC §4.6).
     pub compaction: CompactionOptions,
+    /// The cache of decoded blocks every segment this database opens reads through (SPEC §10.6, ROADMAP 10.2.5): the
+    /// segments its open recovers, those its flushes and merges write, and those a schema change opens again. By
+    /// default a new cache of [`BlockCache::DEFAULT_CAPACITY`] (8 MiB) for this database alone; give several
+    /// databases the same `Arc` and they share it, under its one budget. [`Database::block_cache_stats`] reads its
+    /// counters.
+    pub block_cache: Arc<BlockCache>,
     /// Caps each memtable's docids, so tests reach the limit.
     #[cfg(test)]
     pub(crate) memtable_max_docs: Option<u32>,
@@ -416,6 +424,7 @@ impl Default for DatabaseOptions {
             wal_chunk_target: DEFAULT_CHUNK_TARGET,
             merge: MergeOptions::default(),
             compaction: CompactionOptions::default(),
+            block_cache: Arc::new(BlockCache::default()),
             #[cfg(test)]
             memtable_max_docs: None,
         }
@@ -785,6 +794,30 @@ impl<F: ContainerFile + Sync> Database<F> {
             .fold(self.relaxation_dropped, |sum, c| {
                 sum.plus(&c.relaxation.load())
             })
+    }
+
+    /// The cache every segment of this database reads its blocks through ([`DatabaseOptions::block_cache`], SPEC
+    /// §10.6): this database's own unless its options were given one shared with others.
+    pub fn block_cache(&self) -> &Arc<BlockCache> {
+        &self.options.block_cache
+    }
+
+    /// The counters of [`Self::block_cache`], read now: reads served from it, reads that decoded their block, and the
+    /// entries and decoded bytes it holds. With a cache shared by several databases, they are the cache's, not this
+    /// database's share.
+    ///
+    /// ```
+    /// use persia_engine::db::{Database, DatabaseOptions};
+    /// use persia_engine::segment::BlockCache;
+    /// use persia_storage::container::sim::SimFile;
+    ///
+    /// let db = Database::create_on(SimFile::new(), [7; 16], DatabaseOptions::default())?;
+    /// assert_eq!(db.block_cache().capacity(), BlockCache::DEFAULT_CAPACITY);
+    /// assert_eq!(db.block_cache_stats().misses, 0);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn block_cache_stats(&self) -> CacheStats {
+        self.options.block_cache.stats()
     }
 
     /// A handle that loads the latest published snapshot from any thread.
@@ -1416,7 +1449,8 @@ impl<F: ContainerFile + Sync> Database<F> {
                     what: "a committed segment is not in its manifest",
                 })?;
             let source = ByteSource::new(flushed.bytes.into());
-            let segment = open_source(source, &p.collection, entry, &c.schema)?;
+            let cache = &self.options.block_cache;
+            let segment = open_source(source, &p.collection, entry, &c.schema, cache)?;
             c.segments.push(LiveSegment::new(segment, None));
         }
         c.memtable = p.memtable;
@@ -1676,18 +1710,23 @@ fn new_segment_id(
     }
 }
 
-/// Opens the bytes of the segment `entry` describes and checks its footer against the entry.
+/// Opens the bytes of the segment `entry` describes, reading its blocks through `cache` (the database's, SPEC §10.6),
+/// and checks its footer against the entry.
 fn open_source(
     source: ByteSource,
     collection: &str,
     entry: &SegmentEntry,
     schema: &CollectionSchema,
+    cache: &Arc<BlockCache>,
 ) -> Result<Arc<Segment>, DatabaseError> {
-    let segment = Segment::open(source, schema).map_err(|source| DatabaseError::OpenSegment {
-        collection: collection.to_owned(),
-        id: entry.id,
-        source,
-    })?;
+    let segment =
+        Segment::open_with_cache(source, schema, Arc::clone(cache)).map_err(|source| {
+            DatabaseError::OpenSegment {
+                collection: collection.to_owned(),
+                id: entry.id,
+                source,
+            }
+        })?;
     let mismatch = |field| DatabaseError::SegmentMismatch {
         collection: collection.to_owned(),
         id: entry.id,

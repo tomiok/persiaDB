@@ -39,7 +39,7 @@ use std::sync::Arc;
 use persia_analysis::{AnalyzerRegistry, EdgeNgramFilter, LowercaseFilter, WhitespaceTokenizer};
 use persia_engine::db::{
     CommitPolicy, Database, DatabaseError, DatabaseOptions, ManualClock, ReadOnlyDatabase,
-    SearchRequest, SegmentIds, Snapshot,
+    ReadOnlyOptions, SearchRequest, SegmentIds, Snapshot,
 };
 use persia_engine::document::{Document, FieldSet, Value};
 use persia_engine::manifest::{CollectionDiff, CollectionEntry, Location, Manifest, ManifestDiff};
@@ -1033,4 +1033,41 @@ proptest! {
         }
         prop_assert_eq!(decoded.encode().unwrap(), bytes);
     }
+}
+
+/// `ReadOnlyOptions` (ROADMAP 10.2.5) carry the registry and the treatment of a missing analyzer, as the older opens'
+/// arguments do: invariants 2 and 3 through `ReadOnlyDatabase::open_with_options`.
+#[test]
+fn read_only_options_carry_the_registry_and_the_skip() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    database(&path);
+    // The default: built-ins alone, and a missing analyzer fails the open.
+    let e = ReadOnlyDatabase::open_with_options(&path, &ReadOnlyOptions::new()).unwrap_err();
+    assert!(
+        matches!(e, DatabaseError::UnregisteredAnalyzer { .. }),
+        "{e:?}"
+    );
+    // With the registry: the registered analyzer analyzes the replayed record.
+    let with = ReadOnlyOptions::new().registry(registry());
+    let ro = ReadOnlyDatabase::open_with_options(&path, &with).unwrap();
+    assert!(ro.skipped_analysis().is_empty());
+    let all = registry().with_builtins();
+    assert_eq!(search(&ro.snapshot(), &all, "pers"), ["n1", "n2"]);
+    // Skipping: the open succeeds and lists the field.
+    let skipping = ReadOnlyOptions::new().skip_unregistered_analysis(true);
+    let ro = ReadOnlyDatabase::open_with_options(&path, &skipping).unwrap();
+    let skipped: Vec<_> = ro
+        .skipped_analysis()
+        .into_iter()
+        .map(|s| (s.collection, s.field))
+        .collect();
+    assert_eq!(skipped, [("notes".to_owned(), "title".to_owned())]);
+    // The last setting wins.
+    let again = skipping.skip_unregistered_analysis(false);
+    let e = ReadOnlyDatabase::open_with_options(&path, &again).unwrap_err();
+    assert!(
+        matches!(e, DatabaseError::UnregisteredAnalyzer { .. }),
+        "{e:?}"
+    );
 }

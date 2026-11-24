@@ -14,6 +14,10 @@
 //! container, then either replays only the WAL chunks written since into the same memtables, opening only the
 //! segments whose manifest entry changed, or, where that is not sound, runs the open sequence again. Either way the
 //! next state is swapped in at once ([`ArcSwap`]); a snapshot taken before keeps what it holds.
+//!
+//! [`ReadOnlyDatabase::open_with_options`] maps the container where it is on a local disk, by default (SPEC §4.7,
+//! ADR-0017 amended 2026-11-23, [`MappedReads`]): the open, and each refresh that finds something new, maps the
+//! container it reads before it opens a segment from it.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -31,6 +35,7 @@ use super::{Collection, ContainerObjects, DatabaseError, Snapshot, check_analyze
 use crate::manifest::{CollectionEntry, Manifest};
 use crate::memtable::Memtable;
 use crate::schema::{CollectionSchema, FieldKind};
+use crate::segment::{BlockCache, CacheStats};
 use crate::wal::{MAX_CHUNK_LEN, ReplayError, apply};
 
 /// A database opened read-only (see the module docs).
@@ -80,6 +85,11 @@ pub struct ReadOnlyDatabase<F = File> {
     registry: AnalyzerRegistry,
     /// The open's treatment of a `text` field whose analyzer `registry` lacks.
     analysis: Analysis,
+    /// The cache every segment this handle opens reads through, at the open and at each refresh (SPEC §10.6).
+    block_cache: Arc<BlockCache>,
+    /// Maps each container this handle reopens, before it opens a segment from it (SPEC §4.7): set by an open that
+    /// maps, `None` for ordinary reads.
+    map: Option<MapReads<F>>,
     /// What replay writes into. A refresh holds it throughout, so refreshes run one at a time; readers never take it.
     live: Mutex<Live>,
 }
@@ -150,7 +160,176 @@ impl<F> fmt::Debug for ReadOnlyDatabase<F> {
     }
 }
 
+/// How a [`ReadOnlyDatabase`] is opened ([`ReadOnlyDatabase::open_with_options`]). No option is stored in the
+/// container. The default analyzes with the built-in analyzers, requires every `text` field's analyzer, gives the
+/// database a block cache of its own, and maps the container where it is on a local disk ([`MappedReads::IfLocal`]).
+///
+/// ```
+/// use std::sync::Arc;
+/// use persia_analysis::AnalyzerRegistry;
+/// use persia_engine::db::{MappedReads, ReadOnlyOptions};
+/// use persia_engine::segment::BlockCache;
+///
+/// // One cache for every database a process reads, sized once.
+/// let cache = Arc::new(BlockCache::new(64 << 20));
+/// let options = ReadOnlyOptions::new()
+///     .registry(AnalyzerRegistry::builtin())
+///     .block_cache(Arc::clone(&cache))
+///     .mapped_reads(MappedReads::Never);
+/// # let _ = options;
+/// ```
+#[derive(Debug, Clone)]
+pub struct ReadOnlyOptions {
+    registry: AnalyzerRegistry,
+    analysis: Analysis,
+    /// `None`: a new cache for each database opened with these options.
+    block_cache: Option<Arc<BlockCache>>,
+    mapped_reads: MappedReads,
+}
+
+impl Default for ReadOnlyOptions {
+    fn default() -> Self {
+        Self {
+            registry: AnalyzerRegistry::builtin(),
+            analysis: Analysis::Required,
+            block_cache: None,
+            mapped_reads: MappedReads::default(),
+        }
+    }
+}
+
+/// Whether a read-only database reads its container through a memory mapping (SPEC §4.7, ROADMAP 10.2.4; ADR-0017,
+/// amended 2026-11-23): [`ReadOnlyOptions::mapped_reads`]. Only [`ReadOnlyDatabase::open_with_options`], which opens
+/// the file at a path, maps: the opens of a given file or container read with ordinary reads whatever this says, and
+/// a read-write [`super::Database`] never maps.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MappedReads {
+    /// Mapped where the container is on a local disk file system
+    /// ([`Container::map_read_only_if_local`]), ordinary reads everywhere else: the default.
+    ///
+    /// Persia keeps its own side of the mapping contract. The other side is the deployment's: while the database is
+    /// open, no other program, and no other handle of the file in this process, writes or truncates the container
+    /// file. A write under a mapping is undefined behavior, and a truncation ends the process (`SIGBUS`, or
+    /// `EXCEPTION_IN_PAGE_ERROR` on Windows). Where that cannot be excluded, use [`Self::Never`]. On Windows a reader's
+    /// mapping also keeps a writer from truncating a torn tail when it opens (SPEC §4.7).
+    #[default]
+    IfLocal,
+    /// Ordinary reads (`pread`) everywhere: a read error is an error, never a fault.
+    Never,
+}
+
+/// Maps a container this handle opened or reopened ([`Container::map_read_only_if_local`] for a file). A function
+/// pointer, so only an open on a `File` sets it, while a refresh, which is generic, can call it.
+type MapReads<F> = fn(&mut Container<F>) -> persia_storage::container::Result<bool>;
+
+/// Maps `container` with `map` when the handle maps (SPEC §4.7). A mapping that fails is not an error of the open or
+/// the refresh: the container is read with ordinary reads, which report their own errors, and a warning says so.
+fn map_reads<F>(map: Option<MapReads<F>>, container: &mut Container<F>) {
+    if let Some(map) = map
+        && let Err(error) = map(container)
+    {
+        tracing::warn!(%error, "mapping the container failed; it is read with ordinary reads");
+    }
+}
+
+impl ReadOnlyOptions {
+    /// The defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Analyzes replayed `text` fields with `registry`'s analyzers and the built-in ones (SPEC §6.2.2), as
+    /// [`super::DatabaseOptions::registry`] does for a writer.
+    #[must_use]
+    pub fn registry(mut self, registry: AnalyzerRegistry) -> Self {
+        self.registry = registry;
+        self
+    }
+
+    /// Whether a `text` field whose analyzer the registry lacks is opened without its analysis instead of failing the
+    /// open ([`ReadOnlyDatabase::open_container_skipping_analysis`]): for a check of the database, not for searches
+    /// of that field.
+    #[must_use]
+    pub fn skip_unregistered_analysis(mut self, skip: bool) -> Self {
+        self.analysis = if skip {
+            Analysis::SkipUnregistered
+        } else {
+            Analysis::Required
+        };
+        self
+    }
+
+    /// Reads every segment through `cache` (SPEC §10.6, ROADMAP 10.2.5), at the open and at each refresh: one cache
+    /// given to several databases is shared by them, under its one budget. Without it, each database opened with
+    /// these options gets a new cache of [`BlockCache::DEFAULT_CAPACITY`].
+    #[must_use]
+    pub fn block_cache(mut self, cache: Arc<BlockCache>) -> Self {
+        self.block_cache = Some(cache);
+        self
+    }
+
+    /// Whether [`ReadOnlyDatabase::open_with_options`] maps the container (SPEC §4.7): [`MappedReads::IfLocal`] by
+    /// default, [`MappedReads::Never`] for ordinary reads. A refresh keeps the open's choice.
+    #[must_use]
+    pub fn mapped_reads(mut self, mapped_reads: MappedReads) -> Self {
+        self.mapped_reads = mapped_reads;
+        self
+    }
+
+    /// The cache of a database opened with these options.
+    fn cache(&self) -> Arc<BlockCache> {
+        self.block_cache.clone().unwrap_or_else(new_cache)
+    }
+}
+
+/// A database's own block cache (SPEC §10.6): 8 MiB.
+fn new_cache() -> Arc<BlockCache> {
+    Arc::new(BlockCache::default())
+}
+
 impl ReadOnlyDatabase<File> {
+    /// Opens the database in the container file at `path` read-only, as `options` say: their registry and analysis,
+    /// their block cache for every segment (SPEC §10.6), and whether the container is mapped (SPEC §4.7; by default
+    /// where it is on a local disk, [`MappedReads::IfLocal`], with the conditions stated there). The open and every
+    /// refresh that finds something new map the container they read, before they open a segment from it.
+    ///
+    /// ```
+    /// use persia_engine::db::{Database, DatabaseOptions, MappedReads, ReadOnlyDatabase, ReadOnlyOptions};
+    ///
+    /// # let dir = tempfile::tempdir()?;
+    /// let path = dir.path().join("app.persia");
+    /// let db = Database::create(&path, DatabaseOptions::default())?;
+    /// let reader = ReadOnlyDatabase::open_with_options(&path, &ReadOnlyOptions::new())?;
+    /// assert_eq!(reader.container().is_mapped(), reader.container().is_on_local_disk()?);
+    /// // The writer's handle never is.
+    /// assert!(!db.container().is_mapped());
+    /// let plain = ReadOnlyOptions::new().mapped_reads(MappedReads::Never);
+    /// assert!(!ReadOnlyDatabase::open_with_options(&path, &plain)?.container().is_mapped());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// As [`Container::open`] and [`ReadOnlyDatabase::open_container`]. A mapping that fails is not an error: the
+    /// container is read with ordinary reads, and a `tracing` warning says so.
+    pub fn open_with_options(
+        path: impl AsRef<Path>,
+        options: &ReadOnlyOptions,
+    ) -> Result<Self, DatabaseError> {
+        let map: Option<MapReads<File>> = match options.mapped_reads {
+            MappedReads::IfLocal => Some(Container::<File>::map_read_only_if_local),
+            MappedReads::Never => None,
+        };
+        let container = Container::open(path, Mode::ReadOnly)?;
+        Self::open_as(
+            container,
+            &options.registry,
+            options.analysis,
+            options.cache(),
+            map,
+        )
+    }
+
     /// Opens the database in the container file at `path` read-only, analyzing replayed `text` fields with
     /// `registry`'s analyzers.
     ///
@@ -185,6 +364,35 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
         Self::open_container(Container::open_on(file, Mode::ReadOnly)?, registry)
     }
 
+    /// [`ReadOnlyDatabase::open_with_options`] for a container in `file`.
+    ///
+    /// # Errors
+    /// As [`Container::open_on`] and [`ReadOnlyDatabase::open_container`].
+    pub fn open_on_with_options(file: F, options: &ReadOnlyOptions) -> Result<Self, DatabaseError> {
+        Self::open_container_with_options(Container::open_on(file, Mode::ReadOnly)?, options)
+    }
+
+    /// [`ReadOnlyDatabase::open_container`] as `options` say: their registry, whether a missing analyzer fails the
+    /// open, and the block cache every segment reads through (SPEC §10.6), at this open and at each refresh. It reads
+    /// with ordinary reads whatever [`ReadOnlyOptions::mapped_reads`] says: only
+    /// [`ReadOnlyDatabase::open_with_options`], which opens the file itself, maps (SPEC §4.7).
+    ///
+    /// # Errors
+    /// As [`ReadOnlyDatabase::open_container`]; with [`ReadOnlyOptions::skip_unregistered_analysis`], never
+    /// [`DatabaseError::UnregisteredAnalyzer`].
+    pub fn open_container_with_options(
+        container: Container<F>,
+        options: &ReadOnlyOptions,
+    ) -> Result<Self, DatabaseError> {
+        Self::open_as(
+            container,
+            &options.registry,
+            options.analysis,
+            options.cache(),
+            None,
+        )
+    }
+
     /// Runs the open sequence on `container` (SPEC §8.6) without writing to it, whatever its mode.
     ///
     /// Replay cannot flush here. It does not stop at the writer's size threshold, so memory grows with the
@@ -198,7 +406,7 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
         container: Container<F>,
         registry: &AnalyzerRegistry,
     ) -> Result<Self, DatabaseError> {
-        Self::open_with(container, registry, Analysis::Required)
+        Self::open_as(container, registry, Analysis::Required, new_cache(), None)
     }
 
     /// [`ReadOnlyDatabase::open_container`] for a check of the database, such as `persia verify` (ROADMAP 6.6.8): a
@@ -214,20 +422,32 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
         container: Container<F>,
         registry: &AnalyzerRegistry,
     ) -> Result<Self, DatabaseError> {
-        Self::open_with(container, registry, Analysis::SkipUnregistered)
+        Self::open_as(
+            container,
+            registry,
+            Analysis::SkipUnregistered,
+            new_cache(),
+            None,
+        )
     }
 
-    fn open_with(
-        container: Container<F>,
+    /// The open: maps `container` with `map` if given (SPEC §4.7), then runs the open sequence on it.
+    fn open_as(
+        mut container: Container<F>,
         registry: &AnalyzerRegistry,
         analysis: Analysis,
+        block_cache: Arc<BlockCache>,
+        map: Option<MapReads<F>>,
     ) -> Result<Self, DatabaseError> {
+        map_reads(map, &mut container);
         let registry = registry.clone().with_builtins();
-        let (state, live) = opened(container, &registry, analysis)?;
+        let (state, live) = opened(container, &registry, analysis, &block_cache)?;
         Ok(Self {
             state: ArcSwap::from_pointee(state),
             registry,
             analysis,
+            block_cache,
+            map,
             live: Mutex::new(live),
         })
     }
@@ -272,6 +492,18 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
     /// not WAL, such as the segment frames a commit writes before its Manifest (SPEC §8.6).
     pub fn wal_end(&self) -> u64 {
         self.state.load().wal_end
+    }
+
+    /// The cache every segment of this handle reads its blocks through (SPEC §10.6): the one its options gave
+    /// ([`ReadOnlyOptions::block_cache`]), else its own, of [`BlockCache::DEFAULT_CAPACITY`]. A refresh opens its
+    /// segments through the same one.
+    pub fn block_cache(&self) -> &Arc<BlockCache> {
+        &self.block_cache
+    }
+
+    /// The counters of [`Self::block_cache`], read now ([`super::Database::block_cache_stats`]).
+    pub fn block_cache_stats(&self) -> CacheStats {
+        self.block_cache.stats()
     }
 
     /// The `text` fields whose analysis the current state skipped, in collection then field id order: none unless it
@@ -332,7 +564,7 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyDatabase<F> {
             live
         });
         let current = self.state.load_full();
-        let container = current.container.reopen_read_only()?;
+        let mut container = current.container.reopen_read_only()?;
         let current_seq = current.snapshot.seq();
         let found = container.superblock().seq;
         let other_database = container.header().db_uuid != current.container.header().db_uuid;
@@ -348,10 +580,15 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyDatabase<F> {
         } else {
             plan(&current, &live, &container)?
         };
+        if !matches!(step, Step::Unchanged) {
+            // Before any segment is opened from it, so they read from the mapping (SPEC §4.7, ADR-0017 amended).
+            map_reads(self.map, &mut container);
+        }
         match step {
             Step::Unchanged => Ok(Refreshed::Unchanged),
             Step::Reload => {
-                let (state, next) = opened(container, &self.registry, self.analysis)?;
+                let (state, next) =
+                    opened(container, &self.registry, self.analysis, &self.block_cache)?;
                 self.state.store(Arc::new(state));
                 *live = next;
                 Ok(Refreshed::Reloaded { seq: found })
@@ -375,7 +612,7 @@ impl<F: ContainerFile + Sync + 'static> ReadOnlyDatabase<F> {
         let seq = container.superblock().seq;
         let skipped = match manifest {
             // Changes `live` only once every segment opened.
-            Some(next) => take_manifest(live, &container, next, &self.registry, self.analysis)?,
+            Some(next) => take_manifest(live, &container, next, self)?,
             None => current.skipped.clone(),
         };
         // From here until the swap, a failure leaves the memtables held and the next refresh reloads.
@@ -493,17 +730,18 @@ fn plan<F: ContainerFile + Sync>(
 
 /// Takes `next`, a later commit [`plan`] found compatible, into `live`: each collection's segments as `next` lists
 /// them, sharing those whose entry is unchanged and opening the others, and an empty memtable for each new collection,
-/// analyzed with `registry` as an open would. Returns the fields whose analysis is skipped. `live` changes only once
+/// analyzed with `reader`'s registry as an open would, the opened segments reading through its block cache. Returns
+/// the fields whose analysis is skipped. `live` changes only once
 /// every segment opened.
 fn take_manifest<F: ContainerFile + Sync>(
     live: &mut Live,
     container: &Container<F>,
     next: Manifest,
-    registry: &AnalyzerRegistry,
-    analysis: Analysis,
+    reader: &ReadOnlyDatabase<F>,
 ) -> Result<Vec<SkippedAnalysis>, DatabaseError> {
     let objects = ContainerObjects::new(container, &next);
-    let mut registry = registry.clone();
+    let analysis = reader.analysis;
+    let mut registry = reader.registry.clone();
     let mut skipped = Vec::new();
     let mut segments = BTreeMap::new();
     let mut created = Vec::new();
@@ -535,7 +773,7 @@ fn take_manifest<F: ContainerFile + Sync>(
                 .and_then(|i| old?.segments.get(i).cloned());
             opened.push(match reused {
                 Some(s) => s,
-                None => open_segment(&objects, name, segment, &schema)?,
+                None => open_segment(&objects, name, segment, &schema, &reader.block_cache)?,
             });
         }
         if old.is_none() {
@@ -557,16 +795,18 @@ fn take_manifest<F: ContainerFile + Sync>(
     Ok(skipped)
 }
 
-/// The open sequence (SPEC §8.6) on `container`, with `registry` and `analysis`: the state readers see, and the
+/// The open sequence (SPEC §8.6) on `container`, with `registry` and `analysis`, its segments reading through `cache`:
+/// the state readers see, and the
 /// memtables behind it.
 fn opened<F: ContainerFile + Sync>(
     container: Container<F>,
     registry: &AnalyzerRegistry,
     analysis: Analysis,
+    cache: &Arc<BlockCache>,
 ) -> Result<(State<F>, Live), DatabaseError> {
     let mut registry = registry.clone();
     let mut skipped = Vec::new();
-    let (manifest, mut collections) = load(&container, |name, schema| {
+    let (manifest, mut collections) = load(&container, cache, |name, schema| {
         if analysis == Analysis::SkipUnregistered {
             skip_unregistered(name, schema, &mut registry, &mut skipped)?;
         }
@@ -737,3 +977,6 @@ fn skip_unregistered(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

@@ -419,9 +419,28 @@ truncate below the `log_end` that process mapped. A fault on a mapped page (a re
 program) raises `SIGBUS` on Unix (`EXCEPTION_IN_PAGE_ERROR` on Windows) and ends the process; a reader that cannot
 accept that reads with ordinary reads instead.
 
-Mapping is opt-in; ordinary reads are the default (ADR-0017). Turning it on is an `unsafe` call: the embedder states
-that nothing outside Persia writes, truncates or hole-punches the file below the mapped `log_end` while a mapping
-lives. A failed remap falls back to ordinary reads, logs a warning and is counted (`mapping_failures`). The automatic
+Mapping is on by default for read-only handles on local disks, and off for read-write ones (ADR-0017, amended
+2026-11-23). A read-only database opened by path (`ReadOnlyDatabase::open_with_options`, which the embedded API's
+read-only open is to use, ROADMAP 10.2.4) maps its container when the file is on a local disk file system (below),
+through a safe call (`Container::map_read_only_if_local`) that refuses a read-write container; its options can force
+ordinary reads (`MappedReads::Never`). The engine's read-only opens of a given file or container, and its older ones
+that take a registry alone, read with ordinary reads. A read-write database never maps: the writer's handle always
+reads with ordinary reads. The safe call takes on the part of the mapping contract that is Persia's own: no Persia
+writer changes the bytes below a committed `log_end` (above), the mapping handle is read-only, and on the
+allow-listed local file systems the writer lock belongs to the open file, so no second writer can exist in the same
+process. It cannot take on the rest, which stays with the deployment: while a read-only handle is open, nothing but
+Persia writes, truncates or hole-punches the container file, neither another program nor another handle of the file
+in the same process. A write under a mapping is undefined behaviour, a truncation ends the process as above, and a
+slot damaged later stays outside the contract (above). A deployment that cannot rule that out opens with ordinary
+reads. A read-only handle never commits, so it never remaps: a refresh (ADR-0060) reopens the container and, when it
+finds something new, maps the new handle before it opens a segment from it, up to the new `log_end` (after a
+compaction, the file renamed over the path). A snapshot taken before keeps the mapping its segments were opened on.
+A mapping that fails at an open or a refresh is not an error of either: the handle reads with ordinary reads, and a
+warning is logged.
+
+Mapping anything else (a read-write container, or a file the caller vouches for) is an `unsafe` call
+(`enable_mapped_reads`, ADR-0017): the embedder states that nothing outside Persia writes, truncates or hole-punches
+the file below the mapped `log_end` while a mapping lives. A failed remap falls back to ordinary reads, logs a warning and is counted (`mapping_failures`). The automatic
 choice maps only a container on a local disk file system (`enable_mapped_reads_if_local`): on Linux, those in an
 allow-list of `f_type`s (ext2-4, XFS, Btrfs and other allow-listed local types; ADR-0021), on macOS local volumes other than FUSE, FAT and exFAT, on Windows fixed
 and RAM disks. Network, FUSE, overlay, removable and unlisted file systems keep ordinary reads, since a failed page read
@@ -432,7 +451,11 @@ that succeeded. A frame the mapping covers is read from it; any other (after tha
 Either way the frame is validated on every read (§4.4). On Windows a live mapping keeps the file from being shrunk,
 so a read-write open that must truncate a torn or corrupt tail (§4.4, §8.6) fails with an I/O error and leaves the
 container unchanged until the mapping is gone; a corrupt tail's quarantine copy (§4.4) may be left behind by each
-such attempt.
+such attempt. With mapping on by default for read-only handles, every reader of a container on a Windows fixed or RAM
+disk holds a mapping while it is open (or while a snapshot taken from it lives): a writer that stopped uncleanly with
+a torn or corrupt tail cannot open read-write until every such reader has closed or reads with ordinary reads. A
+clean tail needs no truncation and opens. Whether Windows read handles should default to ordinary reads instead is
+open (ROADMAP 10.1.22).
 
 ### 4.8 Copying and backing up a database
 A database is both of its files (§4). A copy of `<name>.persia` alone keeps every document's `BlobRef` but none of
@@ -3327,9 +3350,17 @@ segment has its own entries, dropped with it): once a block is in it, term looku
 document fetches reuse it without decompressing it or checking its CRC again. The same cache keeps a `keyword` column's
 dictionary decoded and checked (keyed by open segment and field, its cost its decoded bytes), so sorts and facets
 over it do not decode it per request (ROADMAP 7.5.5); `Segment::verify` reads its own copy. Readers that miss the
-same block at the same time may each decode it; one copy is kept. Segments opened without a given cache share one per process
-(8 MiB, `BlockCache::shared`); the embedded API and the server are to open all their segments with one cache sized
-by their configuration (planned: ROADMAP 10.2.5, 11.4.7). The capacity bounds what the cache keeps: a reader keeps
+same block at the same time may each decode it; one copy is kept. A database reads every segment it opens through
+one such cache (ROADMAP 10.2.5): the segments an open recovers, those a flush and a merge write (the merge worker's
+verifying open included), those a schema change opens again, and those of a read-only database, at its open and at
+each refresh. The cache is an option of the open (`DatabaseOptions::block_cache`; `ReadOnlyOptions::block_cache`
+for a read-only one): by default a new one per database, of 8 MiB (`BlockCache::DEFAULT_CAPACITY`), so two databases
+of one process do not evict each other's blocks. One cache given to several databases is shared by them under its
+one budget, as the server is to give its databases one (ROADMAP 11.4.7). Its counters (hits, misses, entries, bytes)
+are read from the database (`Database::block_cache_stats`, `ReadOnlyDatabase::block_cache_stats`). That is the
+engine's side; the embedded API's option for the size (`OpenOptions`) and a default taken from measurements are
+planned (ROADMAP 10.2.5, 15.2.4). A segment opened outside a database without a given cache reads through one per
+process (8 MiB, `BlockCache::shared`). The capacity bounds what the cache keeps: a reader keeps
 the block it is reading in each stream it reads, also after the cache evicts it.
 It holds no state of its own on disk.
 
