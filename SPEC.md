@@ -1516,7 +1516,7 @@ query (so its text is stated in `original` and `effective`, and `filter` is hard
 to the same limits. When they run L0 alone (`relax: false`, a collection that disables the cascade, or a plan with no
 level, no fallback and no filter step), the plain search runs: its hits have no level or rank score, an explained
 one has no `relaxed` node (§7.7), and the search is not counted in the relaxation metrics (§7.6, ROADMAP 10.1.21). A
-response states such a search as `level: "exact"` with nothing applied (§7.6; the response JSON is ROADMAP 10.1.13).
+response states such a search as `level: "exact"` with nothing applied (§7.6; the response JSON is §7.5.2).
 `proximity` (ROADMAP 10.1.7, ADR-0036) plans the plain search with the proximity bonus of §7.2 when `true`
 (`SearchPlan::with_proximity`) and without it when `false` or left out (`SearchPlan::without_proximity`). The
 relaxed search plans every step without the bonus (§7.2), so `"proximity": true` on a request whose settings
@@ -1830,6 +1830,49 @@ one (§9.1), and its stored fields (§6.4.2) after the projection. The projectio
 (default), none, or a list of names: a field of the schema with `stored: true`, or in a collection that is not
 `strict` an extra field; another name is an error. A document lacking a projected field returns without it. In a
 request's JSON it is the key `projection` (§7.1.4).
+
+#### 7.5.2 Response JSON
+A response is one JSON object (ROADMAP 10.1.13, ADR-0065), written by the engine beside the request JSON it answers
+(§7.1.4), so the embedded API, its bindings and the server write the same text. Its keys come in this order, and so do
+the keys of each object in it; a value that is absent is left out, never `null`:
+```jsonc
+{"hits": [{"document": {"id": "a", "title": "red shoes", "price": 80.5},   // §6.4.1's output form, projected (§7.5.1)
+           "score": 1.25,
+           "sort": [1.25, 80.5],                 // one per sort key (§7.4); null for a document without a value
+           "cursor": "AgAD...",                  // the cursor token of the page after this hit (§7.4)
+           "explanation": {"relaxed": {...}},    // only with "explain": true (§7.7)
+           "level": "exact", "step": 0, "rank_score": 1.25}],   // a relaxed search's hits only (§7.6)
+ "facets": [{"field": "brand", "values": [{"value": "nike", "count": 3}]}],   // request order (§7.5)
+ "relaxation": {"level": "exact", "applied": [], "original": "red shoes", "effective": "red shoes",
+                "corrected": {}, "truncated": false, "filters_dropped": false},   // §7.6
+ "query_truncated": false}               // §7.1.1
+```
+- `document` is the hit's document in the output form of §6.4.1: `id`, then `blob` when it has a blob reference
+  (§9.1), then its projected fields in name order.
+- Every number is a plain finite JSON number (§7.2: a score is never `Infinity` or `NaN`), written in the shortest form
+  that reads back as the same `f64`; counts, steps and positions are integers.
+- A sort value is typed by its key: the score and an `f64` field as numbers, an `i64` as an integer, a `datetime` as
+  §6.4.1's output text, a `bool` as `true` or `false`, a `keyword` as below, and `null` when the document has no value.
+- A *keyword value* (a keyword sort value, a facet value, an explained term) is a JSON string when its bytes are UTF-8,
+  and otherwise the object `{"base64url": "<text>"}`, its bytes as the cursor token's base64url without padding
+  (§7.4). Documents write their keywords as strings, so the object form is for values the index holds as bytes.
+- `relaxation` has `level`, `applied`, `original` and `effective` when the query was compiled from `q`, `corrected`
+  (an object from each word the fuzzy level replaced to the term it searched, in query order; a word the query repeats
+  is named once, as its corrections are the same), `truncated`, `fallback` when L5 found the hits, and
+  `filters_dropped` (§7.6). A plain search (`relax: false`, §7.1.4) states `level: "exact"`, `applied: []`,
+  `truncated: false`, `filters_dropped: false`, and its text as L0 states it (`original` as read, `effective` the
+  clauses that compiled), as a relaxed search that stops at L0 does; its hits have no `level`, `step` or
+  `rank_score`.
+- An explanation node (§7.7) is an object of one key naming its kind, whose value holds its parts: `word` (`score`,
+  `idf`, `k1`, `tf`, `fields`: each `field` by name, `term` as a keyword value, `tf`, `norm`, `length` except for a
+  `keyword` field, `factor`, `contribution`), `phrase` (`score`, `field`, `terms`, `idf`, `k1`, `freq`, `norm`,
+  `length`, `factor`, `tf`), `bool` (`score`, `must`, `proximity` when it has one: `score` and `pairs`, each `first`,
+  `weight`, `field` and `distance` when a field holds both words, `closeness`, `score`; then `should`), `boost`
+  (`score`, `boost`, `query`), `constant_score` (`score`, `query`), `match_all` (`score`), `static_rank` (`score`,
+  `value` when the document has one) and `relaxed` (`level`, `step`, `applied` except at L0, `score`, `explanation`).
+
+Writing a response fails only on a broken invariant (a field id of another schema, a value of another type than its
+field, a number that is not finite): it is reported, not written as JSON a reader would take for a value.
 
 ### 7.6 Zero-results avoidance (default on)
 If the number of hits `< relax.min_results` (default **1**), the engine runs the **relaxation cascade**,
@@ -2292,8 +2335,8 @@ includes `:cut` when the step was cut, and is absent at L0, which applies nothin
 bit for bit. Every level has one: L0's around its query's tree, L1 to L4 around their step's query, and L5 around its
 `static_rank`; L6 `filters` around its query's tree (`applied` `"filters"`). Nodes under the root never have one. A plain search's hits have none either, while a relaxed search
 with `relax: false` wraps its L0 hits as step 0: the two rank alike (§7.6), but their explanations differ by this
-node. The JSON below is illustrative. The node is one object key, and the JSON of the tree inside it is defined
-with the request and response JSON (ROADMAP 10.1, 11.x):
+node. The JSON below is illustrative. The node is one object key, and the JSON of the tree inside it is §7.5.2's
+(ROADMAP 10.1.13):
 ```jsonc
 "explanation": { "relaxed": { "level": "fuzzy", "step": 4, "applied": "fuzzy", "score": 1.25,
                               "explanation": { /* the step's tree, as above */ } } }

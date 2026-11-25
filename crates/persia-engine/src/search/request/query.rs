@@ -13,8 +13,8 @@ use std::time::Instant;
 
 use super::cursor::CursorTokenError;
 use crate::db::{
-    CancelToken, Clock, CollectionSnapshot, Cursor, Execution, RelaxedResults, RelaxedSearchError,
-    SearchRequest, SearchResults, Threads,
+    CancelToken, Clock, CollectionSnapshot, Cursor, Execution, Relaxation, RelaxedResults,
+    RelaxedSearchError, SearchRequest, SearchResults, Threads,
 };
 use crate::query::{DefaultFields, Filter, QueryError, QueryLimits};
 use crate::relax::{RelaxError, RelaxOptions, RelaxPlan};
@@ -281,6 +281,7 @@ impl QueryRequest {
         Ok(QueryResponse {
             results,
             query_truncated: compiled.truncated,
+            exact: Relaxation::exact(&compiled),
         })
     }
 
@@ -378,6 +379,20 @@ pub struct QueryResponse {
     /// Whether part of `q` was left out to stay within the limits (`query_truncated`, SPEC §7.1.1); not the
     /// relaxation budget's `truncated` ([`crate::db::Relaxation::truncated`]).
     pub query_truncated: bool,
+    /// What a plain search states as its `relaxation` (SPEC §7.6): level `exact`, nothing applied, L0's text.
+    pub(super) exact: Relaxation,
+}
+
+impl QueryResponse {
+    /// What the relaxation cascade did (SPEC §7.6): the relaxed search's [`RelaxedResults::relaxation`], or for the
+    /// plain search (`relax: false`) level `exact` with nothing applied, not truncated, and the text of `q` as L0 states
+    /// it (`original` as read, `effective` the clauses that compiled), as a relaxed search that stops at L0 states it.
+    pub fn relaxation(&self) -> &Relaxation {
+        match &self.results {
+            QueryResults::Relaxed(results) => &results.relaxation,
+            QueryResults::Plain(_) => &self.exact,
+        }
+    }
 }
 
 /// The results of a request, by the search that ran (SPEC §7.6).

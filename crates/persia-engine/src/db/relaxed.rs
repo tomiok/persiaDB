@@ -158,7 +158,7 @@ impl Relaxation {
     /// What a cascade that built steps through `level` (`relaxed` when that step is after L0), applying `applied`, did,
     /// for a query `compiled` from text (`None` for a programmatic one) whose hit step reads `effective` and
     /// `corrected` those words.
-    fn of(
+    pub(crate) fn of(
         (level, relaxed): (RelaxLevel, bool),
         applied: Vec<String>,
         compiled: Option<&Compiled>,
@@ -190,6 +190,18 @@ impl Relaxation {
             truncated,
             relaxed,
         }
+    }
+
+    /// What a search of L0 alone states (SPEC §7.6): level `exact`, nothing applied, not truncated, and for a query
+    /// `compiled` from text its text as L0 states it (`effective` the clauses that compiled).
+    pub(crate) fn exact(compiled: &Compiled) -> Self {
+        Self::of(
+            (RelaxLevel::Exact, false),
+            Vec::new(),
+            Some(compiled),
+            (Some(compiled.effective()), Vec::new()),
+            false,
+        )
     }
 
     /// Whether the cascade built a step after L0 that it did not skip, so the response may hold hits a strict query

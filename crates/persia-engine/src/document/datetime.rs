@@ -119,7 +119,7 @@ pub(crate) fn parse(text: &str) -> Option<i64> {
 }
 
 /// The RFC 3339 UTC form SPEC §6.4.1 writes, or `None` outside the range.
-pub(super) fn format(micros: i64) -> Option<String> {
+pub(crate) fn format(micros: i64) -> Option<String> {
     if !in_range(micros) {
         return None;
     }

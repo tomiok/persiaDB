@@ -1,6 +1,6 @@
 //! Fuzz the request JSON (ROADMAP 10.1.10; SPEC §7.1, ADR-0062): no input panics `QueryRequest::from_json`, an
 //! accepted request holds only parts its own parsers accept, and running it on a small collection returns, with hits
-//! or an error, never a panic.
+//! or an error, never a panic. A response it returns is written as valid JSON (ROADMAP 10.1.13).
 #![no_main]
 
 use std::sync::{Arc, OnceLock};
@@ -112,5 +112,11 @@ fuzz_target!(|data: &[u8]| {
     let options = RunOptions::new()
         .threads(Threads::Current)
         .budget_clock(Arc::new(ManualClock::new(0)));
-    let _ = request.run(collection, &options);
+    // A response the search returned always has its JSON (SPEC §7.5.2), and that JSON is valid.
+    if let Ok(response) = request.run(collection, &options) {
+        let json = response
+            .to_json(collection.schema())
+            .expect("a response the search returned has its JSON");
+        assert!(serde_json::from_str::<serde_json::Value>(&json).is_ok(), "{json}");
+    }
 });

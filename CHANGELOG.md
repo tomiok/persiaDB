@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia_engine::search::request::QueryResponse::to_json` writes a search response as the response JSON of SPEC §7.5.2
+  (ROADMAP 10.1.13, ADR-0065): each hit's projected document, score, typed sort values, cursor token and, for a
+  relaxed search, its level, step and rank score; the facets; `relaxation` as SPEC §7.6 lists it (a `relax: false`
+  search states level `exact` and L0's text, `QueryResponse::relaxation`); `query_truncated`; and the explanation
+  tree of SPEC §7.7. Keyword values that are not UTF-8 are written as `{"base64url": "..."}`. Writing fails only on a
+  broken invariant (`ResponseJsonError`).
 - The request JSON takes `projection` (ROADMAP 10.1.20; SPEC §7.1.4, §7.5.1; ADR-0065): `"all"` (the default), `"none"`
   (each hit returns its id and blob reference only) or a non-empty array of distinct stored field names (in a
   collection that is not `strict`, extra fields too). `[]`, a repeated name, another string, and a name that is not

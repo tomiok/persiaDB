@@ -145,6 +145,11 @@ pub struct SearchHit {
 }
 
 impl SearchHit {
+    /// The keys of the sort that ranked it, one per sort value.
+    pub(crate) fn sort_keys(&self) -> &[SortKey] {
+        &self.sort_keys
+    }
+
     /// The cursor of the page after this hit, including the view that produced it, and for a hit of
     /// `search_relaxed` its step, its cascade's last step, and its hit step (SPEC §7.6), as
     /// [`RelaxedHit::cursor`](crate::db::RelaxedHit::cursor) gives.
