@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- A cursor token records its request (ROADMAP 10.1.24; SPEC §7.4; ADR-0062 item 11, amended): cursor tokens are
+  version 2, which adds a fingerprint of the request's `q`, fields, filters and query limits (`Cursor::request`,
+  `QueryRequest::fingerprint`). A token given back with another `q`, `fields`, `filter`, `soft_filter` or limits is an
+  invalid argument (`RequestError::CursorRequest`) instead of paging another ranking; `limit`, `offset`, facets, the
+  projection and `explain` may still change between pages. Version 1 tokens are refused (pre-1.0: request the first
+  page again).
 - `persia_engine::search::request::QueryResponse::to_json` writes a search response as the response JSON of SPEC §7.5.2
   (ROADMAP 10.1.13, ADR-0065): each hit's projected document, score, typed sort values, cursor token and, for a
   relaxed search, its level, step and rank score; the facets; `relaxation` as SPEC §7.6 lists it (a `relax: false`

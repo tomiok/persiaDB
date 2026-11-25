@@ -31,8 +31,8 @@ use std::time::Duration;
 use persia_analysis::AnalyzerRegistry;
 use persia_engine::db::{
     CancelToken, Clock, CollectionSnapshot, Cursor, CursorOrigin, Database, DatabaseOptions,
-    Execution, Located, ManualClock, RelaxedResults, SearchResults, SegmentIds, StepCursor,
-    Threads,
+    Execution, Located, ManualClock, RelaxedResults, SearchRequest, SearchResults, SegmentIds,
+    StepCursor, Threads,
 };
 use persia_engine::document::{Document, Value};
 use persia_engine::query::{
@@ -201,6 +201,7 @@ fn every_key_parses_to_its_typed_value() {
         relaxed: None,
         proximity: false,
         relax: None,
+        request: None,
     };
     let json = json!({
         "q": "zapatillas rojas nike",
@@ -695,7 +696,7 @@ fn errors_name_what_is_wrong() {
     );
     assert_eq!(
         message(r#"{"search_after": "AAAA"}"#),
-        "search_after: a cursor token of version 0; this build reads version 1"
+        "search_after: a cursor token of version 0; this build reads version 2"
     );
     // The typed errors of each part come through as they are.
     assert!(matches!(
@@ -811,6 +812,40 @@ fn by_hand(c: &CollectionSnapshot, request: &QueryRequest) -> Result<QueryResult
     }
 }
 
+/// What a hit is, beside the request fingerprint its cursor records: `run` records its request's (ROADMAP 10.1.24), the
+/// engine's own searches none. Each hit's cursor is checked to record `fingerprint`, then compared without it.
+fn without_request(results: &QueryResults, fingerprint: Option<u64>) -> J {
+    let hit = |h: &persia_engine::db::SearchHit| {
+        let cursor = h.cursor();
+        assert_eq!(cursor.request, fingerprint);
+        let cursor = Cursor {
+            request: None,
+            ..cursor
+        };
+        json!(format!(
+            "{:?} {} {:?} {:?} {:?} {}",
+            h.location,
+            h.score.to_bits(),
+            h.sort,
+            h.document,
+            h.explanation,
+            cursor.to_token()
+        ))
+    };
+    match results {
+        QueryResults::Relaxed(r) => json!({
+            "hits": r.hits.iter().map(|h| json!([hit(&h.hit), format!("{:?} {} {}", h.level, h.step, h.rank_score.to_bits())])).collect::<Vec<_>>(),
+            "facets": format!("{:?}", r.facets),
+            "relaxation": format!("{:?}", r.relaxation),
+        }),
+        QueryResults::Plain(r) => json!({
+            "hits": r.hits.iter().map(hit).collect::<Vec<_>>(),
+            "facets": format!("{:?}", r.facets),
+        }),
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn run_is_the_engines_search_of_the_same_parts() {
     let db = database(schema());
@@ -842,7 +877,12 @@ fn run_is_the_engines_search_of_the_same_parts() {
         let request = parse(&json.to_string()).unwrap();
         let got = request.run(c, &options()).unwrap();
         assert!(!got.query_truncated, "{json}");
-        assert_eq!(got.results, by_hand(c, &request).unwrap(), "{json}");
+        let fingerprint = request.fingerprint(c.schema(), &limits());
+        assert_eq!(
+            without_request(&got.results, Some(fingerprint)),
+            without_request(&by_hand(c, &request).unwrap(), None),
+            "{json}"
+        );
     }
 }
 
@@ -1465,6 +1505,139 @@ fn a_token_pages_only_the_search_that_made_it() {
     drop(schema);
 }
 
+/// A token records its request (SPEC §7.4, ROADMAP 10.1.24): another `q`, `fields`, `filter`, `soft_filter` or limits
+/// is refused, while the page, the facets, the projection and `explain` may change; the same request pages exactly.
+#[test]
+fn a_token_pages_only_its_own_request() {
+    let db = database(schema());
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("shoes").unwrap();
+    for base in [
+        json!({"q": "red", "relax": false, "limit": 1}),
+        json!({"q": "red shoes", "limit": 1, "filter": {"term": ["tenant", "t1"]}}),
+    ] {
+        let first = parse(&base.to_string()).unwrap();
+        let ran = first.run(c, &options()).unwrap();
+        let cursor = match &ran.results {
+            QueryResults::Relaxed(r) => r.hits[0].cursor(),
+            QueryResults::Plain(r) => r.hits[0].cursor(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            cursor.request,
+            Some(first.fingerprint(c.schema(), &limits()))
+        );
+        let after = |extra: J| {
+            let mut request = base.clone();
+            request["search_after"] = json!(cursor.to_token());
+            for (key, value) in extra.as_object().unwrap() {
+                request[key] = value.clone();
+            }
+            parse(&request.to_string()).unwrap()
+        };
+        // What does not change the ranking may change between pages.
+        for same in [
+            json!({}),
+            json!({"limit": 3}),
+            json!({"offset": 1}),
+            json!({"facets": ["brand"]}),
+            json!({"projection": "none"}),
+            json!({"explain": true}),
+        ] {
+            assert!(
+                after(same.clone()).run(c, &options()).is_ok(),
+                "{base} {same}"
+            );
+        }
+        // What does is refused, each as another request.
+        let refused =
+            |request: QueryRequest, run: &RunOptions, what: &str| match request.run(c, run) {
+                Err(QueryRequestError::Request(RequestError::CursorRequest {
+                    cursor: true,
+                    search: true,
+                })) => {}
+                other => panic!("{base} {what}: {other:?}"),
+            };
+        for other in [
+            json!({"q": "red hat"}),
+            json!({"q": "Red"}),
+            json!({"fields": ["title"]}),
+            json!({"filter": {"term": ["tenant", "t2"]}}),
+            json!({"soft_filter": {"term": ["brand", "nike"]}}),
+        ] {
+            refused(after(other.clone()), &options(), &other.to_string());
+        }
+        let wider = QueryLimits {
+            max_expansions: limits().max_expansions + 1,
+            ..limits()
+        };
+        refused(after(json!({})), &options().limits(wider), "other limits");
+    }
+    // The same request pages exactly: the page after the first hit's token is the page from offset 1.
+    let base = json!({"q": "red", "relax": false, "limit": 2});
+    let mut by_token = paged(c, base.clone(), 1);
+    by_token.truncate(3);
+    let mut by_offset = Vec::new();
+    for offset in 0..3 {
+        let mut request = base.clone();
+        request["limit"] = json!(1);
+        request["offset"] = json!(offset);
+        by_offset.extend(
+            plain_ids(&plain(
+                parse(&request.to_string())
+                    .unwrap()
+                    .run(c, &options())
+                    .unwrap()
+                    .results,
+            ))
+            .into_iter()
+            .map(str::to_owned),
+        );
+    }
+    assert_eq!(by_token, by_offset);
+    // A request's token and the engine's own searches do not page each other: neither knows the other's request.
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let request = parse(r#"{"q": "red", "relax": false, "limit": 1}"#).unwrap();
+    let ran = plain(request.run(c, &options()).unwrap().results);
+    let stats = c.search_statistics(&memtable);
+    let compiled = c
+        .compiler()
+        .compile("red", &DefaultFields::all(c.schema()), &limits());
+    let plan = SearchPlan::with_terms(compiled.query(), c.schema(), &stats, &exec().terms(&views))
+        .unwrap()
+        .without_proximity();
+    let page = |cursor: Cursor| SearchRequest {
+        limit: 1,
+        search_after: Some(cursor),
+        ..SearchRequest::default()
+    };
+    assert!(matches!(
+        views.search_with(&plan, &page(ran.hits[0].cursor()), &exec()),
+        Err(RequestError::CursorRequest {
+            cursor: true,
+            search: false
+        })
+    ));
+    let engine = views.search_with(&plan, &page_one(), &exec()).unwrap();
+    assert!(matches!(
+        request
+            .with_search_after(engine.hits[0].cursor())
+            .run(c, &options()),
+        Err(QueryRequestError::Request(RequestError::CursorRequest {
+            cursor: false,
+            search: true
+        }))
+    ));
+}
+
+fn page_one() -> SearchRequest {
+    SearchRequest {
+        limit: 1,
+        ..SearchRequest::default()
+    }
+}
+
 // --- properties -------------------------------------------------------------------------------------------------------
 
 fn runner(cases: u32) -> TestRunner {
@@ -1878,10 +2051,17 @@ fn any_cursor() -> impl Strategy<Value = Cursor> {
         (any::<u64>(), any::<u64>(), ".{0,24}"),
         step,
         any::<bool>(),
-        relax,
+        (relax, proptest::option::of(any::<u64>())),
     )
         .prop_map(
-            |((sort, values), location, (seq, version, collection), relaxed, proximity, relax)| {
+            |(
+                (sort, values),
+                location,
+                (seq, version, collection),
+                relaxed,
+                proximity,
+                (relax, request),
+            )| {
                 Cursor {
                     sort,
                     values,
@@ -1894,6 +2074,7 @@ fn any_cursor() -> impl Strategy<Value = Cursor> {
                     relaxed,
                     proximity,
                     relax,
+                    request,
                 }
             },
         )
@@ -2330,10 +2511,11 @@ fn a_forged_cursor_never_panics() {
             let _ = parsed.run(c, &options());
             // And with the settings the search itself records, so the settings check passes too.
             let relax = RelaxPlan::new(c.schema().relaxation(), parsed.relax()).unwrap();
-            // And with the request's own sort, so the sort check passes and the values' and steps' checks run.
+            // And with the request's own sort and fingerprint, so those checks pass and the values' and steps' checks run.
             let matching = Cursor {
                 relax: relax.settings(),
                 sort: parsed.page().sort.keys().collect(),
+                request: Some(parsed.fingerprint(c.schema(), &limits())),
                 ..forged
             };
             let _ = parsed.with_search_after(matching).run(c, &options());

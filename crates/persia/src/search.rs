@@ -168,8 +168,8 @@ impl SearchRequest {
     }
 
     /// The page after the hit whose cursor token this is ([`Hit::cursor`], [`SearchResponse::next_cursor`]; SPEC
-    /// §7.4). A token that was cut, changed, written by another version, or taken from a search with another sort is
-    /// refused when the request runs ([`ErrorCode::InvalidArgument`](crate::ErrorCode::InvalidArgument)).
+    /// §7.4). A token that was cut, changed, written by another version, or taken from a search with another sort or
+    /// another `q`, fields, filters or limits (ROADMAP 10.1.24) is refused when the request runs ([`ErrorCode::InvalidArgument`](crate::ErrorCode::InvalidArgument)).
     ///
     /// ```
     /// let request = persia::SearchRequest::new("shoes").after("token-from-a-previous-page");

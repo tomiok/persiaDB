@@ -13,6 +13,7 @@ use crate::segment::ReadError;
 
 mod base64url;
 mod cursor;
+mod fingerprint;
 mod json;
 mod query;
 mod response;
@@ -100,6 +101,24 @@ pub enum RequestError {
         cursor: Option<RelaxSettings>,
         /// This search's.
         search: Option<RelaxSettings>,
+    },
+    /// A cursor from the search of another request (SPEC §7.4, ROADMAP 10.1.24): its `q`, `fields`, `filter`,
+    /// `soft_filter` or limits differ, as its fingerprint ([`crate::db::Cursor::request`]) says, so this search ranks
+    /// otherwise and its page would not be a slice of the cursor's ranking. A search run without a request has no
+    /// fingerprint: its cursors page only such a search, and a request's page only a request's.
+    #[error(
+        "a cursor from another request: its query, fields, filters or limits are not this request's{}",
+        match (cursor, search) {
+            (true, false) => " (the cursor is a request's, this search is run without one)",
+            (false, true) => " (the cursor is from a search run without a request)",
+            _ => "",
+        }
+    )]
+    CursorRequest {
+        /// Whether the cursor records a request's fingerprint.
+        cursor: bool,
+        /// Whether this search is a request's.
+        search: bool,
     },
     /// A cursor from a relaxation step this search cannot page after (SPEC §7.6, ROADMAP 8.1.3): a step after L0
     /// given to a search that does not relax (every hit it returns ranks before it), or a step after the last step

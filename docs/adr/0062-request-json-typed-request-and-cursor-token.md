@@ -3,7 +3,7 @@
 - Status: proposed
 - Date: 2026-11-23
 - Related: SPEC §7.1, §7.1.4, §7.2, §7.4, §7.6, §17; ROADMAP 10.1.3, 10.1.7, 10.1.10, 10.1.13, 10.1.14, 10.1.20,
-  10.1.21, 8.2.13; ADR-0022, ADR-0036, ADR-0045, ADR-0048, ADR-0056
+  10.1.21, 8.2.13, 10.1.24; ADR-0022, ADR-0036, ADR-0045, ADR-0048, ADR-0056
 
 ## Context
 
@@ -70,6 +70,25 @@ segment index, a docid, relaxation settings) that no client should build or read
     stores it. But clients hold tokens between requests, so **the version byte is the compatibility rule**: any
     change to the layout or to the meaning of a field takes a new version, a build refuses versions it does not read,
     and a golden test per version pins the text. Decoding is strict (one encoding per cursor) and never panics.
+    *Amended 2026-11-25 (ROADMAP 10.1.24): version 2.* A cursor from a request also records a *request
+    fingerprint* (flag 16, a `u64` before the checksum): XXH3-64 (`persia_format::hash::xxh3_64`, already in the
+    workspace) of a canonical encoding of the request's `q` as written, the fields it searches (resolved: every
+    `text` field with its boost when `fields` is left out), `filter`, `soft_filter` and the query limits, the parts
+    its ranking depends on that the cursor records nowhere else. The encoding is binary and defined field by field
+    (`search/request/fingerprint.rs`: lengths and counts as varints, a filter as a tag per node, `f64` as its bits
+    with `-0.0` as `0.0`, the five limits as `u64`), never `Debug` text, so equal requests hash alike on every build
+    of a version, and a golden test pins it. `QueryRequest::run` refuses a cursor whose fingerprint is not its own
+    (`RequestError::CursorRequest`), checked after the view, sort, proximity and relaxation checks so those keep
+    their own errors; the engine's own `search_with` and `search_relaxed` record none and refuse a cursor that has
+    one, so a request's tokens and theirs do not page each other. What does not change the ranking does not count:
+    the page (`limit`, `offset`), the facets, the projection and `explain`. `q` is hashed as written, not as
+    analyzed: two spellings that analyze alike (`Red`, `red`) are two requests, which costs a client nothing (it sends
+    the same request for its next page) and keeps the fingerprint independent of the analyzers. **Version 1 is
+    refused** with the error of any version the build does not read (`CursorTokenError::Version`, an invalid
+    argument), not read as a version 2 token without a fingerprint: there is no compatibility promise before 1.0, and
+    a version 1 page could not be checked against its request. A hash, not the request itself, keeps the token short
+    (a filter may be up to 1 MiB); a collision only fails to refuse a mistaken page, which the checksum's argument
+    (decision 12) already accepts for forgeries.
 12. **The checksum is not authentication.** It turns a token that was cut or mistyped into an error instead of
     another cursor. A client can still build any cursor it likes, so a decoded cursor is checked exactly as a typed
     one is: against the sort, the snapshot and memtable view, the collection, the proximity setting and the

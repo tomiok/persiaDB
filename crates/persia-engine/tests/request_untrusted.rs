@@ -201,6 +201,7 @@ fn plain_cursor() -> Cursor {
         relaxed: None,
         proximity: false,
         relax: None,
+        request: None,
     }
 }
 
@@ -248,6 +249,7 @@ fn full_cursor() -> Cursor {
         relax: RelaxPlan::new(&RelaxationConfig::default(), &options)
             .unwrap()
             .settings(),
+        request: Some(u64::MAX),
     }
 }
 
@@ -335,10 +337,17 @@ fn any_cursor() -> impl Strategy<Value = Cursor> {
         (any::<u64>(), any::<u64>(), ".{0,12}"),
         step,
         any::<bool>(),
-        relax,
+        (relax, proptest::option::of(any::<u64>())),
     )
         .prop_map(
-            |((sort, values), location, (seq, version, collection), relaxed, proximity, relax)| {
+            |(
+                (sort, values),
+                location,
+                (seq, version, collection),
+                relaxed,
+                proximity,
+                (relax, request),
+            )| {
                 Cursor {
                     sort,
                     values,
@@ -351,6 +360,7 @@ fn any_cursor() -> impl Strategy<Value = Cursor> {
                     relaxed,
                     proximity,
                     relax,
+                    request,
                 }
             },
         )
@@ -466,13 +476,13 @@ fn under_version(token: &str, version: u8) -> String {
 
 #[test]
 fn another_version_is_refused_by_the_token_and_by_the_request() {
-    assert_eq!(CURSOR_TOKEN_VERSION, 1);
+    assert_eq!(CURSOR_TOKEN_VERSION, 2);
     for cursor in [plain_cursor(), full_cursor()] {
         let token = cursor.to_token();
         // The test's codec reads the engine's text: the re-framing below changes the version byte only.
         assert_eq!(b64_encode(&b64_decode(&token)), token);
-        assert_eq!(under_version(&token, 1), token);
-        for version in [0, 2, 3, 0x7f, 0x80, 0xff] {
+        assert_eq!(under_version(&token, 2), token);
+        for version in [0, 1, 3, 0x7f, 0x80, 0xff] {
             let other = under_version(&token, version);
             assert_eq!(
                 Cursor::from_token(&other),
@@ -491,11 +501,11 @@ fn another_version_is_refused_by_the_token_and_by_the_request() {
     // A later version may lay out the rest as it likes: whatever follows its version byte, it is the version that
     // is named, checksum or not.
     for rest in [&[][..], &[0][..], &[0xff; 3][..], &[7; 64][..]] {
-        let mut bytes = vec![2];
+        let mut bytes = vec![3];
         bytes.extend_from_slice(rest);
         assert_eq!(
             Cursor::from_token(&b64_encode(&bytes)),
-            Err(CursorTokenError::Version { version: 2 }),
+            Err(CursorTokenError::Version { version: 3 }),
             "{rest:?}"
         );
     }
@@ -879,6 +889,7 @@ fn the_fuzz_seeds_are_valid_requests_and_tokens() {
         include_str!("../../../fuzz/corpus/request_json/all"),
         include_str!("../../../fuzz/corpus/request_json/plain"),
         include_str!("../../../fuzz/corpus/request_json/proximity"),
+        include_str!("../../../fuzz/corpus/request_json/projection"),
     ];
     let db = database();
     let snapshot = db.snapshot();
@@ -895,6 +906,7 @@ fn the_fuzz_seeds_are_valid_requests_and_tokens() {
     for seed in [
         include_str!("../../../fuzz/corpus/cursor_token/full"),
         include_str!("../../../fuzz/corpus/cursor_token/plain"),
+        include_str!("../../../fuzz/corpus/cursor_token/requested"),
     ] {
         let cursor = Cursor::from_token(seed).unwrap_or_else(|e| panic!("{seed}: {e}"));
         assert_eq!(cursor.to_token(), seed);

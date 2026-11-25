@@ -1737,18 +1737,26 @@ also records its hit's step, its cascade's last step and its hit step (§7.6). I
 (§7.2): a page under a plan with the other setting is an error, since the bonus changes the scores and so the order.
 It records the relaxation settings of its search too, none for a plain search or one of L0 alone, and a page under
 other settings is an error (§7.6, ROADMAP 8.3.1).
-The cursor does not record the query, its fields and filters, or the limits (ROADMAP 10.1.24), so paging is exact
-only when they are unchanged between pages. A request sets `proximity` (§7.1.4), and a caller building its own
+A cursor from a request (§7.1.4) also records the *request fingerprint* (ROADMAP 10.1.24): XXH3-64 of a canonical
+encoding of its `q` (as written), the fields it searches (when `fields` is left out, every `text` field with its
+boost), `filter`, `soft_filter` and the limits of §7.1.3, the parts its ranking depends on that the cursor records
+nowhere else. A page of a request whose fingerprint differs is an error (an invalid argument), checked after the
+checks above, so a cursor of another view, sort or setting is reported as that. The page (`limit`, `offset`), the
+facets, the projection and `explain` do not count, as they do not change the ranking. A search run without a request
+(the engine's own `search` and relaxed search) records none, so its cursors and a request's do not page each other. The
+encoding is ADR-0062's (item 11, amended); `q` is hashed as written, not as analyzed.
+A request sets `proximity` (§7.1.4), and a caller building its own
 `SearchPlan` sets it on the plan; the relaxed search always plans without it, so a cursor from a proximity-on search
 pages only a plain search asked with `"proximity": true`.
 
 In JSON a cursor is a *cursor token* (ROADMAP 10.1.10, ADR-0062): a request's `search_after` takes one, and a response
 gives each hit's cursor as one (ROADMAP 10.1.13). A token is opaque text: base64url without padding (RFC 4648 §5) of a
 binary encoding of the cursor that starts with a version byte and ends with the CRC-32C of every byte before it.
-Version 1, integers little-endian, `varint` as §4.1:
+Version 2, integers little-endian, `varint` as §4.1:
 ```
-u8      version = 1
-u8      flags: 1 proximity, 2 has step, 4 has relaxation settings, 8 the location is the memtable; other bits 0
+u8      version = 2
+u8      flags: 1 proximity, 2 has step, 4 has relaxation settings, 8 the location is the memtable, 16 has a request
+        fingerprint; other bits 0
 u64     snapshot seq
 u64     memtable view version
 varint  collection name length, then its UTF-8 bytes
@@ -1761,8 +1769,12 @@ varint  number of sort keys (at most 16), then each: u8 bits, 1 a field (else th
 varint  step, varint last step, varint hit step                              (only with "has step")
 varint  level bits (bit i: level Li), varint min_results, u8 1 fill | 2 filters last_resort
                                                                              (only with "has relaxation settings")
+u64     request fingerprint                                                  (only with "has a request fingerprint")
 u32     CRC-32C of every byte above
 ```
+Version 1 (ROADMAP 10.1.10) had neither the flag 16 nor the fingerprint; version 2 refuses it as any version it does not
+read (an invalid argument): there is no compatibility promise before 1.0, and its page could not be checked against
+its request.
 Nothing stores a token, so it is not an on-disk format (§15) and has no fixture directory. Clients hold tokens
 between requests, though, and a token outlives the process that made it while its snapshot and memtable view are
 still the ones searched, so the version byte is its compatibility rule: any change to the layout, or to what a field

@@ -6,11 +6,13 @@
 //! Clients hold tokens across requests, though, so the version byte is the compatibility rule: any change to the
 //! layout, or to what a field means, takes a new version, and a build refuses the versions it does not read.
 //!
-//! Version 1, integers little-endian, `varint` the canonical LEB128 of SPEC §4.1:
+//! Version 2, integers little-endian, `varint` the canonical LEB128 of SPEC §4.1 (version 1 had neither the flag 16 nor
+//! the request fingerprint, and is refused like any version this build does not read, ROADMAP 10.1.24):
 //!
 //! ```text
-//! u8      version = 1
-//! u8      flags: 1 proximity, 2 has step, 4 has relaxation settings, 8 location is the memtable; others 0
+//! u8      version = 2
+//! u8      flags: 1 proximity, 2 has step, 4 has relaxation settings, 8 location is the memtable, 16 has a request
+//!         fingerprint; others 0
 //! u64     origin.seq
 //! u64     origin.version (the memtable view's)
 //! varint  collection name length, then its UTF-8 bytes
@@ -22,6 +24,7 @@
 //!         first (a field's only); then for a field, varint field id
 //! varint  step, varint last, varint hit                      (only with "has step")
 //! varint  level bits, varint min_results, u8 1 fill | 2 filters last_resort   (only with "has relaxation settings")
+//! u64     request fingerprint (`super::fingerprint`)          (only with "has a request fingerprint")
 //! u32     CRC-32C of every byte above
 //! ```
 //!
@@ -43,7 +46,7 @@ use crate::schema::FilterRelaxation;
 use crate::search::{MAX_SORT_KEYS, Missing, Order, SortKey, SortValue};
 
 /// The version of the tokens [`Cursor::to_token`] writes, and the only one [`Cursor::from_token`] reads.
-pub const CURSOR_TOKEN_VERSION: u8 = 1;
+pub const CURSOR_TOKEN_VERSION: u8 = 2;
 
 /// The longest token [`Cursor::from_token`] reads, in bytes of text: a request's JSON is no longer (SPEC §7.1).
 pub const MAX_CURSOR_TOKEN_LEN: usize = super::MAX_REQUEST_JSON_LEN;
@@ -52,7 +55,8 @@ const PROXIMITY: u8 = 1;
 const HAS_STEP: u8 = 2;
 const HAS_RELAX: u8 = 4;
 const MEMTABLE: u8 = 8;
-const FLAGS: u8 = PROXIMITY | HAS_STEP | HAS_RELAX | MEMTABLE;
+const HAS_REQUEST: u8 = 16;
+const FLAGS: u8 = PROXIMITY | HAS_STEP | HAS_RELAX | MEMTABLE | HAS_REQUEST;
 
 const MISSING: u8 = 0;
 const SCORE: u8 = 1;
@@ -91,7 +95,7 @@ pub enum CursorTokenError {
     /// The checksum does not match: the token was cut or changed since a search returned it.
     #[error("a cursor token that was cut or changed: its checksum does not match")]
     Checksum,
-    /// A field is not what version 1 defines, under a matching checksum: not a token Persia wrote.
+    /// A field is not what this version defines, under a matching checksum: not a token Persia wrote.
     #[error("a cursor token that is not well formed: {what}")]
     Malformed {
         /// What is wrong.
@@ -117,6 +121,7 @@ impl Cursor {
     ///     relaxed: None,
     ///     proximity: false,
     ///     relax: None,
+    ///     request: None,
     /// };
     /// let token = cursor.to_token();
     /// assert_eq!(Cursor::from_token(&token)?, cursor);
@@ -146,7 +151,7 @@ impl Cursor {
     }
 }
 
-/// The bytes of `cursor`'s token: version 1 (module docs).
+/// The bytes of `cursor`'s token: version 2 (module docs).
 fn encode(cursor: &Cursor) -> Vec<u8> {
     let mut w = Writer::new();
     w.write_u8(CURSOR_TOKEN_VERSION);
@@ -162,6 +167,9 @@ fn encode(cursor: &Cursor) -> Vec<u8> {
     }
     if matches!(cursor.location, Located::Memtable(_)) {
         flags |= MEMTABLE;
+    }
+    if cursor.request.is_some() {
+        flags |= HAS_REQUEST;
     }
     w.write_u8(flags);
     w.write_u64(cursor.origin.seq);
@@ -213,6 +221,9 @@ fn encode(cursor: &Cursor) -> Vec<u8> {
             bits |= LAST_RESORT;
         }
         w.write_u8(bits);
+    }
+    if let Some(request) = cursor.request {
+        w.write_u64(request);
     }
     let checksum = crc32c(w.as_slice());
     w.write_u32(checksum);
@@ -309,6 +320,14 @@ fn decode(bytes: &[u8]) -> Result<Cursor, CursorTokenError> {
     } else {
         None
     };
+    let request = if flags & HAS_REQUEST != 0 {
+        Some(
+            r.read_u64()
+                .map_err(|_| malformed("no request fingerprint"))?,
+        )
+    } else {
+        None
+    };
     if !r.is_empty() {
         return Err(malformed("bytes after its last field"));
     }
@@ -324,6 +343,7 @@ fn decode(bytes: &[u8]) -> Result<Cursor, CursorTokenError> {
         relaxed,
         proximity: flags & PROXIMITY != 0,
         relax,
+        request,
     })
 }
 
@@ -420,6 +440,7 @@ mod tests {
             relaxed: None,
             proximity: false,
             relax: None,
+            request: None,
         }
     }
 
@@ -470,22 +491,30 @@ mod tests {
             }),
             proximity: true,
             relax: plan.settings(),
+            request: Some(0x0123_4567_89ab_cdef),
         }
     }
 
-    /// The tokens of version 1, as this version wrote them: a change to the encoding fails here, and takes a new
-    /// version (ADR-0062).
+    /// The tokens of version 2, as this version writes them: a change to the encoding fails here, and takes a new
+    /// version (ADR-0062 item 11).
     #[test]
-    fn golden_tokens_of_version_1() {
+    fn golden_tokens_of_version_2() {
+        let requested = Cursor {
+            request: Some(7),
+            ..plain()
+        };
         let golden = [
             (
                 plain(),
-                "AQADAAAAAAAAAAkAAAAAAAAABWl0ZW1zAgcBAQAAAAAAAPg_AQKTxg4c",
+                "AgADAAAAAAAAAAkAAAAAAAAABWl0ZW1zAgcBAQAAAAAAAPg_AQLzJp7Y",
+            ),
+            (
+                requested,
+                "AhADAAAAAAAAAAkAAAAAAAAABWl0ZW1zAgcBAQAAAAAAAPg_AQIHAAAAAAAAAKW-WXE",
             ),
             (
                 full(),
-                "AQ___________wAAAAAAAQAADXphcGF0aWxsYXMgw7H_____DwQAAQAAAAAAAACAAv__________A\
-                 wVuaWtl_wQFAwAD_____w8HAAKsAgR_BQPl6RfX",
+                "Ah___________wAAAAAAAQAADXphcGF0aWxsYXMgw7H_____DwQAAQAAAAAAAACAAv__________AwVuaWtl_wQFAwAD_____w8HAAKsAgR_BQPvzauJZ0UjAbUxZok",
             ),
         ];
         for (cursor, token) in golden {
@@ -495,6 +524,54 @@ mod tests {
             assert_eq!(decoded, cursor);
             assert_eq!(decoded.to_token(), token);
         }
+    }
+
+    /// Version 1 (without the request fingerprint, ROADMAP 10.1.24) is refused as any other version is: before 1.0
+    /// there is no promise to read an older token, and its page could not be checked against its request.
+    #[test]
+    fn tokens_of_version_1_are_refused() {
+        for token in [
+            "AQADAAAAAAAAAAkAAAAAAAAABWl0ZW1zAgcBAQAAAAAAAPg_AQKTxg4c",
+            "AQ___________wAAAAAAAQAADXphcGF0aWxsYXMgw7H_____DwQAAQAAAAAAAACAAv__________A\
+             wVuaWtl_wQFAwAD_____w8HAAKsAgR_BQPl6RfX",
+        ] {
+            assert_eq!(
+                Cursor::from_token(token),
+                Err(CursorTokenError::Version { version: 1 })
+            );
+        }
+    }
+
+    /// The fingerprint is the last field before the checksum, eight bytes, only with its flag.
+    #[test]
+    fn the_request_fingerprint_is_checked_like_any_field() {
+        let what = |bytes: Vec<u8>| match decode(&summed(bytes)) {
+            Err(CursorTokenError::Malformed { what }) => what,
+            other => panic!("{other:?}"),
+        };
+        for request in [0, 1, u64::MAX] {
+            let cursor = Cursor {
+                request: Some(request),
+                ..plain()
+            };
+            assert_eq!(Cursor::from_token(&cursor.to_token()).unwrap(), cursor);
+            let base = body(&cursor);
+            for cut in 1..=8 {
+                assert_eq!(
+                    what(base[..base.len() - cut].to_vec()),
+                    "no request fingerprint",
+                    "{cut}"
+                );
+            }
+            // Without its flag the eight bytes are bytes left over.
+            let mut unflagged = base.clone();
+            unflagged[1] &= !HAS_REQUEST;
+            assert_eq!(what(unflagged), "bytes after its last field");
+        }
+        // The flag without the field.
+        let mut flagged = body(&plain());
+        flagged[1] |= HAS_REQUEST;
+        assert_eq!(what(flagged), "no request fingerprint");
     }
 
     #[test]
@@ -522,7 +599,7 @@ mod tests {
     #[test]
     fn another_version_is_refused_before_anything_else_is_read() {
         let mut bytes = encode(&plain());
-        for version in [0, 2, 0xff] {
+        for version in [0, 1, 3, 0xff] {
             bytes[0] = version;
             // The checksum no longer matches either: the version is what the error names.
             assert_eq!(
@@ -590,7 +667,7 @@ mod tests {
         };
         let base = body(&plain());
         // An unknown flag.
-        for flag in [16, 32, 64, 128] {
+        for flag in [32, 64, 128] {
             let mut bytes = base.clone();
             bytes[1] |= flag;
             assert_eq!(what(bytes), "an unknown flag", "{flag}");
@@ -608,8 +685,8 @@ mod tests {
             what(base[..base.len() - 3].to_vec()),
             "a sort value cut short"
         );
-        assert_eq!(what(vec![1]), "no flags");
-        assert_eq!(what(vec![1, 0, 0]), "no origin");
+        assert_eq!(what(vec![CURSOR_TOKEN_VERSION]), "no flags");
+        assert_eq!(what(vec![CURSOR_TOKEN_VERSION, 0, 0]), "no origin");
         assert_eq!(what(base[..10].to_vec()), "no origin");
         assert_eq!(what(base[..18].to_vec()), "a collection name cut short");
         assert_eq!(what(base[..20].to_vec()), "a collection name cut short");
@@ -794,7 +871,13 @@ mod tests {
             Err(CursorTokenError::Version { version: 0 })
         );
         // Four bytes or fewer have no room for a checksum.
-        assert_eq!(decode(&[1, 0, 0, 0]), Err(CursorTokenError::Checksum));
-        assert_eq!(decode(&[1]), Err(CursorTokenError::Checksum));
+        assert_eq!(
+            decode(&[CURSOR_TOKEN_VERSION, 0, 0, 0]),
+            Err(CursorTokenError::Checksum)
+        );
+        assert_eq!(
+            decode(&[CURSOR_TOKEN_VERSION]),
+            Err(CursorTokenError::Checksum)
+        );
     }
 }

@@ -719,6 +719,7 @@ impl CollectionViews<'_> {
     /// As [`Self::search_with`]; [`RequestError::CursorStep`] for a cursor whose step is after its last, or from a step
     /// after L0 when `relax` does not relax; [`RequestError::CursorRelax`] for a cursor from a search with other
     /// relaxation settings ([`RelaxPlan::settings`]);
+    /// [`RequestError::CursorRequest`] for a cursor from a request's search ([`Cursor::request`]);
     /// [`RelaxedSearchError::Plan`] when a step cannot be planned, or a level cannot read the statistics it builds its steps
     /// from (L2 reads its terms' `df`, L4 walks the term dictionaries of the words it corrects).
     pub fn search_relaxed<'q>(
@@ -728,14 +729,27 @@ impl CollectionViews<'_> {
         relax: &RelaxPlan,
         exec: &Execution,
     ) -> Result<RelaxedResults, RelaxedSearchError> {
+        self.search_relaxed_for(query.into(), request, relax, exec, None)
+    }
+
+    /// [`Self::search_relaxed`] for the request of `fingerprint` (`None` for none, ROADMAP 10.1.24): a cursor must
+    /// have it, and every hit's cursor records it.
+    pub(crate) fn search_relaxed_for(
+        &self,
+        query: RelaxedQuery<'_>,
+        request: &SearchRequest,
+        relax: &RelaxPlan,
+        exec: &Execution,
+        fingerprint: Option<u64>,
+    ) -> Result<RelaxedResults, RelaxedSearchError> {
         let RelaxedQuery {
             query,
             compiled,
             soft,
-        } = query.into();
+        } = query;
         let soft = soft_filters(compiled, soft);
         // Every step is planned as `SearchPlan::with_terms` plans by default: without proximity (SPEC §7.4).
-        let window = self.check_request(request, false, relax.settings())?;
+        let window = self.check_request(request, false, relax.settings(), fingerprint)?;
         let collection = self.collection();
         let stats = collection.search_statistics(self.memtable());
         let start = Start::of(request.search_after.as_ref(), relax);
@@ -839,15 +853,20 @@ impl CollectionViews<'_> {
             cached,
         };
         let hit = built.hit_level();
-        let out = self.respond(built, start, request, exec, (compiled, passed.page, facets))?;
-        self.count(request, &out, hit);
-        Ok(out)
+        let page = (compiled, passed.page, facets, fingerprint);
+        let out = self.respond(built, start, request, exec, page)?;
+        Ok(self.count(request, out, hit))
     }
 
     /// Counts a query in its collection's [`RelaxationStats`] (ROADMAP 8.3.3), unless the request continues one from a
     /// cursor, and states what a relaxed search did as one `tracing` debug event. `hit` is the level of the last step
-    /// that found a hit on the page (from the top, without a cursor), `None` when none did.
-    fn count(&self, request: &SearchRequest, out: &RelaxedResults, hit: Option<RelaxLevel>) {
+    /// that found a hit on the page (from the top, without a cursor), `None` when none did. Returns `out`.
+    fn count(
+        &self,
+        request: &SearchRequest,
+        out: RelaxedResults,
+        hit: Option<RelaxLevel>,
+    ) -> RelaxedResults {
         let r = &out.relaxation;
         let relaxed = r.level != RelaxLevel::Exact;
         if request.search_after.is_none() {
@@ -863,19 +882,26 @@ impl CollectionViews<'_> {
                 "relaxed search"
             );
         }
+        out
     }
 
     /// The response of the cascade `built` from `start`: its page of `request` and what it did, for a query
     /// `compiled` from text (or not) and `truncated` by the budget (or not). Its facets are those `facets` read, else
     /// those its steps counted, which the snapshot keeps for later pages when `facets` has a key: a page from the top
-    /// that counted every step it builds, without the budget passing (ROADMAP 8.1.11).
+    /// that counted every step it builds, without the budget passing (ROADMAP 8.1.11). Every hit's cursor records the
+    /// request `fingerprint` (ROADMAP 10.1.24).
     fn respond(
         &self,
         built: Built<'_, '_>,
         start: Start,
         request: &SearchRequest,
         exec: &Execution,
-        (compiled, truncated, kept): (Option<&Compiled>, bool, Facets<'_>),
+        (compiled, truncated, kept, fingerprint): (
+            Option<&Compiled>,
+            bool,
+            Facets<'_>,
+            Option<u64>,
+        ),
     ) -> Result<RelaxedResults, RelaxedSearchError> {
         let level = built.last_level();
         let Finished {
@@ -885,7 +911,10 @@ impl CollectionViews<'_> {
             at,
             hit_level,
         } = built.finish(start);
-        let (hits, counted) = self.relaxed_page(ran, &applied, request, at, exec)?;
+        let (mut hits, counted) = self.relaxed_page(ran, &applied, request, at, exec)?;
+        for hit in &mut hits {
+            hit.hit.request = fingerprint;
+        }
         let facets = match kept {
             Facets {
                 cached: Some(cached),

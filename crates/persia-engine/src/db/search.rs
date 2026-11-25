@@ -78,8 +78,8 @@ pub struct CursorOrigin {
 /// view that returned the hit, so a cursor from elsewhere would repeat a tied hit or pass one over. It also records the
 /// relaxation settings of its search ([`Self::relax`]), and a page under others is [`RequestError::CursorRelax`]
 /// (ROADMAP 8.3.1). It records the sort's keys ([`Self::sort`]), and a page under another sort is
-/// [`RequestError::Cursor`]. The query, its fields and filters and the limits are not recorded (ROADMAP 10.1.24):
-/// paging is exact only when they are unchanged.
+/// [`RequestError::Cursor`]. It records the fingerprint of its request ([`Self::request`]), and a page of another request is
+/// [`RequestError::CursorRequest`] (ROADMAP 10.1.24).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cursor {
     /// The keys of the sort that ranked the hit, in order (SPEC §7.4): a page under other keys (another field, order
@@ -103,6 +103,12 @@ pub struct Cursor {
     /// search or a relaxed one that runs L0 alone (`relax: false`). A page under other settings would build other steps
     /// or stop elsewhere: [`RequestError::CursorRelax`].
     pub relax: Option<RelaxSettings>,
+    /// The fingerprint of the request whose search produced the hit (SPEC §7.4, ROADMAP 10.1.24): a hash of its `q`,
+    /// `fields`, `filter`, `soft_filter` and limits, recorded by [`crate::search::request::QueryRequest::run`]
+    /// ([`crate::search::request::QueryRequest::fingerprint`]). `None` from a search run without a request
+    /// ([`CollectionViews::search_with`], [`CollectionViews::search_relaxed`]). A page whose request has another
+    /// fingerprint would rank otherwise: [`RequestError::CursorRequest`].
+    pub request: Option<u64>,
 }
 
 /// Where in the relaxation cascade a [`Cursor`]'s hit is (SPEC §7.6, ROADMAP 8.1.3).
@@ -142,6 +148,8 @@ pub struct SearchHit {
     pub(super) relax: Option<RelaxSettings>,
     /// The keys of the sort that ranked it, shared by the hits of a page. [`Self::cursor`] copies them.
     pub(super) sort_keys: Arc<[SortKey]>,
+    /// The fingerprint of its request, when a request ran it. [`Self::cursor`] copies it.
+    pub(super) request: Option<u64>,
 }
 
 impl SearchHit {
@@ -162,6 +170,7 @@ impl SearchHit {
             relaxed: self.relaxed,
             proximity: self.proximity,
             relax: self.relax,
+            request: self.request,
         }
     }
 }
@@ -230,7 +239,8 @@ impl CollectionViews<'_> {
     /// collection or memtable view; [`RequestError::CursorProximity`] for a cursor from a plan with the other
     /// proximity setting; [`RequestError::CursorStep`] for a cursor from a relaxation step after L0
     /// ([`super::RelaxedHit::cursor`]); [`RequestError::CursorRelax`] for a cursor of a relaxing cascade (a plain search
-    /// runs L0 alone, as `relax: false` does); [`RequestError::TooManyFacets`] above [`MAX_FACETS`];
+    /// runs L0 alone, as `relax: false` does); [`RequestError::CursorRequest`] for a cursor from a request's search
+    /// ([`Cursor::request`]); [`RequestError::TooManyFacets`] above [`MAX_FACETS`];
     /// [`RequestError::MismatchedSortValue`] if two sort values are not of the key's type;
     /// [`RequestError::HitSegment`] if a hit names a segment the views do not have (the hit is not skipped);
     /// [`RequestError::Read`] as [`SearchPlan::matcher`], or for a document that cannot be read.
@@ -256,8 +266,20 @@ impl CollectionViews<'_> {
         request: &SearchRequest,
         exec: &Execution,
     ) -> Result<SearchResults, RequestError> {
+        self.search_for(plan, request, exec, None)
+    }
+
+    /// [`Self::search_with`] for the request of `fingerprint` (`None` for none, ROADMAP 10.1.24): a cursor must have
+    /// it, and every hit's cursor records it.
+    pub(crate) fn search_for(
+        &self,
+        plan: &SearchPlan,
+        request: &SearchRequest,
+        exec: &Execution,
+        fingerprint: Option<u64>,
+    ) -> Result<SearchResults, RequestError> {
         // A plain search runs L0 alone, as `relax: false` does (ROADMAP 8.3.1).
-        let window = self.check_request(request, plan.proximity(), None)?;
+        let window = self.check_request(request, plan.proximity(), None, fingerprint)?;
         let collected = self.collect(
             plan,
             &Part {
@@ -278,15 +300,19 @@ impl CollectionViews<'_> {
         } else {
             Vec::new()
         };
+        let mut hits = self.page_hits(
+            &segments,
+            page,
+            explanations,
+            &request.sort,
+            &request.projection,
+            plan.proximity(),
+        )?;
+        for hit in &mut hits {
+            hit.request = fingerprint;
+        }
         Ok(SearchResults {
-            hits: self.page_hits(
-                &segments,
-                page,
-                explanations,
-                &request.sort,
-                &request.projection,
-                plan.proximity(),
-            )?,
+            hits,
             facets: collected
                 .facets
                 .into_iter()
@@ -298,12 +324,14 @@ impl CollectionViews<'_> {
     /// The window of `request` (`offset + limit`), once its page, cursor and facets are checked (SPEC §7.4, §7.5).
     /// `proximity`: whether the plan the page runs scores the proximity bonus, which the cursor must match. `relax`: the
     /// settings of its relaxation cascade, which the cursor must match too (ROADMAP 8.3.1); `None` for a search that
-    /// runs L0 alone, which no cursor from a step after L0 can page.
+    /// runs L0 alone, which no cursor from a step after L0 can page. `fingerprint`: the request's ([`Cursor::request`]),
+    /// `None` for a search run without one, which the cursor must match too (ROADMAP 10.1.24).
     pub(super) fn check_request(
         &self,
         request: &SearchRequest,
         proximity: bool,
         relax: Option<RelaxSettings>,
+        fingerprint: Option<u64>,
     ) -> Result<usize, RequestError> {
         let window = request
             .offset
@@ -371,6 +399,13 @@ impl CollectionViews<'_> {
                 return Err(RequestError::CursorRelax {
                     cursor: cursor.relax,
                     search: relax,
+                });
+            }
+            // Last: a cursor of another view, sort or setting is reported as that, though its request differs too.
+            if cursor.request != fingerprint {
+                return Err(RequestError::CursorRequest {
+                    cursor: cursor.request.is_some(),
+                    search: fingerprint.is_some(),
                 });
             }
         }
@@ -469,6 +504,7 @@ impl CollectionViews<'_> {
                 proximity,
                 relax: None,
                 sort_keys: Arc::clone(&sort_keys),
+                request: None,
             });
         }
         Ok(hits)

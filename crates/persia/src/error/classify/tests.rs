@@ -1478,6 +1478,13 @@ fn request_rows() -> Vec<(ErrorCode, RequestError)> {
         ),
         (
             InvalidArgument,
+            RequestError::CursorRequest {
+                cursor: true,
+                search: true,
+            },
+        ),
+        (
+            InvalidArgument,
             RequestError::CursorRelax {
                 cursor: None,
                 search: None,

@@ -12,12 +12,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::cursor::CursorTokenError;
+use super::fingerprint::fingerprint;
 use crate::db::{
     CancelToken, Clock, CollectionSnapshot, Cursor, Execution, Relaxation, RelaxedResults,
     RelaxedSearchError, SearchRequest, SearchResults, Threads,
 };
 use crate::query::{DefaultFields, Filter, QueryError, QueryLimits};
 use crate::relax::{RelaxError, RelaxOptions, RelaxPlan};
+use crate::schema::CollectionSchema;
 use crate::search::{
     FacetRequest, Interrupt, Projection, RequestError, SearchError, SearchPlan, Sort,
 };
@@ -213,6 +215,43 @@ impl QueryRequest {
         self.proximity
     }
 
+    /// The fingerprint every hit's cursor of this request records when it runs with `limits` on a collection of
+    /// `schema` ([`crate::db::Cursor::request`], SPEC §7.4, ROADMAP 10.1.24): a hash of `q`, the fields it searches
+    /// (every `text` field with its schema boost when [`Self::fields`] is `None`), `filter`, `soft_filter` and
+    /// `limits`, the parts its ranking depends on that the cursor records nowhere else. [`Self::run`] refuses a cursor
+    /// of another fingerprint ([`RequestError::CursorRequest`]). The page, the facets, the projection and `explain` do
+    /// not count: they do not change the ranking.
+    ///
+    /// ```
+    /// use persia_engine::query::QueryLimits;
+    /// use persia_engine::schema::{FieldKind, SchemaBuilder, TextOptions};
+    /// use persia_engine::search::request::QueryRequest;
+    ///
+    /// let schema = SchemaBuilder::new("c").field("title", FieldKind::Text(TextOptions::default())).build()?;
+    /// let limits = QueryLimits::default();
+    /// let red = QueryRequest::new("red");
+    /// // Another page of the same query is the same request; another query is not.
+    /// assert_eq!(red.fingerprint(&schema, &limits), red.clone().with_limit(5).fingerprint(&schema, &limits));
+    /// assert_ne!(red.fingerprint(&schema, &limits), QueryRequest::new("blue").fingerprint(&schema, &limits));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn fingerprint(&self, schema: &CollectionSchema, limits: &QueryLimits) -> u64 {
+        let fields = self
+            .fields
+            .as_ref()
+            .map_or_else(|| Cow::Owned(DefaultFields::all(schema)), Cow::Borrowed);
+        self.fingerprint_over(&fields, limits)
+    }
+
+    fn fingerprint_over(&self, fields: &DefaultFields, limits: &QueryLimits) -> u64 {
+        fingerprint(
+            &self.q,
+            fields,
+            (self.filter.as_ref(), self.soft_filter.as_ref()),
+            limits,
+        )
+    }
+
     /// Runs the request on `collection` (SPEC §7.1, ROADMAP 10.1.10): compiles `q` with the collection's analyzers
     /// ([`CollectionSnapshot::compiler`]) over the request's fields, joins `filter` and `soft_filter` to it as a
     /// request's filters join `q` ([`crate::query::Compiled::with_filter`],
@@ -258,14 +297,17 @@ impl QueryRequest {
             .with_soft_filter(self.soft_filter.clone());
         // The filters add their nodes, terms and a level of depth to the compiled query (SPEC §7.1.3).
         compiled.query().validate(schema, &limits)?;
+        // After the validation: the filters are within the limits' depth.
+        let fingerprint = self.fingerprint_over(&fields, &limits);
         let memtable = collection.memtable();
         let views = collection.views(&memtable).map_err(RequestError::from)?;
         let results = if relax.relaxes() {
-            QueryResults::Relaxed(views.search_relaxed(
-                &compiled,
+            QueryResults::Relaxed(views.search_relaxed_for(
+                (&compiled).into(),
                 &self.page,
                 &relax,
                 &options.exec,
+                Some(fingerprint),
             )?)
         } else {
             let stats = collection.search_statistics(&memtable);
@@ -276,7 +318,12 @@ impl QueryRequest {
             } else {
                 plan.without_proximity()
             };
-            QueryResults::Plain(views.search_with(&plan, &self.page, &options.exec)?)
+            QueryResults::Plain(views.search_for(
+                &plan,
+                &self.page,
+                &options.exec,
+                Some(fingerprint),
+            )?)
         };
         Ok(QueryResponse {
             results,
