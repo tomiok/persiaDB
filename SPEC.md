@@ -374,6 +374,18 @@ from `wal_start` to the end of the valid frames; the rest of that end is *dead*.
 reach the dead-space ratio of the end (default 40%). Dead frames in `wal_start..log_end` (an old Manifest) count as
 live; they are few and small.
 
+**From the command line** (ROADMAP 10.4.1). `persia compact <path>` runs one compaction on request, whatever the
+dead space. It opens the database read-write as any writer does, so it fails while another writer holds the lock, and
+recovery runs first (§8.6). It commits no document of its own; as with any writer's open, recovery may flush a WAL
+backlog larger than the default memtable, or retire a cut commit (§8.6), so the compacted `seq` may be more than one
+above the last commit before the command. Otherwise the WAL records after the last commit stay WAL records. It
+prints the space before and after (`--json` for one JSON object, keys in the README's command-line section). It has the built-in analyzers only, so a database
+whose schema names a registered analyzer (§6.2.2) fails that read-write open, and is compacted by its application.
+It never opens the blob pack (§9.3), whose space blob GC reclaims (§9.5). `persia stats` reports whether a
+compaction is due by the default thresholds only, and says so: the application's own are not in the file. Like every compaction it puts the read-only
+handles of other processes behind until they refresh (§9.5), and it must not run during a copy taken with the files
+in use (§4.8).
+
 **The new file**, written by the single writer while it holds the lock:
 1. The live frames below `wal_start`, in their old order, then the frames of `wal_start..log_end`, each copied with
    its stored payload unchanged and a new `frame_seq`, numbered on from one more than the `frame_seq` of the last
@@ -2689,6 +2701,21 @@ put or delete it (a put names its document by the id of its encoding, read witho
 payload does not decode is reported on its row; inspection is a debugging aid and does not fail on it, `persia verify`
 does.
 
+**Statistics and dumps** (ROADMAP 10.4.1). `persia stats` and `persia dump documents` are read-only opens too: no
+lock, nothing written, and no reader lease, since neither reads a blob. Like `verify` they skip the analysis of a
+`text` field whose registered analyzer they lack. `stats` prints the last commit's `seq`, the container's live and
+dead bytes (§4.6, counted from the manifest alone: a live writer may still hold obsolete frames for its readers,
+§8.5) and whether a compaction is due with the default thresholds (§14; an application's own thresholds are not
+stored, so the output says which it used), the valid frames and WAL chunks after `log_end`, the replayed WAL records, the blob pack's size if there is
+one (§9.3), and per collection its schema, its segments (documents, deleted, size) and its live documents as a
+reader sees them. `--json` writes one JSON object whose keys the README's command-line section lists (as for
+`compact` and `bench`); keys are only ever added to it. `dump documents --collection <name>` writes the live documents of that snapshot as JSON Lines, each in
+the output form of §6.4.1 (what `get` returns: the stored fields, and a blob as its reference), so
+`Document::from_json` reads a line back. The order is storage order: the segments as the manifest lists them, each in
+ascending docid, then the documents of the WAL records not yet in a segment, in log order. It is the same for every
+dump of one file state; a merge or a commit changes the order, not the set. A segment's documents are streamed one at a time; the WAL's
+are in memory, as the open replayed them (§8.6).
+
 ### 8.7 Manifest
 A manifest is the snapshot one commit publishes (ADR-0024): the commit's `seq`, the committing writer's
 `fence_token` (§11.3), `wal_start`, and per collection its current schema and live segments, each with its current
@@ -3620,6 +3647,13 @@ Defaults: `memtable_bytes` 64 MiB (with a 10 s idle flush), `commit_interval` 60
 ### 16.3 Benchmarks
 Reproducible harness (`benches/`, dataset download scripts, pinned configs), tracked in CI for regressions (> 5% fails).
 Comparison against other engines is reported with methodology, never cherry-picked.
+`persia bench` (ROADMAP 10.4.3) is not part of that harness. It is a quick local check: a seeded synthetic corpus
+indexed into a new database in a scratch directory the command creates and removes, then a seeded query mix, reported
+as documents per second, the commit time and latency percentiles per kind of query (text, or `--json`, keys in the
+README's command-line section). The same seed gives the same corpus and queries, and the same hits while no query is
+`truncated`: the relaxation budget (§7.6) reads the wall clock, so each kind reports how many of its queries it
+truncated. Its numbers are local guidance only and are never a published result: its help and
+its output say so, and reproducible numbers, with their method, go in `docs/benchmarks.md`.
 
 ---
 

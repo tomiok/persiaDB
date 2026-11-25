@@ -644,6 +644,8 @@ dependencies = [
  "persia-engine",
  "persia-format",
  "persia-storage",
+ "proptest",
+ "serde_json",
  "tempfile",
 ]
 

@@ -46,7 +46,8 @@ M1 to M5 are done, and M0 and M6 to M9 are in progress (see [Roadmap](#roadmap))
   BM25F, top-k, filters, sort, facets, pages, and explain (M7, done); and the relaxation cascade with
   levels L1–L5, typo tiers, per-request `relax` options and the `last_resort` filter step (M8, 29 of 51).
 - `persia-blob` (M9, 5 of 22): the content hasher, the chunker, and the blob manifest codec.
-- `persia-cli`: `inspect`, `dump`, and `verify` for containers and segments (ROADMAP 5.4.2, 5.4.3, 6.6.3, 6.6.10).
+- `persia-cli`: `inspect`, `dump`, and `verify` for containers and segments (ROADMAP 5.4.2, 5.4.3, 6.6.3, 6.6.10);
+  `stats`, `compact`, and `dump documents` for a database, and `bench`, a local micro-benchmark (10.4.1, 10.4.3).
 
 That is library code under the public facade. `persia` exports no `Db` yet (M10), and `persia-server` is a
 placeholder (M11). The blob pack file, cloud storage, and the server are still ahead.
@@ -410,7 +411,7 @@ Three rules shape the rest of the design:
 | `persia` | The embedded API: `Db` and `Collection`. | Planned (M10) |
 | `persia-proto` | `persia.proto` and committed generated code. | Planned (M11) |
 | `persia-server` | gRPC and HTTP. Roles: writer, reader, router. | Planned (M11, M13) |
-| `persia-cli` | `persia inspect`, `dump`, `verify`, `compact`, `bench`. | `inspect`, `dump`, `verify` done (5.4.2, 5.4.3, 6.6.3); the rest planned (M10) |
+| `persia-cli` | `persia inspect`, `dump`, `verify`, `stats`, `compact`, `bench`. | Done (5.4.2, 5.4.3, 6.6.3, 10.4.1, 10.4.3); `import` and `search` planned (10.4.2) |
 
 Dependencies point downward only (`persia-format` at the bottom). `cargo xtask check-deps` enforces
 the graph. The public facade orders blob writes before the document commit so the engine never has
@@ -505,7 +506,7 @@ eventually consistent; lag is a metric.
 
 `persia` exports no types yet (M10), and the crates are not published. Under it, `persia-engine`
 creates and opens a database file, writes and commits documents through a WAL, and searches, as library
-code (M6, M7); the README quickstart shows those calls. `persia-cli` inspects and verifies files, and
+code (M6, M7); the README quickstart shows those calls. `persia-cli` inspects, verifies, dumps, and compacts files, and
 `persia-server` prints "not implemented (M11)" and exits (ROADMAP 0.6.4).
 A git dependency on `persia-engine` does not provide `Db::open`.
 

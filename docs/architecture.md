@@ -54,7 +54,7 @@ flowchart TD
 | `persia` | Public embedded API (`Db`, `Collection`); orders blob writes before document commits | §8, §9.5 | sync (an optional `tokio` wrapper is ROADMAP 10.1.6) |
 | `persia-proto` | `persia.proto` and generated code | §12 | n/a |
 | `persia-server` | gRPC + HTTP server, roles (writer/reader/router) | §11, §12 | async |
-| `persia-cli` | `persia` binary: inspect, dump, verify, compact, bench | — | sync |
+| `persia-cli` | `persia` binary: inspect, dump, verify, stats, compact, bench | — | sync |
 | `persia-ffi` (planned, ADR-0018) | C ABI and the safe Rust API the embedded Go and TypeScript bindings share. Not in the workspace. | §13.1 | sync, same as `persia` |
 
 ## Life of a write (SPEC §8.2)

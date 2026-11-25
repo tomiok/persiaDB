@@ -20,6 +20,35 @@
 //! The pack open and the scan bound each frame's length by its kind before reading it (ROADMAP 9.2.14). Only the local
 //! layout is checked (the remote one is ROADMAP 13.2.6).
 //!
+//! Database commands (ROADMAP 10.4.1) complete the tree. `persia stats` prints what a read-only open reports: the last
+//! commit, the container's live and dead space, the WAL after the last commit, the blob pack's size, and each
+//! collection's schema, documents and segments (module `stats`, which defines its `--json` shape; it is the
+//! whole-database inspection, so there is no `inspect database`). `persia dump documents` writes a collection's live
+//! documents as JSON Lines in the output form of SPEC §6.4.1, in storage order (module `documents`). `persia compact`
+//! rewrites the container without its dead frames (SPEC §4.6, module `compact`); it is the one database command that
+//! opens read-write.
+//!
+//! The command tree. A file or directory is the positional argument (`<PATH>`; `<ROOT>` for a store), every other
+//! argument is a `--flag`, and `--json` asks for one JSON object on one line where a command has one:
+//!
+//! ```text
+//! persia container files <PATH>
+//! persia container sweep <PATH> [--quarantine]
+//! persia store files <ROOT>
+//! persia store sweep <ROOT> [--force]
+//! persia inspect container <PATH> [--id <ID>]
+//! persia inspect segment <PATH> --schema <SCHEMA> [--verify]
+//! persia dump segment <PATH> --schema <SCHEMA> --field <FIELD> [--term <TERM>]
+//! persia dump documents <PATH> --collection <COLLECTION>
+//! persia verify <PATH> [--quick | --deep]
+//! persia stats <PATH> [--json]
+//! persia compact <PATH> [--json]
+//! persia bench [--dir <DIR>] [--docs <DOCS>] [--queries <QUERIES>] [--seed <SEED>] [--json]
+//! ```
+//!
+//! Output goes to stdout and a failure's reason to stderr. A reader that closes the pipe early (`persia dump
+//! documents ... | head`) ends the output without an error.
+//!
 //! Exit status (ROADMAP 6.6.7, SPEC §8.6): 0 on success, 3 when the command failed on corrupt stored bytes (a database,
 //! container, segment or blob pack that breaks its format) or on a broken blob reference (`verify`: a document that
 //! references a blob the pack lacks, or whose bytes do not match it, SPEC §9.5), 4 when the file is not a Persia
@@ -29,11 +58,44 @@
 //! another database (`PackOfAnotherDatabase`) or of a newer format (`PackUnsupported`), and a database a live writer
 //! committed to while `verify` ran, which reports "changed during verify, rerun" instead of a dangling reference). A
 //! script separates a wrong file (4), damage (3), and any other failed run (1).
+//!
+//! The status of each command that takes a container, by what it finds at `<PATH>` (tested as a table in
+//! `tests/commands.rs`):
+//!
+//! | Command | A sound database | No file | Not a container | A damaged container | A live writer holds it |
+//! |---|---|---|---|---|---|
+//! | `verify` | 0 | 1 | 4 | 3 | 0 |
+//! | `stats` | 0 | 1 | 4 | 3 | 0 |
+//! | `dump documents` | 0 | 1 | 4 | 3 | 0 |
+//! | `inspect container` | 0 | 1 | 4 | 3 | 0 |
+//! | `compact` | 0 | 1 | 4 | 3 | 1 |
+//! | `container sweep` | 0 | 1 | 4 | 3 | 1 |
+//! | `container files` | 0 | 1 | 0 | 0 | 0 |
+//!
+//! The read-only commands take no lock, so a live writer does not fail them; `compact` and `container sweep` open
+//! read-write and fail with status 1 while another writer has the database. `container files` opens nothing: it lists
+//! the files beside any existing file. `inspect container` reports damage after the last commit on its rows and
+//! still exits 0 (it is a debugging aid; `verify` is the check). Besides the table: `dump documents` exits 1 for a
+//! collection the database lacks, `compact` exits 1 for a schema that names an analyzer registered by the application
+//! (it has the built-in ones only), the segment commands exit 3 for a corrupt segment file and 1 for a missing one or
+//! a `--schema` that is not the segment's, and the store commands exit 1 for a root that is not a directory.
+//!
+//! `persia bench` (ROADMAP 10.4.3, module `bench`) is a quick micro-benchmark: it indexes a seeded synthetic corpus
+//! into a new database in a scratch directory it creates and removes, then runs a seeded query mix, and reports
+//! documents per second, the commit time and each query kind's latency percentiles. **Its numbers are local guidance
+//! only, not a published benchmark** (reproducible numbers live in `docs/benchmarks.md`); its help and its output
+//! both say so. It takes no container: it exits 0, or 1 on any failure (a `--dir` that is not a directory, an I/O
+//! error), and never opens an existing database.
 #![forbid(unsafe_code)]
 
+mod bench;
+mod compact;
 mod container;
 mod database;
+mod documents;
+mod open;
 mod segment;
+mod stats;
 
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -91,6 +153,61 @@ enum Command {
         /// Also read every referenced blob whole and check its SHA-256 against its id.
         #[arg(long)]
         deep: bool,
+    },
+    /// Rewrites a container without its dead frames (SPEC §4.6) and prints its size before and after. Opens the
+    /// database read-write, as a writer does, so it fails (status 1) while another writer has it open. It commits no
+    /// document of its own; as with any writer's open, recovery may flush a WAL backlog larger than the default
+    /// memtable or retire a cut commit (SPEC §8.6). The new file is renamed over the old one, so the path names a
+    /// complete database at every instant.
+    /// The blob pack (`<name>.persia.blobs`) is not touched. Do not run it during a copy of the files taken with the
+    /// database in use (SPEC §4.8). Read-only handles of other processes keep reading the old file until they
+    /// refresh, which holds a writer's blob garbage collection back meanwhile (SPEC §9.5). Exits with status 3 on
+    /// corruption, 4 when the file is not a Persia container, and 1 on any other failure.
+    Compact {
+        /// The container file.
+        path: PathBuf,
+        /// Write one JSON object (its keys are listed in the README's command-line section) instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Prints what a read-only open of a database reports (no lock, no writes, so a live writer may have it open):
+    /// the last commit, the container's live and dead space, whether a compaction is due with the DEFAULT thresholds
+    /// (40% and 1 MiB dead; an application's own are not stored in the file), the WAL after the last commit, the
+    /// blob pack's size, and each collection's schema, documents and segments. Exits with status 3 on corruption, 4
+    /// when the file is not a Persia container, and 1 on any other failure.
+    Stats {
+        /// The container file.
+        path: PathBuf,
+        /// Write one JSON object (a stable shape: its keys are listed in the README's command-line section) instead
+        /// of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Runs a quick micro-benchmark of this build on this machine: indexes a seeded synthetic corpus into a new
+    /// database, commits it, and runs a seeded query mix (term, terms, phrase, filter, typo). Prints documents per
+    /// second, the commit time and each query kind's latency percentiles (p50, p90, p99, max). THE NUMBERS ARE LOCAL
+    /// GUIDANCE ONLY, NOT A PUBLISHED BENCHMARK: they depend on this machine, its load and this build, and one run is
+    /// one sample (reproducible numbers live in docs/benchmarks.md). The same seed gives the same corpus and queries.
+    /// The database is created in a new scratch directory that is removed afterwards, also on failure; no existing
+    /// database is opened. Exits with status 1 on any failure.
+    Bench {
+        /// Where the scratch directory is created [default: the system temporary directory].
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Documents in the corpus.
+        #[arg(long, default_value_t = bench::DEFAULT_DOCS, value_parser = clap::value_parser!(u32).range(1..))]
+        docs: u32,
+        /// Queries in the mix, a fifth of each kind; at most 10000000, since each one's latency is kept.
+        #[arg(long, default_value_t = bench::DEFAULT_QUERIES,
+              value_parser = clap::value_parser!(u32).range(..=i64::from(bench::MAX_QUERIES)))]
+        queries: u32,
+        /// The seed of the corpus and of the queries.
+        #[arg(long, default_value_t = bench::DEFAULT_SEED)]
+        seed: u64,
+        /// Write one JSON object (a stable shape: its keys are listed in the README's command-line section) instead
+        /// of text.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -159,6 +276,19 @@ enum DumpCommand {
         /// A term, as indexed (after analysis: e.g. lowercased and stemmed for an English `text` field).
         #[arg(long)]
         term: Option<String>,
+    },
+    /// The live documents of one collection of a database, as JSON Lines (one document per line, in the output form
+    /// of SPEC §6.4.1: what `get` returns, so stored fields only, and a blob as its reference). Read-only, without
+    /// the writer lock. Order: the segments oldest first, each by docid, then the documents of the WAL records not
+    /// yet in a segment, as logged. The segments' documents are streamed one at a time; the WAL's are in memory
+    /// already, as the open replayed them. Exits with status 3 on corruption, 4 when
+    /// the file is not a Persia container, and 1 on any other failure (a collection the database lacks included).
+    Documents {
+        /// The container file.
+        path: PathBuf,
+        /// The collection to dump.
+        #[arg(long)]
+        collection: String,
     },
 }
 
@@ -294,6 +424,27 @@ fn run(cli: Cli) -> Result<()> {
             field,
             term,
         }) => to_stdout(|out| segment::dump(out, &path, &schema, &field, term.as_deref()))?,
+        Command::Dump(DumpCommand::Documents { path, collection }) => {
+            to_stdout(|out| documents::dump(out, &path, &collection))?;
+        }
+        Command::Compact { path, json } => to_stdout(|out| compact::compact(out, &path, json))?,
+        Command::Stats { path, json } => to_stdout(|out| stats::stats(out, &path, json))?,
+        Command::Bench {
+            dir,
+            docs,
+            queries,
+            seed,
+            json,
+        } => {
+            let options = bench::Options {
+                dir,
+                docs,
+                queries,
+                seed,
+                json,
+            };
+            to_stdout(|out| bench::bench(out, &options))?;
+        }
         Command::Verify { path, quick, deep } => {
             let scan = match (quick, deep) {
                 (true, _) => Scan::Quick,

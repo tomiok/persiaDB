@@ -18,9 +18,12 @@ persia-engine.workspace = true
 persia-format.workspace = true
 clap.workspace = true
 anyhow.workspace = true
+# `--json` output (`stats`, `compact`, `bench`); a library-tier crate of the allowed list.
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+proptest.workspace = true
 
 [features]
 # Extended property tests: gate them with #[cfg(feature = "slow")]; nightly CI runs them.
