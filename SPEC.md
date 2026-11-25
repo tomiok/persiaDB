@@ -1500,7 +1500,8 @@ Each value is read by the rules of its own section. A `sort` key object takes `f
 `score` alone with an object of `order` (§7.4); a facet object takes `field` and `size` (default 10); any other key in
 either is an error. `projection` (ROADMAP 10.1.20, ADR-0065) is `"all"` (every stored and extra field), `"none"` (the
 id and the blob reference only) or a list of names; `[]` is an error, since it names no field (write `"none"`), and
-so are a repeated name, another string, and a name §7.5.1 refuses (an invalid argument that names it). The 1 MiB bound is that of a filter's JSON (§7.1.2), which the
+so are a repeated name, another string, and a name §7.5.1 refuses (an invalid argument that names it).
+The 1 MiB bound is that of a filter's JSON (§7.1.2), which the
 request holds: inside a request, the request's bound is the one that applies to `filter`, `soft_filter` and `relax`
 (§7.6's 64 KiB is for a `relax` read on its own). A `filter` and a `soft_filter` are each held to §7.1.3's limits
 when parsed. When the request runs, the compiled `q` joined to both (§7.1.1) is held to them again, since the filters
@@ -1515,7 +1516,8 @@ collection's as `relax` overrides them (§7.6). When they relax, the relaxed sea
 query (so its text is stated in `original` and `effective`, and `filter` is hard at every level) and its steps held
 to the same limits. When they run L0 alone (`relax: false`, a collection that disables the cascade, or a plan with no
 level, no fallback and no filter step), the plain search runs: its hits have no level or rank score, an explained
-one has no `relaxed` node (§7.7), and its page from the top counts in the relaxation metrics as a query at level `exact` (§7.6, ROADMAP 10.1.21). A
+one has no `relaxed` node (§7.7), and its page from the top counts in the relaxation metrics as a query at level
+`exact` (§7.6, ROADMAP 10.1.21). A
 response states such a search as `level: "exact"` with nothing applied (§7.6; the response JSON is §7.5.2).
 `proximity` (ROADMAP 10.1.7, ADR-0036) plans the plain search with the proximity bonus of §7.2 when `true`
 (`SearchPlan::with_proximity`) and without it when `false` or left out (`SearchPlan::without_proximity`). The
@@ -1756,7 +1758,7 @@ Version 2, integers little-endian, `varint` as §4.1:
 ```
 u8      version = 2
 u8      flags: 1 proximity, 2 has step, 4 has relaxation settings, 8 the location is the memtable, 16 has a request
-        fingerprint; other bits 0
+        fingerprint, 32 the step is L5 `fallback`'s (only with "has step"); other bits 0
 u64     snapshot seq
 u64     memtable view version
 varint  collection name length, then its UTF-8 bytes
@@ -2303,24 +2305,33 @@ On a cursor page, those before the cursor's step are steps of the page (it build
 truncated before any hit. With `fill`, those past the page's own come after its hits: the budget passing in one of
 them leaves the page whole and not truncated, and its facets partial (§7.5). Once a page from the top counted every
 one of them, later pages read the counts and search only their own steps. A cascade whose page's steps end before the
-budget passes is not truncated. When the budget passed in a step of the page and the page would otherwise be empty (the steps
+budget passes is not truncated.
+When the budget passed in a step of the page and the page would otherwise be empty (the steps
 completed found no more hits than its `offset`, and the cascade still wants hits), a plan with L5 still runs L5
 `fallback` past the budget (ROADMAP 8.1.33, ADR-0066), as its own step after the steps completed, bounded by the
 request's deadline and cancellation (errors, as at any step) and not by the budget, so the page is not empty (pillar
 3). The steps the budget skipped stay skipped (L6 too), the page stays `truncated: true`, and `level`, `applied` and
 `fallback` state L5 as for any page whose hit step it is. Without L5 (`fallback: "none"`), or when L5 was already
 built (searched, or skipped for the limits), the empty truncated page is the answer; a budget that passed inside L5
-dropped it whole, so it runs again, whole.
+dropped it whole, so it runs again, whole. On a cursor's page (ROADMAP 8.1.34) L5 never takes the cursor's step from another level:
+a cursor records whether its step is L5's (§7.4), and the page after an L5 hit builds the steps before the cursor's,
+then L5 at the cursor's step whatever level the cascade would build there, searched after the cursor and past the
+budget, so it continues the cursor's ranking exactly, the page L5 filled past the budget included. After a cursor of
+another level's step, L5 runs past the budget only once the cursor's step was rebuilt and searched (then from its top);
+when the budget passes before that, the page is the empty truncated page, as L5 would otherwise read that level's
+cursor in its own order.
 
 Metrics (ROADMAP 8.3.3). Each collection counts its relaxed searches since the database was opened, in counters its
 snapshots share (atomic, so a search on any thread counts without a lock; nothing is stored, a reopened database
 counts from 0). A *query* is a relaxed search that returned a response and was given no cursor: a cursor's page
 continues a query counted on its first page and counts nowhere, while a page by `offset` runs the cascade from the
-top and counts as a query. A request whose settings run L0 alone runs the plain search (§7.1.4) and counts as a query too (ROADMAP 10.1.21,
+top and counts as a query.
+A request whose settings run L0 alone runs the plain search (§7.1.4) and counts as a query too (ROADMAP 10.1.21,
 ADR-0065), by the same rules at level `exact`: never `relaxed`, in `empty` when L0 found no hit from the top (a page by
 `offset` or of `limit` 0 included: it searches for one hit at least), else at level `exact`; a cursor's page counts
 nowhere. It is still the plain search, so its proximity bonus and its explanations (no `relaxed` node, §7.7) do not
-change. The engine's own plain search, run without a request, counts nowhere. Per query: `queries` counts it; `relaxed` counts
+change. The engine's own plain search, run without a request, counts nowhere.
+Per query: `queries` counts it; `relaxed` counts
 it when the response's `level` is not `exact` (a step after L0 was built and not skipped); `empty` counts it when no
 step of its cascade found a hit, L0 included (the zero-result queries, after whatever relaxation ran, `relax: false`
 included); otherwise the level of its hit step (above) counts it, once. So the per-level counts are the level

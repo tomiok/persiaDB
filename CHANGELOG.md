@@ -9,16 +9,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
-- A relaxed search whose time budget passes before its page found a hit still runs L5 `fallback` past the budget
-  (ROADMAP 8.1.33; SPEC §7.6 "Budget"; ADR-0066), bounded by the request's deadline and cancellation, so the page holds
-  L5's hits instead of none (pillar 3). The page stays `truncated: true` and the steps the budget skipped stay skipped;
-  a plan without L5 (`fallback: "none"`) still answers the empty truncated page.
-- A cursor token records its request (ROADMAP 10.1.24; SPEC §7.4; ADR-0062 item 11, amended): cursor tokens are
-  version 2, which adds a fingerprint of the request's `q`, fields, filters and query limits (`Cursor::request`,
-  `QueryRequest::fingerprint`). A token given back with another `q`, `fields`, `filter`, `soft_filter` or limits is an
-  invalid argument (`RequestError::CursorRequest`) instead of paging another ranking; `limit`, `offset`, facets, the
-  projection and `explain` may still change between pages. Version 1 tokens are refused (pre-1.0: request the first
-  page again).
 - `persia_engine::search::request::QueryResponse::to_json` writes a search response as the response JSON of SPEC §7.5.2
   (ROADMAP 10.1.13, ADR-0065): each hit's projected document, score, typed sort values, cursor token and, for a
   relaxed search, its level, step and rank score; the facets; `relaxation` as SPEC §7.6 lists it (a `relax: false`
@@ -411,6 +401,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- **Breaking** (`persia-engine`): cursor tokens are version 2 (ROADMAP 10.1.24, 8.1.34; SPEC §7.4; ADR-0062 item 11,
+  amended), and version 1 tokens are refused as an invalid argument (pre-1.0: request the first page again). A token
+  records a fingerprint of its request's `q`, fields, filters and query limits (`Cursor::request`, a new public field,
+  and `QueryRequest::fingerprint`): given back with another `q`, `fields`, `filter`, `soft_filter` or limits it is
+  `RequestError::CursorRequest` instead of paging another ranking; `limit`, `offset`, facets, the projection and
+  `explain` may still change between pages. It also records whether its step is L5 `fallback`'s
+  (`StepCursor::fallback`, a new public field), so the page after an L5 hit runs L5 at that step.
+- **Breaking** (`persia-engine`): a relaxed search whose time budget passes before its page found a hit now runs L5
+  `fallback` past the budget (ROADMAP 8.1.33; SPEC §7.6 "Budget"; ADR-0066), bounded by the request's deadline and
+  cancellation: a truncated page that was empty now carries L5's hits, and stays `truncated: true`. A plan without L5
+  (`fallback: "none"`) still answers the empty truncated page; a cursor of another level's step is not paged by L5.
+- `persia-engine`: `QueryResponse` gains a private field (ROADMAP 10.1.13), so it cannot be built outside the crate
+  (it was `#[non_exhaustive]` already).
+- `persia bench` reports `empty` per kind of query: how many returned no hit (`--json` key `empty`, a text column).
 - A request whose settings run L0 alone (`relax: false`) now counts in the relaxation metrics (ROADMAP 10.1.21; SPEC
   §7.6; ADR-0065 item 10): its page from the top is a query at level `exact` of `RelaxationStats`, in `empty` when it
   found no hit, so the zero-result rate covers every request. It still runs the plain search (its proximity bonus and

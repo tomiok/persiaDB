@@ -247,11 +247,21 @@ fn a_cascade_the_budget_truncates_counts_by_the_steps_it_ran() {
     // 1 ms a read, every budget up to 60 ms: each query counts as its response says, truncated or not.
     let mut want = (stats.queries, stats.relaxed, stats.empty);
     let mut want_levels = levels(&stats);
+    // With L5 (the default) a truncated page is never empty (ROADMAP 8.1.33); `fallback: "none"` leaves it empty, and
+    // that cascade counts too.
     let mut seen = (false, false);
-    for ms in 1..=60 {
+    for (ms, fallback) in (1..=60).flat_map(|ms| [(ms, None), (ms, Some(Fallback::None))]) {
         for text in ["sneakers", "red purple", "shoez", "zebra"] {
             let exec = Execution::default().budget_clock(Advancing::new(1));
-            let out = search_on(a, text, &request, &budget(ms), &exec);
+            let options = RelaxOptions {
+                fallback,
+                ..budget(ms)
+            };
+            let out = search_on(a, text, &request, &options, &exec);
+            assert!(
+                fallback.is_some() || !truncated_empty(&out),
+                "{text:?} at {ms} ms: a truncated page with L5 is empty"
+            );
             let r = &out.relaxation;
             let relaxed = r.level != RelaxLevel::Exact;
             // The page holds every hit, so its last is the hit step's.
@@ -274,8 +284,7 @@ fn a_cascade_the_budget_truncates_counts_by_the_steps_it_ran() {
                 "{context}"
             );
             assert_eq!(levels(&stats), want_levels, "{context}");
-            // The cases the budget makes: relaxed with a hit step after L0, and never relaxed and still empty: the plan
-            // has L5, which runs past the budget when the page would be empty (ROADMAP 8.1.33).
+            // The cases the budget makes: relaxed and still empty (only without L5), and relaxed with a hit step after L0.
             if r.truncated && relaxed {
                 match hit {
                     None => seen.0 = true,
@@ -286,8 +295,8 @@ fn a_cascade_the_budget_truncates_counts_by_the_steps_it_ran() {
     }
     assert_eq!(
         seen,
-        (false, true),
-        "a truncated relaxed cascade is never empty with L5, and the budgets truncate one with a hit step after L0"
+        (true, true),
+        "the budgets truncate no relaxed cascade of each kind"
     );
 }
 
@@ -537,4 +546,9 @@ fn a_request_of_l0_alone_counts_at_level_exact_without_relaxing() {
         .unwrap();
     assert_eq!(engine.hits.len(), 0);
     counted(7, 3, 4);
+}
+
+/// Whether the budget truncated `out` and left it without a hit.
+fn truncated_empty(out: &RelaxedResults) -> bool {
+    out.relaxation.truncated && out.hits.is_empty()
 }

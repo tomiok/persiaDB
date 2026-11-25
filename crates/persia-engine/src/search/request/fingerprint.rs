@@ -67,51 +67,53 @@ pub(super) fn fingerprint(
     xxh3_64(w.as_slice())
 }
 
-/// A filter, depth first. A request's filters were held to its limits' depth before (SPEC §7.1.3), so the recursion is
-/// as deep as the validation's.
+/// A filter, depth first (each node before its children, in order). Walked with a stack of its own, not by recursion: a
+/// filter built in code need not have been held to any depth limit yet ([`super::QueryRequest::fingerprint`]).
 fn write_filter(w: &mut Writer, filter: &Filter) {
-    match filter {
-        Filter::Term { field, value } => {
-            w.write_u8(1);
-            w.write_varint_u32(field.get());
-            write_value(w, value);
-        }
-        Filter::Terms { field, values } => {
-            w.write_u8(2);
-            w.write_varint_u32(field.get());
-            w.write_varint_u64(u64_from_usize(values.len()));
-            for value in values {
+    let mut pending = vec![filter];
+    while let Some(filter) = pending.pop() {
+        match filter {
+            Filter::Term { field, value } => {
+                w.write_u8(1);
+                w.write_varint_u32(field.get());
                 write_value(w, value);
             }
-        }
-        Filter::Range {
-            field,
-            lower,
-            upper,
-        } => {
-            w.write_u8(3);
-            w.write_varint_u32(field.get());
-            write_bound(w, lower.as_ref());
-            write_bound(w, upper.as_ref());
-        }
-        Filter::Exists { field } => {
-            w.write_u8(4);
-            w.write_varint_u32(field.get());
-        }
-        Filter::And(filters) | Filter::Or(filters) => {
-            w.write_u8(if matches!(filter, Filter::And(_)) {
-                5
-            } else {
-                6
-            });
-            w.write_varint_u64(u64_from_usize(filters.len()));
-            for filter in filters {
-                write_filter(w, filter);
+            Filter::Terms { field, values } => {
+                w.write_u8(2);
+                w.write_varint_u32(field.get());
+                w.write_varint_u64(u64_from_usize(values.len()));
+                for value in values {
+                    write_value(w, value);
+                }
             }
-        }
-        Filter::Not(filter) => {
-            w.write_u8(7);
-            write_filter(w, filter);
+            Filter::Range {
+                field,
+                lower,
+                upper,
+            } => {
+                w.write_u8(3);
+                w.write_varint_u32(field.get());
+                write_bound(w, lower.as_ref());
+                write_bound(w, upper.as_ref());
+            }
+            Filter::Exists { field } => {
+                w.write_u8(4);
+                w.write_varint_u32(field.get());
+            }
+            Filter::And(filters) | Filter::Or(filters) => {
+                w.write_u8(if matches!(filter, Filter::And(_)) {
+                    5
+                } else {
+                    6
+                });
+                w.write_varint_u64(u64_from_usize(filters.len()));
+                // Reversed onto the stack, so they come off in order.
+                pending.extend(filters.iter().rev());
+            }
+            Filter::Not(filter) => {
+                w.write_u8(7);
+                pending.push(filter);
+            }
         }
     }
 }
@@ -247,6 +249,8 @@ mod tests {
         };
         assert_ne!(one("red", None, None, &wider), base);
         let schema = schema();
+        // The order of the fields is part of the request, not to be canonicalised: a word over several fields sums its
+        // fields' contributions in that order (SPEC §7.2), and f64 addition in another order may give another score.
         for specs in [&["a"][..], &["a", "b^2"], &["b", "a"]] {
             let other = DefaultFields::parse(&schema, specs).unwrap();
             assert_ne!(
@@ -271,5 +275,30 @@ mod tests {
             one("", Some(&and), None, &limits),
             one("", Some(&or), None, &limits)
         );
+    }
+}
+
+#[cfg(test)]
+mod deep {
+    use super::*;
+    use crate::schema::FieldId;
+
+    /// A filter built in code may nest deeper than any limit before it is validated: it is walked without recursion.
+    #[test]
+    fn a_deep_filter_is_walked_without_recursion() {
+        let nested = |depth: usize| {
+            (0..depth).fold(
+                Filter::Exists {
+                    field: FieldId::new(1),
+                },
+                |f, _| Filter::Not(Box::new(f)),
+            )
+        };
+        let f = DefaultFields::all(&crate::schema::SchemaBuilder::new("c").build().unwrap());
+        let limits = QueryLimits::default();
+        let (deep, deeper) = (nested(10_000), nested(10_001));
+        let hash = |filter: &Filter| fingerprint("", &f, (Some(filter), None), &limits);
+        assert_ne!(hash(&deep), hash(&deeper));
+        assert_eq!(hash(&deep), hash(&nested(10_000)));
     }
 }

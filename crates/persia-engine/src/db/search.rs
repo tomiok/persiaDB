@@ -121,6 +121,9 @@ pub struct StepCursor {
     /// Its cascade's *hit step* (ROADMAP 8.1.22): the last step that found a hit, from `step` to `last`, whose text
     /// every page of the query states (`effective`, `corrected`), though a page after the cursor may not search it.
     pub hit: usize,
+    /// Whether the step is L5 `fallback`'s (SPEC §7.6, ROADMAP 8.1.34): a page after the cursor runs L5 at `step`, also
+    /// when its cascade would build another level there (L5 run past the budget took the step after those completed).
+    pub fallback: bool,
 }
 
 /// A hit of a search (SPEC §7.5.1).
@@ -359,7 +362,10 @@ impl CollectionViews<'_> {
             })?;
         if let Some(cursor) = &request.search_after {
             request.sort.check(&cursor.values)?;
-            if let Some(StepCursor { step, last, hit }) = cursor.relaxed {
+            if let Some(StepCursor {
+                step, last, hit, ..
+            }) = cursor.relaxed
+            {
                 if step > last {
                     return Err(RequestError::CursorStep {
                         step,

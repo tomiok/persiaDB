@@ -12,7 +12,7 @@
 //! ```text
 //! u8      version = 2
 //! u8      flags: 1 proximity, 2 has step, 4 has relaxation settings, 8 location is the memtable, 16 has a request
-//!         fingerprint; others 0
+//!         fingerprint, 32 the step is L5 `fallback`'s (only with "has step"); others 0
 //! u64     origin.seq
 //! u64     origin.version (the memtable view's)
 //! varint  collection name length, then its UTF-8 bytes
@@ -56,7 +56,8 @@ const HAS_STEP: u8 = 2;
 const HAS_RELAX: u8 = 4;
 const MEMTABLE: u8 = 8;
 const HAS_REQUEST: u8 = 16;
-const FLAGS: u8 = PROXIMITY | HAS_STEP | HAS_RELAX | MEMTABLE | HAS_REQUEST;
+const FALLBACK_STEP: u8 = 32;
+const FLAGS: u8 = PROXIMITY | HAS_STEP | HAS_RELAX | MEMTABLE | HAS_REQUEST | FALLBACK_STEP;
 
 const MISSING: u8 = 0;
 const SCORE: u8 = 1;
@@ -159,8 +160,11 @@ fn encode(cursor: &Cursor) -> Vec<u8> {
     if cursor.proximity {
         flags |= PROXIMITY;
     }
-    if cursor.relaxed.is_some() {
+    if let Some(at) = cursor.relaxed {
         flags |= HAS_STEP;
+        if at.fallback {
+            flags |= FALLBACK_STEP;
+        }
     }
     if cursor.relax.is_some() {
         flags |= HAS_RELAX;
@@ -204,7 +208,10 @@ fn encode(cursor: &Cursor) -> Vec<u8> {
     for key in &cursor.sort {
         write_key(&mut w, *key);
     }
-    if let Some(StepCursor { step, last, hit }) = cursor.relaxed {
+    if let Some(StepCursor {
+        step, last, hit, ..
+    }) = cursor.relaxed
+    {
         for n in [step, last, hit] {
             w.write_varint_u64(u64_from_usize(n));
         }
@@ -276,6 +283,9 @@ fn decode(bytes: &[u8]) -> Result<Cursor, CursorTokenError> {
     if flags & !FLAGS != 0 {
         return Err(malformed("an unknown flag"));
     }
+    if flags & FALLBACK_STEP != 0 && flags & HAS_STEP == 0 {
+        return Err(malformed("an L5 step without a step"));
+    }
     let origin = |_| malformed("no origin");
     let seq = r.read_u64().map_err(origin)?;
     let version = r.read_u64().map_err(origin)?;
@@ -311,7 +321,12 @@ fn decode(bytes: &[u8]) -> Result<Cursor, CursorTokenError> {
         let step = read_usize(&mut r, "no step")?;
         let last = read_usize(&mut r, "no step")?;
         let hit = read_usize(&mut r, "no step")?;
-        Some(StepCursor { step, last, hit })
+        Some(StepCursor {
+            step,
+            last,
+            hit,
+            fallback: flags & FALLBACK_STEP != 0,
+        })
     } else {
         None
     };
@@ -488,6 +503,7 @@ mod tests {
                 step: 2,
                 last: 300,
                 hit: 4,
+                fallback: true,
             }),
             proximity: true,
             relax: plan.settings(),
@@ -514,7 +530,7 @@ mod tests {
             ),
             (
                 full(),
-                "Ah___________wAAAAAAAQAADXphcGF0aWxsYXMgw7H_____DwQAAQAAAAAAAACAAv__________AwVuaWtl_wQFAwAD_____w8HAAKsAgR_BQPvzauJZ0UjAbUxZok",
+                "Aj___________wAAAAAAAQAADXphcGF0aWxsYXMgw7H_____DwQAAQAAAAAAAACAAv__________AwVuaWtl_wQFAwAD_____w8HAAKsAgR_BQPvzauJZ0UjAfb4laE",
             ),
         ];
         for (cursor, token) in golden {
@@ -539,6 +555,25 @@ mod tests {
                 Cursor::from_token(token),
                 Err(CursorTokenError::Version { version: 1 })
             );
+        }
+    }
+
+    /// The L5 flag comes back as written, with every step (ROADMAP 8.1.34).
+    #[test]
+    fn an_l5_step_comes_back_as_written() {
+        for fallback in [false, true] {
+            let cursor = Cursor {
+                relaxed: Some(StepCursor {
+                    step: 3,
+                    last: 4,
+                    hit: 3,
+                    fallback,
+                }),
+                ..plain()
+            };
+            let decoded = Cursor::from_token(&cursor.to_token()).unwrap();
+            assert_eq!(decoded, cursor);
+            assert_eq!(body(&cursor)[1] & FALLBACK_STEP != 0, fallback);
         }
     }
 
@@ -667,11 +702,15 @@ mod tests {
         };
         let base = body(&plain());
         // An unknown flag.
-        for flag in [32, 64, 128] {
+        for flag in [64, 128] {
             let mut bytes = base.clone();
             bytes[1] |= flag;
             assert_eq!(what(bytes), "an unknown flag", "{flag}");
         }
+        // The L5 flag needs a step.
+        let mut stepless = base.clone();
+        stepless[1] |= FALLBACK_STEP;
+        assert_eq!(what(stepless), "an L5 step without a step");
         // Bytes after the last field, and a field cut short under a matching checksum.
         let mut longer = base.clone();
         longer.push(0);
@@ -723,6 +762,7 @@ mod tests {
                 step: 1,
                 last: 2,
                 hit: 2,
+                fallback: false,
             }),
             ..plain()
         };

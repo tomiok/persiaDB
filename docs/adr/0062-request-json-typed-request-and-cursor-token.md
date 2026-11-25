@@ -88,7 +88,8 @@ segment index, a docid, relaxation settings) that no client should build or read
     argument), not read as a version 2 token without a fingerprint: there is no compatibility promise before 1.0, and
     a version 1 page could not be checked against its request. A hash, not the request itself, keeps the token short
     (a filter may be up to 1 MiB); a collision only fails to refuse a mistaken page, which the checksum's argument
-    (decision 12) already accepts for forgeries.
+    (decision 12) already accepts for forgeries. Flag 32 marks a cursor whose step is L5 `fallback`'s (ADR-0066 item
+    5, ROADMAP 8.1.34), so the next page runs L5 at that step.
 12. **The checksum is not authentication.** It turns a token that was cut or mistyped into an error instead of
     another cursor. A client can still build any cursor it likes, so a decoded cursor is checked exactly as a typed
     one is: against the sort, the snapshot and memtable view, the collection, the proximity setting and the

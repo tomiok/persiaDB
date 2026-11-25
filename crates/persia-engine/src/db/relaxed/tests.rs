@@ -716,6 +716,7 @@ fn a_cursor_from_a_later_step_is_an_error_where_it_cannot_page() {
         step: 2,
         last: 1,
         hit: 1,
+        fallback: false,
     });
     let broken = SearchRequest {
         search_after: Some(broken),
@@ -739,6 +740,7 @@ fn a_cursor_from_a_later_step_is_an_error_where_it_cannot_page() {
             step: 1,
             last: 1,
             hit,
+            fallback: false,
         });
         let broken = SearchRequest {
             search_after: Some(broken),
@@ -1218,7 +1220,8 @@ mod budget {
             Some(StepCursor {
                 step: 1,
                 last: 1,
-                hit: 1
+                hit: 1,
+                fallback: false,
             })
         );
         // The same cascade with time to spare is not truncated and reaches drop_terms.
@@ -1572,7 +1575,8 @@ mod budget {
             Some(StepCursor {
                 step: 1,
                 last: 1,
-                hit: 1
+                hit: 1,
+                fallback: true,
             })
         );
         // A query with hits at L0, fewer than `min_results` 3, is not rescued: its page is L0's, truncated before L1.
@@ -1605,7 +1609,70 @@ mod budget {
         assert!(rescued.relaxation.truncated);
     }
 
-    /// The request's own deadline still bounds L5 past the budget: the search fails as the deadline's error.
+    /// Reads one instant until armed; then each read moves it `by` and is counted, and the read `cancel_at` (when set)
+    /// cancels `token`: a deadline or a cancellation that comes inside a later step's reads.
+    #[derive(Debug)]
+    struct Armed {
+        on: std::sync::atomic::AtomicBool,
+        now: Mutex<Instant>,
+        by: Duration,
+        reads: AtomicUsize,
+        cancel: Option<(usize, crate::db::CancelToken)>,
+    }
+
+    impl Armed {
+        fn new(by_ms: u64, cancel: Option<(usize, crate::db::CancelToken)>) -> Arc<Self> {
+            Arc::new(Self {
+                on: std::sync::atomic::AtomicBool::new(false),
+                now: Mutex::new(Instant::now()),
+                by: Duration::from_millis(by_ms),
+                reads: AtomicUsize::new(0),
+                cancel,
+            })
+        }
+
+        fn reads(&self) -> usize {
+            self.reads.load(Ordering::Relaxed)
+        }
+    }
+
+    impl Clock for Armed {
+        fn now(&self) -> Instant {
+            let mut now = self.now.lock().unwrap();
+            if self.on.load(Ordering::Relaxed) {
+                *now += self.by;
+                let n = self.reads.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Some((at, token)) = &self.cancel
+                    && n >= *at
+                {
+                    token.cancel();
+                }
+            }
+            *now
+        }
+
+        fn unix_micros(&self) -> i64 {
+            0
+        }
+    }
+
+    /// Builds as `inner` does (L1, past the budget), then arms `clock`: only the reads after L1 move it, L5's.
+    #[derive(Debug)]
+    struct Arming {
+        clock: Arc<Armed>,
+        inner: Arc<Slow>,
+    }
+
+    impl LevelTransform for Arming {
+        fn steps(&self, input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
+            let steps = self.inner.steps(input);
+            self.clock.on.store(true, Ordering::Relaxed);
+            steps
+        }
+    }
+
+    /// The request's own deadline and cancellation still bound L5 past the budget: each passes inside L5's search
+    /// (after it started: the steps searched count it), and the search fails as its error, not a page.
     #[test]
     fn l5_past_the_budget_stops_at_the_requests_deadline() {
         let (db, body, _) = database();
@@ -1613,77 +1680,208 @@ mod budget {
         let c = snapshot.collection("c").unwrap();
         let memtable = c.memtable();
         let views = c.views(&memtable).unwrap();
-        let clock = Arc::new(ManualClock::new(0));
-        let (relax, _) = past_budget(&clock, true, 1);
-        // The deadline passes while L1 builds (at 80 ms of its 100): after L0, before L5.
-        let at = clock.now() + Duration::from_millis(80);
+        let budget_clock = Arc::new(ManualClock::new(0));
+        let plan = |armed: &Arc<Armed>| {
+            let arming = Arc::new(Arming {
+                clock: Arc::clone(armed),
+                inner: slow(
+                    &budget_clock,
+                    100,
+                    vec![step(term(body, "hat"), "synonyms")],
+                ),
+            });
+            let options = RelaxOptions {
+                levels: Some(Levels::Custom(Vec::new())),
+                ..budget(50, 1)
+            };
+            RelaxPlan::new(&RelaxationConfig::default(), &options)
+                .unwrap()
+                .with_level(RelaxLevel::Synonyms, arming as _)
+        };
+        let interrupted = |err: &super::super::RelaxedSearchError| match err {
+            super::super::RelaxedSearchError::Request(RequestError::Interrupted(i))
+            | super::super::RelaxedSearchError::Plan(SearchError::Interrupted(i)) => Some(*i),
+            _ => None,
+        };
+        // 10 ms a read once L1 armed the clock, the deadline 25 ms on: L5 starts, and its third read passes it.
+        let armed = Armed::new(10, None);
+        let at = armed.now() + Duration::from_millis(25);
         let exec = exec()
-            .deadline(Arc::clone(&clock) as _, at)
-            .budget_clock(Arc::clone(&clock) as _);
+            .deadline(Arc::clone(&armed) as _, at)
+            .budget_clock(Arc::clone(&budget_clock) as _);
+        let before = crate::db::relaxed::searched();
         let err = views
-            .search_relaxed(&term(body, "purple"), &request(10), &relax, &exec)
+            .search_relaxed(&term(body, "purple"), &request(10), &plan(&armed), &exec)
             .unwrap_err();
-        assert!(
-            matches!(
-                err,
-                super::super::RelaxedSearchError::Request(RequestError::Interrupted(
-                    Interrupt::DeadlineExceeded
-                )) | super::super::RelaxedSearchError::Plan(SearchError::Interrupted(
-                    Interrupt::DeadlineExceeded
-                ))
-            ),
+        assert_eq!(
+            interrupted(&err),
+            Some(Interrupt::DeadlineExceeded),
             "{err:?}"
         );
-        // A cancelled token stops it as well.
+        // L0 and L5 were searched (L1 was not: the budget passed before its step), and L5 was cut at its reads.
+        assert_eq!(crate::db::relaxed::searched() - before, 2);
+        assert_eq!(armed.reads(), 3);
+        // A token cancelled at the third read after L1 stops it the same way (the far deadline only drives the reads).
         let token = crate::db::CancelToken::new();
-        let cancelling = Arc::new(Cancelling {
-            token: token.clone(),
-            inner: slow(&clock, 100, vec![step(term(body, "hat"), "synonyms")]),
-        });
+        let armed = Armed::new(10, Some((3, token.clone())));
+        let far = armed.now() + Duration::from_secs(3_600);
+        let exec = super::exec()
+            .deadline(Arc::clone(&armed) as _, far)
+            .cancel(token)
+            .budget_clock(Arc::clone(&budget_clock) as _);
+        let before = crate::db::relaxed::searched();
+        let err = views
+            .search_relaxed(&term(body, "purple"), &request(10), &plan(&armed), &exec)
+            .unwrap_err();
+        assert_eq!(interrupted(&err), Some(Interrupt::Cancelled), "{err:?}");
+        assert_eq!(crate::db::relaxed::searched() - before, 2);
+    }
+
+    /// L0 then `synonyms` (`hat`) built by `l1`, then L5 by recency, 50 ms of budget and `min_results` 1.
+    fn with_l1(l1: Arc<dyn LevelTransform>) -> RelaxPlan {
         let options = RelaxOptions {
             levels: Some(Levels::Custom(Vec::new())),
             ..budget(50, 1)
         };
-        let relax = RelaxPlan::new(&RelaxationConfig::default(), &options)
+        RelaxPlan::new(&RelaxationConfig::default(), &options)
             .unwrap()
-            .with_level(RelaxLevel::Synonyms, Arc::clone(&cancelling) as _);
-        let cancelled = super::exec()
-            .cancel(token)
-            .budget_clock(Arc::clone(&clock) as _);
-        let err = views
-            .search_relaxed(&term(body, "purple"), &request(10), &relax, &cancelled)
-            .unwrap_err();
-        assert!(
-            matches!(
-                err,
-                super::super::RelaxedSearchError::Request(RequestError::Interrupted(
-                    Interrupt::Cancelled
-                )) | super::super::RelaxedSearchError::Plan(SearchError::Interrupted(
-                    Interrupt::Cancelled
-                ))
-            ),
-            "{err:?}"
-        );
+            .with_level(RelaxLevel::Synonyms, l1)
     }
 
-    /// Builds as `inner` does, then cancels `token`: a cancellation that comes after L0.
-    #[derive(Debug)]
-    struct Cancelling {
-        token: crate::db::CancelToken,
-        inner: Arc<Slow>,
-    }
-
-    impl LevelTransform for Cancelling {
-        fn steps(&self, input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
-            self.token.cancel();
-            self.inner.steps(input)
-        }
-    }
-
-    /// The page after an L5 hit of a page the budget left empty pages on from the cursor (ROADMAP 8.1.33): when its
-    /// budget passes at the same point, L5 takes the same step, and is searched after the cursor.
+    /// A cursor of another level's step is not read by L5 (ROADMAP 8.1.33, 8.1.34): page 1, not truncated, ends in L1's
+    /// step; page 2's budget passes right before that step, so it found nothing, and L5 does not run there (it would
+    /// read L1's cursor in its own order and could return page 1's hits again): the page is empty and truncated, as
+    /// before 8.1.33.
     #[test]
-    fn a_cursor_from_l5_past_the_budget_pages_on_when_the_budget_passes_alike() {
+    fn l5_past_the_budget_does_not_take_another_levels_cursor_step() {
+        let (db, body, _) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let clock = Arc::new(ManualClock::new(0));
+        let exec = exec().budget_clock(Arc::clone(&clock) as _);
+        let purple = term(body, "purple");
+        let hat = || vec![step(term(body, "hat"), "synonyms")];
+        let fast = with_l1(Stub::new(hat()) as _);
+        let first = views
+            .search_relaxed(&purple, &request(2), &fast, &exec)
+            .unwrap();
+        assert!(!first.relaxation.truncated);
+        assert!(
+            first
+                .hits
+                .iter()
+                .all(|h| h.level == RelaxLevel::Synonyms && h.step == 1)
+        );
+        let next = SearchRequest {
+            search_after: first.hits.last().map(crate::db::RelaxedHit::cursor),
+            ..request(2)
+        };
+        let cut = with_l1(slow(&clock, 100, hat()) as _);
+        let second = views.search_relaxed(&purple, &next, &cut, &exec).unwrap();
+        assert!(second.relaxation.truncated);
+        assert_eq!(second.hits.len(), 0);
+        // Not cut, page 2 pages on as the page by offset does.
+        let uncut = views.search_relaxed(&purple, &next, &fast, &exec).unwrap();
+        let by_offset = SearchRequest {
+            offset: 2,
+            ..request(2)
+        };
+        let deeper = views
+            .search_relaxed(&purple, &by_offset, &fast, &exec)
+            .unwrap();
+        let ids = |r: &super::super::RelaxedResults| -> Vec<(String, usize)> {
+            r.hits
+                .iter()
+                .map(|h| (h.hit.document.id().to_owned(), h.step))
+                .collect()
+        };
+        assert_eq!(ids(&uncut), ids(&deeper));
+    }
+
+    /// A cursor from the page L5 filled past the budget pages on exactly when the next page's cascade is not cut
+    /// (ROADMAP 8.1.34): its cursor says its step is L5's, so the next page builds the steps before it, then L5 at that
+    /// step (not the level it would build there), and continues L5's ranking from the cursor.
+    #[test]
+    fn a_cursor_from_l5_past_the_budget_pages_on_exactly_when_the_next_page_is_not_cut() {
+        let (db, body, _) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let clock = Arc::new(ManualClock::new(0));
+        let exec = exec().budget_clock(Arc::clone(&clock) as _);
+        let purple = term(body, "purple");
+        let hat = || vec![step(term(body, "hat"), "synonyms")];
+        let cut = with_l1(slow(&clock, 100, hat()) as _);
+        let first = views
+            .search_relaxed(&purple, &request(2), &cut, &exec)
+            .unwrap();
+        assert!(first.relaxation.truncated);
+        let last = first.hits.last().unwrap().cursor();
+        assert_eq!(
+            last.relaxed,
+            Some(StepCursor {
+                step: 1,
+                last: 1,
+                hit: 1,
+                fallback: true,
+            })
+        );
+        let fast = Stub::new(hat());
+        let uncut = with_l1(Arc::clone(&fast) as _);
+        let next = SearchRequest {
+            search_after: Some(last),
+            ..request(2)
+        };
+        let second = views.search_relaxed(&purple, &next, &uncut, &exec).unwrap();
+        // L1 is not built at L5's step.
+        assert_eq!(fast.calls(), 0);
+        assert!(
+            second
+                .hits
+                .iter()
+                .all(|h| h.level == RelaxLevel::Fallback && h.step == 1)
+        );
+        // The page by offset of the page L5 filled: the same hits.
+        let by_offset = SearchRequest {
+            offset: 2,
+            ..request(2)
+        };
+        let deeper = views
+            .search_relaxed(&purple, &by_offset, &cut, &exec)
+            .unwrap();
+        let ids = |r: &super::super::RelaxedResults| -> Vec<String> {
+            r.hits
+                .iter()
+                .map(|h| h.hit.document.id().to_owned())
+                .collect()
+        };
+        assert_eq!(ids(&second).len(), 2);
+        assert_eq!(ids(&second), ids(&deeper));
+        // And the page after that, from the second page's cursor.
+        let third = SearchRequest {
+            search_after: second.hits.last().map(crate::db::RelaxedHit::cursor),
+            ..request(2)
+        };
+        let third = views
+            .search_relaxed(&purple, &third, &uncut, &exec)
+            .unwrap();
+        let rest = SearchRequest {
+            offset: 4,
+            ..request(2)
+        };
+        let rest = views.search_relaxed(&purple, &rest, &cut, &exec).unwrap();
+        assert_eq!(ids(&third), ids(&rest));
+        assert_eq!(fast.calls(), 0);
+    }
+
+    /// The page after an L5 hit of a page the budget left empty pages on from the cursor (ROADMAP 8.1.33, 8.1.34): under
+    /// the same plan, whose budget would pass at the same point, L5 runs at the cursor's step (no other level is built
+    /// there) after the cursor.
+    #[test]
+    fn a_cursor_from_l5_past_the_budget_pages_on_under_the_same_plan() {
         let (db, body, _) = database();
         let snapshot = db.snapshot();
         let c = snapshot.collection("c").unwrap();
@@ -1710,7 +1908,8 @@ mod budget {
                 .map(|h| h.hit.document.id().to_owned())
                 .collect()
         };
-        assert!(second.relaxation.truncated);
+        // L1 is not built at L5's step (ROADMAP 8.1.34), so the budget does not pass on this page.
+        assert!(!second.relaxation.truncated);
         assert!(
             second
                 .hits
@@ -1758,6 +1957,54 @@ mod budget {
         // L6 was built, then found the budget spent; L5 is listed once.
         assert_eq!(l6.calls.load(Ordering::Relaxed), 1);
         assert_eq!(out.relaxation.applied, ["fallback"]);
+    }
+
+    /// After a cursor of L5's step, a page whose budget passes before L5 still runs L5 there, past the budget and after
+    /// the cursor (ROADMAP 8.1.34): it continues the cursor's ranking exactly, and is truncated.
+    #[test]
+    fn a_cursor_of_l5s_step_runs_l5_past_the_budget() {
+        let (db, body, _) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let clock = Arc::new(ManualClock::new(0));
+        let exec = exec().budget_clock(Arc::clone(&clock) as _);
+        let purple = term(body, "purple");
+        let cut = with_l1(slow(&clock, 100, vec![step(term(body, "hat"), "synonyms")]) as _);
+        let first = views
+            .search_relaxed(&purple, &request(2), &cut, &exec)
+            .unwrap();
+        let next = SearchRequest {
+            search_after: first.hits.last().map(crate::db::RelaxedHit::cursor),
+            ..request(2)
+        };
+        // 10 ms a read, 1 ms of budget: past it at the first read after L0, before L5's level.
+        let ticking = super::exec().budget_clock(Ticking::new(10));
+        let second = views
+            .search_relaxed(
+                &purple,
+                &next,
+                &with_l1(Stub::new(Vec::new()) as _),
+                &ticking,
+            )
+            .unwrap();
+        assert!(second.relaxation.truncated);
+        let by_offset = SearchRequest {
+            offset: 2,
+            ..request(2)
+        };
+        let deeper = views
+            .search_relaxed(&purple, &by_offset, &cut, &exec)
+            .unwrap();
+        let ids = |r: &super::super::RelaxedResults| -> Vec<String> {
+            r.hits
+                .iter()
+                .map(|h| h.hit.document.id().to_owned())
+                .collect()
+        };
+        assert_eq!(ids(&second).len(), 2);
+        assert_eq!(ids(&second), ids(&deeper));
     }
 
     /// A plan without L5 (`fallback: "none"`) still answers the empty truncated page: nothing runs past the budget.
@@ -1922,7 +2169,8 @@ fn cursors_from_other_searches_page_as_their_step_says() {
         Some(StepCursor {
             step: 1,
             last: 1,
-            hit: 1
+            hit: 1,
+            fallback: false,
         })
     );
     // A cursor from a step this plan no longer builds (another plan) pages nothing, without an error.

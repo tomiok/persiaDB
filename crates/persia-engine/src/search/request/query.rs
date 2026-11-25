@@ -18,7 +18,7 @@ use crate::db::{
     RelaxedSearchError, SearchRequest, SearchResults, Threads,
 };
 use crate::query::{DefaultFields, Filter, QueryError, QueryLimits};
-use crate::relax::{RelaxError, RelaxOptions, RelaxPlan};
+use crate::relax::{RelaxError, RelaxLevel, RelaxOptions, RelaxPlan};
 use crate::schema::CollectionSchema;
 use crate::search::{
     FacetRequest, Interrupt, Projection, RequestError, SearchError, SearchPlan, Sort,
@@ -220,7 +220,9 @@ impl QueryRequest {
     /// (every `text` field with its schema boost when [`Self::fields`] is `None`), `filter`, `soft_filter` and
     /// `limits`, the parts its ranking depends on that the cursor records nowhere else. [`Self::run`] refuses a cursor
     /// of another fingerprint ([`RequestError::CursorRequest`]). The page, the facets, the projection and `explain` do
-    /// not count: they do not change the ranking.
+    /// not count: they do not change the ranking. The filters are walked with a stack of their own, not by recursion, so
+    /// a filter of any depth (one built in code is held to `limits` only when the request runs) is hashed in time linear
+    /// in the request's size.
     ///
     /// ```
     /// use persia_engine::query::QueryLimits;
@@ -299,18 +301,26 @@ impl QueryRequest {
             .with_soft_filter(self.soft_filter.clone());
         // The filters add their nodes, terms and a level of depth to the compiled query (SPEC §7.1.3).
         compiled.query().validate(schema, &limits)?;
-        // After the validation: the filters are within the limits' depth.
         let fingerprint = self.fingerprint_over(&fields, &limits);
         let memtable = collection.memtable();
         let views = collection.views(&memtable).map_err(RequestError::from)?;
-        let results = if relax.relaxes() {
-            QueryResults::Relaxed(views.search_relaxed_for(
+        // Only the plain search states L0's text through `exact`: the relaxed one states its own.
+        let (results, exact) = if relax.relaxes() {
+            let results = views.search_relaxed_for(
                 (&compiled).into(),
                 &self.page,
                 &relax,
                 &options.exec,
                 Some(fingerprint),
-            )?)
+            )?;
+            let unread = Relaxation::of(
+                (RelaxLevel::Exact, false),
+                Vec::new(),
+                None,
+                (None, Vec::new()),
+                false,
+            );
+            (QueryResults::Relaxed(results), unread)
         } else {
             let stats = collection.search_statistics(&memtable);
             let terms = options.exec.terms(&views);
@@ -320,17 +330,13 @@ impl QueryRequest {
             } else {
                 plan.without_proximity()
             };
-            QueryResults::Plain(views.search_for(
-                &plan,
-                &self.page,
-                &options.exec,
-                Some(fingerprint),
-            )?)
+            let results = views.search_for(&plan, &self.page, &options.exec, Some(fingerprint))?;
+            (QueryResults::Plain(results), Relaxation::exact(&compiled))
         };
         Ok(QueryResponse {
             results,
             query_truncated: compiled.truncated,
-            exact: Relaxation::exact(&compiled),
+            exact,
         })
     }
 
@@ -428,7 +434,8 @@ pub struct QueryResponse {
     /// Whether part of `q` was left out to stay within the limits (`query_truncated`, SPEC §7.1.1); not the
     /// relaxation budget's `truncated` ([`crate::db::Relaxation::truncated`]).
     pub query_truncated: bool,
-    /// What a plain search states as its `relaxation` (SPEC §7.6): level `exact`, nothing applied, L0's text.
+    /// What a plain search states as its `relaxation` (SPEC §7.6): level `exact`, nothing applied, L0's text. For a relaxed
+    /// search, which states its own, an empty one that is never read.
     pub(super) exact: Relaxation,
 }
 

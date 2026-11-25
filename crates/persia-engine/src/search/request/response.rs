@@ -272,7 +272,11 @@ impl Writer<'_> {
                 self.explanation(out, query)?;
                 out.push_str("}}");
             }
-            Explanation::All => out.push_str("{\"match_all\":{\"score\":0}}"),
+            Explanation::All => {
+                out.push_str("{\"match_all\":{\"score\":");
+                number(out, 0.0, "a score")?;
+                out.push_str("}}");
+            }
             Explanation::StaticRank { score, value } => {
                 out.push_str("{\"static_rank\":{\"score\":");
                 number(out, *score, "a score")?;
@@ -789,7 +793,7 @@ mod explain_tests {
                 r#""length":9,"factor":0.75,"tf":1.5}}],"#,
                 r#""proximity":{"score":0.125,"pairs":[{"first":0,"weight":0.5,"field":"body","distance":2,"#,
                 r#""closeness":0.25,"score":0.125},{"first":1,"weight":0.5,"closeness":0.0,"score":0.0}]},"#,
-                r#""should":[{"constant_score":{"score":0.0,"query":{"match_all":{"score":0}}}},"#,
+                r#""should":[{"constant_score":{"score":0.0,"query":{"match_all":{"score":0.0}}}},"#,
                 r#"{"static_rank":{"score":0.5,"value":10.0}}]}}}}"#,
             )
         );

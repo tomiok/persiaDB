@@ -30,7 +30,7 @@
 </p>
 
 <!-- BEGIN GENERATED progress:summary by `cargo xtask progress`. Do not edit by hand. -->
-**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **443 of 608** MVP leaves done (73%), 0 in progress (last snapshot 2026-11-24). Post-MVP work is 0 of 226 and sits outside that percentage.
+**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **443 of 610** MVP leaves done (73%), 0 in progress (last snapshot 2026-11-25). Post-MVP work is 0 of 226 and sits outside that percentage.
 <!-- END GENERATED progress:summary -->
 
 Format 1.0 is unstable until the v1.0 release ([SPEC §15](./SPEC.md#15-versioning-and-compatibility)). The [docs homepage](https://tomiok.github.io/persiaDB/) plays this poster from [`persia-hero.webm`](./website/public/persia-hero.webm) and [`persia-hero.mp4`](./website/public/persia-hero.mp4).
@@ -178,7 +178,7 @@ Every command exits with status 0 on success, 1 on any other failure, 2 on a usa
 - `persia bench --json`:
   - `notice` (the numbers are local guidance only), `build` (`release` or `debug`), `seed`, `docs`, `queries`;
   - `corpus` `{fingerprint, container_bytes}`, `indexing` `{nanos, docs_per_second, commit_nanos}` (`docs_per_second` `null` when the clock read no time), `query_mix` `{fingerprint}` (fingerprints are 16 hex digits);
-  - `query_kinds`, in rotation order (`term`, `terms`, `phrase`, `filter`, `typo`): `{kind, count, hits, truncated, latency_nanos: {p50, p90, p99, max}}`. `latency_nanos` is `null` for a kind that ran no query. `truncated` counts the queries whose page the relaxation time budget (SPEC §7.6) cut short; `hits` repeat for a seed only where `truncated` is 0.
+  - `query_kinds`, in rotation order (`term`, `terms`, `phrase`, `filter`, `typo`): `{kind, count, hits, empty, truncated, latency_nanos: {p50, p90, p99, max}}`. `latency_nanos` is `null` for a kind that ran no query; `empty` counts the queries that returned no hit. `truncated` counts the queries whose page the relaxation time budget (SPEC §7.6) cut short; `hits` repeat for a seed only where `truncated` is 0.
 
 The golden segment above is format 1.0 and holds 300 documents (`doc_count` in the inspect output; see [`crates/persia-cli/tests/segment.rs`](./crates/persia-cli/tests/segment.rs)).
 
@@ -272,9 +272,9 @@ MVP (M0–M15) is the v1.0 release. The live graph, the burn-up, and the ready-n
 | **M5** Segment writer & reader | ✅ done | 48/48 |
 | **M6** Write path, durability, merging | ✅ done | 52/52 |
 | **M7** Query engine & ranking | ✅ done | 51/51 |
-| **M8** Zero-results avoidance | 🔨 in progress | 53/54 |
+| **M8** Zero-results avoidance | 🔨 in progress | 53/55 |
 | **M9** Blob store | ✅ done | 44/44 |
-| **M10** Embedded API | 🔨 in progress | 14/36 |
+| **M10** Embedded API | 🔨 in progress | 14/37 |
 | **M11** Server | ⏳ blocked | 0/24 |
 | **M12** Cloud storage backends | ⏳ blocked | 0/29 |
 | **M13** Distribution & Kubernetes | ⏳ blocked | 0/33 |

@@ -2,7 +2,7 @@
 
 - Status: proposed
 - Date: 2026-11-25
-- Related: SPEC §7.6 ("Budget", L5 `fallback`); ROADMAP 8.1.4, 8.1.33, 8.2.5; ADR-0043, ADR-0047
+- Related: SPEC §7.4, §7.6 ("Budget", L5 `fallback`); ROADMAP 8.1.4, 8.1.33, 8.1.34, 8.2.5; ADR-0043, ADR-0047
 
 ## Context
 
@@ -33,20 +33,31 @@ meant to bound latency, not to give up on the one level that needs no words (fou
 4. **When it does not run:** the plan has no L5 (`fallback: "none"`, or a cascade that runs L0 alone): the empty
    truncated page is the answer. L5 was built already: searched (its result is the page's), or skipped for the limits
    of SPEC §7.1.3 (`fallback:skipped`, it does not fit). A budget that passed inside L5 dropped it whole, so L5 is run
-   again past the budget, whole. A cursor whose step is after the one L5 would take (its hits rank before the cursor).
+   again past the budget, whole. On a cursor's page, while the cursor's step has not been rebuilt and searched (item 5).
+5. **A cursor knows its step is L5's** (ROADMAP 8.1.34). The rescued L5 takes the step index after the steps
+   completed, which is not the index L5 has in a cascade the budget does not cut, so a cursor recording only the
+   index would page another level's step next time. Cursor token version 2 (not yet shipped) gets one more flag, 32,
+   "the step is L5 `fallback`'s" (`StepCursor::fallback`, set for every L5 hit). The page after such a cursor builds the
+   steps before the cursor's step, then runs L5 at the cursor's step, whatever level the cascade would build there,
+   searched after the cursor and not bounded by the budget: the steps before it are the same steps on the same
+   snapshot, so it continues the cursor's ranking exactly, whether or not this page's budget passes. After a cursor
+   of another level's step, L5 never takes that step: it would read that level's cursor (its sort values and
+   location) in L5's own order, skip L5's documents and could return the previous page's hits again. It runs past the
+   budget only once the cursor's step was rebuilt and searched (then from its top, as on a page from the top); when
+   the budget passes before that, the page is the empty truncated page, and the next page tries again.
 
 ## Consequences
 
-- `search_relaxed` gains one post-cascade step (`fallback_past_budget`); the cascade loop is unchanged.
+- `search_relaxed` gains one post-cascade step (`fallback_past_budget`); the cascade loop only stops, after a cursor
+  of L5's step, before building another level at that step.
 - A truncated page from the top whose L0 found nothing now holds L5's hits. Tests that asserted the empty page under a
   plan with L5 now assert L5's hits.
 - L5 is the cheap level (no term walk, FOR-block bounds or a recency walk that stops once it has the page), so running
   it past the budget costs about one more step; the deadline bounds it.
-- Open (ROADMAP 8.1.34): the rescued L5 takes the step index after the steps completed, which is not the index L5 has
-  in a cascade the budget did not cut. A hit's cursor from such a page records that index, so the next page, if its
-  budget does not pass at the same point, rebuilds other steps up to it and pages a step that is not L5: it may repeat
-  or skip hits. A truncated page already only promises that the next page tries again; recording L5 in the cursor
-  (a cursor token version) would make it exact.
+- After a page L5 filled past the budget, the query's later pages are L5's ranking from that point (they do not go back
+  to the levels the budget skipped): the pages by cursor are the pages by offset of that page's ranking.
+- With `fill` and facets, a page after an L5 cursor does not build the steps past its own only to count them, so its
+  facets may count fewer steps; a cursor page keeps no counts anyway (SPEC §7.5).
 
 ## Alternatives considered
 

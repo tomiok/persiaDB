@@ -2030,11 +2030,14 @@ fn any_cursor() -> impl Strategy<Value = Cursor> {
         any::<u32>().prop_map(Located::Memtable),
         (any::<usize>(), any::<u32>()).prop_map(|(index, docid)| Located::Segment { index, docid }),
     ];
-    let step =
-        proptest::option::of(
-            (any::<usize>(), any::<usize>(), any::<usize>())
-                .prop_map(|(step, last, hit)| StepCursor { step, last, hit }),
-        );
+    let step = proptest::option::of((any::<usize>(), any::<usize>(), any::<usize>()).prop_map(
+        |(step, last, hit)| StepCursor {
+            step,
+            last,
+            hit,
+            fallback: false,
+        },
+    ));
     // The settings of any plan that relaxes; `None` is a plan of L0 alone.
     let relax = proptest::option::of(any_relax()).prop_map(|relax| {
         let options = relax.map_or_else(RelaxOptions::default, |r| r.typed());
@@ -2498,7 +2501,12 @@ fn a_forged_cursor_never_panics() {
         .run(&strategy, |(cursor, request, steps, location)| {
             let forged = Cursor {
                 origin: origin.clone(),
-                relaxed: steps.map(|(step, last, hit)| StepCursor { step, last, hit }),
+                relaxed: steps.map(|(step, last, hit)| StepCursor {
+                    step,
+                    last,
+                    hit,
+                    fallback: false,
+                }),
                 location,
                 proximity: false,
                 ..cursor

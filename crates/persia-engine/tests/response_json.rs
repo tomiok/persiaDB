@@ -434,7 +434,9 @@ fn every_response_is_valid_json_that_states_the_typed_one_and_its_cursors_page_o
         .unwrap();
 }
 
-/// A sort value that is a score is the hit's score, bit for bit, in the JSON too.
+/// Each sort value is written as its key's field types it (SPEC §7.5.2): an `i64` as an integer, an `f64` as a number, a
+/// `bool`, a `datetime` in the document's output text, a keyword as a string, the score as a number, and `null` for a
+/// document without a value (`d` has no stock and no price).
 #[test]
 fn sort_values_are_typed_by_their_key() {
     let db = database();

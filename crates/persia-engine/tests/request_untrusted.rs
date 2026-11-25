@@ -244,6 +244,7 @@ fn full_cursor() -> Cursor {
             step: 2,
             last: 300,
             hit: 4,
+            fallback: false,
         }),
         proximity: true,
         relax: RelaxPlan::new(&RelaxationConfig::default(), &options)
@@ -306,11 +307,14 @@ fn any_cursor() -> impl Strategy<Value = Cursor> {
         any::<u32>().prop_map(Located::Memtable),
         (any::<usize>(), any::<u32>()).prop_map(|(index, docid)| Located::Segment { index, docid }),
     ];
-    let step =
-        proptest::option::of(
-            (any::<usize>(), any::<usize>(), any::<usize>())
-                .prop_map(|(step, last, hit)| StepCursor { step, last, hit }),
-        );
+    let step = proptest::option::of((any::<usize>(), any::<usize>(), any::<usize>()).prop_map(
+        |(step, last, hit)| StepCursor {
+            step,
+            last,
+            hit,
+            fallback: false,
+        },
+    ));
     let relax =
         proptest::option::of((1..=1_000_u32, any::<bool>(), any::<bool>())).prop_map(|settings| {
             let (min_results, fill, last_resort) = settings?;
