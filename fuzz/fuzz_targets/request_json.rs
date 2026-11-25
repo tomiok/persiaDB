@@ -117,6 +117,9 @@ fuzz_target!(|data: &[u8]| {
         let json = response
             .to_json(collection.schema())
             .expect("a response the search returned has its JSON");
-        assert!(serde_json::from_str::<serde_json::Value>(&json).is_ok(), "{json}");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&json).is_ok(),
+            "{json}"
+        );
     }
 });
