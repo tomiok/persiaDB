@@ -678,7 +678,13 @@ impl<F: ContainerFile> Container<F> {
         } else {
             clone()?
         };
-        CommittedImage::shared(file, w.as_slice(), sb.log_end)
+        CommittedImage::shared(
+            file,
+            &self.header,
+            &persia_format::header::CONTAINER,
+            w.as_slice(),
+            sb.log_end,
+        )
     }
 
     /// How the container was opened.

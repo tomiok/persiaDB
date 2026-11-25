@@ -363,7 +363,7 @@ impl<F: ContainerFile + 'static> PackStore<F> {
             .try_clone_handle()
             .map_err(io_err("open a second handle"))?;
         let end = pack.sb.log_end;
-        CommittedImage::with_slot(file, &slot, end)
+        CommittedImage::with_slot(file, &pack.header, &BLOB_PACK, &slot, end)
             .map(Some)
             .map_err(|e| match e {
                 ContainerError::Io { op, source } => Error::PackIo { op, source },

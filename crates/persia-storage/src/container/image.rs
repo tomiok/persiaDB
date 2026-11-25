@@ -19,7 +19,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use persia_format::header::HEADER_LEN;
+use persia_format::Reader;
+use persia_format::header::{HEADER_LEN, Header, HeaderRules};
 use persia_format::superblock::{FIRST_FRAME_OFFSET, SLOT_LEN};
 use persia_format::widen::u64_from_usize;
 
@@ -72,19 +73,34 @@ pub struct CommittedImage<F> {
 
 impl<F: ContainerFile> CommittedImage<F> {
     /// The image of the commit whose superblock slot (its [`SLOT_LEN`] encoded bytes) is `slot`, whose frames end at
-    /// `end`, made in `file`: the header page is read from `file` as it is (never rewritten in place, so a header
-    /// with flags this build does not know is copied unchanged), then `slot` is put in both slot places.
+    /// `end`, made in `file` of the kind `rules` describe (container or blob pack): the header page is read from `file`
+    /// as it is (never rewritten in place, so a header with `rocompat_flags` this build does not know is copied
+    /// unchanged), checked (it decodes under `rules` and equals `header`, the one the file was opened with), then
+    /// `slot` is put in both slot places.
     ///
     /// # Errors
     /// [`Error::InvalidInput`] if `slot` is not [`SLOT_LEN`] bytes or `end` is below [`FIRST_FRAME_OFFSET`];
-    /// [`Error::Format`] (corruption) if `file` is shorter than `end`: a committed frame is missing;
-    /// [`Error::Io`] if its length or its header page cannot be read.
-    pub fn with_slot(file: F, slot: &[u8], end: u64) -> Result<Self> {
-        Self::shared(Arc::new(file), slot, end)
+    /// [`Error::Format`] (corruption) if `file` is shorter than `end` (a committed frame is missing), or its header page
+    /// does not decode (damaged) or differs from `header` (`Corruption::HeaderChanged`); [`Error::Io`] if its length or
+    /// its header page cannot be read.
+    pub fn with_slot(
+        file: F,
+        header: &Header,
+        rules: &HeaderRules,
+        slot: &[u8],
+        end: u64,
+    ) -> Result<Self> {
+        Self::shared(Arc::new(file), header, rules, slot, end)
     }
 
     /// [`CommittedImage::with_slot`] on a handle shared with its container.
-    pub(super) fn shared(file: Arc<F>, slot: &[u8], end: u64) -> Result<Self> {
+    pub(super) fn shared(
+        file: Arc<F>,
+        header: &Header,
+        rules: &HeaderRules,
+        slot: &[u8],
+        end: u64,
+    ) -> Result<Self> {
         if slot.len() != SLOT_LEN || end < FIRST_FRAME_OFFSET {
             return Err(Error::InvalidInput(format!(
                 "an image needs a slot of {SLOT_LEN} bytes and an end at or past {FIRST_FRAME_OFFSET}, not {} and \
@@ -105,6 +121,13 @@ impl<F: ContainerFile> CommittedImage<F> {
         let mut prefix = vec![0; HEADER_LEN];
         file.read_exact_at(&mut prefix, 0)
             .map_err(Error::io("read the header page"))?;
+        // A damaged page fails to decode (CRC, magic); a valid one that is not the opened header was rewritten since.
+        if Header::decode_with(&mut Reader::new(&prefix), rules)? != *header {
+            return Err(Error::Format(persia_format::Error::Corrupt {
+                offset: 0,
+                reason: persia_format::Corruption::HeaderChanged,
+            }));
+        }
         prefix.extend_from_slice(slot);
         prefix.extend_from_slice(slot);
         Ok(Self { prefix, file, end })

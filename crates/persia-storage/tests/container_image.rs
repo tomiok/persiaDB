@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use persia_format::block::Compression;
 use persia_format::frame::FrameKind;
-use persia_format::header::HEADER_LEN;
+use persia_format::header::{CONTAINER, HEADER_LEN};
 use persia_format::superblock::{FIRST_FRAME_OFFSET, SLOT_LEN};
 use persia_storage::container::sim::{CrashLoss, SimFault, SimFile};
 use persia_storage::container::{
@@ -179,21 +179,39 @@ fn a_copy_reads_the_file_it_was_taken_from_not_the_path() {
 #[test]
 fn an_image_checks_its_parts() {
     let (bytes, log_end) = source(1);
+    let header = *Container::open_on(SimFile::from_bytes(bytes.clone()), Mode::ReadOnly)
+        .unwrap()
+        .header();
     let file = SimFile::from_bytes(bytes.clone());
-    let err = CommittedImage::with_slot(file.clone(), &[0; 10], log_end).unwrap_err();
-    assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
-    let err = CommittedImage::with_slot(file.clone(), &[0; SLOT_LEN], FIRST_FRAME_OFFSET - 8)
+    let err = CommittedImage::with_slot(file.clone(), &header, &CONTAINER, &[0; 10], log_end)
         .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+    let err = CommittedImage::with_slot(
+        file.clone(),
+        &header,
+        &CONTAINER,
+        &[0; SLOT_LEN],
+        FIRST_FRAME_OFFSET - 8,
+    )
+    .unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
     // A file shorter than its commit: a committed frame is missing.
     let short = SimFile::from_bytes(bytes[..log_end as usize - 8].to_vec());
-    let err = CommittedImage::with_slot(short, &[0; SLOT_LEN], log_end).unwrap_err();
+    let err =
+        CommittedImage::with_slot(short, &header, &CONTAINER, &[0; SLOT_LEN], log_end).unwrap_err();
     assert!(err.is_corruption(), "{err:?}");
     // An image of only the prefix is empty; a copy goes into an empty file only.
-    let empty =
-        CommittedImage::with_slot(file.clone(), &[0; SLOT_LEN], FIRST_FRAME_OFFSET).unwrap();
+    let empty = CommittedImage::with_slot(
+        file.clone(),
+        &header,
+        &CONTAINER,
+        &[0; SLOT_LEN],
+        FIRST_FRAME_OFFSET,
+    )
+    .unwrap();
     assert!(empty.is_empty());
-    let image = CommittedImage::with_slot(file, &[0; SLOT_LEN], log_end).unwrap();
+    let image =
+        CommittedImage::with_slot(file, &header, &CONTAINER, &[0; SLOT_LEN], log_end).unwrap();
     let full = SimFile::from_bytes(vec![1]);
     assert!(matches!(
         image.write_to(&full).unwrap_err(),
@@ -677,4 +695,42 @@ fn with_per_process_locks_a_backup_keeps_the_writer_lock() {
     // Released with the container.
     drop(c);
     drop(Container::open_in(vfs(&fs), "/d/app.persia", Mode::ReadWrite).unwrap());
+}
+
+/// The header page is copied as the file holds it, but checked first: damaged on disk, or another valid header put
+/// there since the open, the image is refused as corruption and no backup is written.
+#[test]
+fn a_header_page_damaged_or_changed_after_the_open_is_refused() {
+    let (a, _) = source(1);
+    let (other, _) = source(7);
+    for (what, page) in [
+        ("damaged", {
+            let mut p = a[..HEADER_LEN].to_vec();
+            p[100] ^= 0xff;
+            p
+        }),
+        ("another header", other[..HEADER_LEN].to_vec()),
+    ] {
+        let fs = SimFs::new();
+        fs.create_dir(Path::new("/d")).unwrap();
+        let f = fs.create_new(Path::new("/d/src.persia")).unwrap();
+        f.write_all_at(&a, 0).unwrap();
+        let c = Container::open_in(vfs(&fs), "/d/src.persia", Mode::ReadOnly).unwrap();
+        f.write_all_at(&page, 0).unwrap();
+        let err = c.committed_image().unwrap_err();
+        assert!(err.is_corruption(), "{what}: {err:?}");
+        if what == "another header" {
+            assert!(
+                matches!(
+                    err,
+                    Error::Format(persia_format::Error::Corrupt {
+                        offset: 0,
+                        reason: persia_format::Corruption::HeaderChanged
+                    })
+                ),
+                "{err:?}"
+            );
+        }
+        assert!(fs.read(Path::new(DEST)).is_none());
+    }
 }

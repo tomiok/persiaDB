@@ -377,6 +377,10 @@ pub enum Corruption {
         /// The frame's `frame_seq`.
         found: u64,
     },
+    /// The header page read back from a file is valid but differs from the header the handle opened that file with
+    /// (SPEC §4.2): something rewrote it since. A copy of the file (ROADMAP 10.1.8) refuses it.
+    #[error("the header page differs from the one the file was opened with")]
+    HeaderChanged,
 }
 
 /// A superblock field, named in [`Corruption::InvalidSuperblock`].

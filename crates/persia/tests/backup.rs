@@ -490,3 +490,24 @@ fn a_destination_that_cannot_be_looked_up_fails_before_the_commit() {
         "refused before the commit"
     );
 }
+
+/// A header page damaged on disk after the open is not copied: the backup fails as corruption and leaves no `dest`.
+#[test]
+fn a_header_page_damaged_after_the_open_fails_the_backup() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let db = Db::open(&path).unwrap();
+    put(&files(&db), "a", 1);
+    let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.seek(SeekFrom::Start(100)).unwrap();
+    file.write_all(&[0xa5; 8]).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    let err = db.backup(out.join("copy.persia")).unwrap_err();
+    assert_eq!(err.code(), ErrorCode::Corrupt, "{err}");
+    assert_eq!(names(&out), Vec::<String>::new());
+}

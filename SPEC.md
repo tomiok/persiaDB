@@ -504,7 +504,8 @@ blocked for the copy:
    commit are not copied.
 3. Each copy is the header page as the file holds it, read when the image is taken (no writer of this version
    rewrites it in place: a compaction writes a new one into its new file, §4.6), so a header with flags this build
-   does not know is copied unchanged; **both** slots holding that commit (as after a compaction, §4.6 step 3),
+   does not know is copied unchanged, after a check that it decodes and equals the header the file was opened with
+   (a page damaged or rewritten since fails the backup as corruption); **both** slots holding that commit (as after a compaction, §4.6 step 3),
    and the frames `12288..log_end` copied byte for byte. No byte at or after `log_end` is copied (acknowledged WAL
    frames after the commit, §8.2; chunks staged for an unbound upload, §9.3), and the slots, the only bytes rewritten
    in place, are written from memory: the copy opens at exactly that commit, with no torn tail. Below a committed
@@ -513,7 +514,10 @@ blocked for the copy:
    process rather than the handle (`locks_per_handle` false, §9.3; NFS-style emulated `flock`), closing any descriptor
    of the container would drop the writer lock (§4.5.1): the container's second handle is then opened once and kept
    open until the writer's container handle closes, after its lock is released. The pack's second handle closes no
-   lock: its writer lock is the file beside it (§9.3).
+   lock: its writer lock is the file beside it (§9.3). This keeps a backup from dropping the lock; it does not lift the
+   limit such mounts already have: a read-only open and close of the database in the writer's own process (a
+   read-only `Db`, its backup included) opens and closes descriptors of the container, and so can drop that
+   process's writer lock, as any read-only open there already can (§4.5.1, ADR-0019).
 4. Durable, whole or absent: each file is written to a temporary name `<name>.backup.<nonce>.<n>` beside its
    destination and synced (data and length, §4.5.2); then hard-linked to its name, which fails if the name has
    appeared, and its directory synced, **the pack before the container**, so a crash never leaves `dest` without its
