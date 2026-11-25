@@ -555,8 +555,8 @@ The intended surface (SPEC §8, §9.6, ROADMAP 10.1):
 
 Handles are `Send` and `Sync`. Many readers share a snapshot. A second writer fails immediately.
 A `put` is visible to later searches on that database (read-your-writes, SPEC §8.2–§8.4).
-An optional `tokio` feature will offer a thin `spawn_blocking` wrapper (ROADMAP 10.1.6); the core
-API stays synchronous.
+The cargo feature `async` adds `AsyncDb` and `AsyncCollection`, whose calls return std futures that run on the
+database's own pool of threads and need no runtime (ROADMAP 10.1.11, ADR-0064); the core API stays synchronous.
 
 Embedded mode has no authentication and no config file. Knobs, once they exist, are builder options
 with defaults: memtable size, commit interval, fsync policy, merge threads, search threads, cache

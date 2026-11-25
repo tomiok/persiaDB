@@ -53,7 +53,7 @@ pub(crate) struct Inner {
     /// The durability of writes through handles that did not choose their own.
     durability: Durability,
     /// The options of the open, for what a refresh opens again.
-    options: OpenOptions,
+    pub(crate) options: OpenOptions,
     /// Set first by a close or a drop: later calls on any handle fail with [`ErrorCode::Closed`].
     closed: AtomicBool,
     /// One refresh at a time, from its reopen to its swap: two racing ones would otherwise swap in their reopens out of

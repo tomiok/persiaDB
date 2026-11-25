@@ -16,13 +16,15 @@ tracing.workspace = true
 
 [dev-dependencies]
 # This crate, with its test hooks, for its integration tests and doctests.
-persia = { workspace = true, features = ["test-hooks"] }
+persia = { workspace = true, features = ["test-hooks", "async"] }
 persia-blob = { workspace = true, features = ["testing"] }
 persia-storage.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 
 [features]
+# The runtime-agnostic async API (`AsyncDb`, `AsyncCollection`; ADR-0064): no dependency, std futures only.
+async = []
 # Extended property tests: gate them with #[cfg(feature = "slow")]; nightly CI runs them.
 slow = []
 # The hidden `persia::internal` layer (ADR-0051): for persia-cli and the fuzz targets. Not a stable API.

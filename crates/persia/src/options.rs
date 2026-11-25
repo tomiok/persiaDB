@@ -78,6 +78,9 @@ pub struct OpenOptions {
     pub(crate) drop_wait: Duration,
     /// Test hook: where a `Drop` puts the thread it detached.
     pub(crate) detached: Option<DetachedSlot>,
+    /// How the async pool is set up (ADR-0064 item 12).
+    #[cfg(feature = "async")]
+    pub(crate) pool: crate::asynchronous::PoolOptions,
 }
 
 impl Default for OpenOptions {
@@ -112,6 +115,8 @@ impl OpenOptions {
             hold_maintenance: false,
             drop_wait: DROP_WAIT,
             detached: None,
+            #[cfg(feature = "async")]
+            pool: crate::asynchronous::PoolOptions::default(),
         }
     }
 
@@ -303,6 +308,24 @@ impl OpenOptions {
     #[must_use]
     pub fn clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = Some(clock);
+        self
+    }
+
+    /// Test hook: the number of threads of the async pool (`min(4, cores)` by default, ADR-0064 item 12).
+    #[cfg(all(feature = "async", feature = "test-hooks"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn async_threads(mut self, threads: std::num::NonZeroUsize) -> Self {
+        self.pool.threads = Some(threads);
+        self
+    }
+
+    /// Test hook: called by the async pool's threads around each job; a hook that blocks holds the job there.
+    #[cfg(all(feature = "async", feature = "test-hooks"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn async_hook(mut self, hook: crate::JobHook) -> Self {
+        self.pool.hook = Some(hook);
         self
     }
 

@@ -51,7 +51,7 @@ flowchart TD
 | `persia-analysis` | Tokenizers, normalizers, stemmers, analyzer registry | §6.3 | sync |
 | `persia-engine` | Memtable, WAL, segments, commit, merge, query, BM25F, relaxation | §5–§8 | **sync**, I/O only via `Storage` |
 | `persia-blob` | Content-addressed chunked blobs, dedup, GC | §9 | sync core |
-| `persia` | Public embedded API (`Db`, `Collection`); orders blob writes before document commits | §8, §9.5 | sync (an optional `tokio` wrapper is ROADMAP 10.1.6) |
+| `persia` | Public embedded API (`Db`, `Collection`); orders blob writes before document commits | §8, §9.5 | sync (the `async` feature runs it on its own thread pool, no runtime: ADR-0064) |
 | `persia-proto` | `persia.proto` and generated code | §12 | n/a |
 | `persia-server` | gRPC + HTTP server, roles (writer/reader/router) | §11, §12 | async |
 | `persia-cli` | `persia` binary: inspect, dump, verify, stats, compact, bench | — | sync |

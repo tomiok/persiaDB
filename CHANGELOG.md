@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia`: a runtime-agnostic async API behind the cargo feature `async`, which adds no dependency (ROADMAP 10.1.11,
+  ADR-0064). `AsyncDb::open`, `open_with`, `close`, `collection` and `commit`, and `AsyncCollection::put`,
+  `put_batch`, `delete`, `get`, `commit` and `search`, return a `JobFuture<T>`: a std `Future` that any executor
+  polls, no runtime named or needed. Each `AsyncDb` has its own pool of plain threads, started by its first job
+  (`min(4, cores)` threads), not shared with the maintenance thread, and joined by `close` before the database
+  closes. A job is queued when its method is called; dropping its future before it starts skips it, a write that has
+  started runs to its end (its result discarded), and a search or get that has started is cancelled. Jobs still
+  queued at `close` resolve to `ErrorCode::Closed`. `open` and `close` run on a thread of their own.
 - `persia bench` (ROADMAP 10.4.3; SPEC §16.3): a quick micro-benchmark of this build on this machine. It indexes a
   seeded synthetic corpus into a new database in a scratch directory it creates and removes (`--dir`, default the
   system temporary directory; no existing database is opened), commits, and runs a seeded mix of five kinds of query.

@@ -447,9 +447,29 @@ impl Collection {
     /// [`ErrorCode::Corrupt`](crate::ErrorCode::Corrupt) if a segment is damaged;
     /// [`ErrorCode::Closed`](crate::ErrorCode::Closed).
     pub fn search(&self, request: &SearchRequest) -> Result<SearchResponse> {
+        self.search_with(request, &RunOptions::new())
+    }
+
+    /// [`search`](Self::search) that stops with [`ErrorCode::Cancelled`](crate::ErrorCode::Cancelled) once `token`
+    /// is cancelled (the async API's search, ADR-0064 item 13).
+    #[cfg(feature = "async")]
+    pub(crate) fn search_cancellable(
+        &self,
+        request: &SearchRequest,
+        token: Option<persia_engine::db::CancelToken>,
+    ) -> Result<SearchResponse> {
+        let run = match token {
+            Some(token) => RunOptions::new().cancel(token),
+            None => RunOptions::new(),
+        };
+        self.search_with(request, &run)
+    }
+
+    /// [`search`](Self::search) run as `run` says.
+    fn search_with(&self, request: &SearchRequest, run: &RunOptions) -> Result<SearchResponse> {
         self.read(|c| {
             let lowered = request.lower(c.schema())?;
-            let ran = lowered.run(c, &RunOptions::new()).map_err(Error::wrap)?;
+            let ran = lowered.run(c, run).map_err(Error::wrap)?;
             response(&request.q, ran)
         })
     }
