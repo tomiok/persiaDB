@@ -263,7 +263,9 @@ impl QueryRequest {
     /// `RelaxedQuery::from(&Compiled)`, so `filter` stays hard at every level), with its steps held to the same
     /// limits. When they run L0 alone (`relax: false`, or a collection that disables the cascade), it is the plain
     /// search ([`crate::db::CollectionViews::search_with`]), planned with the proximity bonus when the request asks
-    /// for it (`SearchPlan::with_proximity`) and without it otherwise (`without_proximity`, ROADMAP 10.1.7).
+    /// for it (`SearchPlan::with_proximity`) and without it otherwise (`without_proximity`, ROADMAP 10.1.7). Either
+    /// search counts a page from the top in the collection's relaxation metrics (SPEC §7.6): the plain one as a query at
+    /// level `exact`, `empty` when L0 found no hit (ROADMAP 10.1.21).
     ///
     /// # Errors
     /// [`QueryRequestError::ProximityRelaxed`] for `proximity` on a search that relaxes;

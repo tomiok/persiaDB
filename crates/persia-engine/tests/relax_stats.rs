@@ -4,7 +4,8 @@
 //! 1. Every relaxed search without a cursor counts one query: `relaxed` when its response's `level` is not `exact`,
 //!    `empty` when no step found a hit, else one at the level of its hit step. So the per-level counts add up to
 //!    `queries − empty`. A cascade the budget truncated counts the same way, by the steps it ran. A cursor's page
-//!    counts nowhere; a page by `offset` counts as a query; a plain search counts nowhere.
+//!    counts nowhere; a page by `offset` counts as a query; a plain search counts nowhere, unless a request whose
+//!    settings run L0 alone ran it (ROADMAP 10.1.21): then it counts at level `exact`.
 //! 2. A collection's snapshots share its counters (across commits); the database's are the sum over its collections,
 //!    and a dropped collection's counts stay in it. A reopened database counts from 0.
 //! 3. Searches on several threads each count once.
@@ -433,4 +434,102 @@ fn searches_on_several_threads_each_count_once() {
     assert_eq!((stats.queries, stats.relaxed, stats.empty), (100, 50, 0));
     assert_eq!(stats.hits_at(RelaxLevel::Exact), 50);
     assert_eq!(stats.hits_at(RelaxLevel::Fallback), 50);
+}
+
+/// A request whose settings run L0 alone (`relax: false`) runs the plain search and counts as a query at level `exact`
+/// (SPEC §7.6, ROADMAP 10.1.21): `empty` when L0 found no hit, its hit level `exact` otherwise, never `relaxed`. A page
+/// from a cursor counts nowhere; a page by `offset`, or of `limit` 0, counts by what L0 found from the top. The plain
+/// search keeps its proximity bonus and its explanations without a `relaxed` node, and the engine's own plain search
+/// (run without a request) counts nowhere.
+#[test]
+fn a_request_of_l0_alone_counts_at_level_exact_without_relaxing() {
+    use persia_engine::search::Explanation;
+    use persia_engine::search::request::{QueryRequest, QueryResults, RunOptions};
+
+    let db = database();
+    let snapshot = db.snapshot();
+    let a = snapshot.collection("a").unwrap();
+    let run = |json: &str| {
+        let request = QueryRequest::from_json(json, a.schema(), &QueryLimits::default()).unwrap();
+        let response = request
+            .run(a, &RunOptions::new().threads(Threads::Current))
+            .unwrap();
+        let QueryResults::Plain(results) = response.results else {
+            panic!("{json}: not the plain search")
+        };
+        results
+    };
+    let counted = |queries, empty, exact| {
+        let stats = a.relaxation_stats();
+        assert_eq!(
+            (stats.queries, stats.relaxed, stats.empty),
+            (queries, 0, empty)
+        );
+        assert_eq!(stats.hits_at(RelaxLevel::Exact), exact);
+        assert_eq!(levels(&stats).len(), usize::from(exact > 0));
+    };
+    // A zero-result query is in `empty`, the zero-result rate.
+    assert_eq!(run(r#"{"q": "zebra", "relax": false}"#).hits.len(), 0);
+    counted(1, 1, 0);
+    // One with hits counts at level `exact`.
+    let red = run(r#"{"q": "red", "relax": false, "limit": 1}"#);
+    assert_eq!(red.hits.len(), 1);
+    counted(2, 1, 1);
+    // Its cursor's page continues the query: it counts nowhere, even empty.
+    let token = red.hits[0].cursor().to_token();
+    let next = format!(r#"{{"q": "red", "relax": false, "limit": 1, "search_after": "{token}"}}"#);
+    assert_eq!(run(&next).hits.len(), 1);
+    counted(2, 1, 1);
+    // A page by `offset` past every hit, and a page of `limit` 0, are empty, but L0 found hits from the top.
+    assert_eq!(
+        run(r#"{"q": "red", "relax": false, "offset": 5}"#)
+            .hits
+            .len(),
+        0
+    );
+    assert_eq!(
+        run(r#"{"q": "red", "relax": false, "limit": 0}"#)
+            .hits
+            .len(),
+        0
+    );
+    counted(4, 1, 3);
+    // And for a query no document matches, both are empty queries.
+    assert_eq!(
+        run(r#"{"q": "zebra", "relax": false, "limit": 0}"#)
+            .hits
+            .len(),
+        0
+    );
+    assert_eq!(
+        run(r#"{"q": "zebra", "relax": false, "offset": 3}"#)
+            .hits
+            .len(),
+        0
+    );
+    counted(6, 3, 3);
+    // Still the plain search: `proximity` is taken (a relaxed search refuses it), an explanation has no `relaxed` node.
+    let near = run(r#"{"q": "red shoes", "relax": false, "proximity": true, "explain": true}"#);
+    let root = near.hits[0].explanation.as_ref().unwrap();
+    assert!(matches!(root, Explanation::Bool { .. }), "{root:?}");
+    counted(7, 3, 4);
+    // The engine's plain search without a request counts nowhere.
+    let memtable = a.memtable();
+    let views = a.views(&memtable).unwrap();
+    let compiled = QueryCompiler::new(a.schema(), &AnalyzerRegistry::builtin())
+        .unwrap()
+        .compile(
+            "zebra",
+            &DefaultFields::all(a.schema()),
+            &QueryLimits::default(),
+        );
+    let exec = Execution::new(Pruning::default()).threads(Threads::Current);
+    let stats = a.search_statistics(&memtable);
+    let plan =
+        SearchPlan::with_terms(compiled.query(), a.schema(), &stats, &exec.terms(&views)).unwrap();
+    let engine = views
+        .search_with(&plan, &SearchRequest::default(), &exec)
+        .unwrap();
+    assert_eq!(engine.hits.len(), 0);
+    counted(7, 3, 4);
 }

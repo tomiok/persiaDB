@@ -1515,7 +1515,7 @@ collection's as `relax` overrides them (§7.6). When they relax, the relaxed sea
 query (so its text is stated in `original` and `effective`, and `filter` is hard at every level) and its steps held
 to the same limits. When they run L0 alone (`relax: false`, a collection that disables the cascade, or a plan with no
 level, no fallback and no filter step), the plain search runs: its hits have no level or rank score, an explained
-one has no `relaxed` node (§7.7), and the search is not counted in the relaxation metrics (§7.6, ROADMAP 10.1.21). A
+one has no `relaxed` node (§7.7), and its page from the top counts in the relaxation metrics as a query at level `exact` (§7.6, ROADMAP 10.1.21). A
 response states such a search as `level: "exact"` with nothing applied (§7.6; the response JSON is §7.5.2).
 `proximity` (ROADMAP 10.1.7, ADR-0036) plans the plain search with the proximity bonus of §7.2 when `true`
 (`SearchPlan::with_proximity`) and without it when `false` or left out (`SearchPlan::without_proximity`). The
@@ -2308,7 +2308,11 @@ Metrics (ROADMAP 8.3.3). Each collection counts its relaxed searches since the d
 snapshots share (atomic, so a search on any thread counts without a lock; nothing is stored, a reopened database
 counts from 0). A *query* is a relaxed search that returned a response and was given no cursor: a cursor's page
 continues a query counted on its first page and counts nowhere, while a page by `offset` runs the cascade from the
-top and counts as a query. A plain search (no cascade) counts nowhere, so neither does a request whose settings run L0 alone, which runs the plain search (§7.1.4): its zero-result queries are not in `empty` (ROADMAP 10.1.21). Per query: `queries` counts it; `relaxed` counts
+top and counts as a query. A request whose settings run L0 alone runs the plain search (§7.1.4) and counts as a query too (ROADMAP 10.1.21,
+ADR-0065), by the same rules at level `exact`: never `relaxed`, in `empty` when L0 found no hit from the top (a page by
+`offset` or of `limit` 0 included: it searches for one hit at least), else at level `exact`; a cursor's page counts
+nowhere. It is still the plain search, so its proximity bonus and its explanations (no `relaxed` node, §7.7) do not
+change. The engine's own plain search, run without a request, counts nowhere. Per query: `queries` counts it; `relaxed` counts
 it when the response's `level` is not `exact` (a step after L0 was built and not skipped); `empty` counts it when no
 step of its cascade found a hit, L0 included (the zero-result queries, after whatever relaxation ran, `relax: false`
 included); otherwise the level of its hit step (above) counts it, once. So the per-level counts are the level

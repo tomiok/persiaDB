@@ -1,4 +1,4 @@
-# ADR-0065: The response JSON and the request's `projection` key
+# ADR-0065: The response JSON, the request's `projection` key, and `relax: false` in the metrics
 
 - Status: proposed
 - Date: 2026-11-25
@@ -48,6 +48,17 @@ request JSON.
 9. **Writing fails only on a broken invariant** (`ResponseJsonError`): a field id of another schema, a value of
    another type than its field, a number that is not finite. A response the engine returned for a collection, written
    with that collection's schema, always has its JSON (the request fuzz target asserts it).
+10. **A request of L0 alone counts in the relaxation metrics, on the plain search** (ROADMAP 10.1.21; amends ADR-0062
+    item 9). A request whose settings run L0 alone (`relax: false`, a collection that disables the cascade) still runs
+    the plain search, which scores the proximity bonus and explains without a `relaxed` node, and its page from the
+    top counts as a query at level `exact`: in `queries`, never in `relaxed`, in `empty` when L0 found no hit, else in
+    the `exact` count. So `empty / queries` is the zero-result rate of every request, `relax: false` included, which is
+    what an operator reads it for. The plain search collects one hit at least when it counts, so a page by `offset`
+    past the hits, or of `limit` 0, still tells whether L0 found one (as the relaxed search's `min_results` of at least
+    1 does). A cursor's page counts nowhere, as for the relaxed search. The engine's own plain search, run without a
+    request (`CollectionViews::search_with`), counts nowhere: it is not a query a user made. Switching `relax: false`
+    to the relaxed search with an L0-only plan would have counted too, but would drop the proximity bonus (ROADMAP
+    10.1.14) and change every explained hit's root.
 
 ## Consequences
 

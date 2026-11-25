@@ -14,7 +14,7 @@ use super::snapshot::Located;
 use super::views::CollectionViews;
 use crate::bitmap::Ascending;
 use crate::document::Document;
-use crate::relax::RelaxSettings;
+use crate::relax::{RelaxLevel, RelaxSettings};
 use crate::search::{
     Explanation, FacetCounter, FacetCounts, FacetRequest, Interruptible, MAX_FACETS, MAX_WINDOW,
     Projection, Pruning, RequestError, SearchPlan, Selections, Sort, SortKey, SortValue, Steps,
@@ -270,7 +270,8 @@ impl CollectionViews<'_> {
     }
 
     /// [`Self::search_with`] for the request of `fingerprint` (`None` for none, ROADMAP 10.1.24): a cursor must have
-    /// it, and every hit's cursor records it.
+    /// it, and every hit's cursor records it. A request's page from the top counts in the collection's relaxation metrics
+    /// (ROADMAP 10.1.21): a query at level `exact`, `empty` when L0 found no hit.
     pub(crate) fn search_for(
         &self,
         plan: &SearchPlan,
@@ -280,6 +281,9 @@ impl CollectionViews<'_> {
     ) -> Result<SearchResults, RequestError> {
         // A plain search runs L0 alone, as `relax: false` does (ROADMAP 8.3.1).
         let window = self.check_request(request, plan.proximity(), None, fingerprint)?;
+        // A request's page from the top counts as a query in the relaxation metrics (SPEC §7.6, ROADMAP 10.1.21). It
+        // collects one hit at least, so a page of `limit` 0 still tells whether L0 found one.
+        let counts = fingerprint.is_some() && request.search_after.is_none();
         let collected = self.collect(
             plan,
             &Part {
@@ -287,14 +291,20 @@ impl CollectionViews<'_> {
                 after: request.search_after.as_ref(),
                 facets: &request.facets,
                 explain: request.explain,
-                window,
+                window: if counts { window.max(1) } else { window },
             },
             exec,
         )?;
+        let found = !collected.ranked.is_empty();
         // Reading the page's documents is the last stage a deadline stops.
         exec.interrupt()?;
         let segments: Vec<_> = self.segments().collect();
-        let page: Vec<Ranked> = collected.ranked.into_iter().skip(request.offset).collect();
+        let page: Vec<Ranked> = collected
+            .ranked
+            .into_iter()
+            .skip(request.offset)
+            .take(request.limit)
+            .collect();
         let explanations = if request.explain {
             self.explain_page(plan, &segments, &page, collected.kept, exec)?
         } else {
@@ -310,6 +320,11 @@ impl CollectionViews<'_> {
         )?;
         for hit in &mut hits {
             hit.request = fingerprint;
+        }
+        if counts {
+            // Level `exact`, never relaxed; empty when L0 found no hit, the zero-result queries.
+            let hit = found.then_some(RelaxLevel::Exact);
+            self.collection().relaxation.record(false, hit);
         }
         Ok(SearchResults {
             hits,

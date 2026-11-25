@@ -407,6 +407,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- A request whose settings run L0 alone (`relax: false`) now counts in the relaxation metrics (ROADMAP 10.1.21; SPEC
+  §7.6; ADR-0065 item 10): its page from the top is a query at level `exact` of `RelaxationStats`, in `empty` when it
+  found no hit, so the zero-result rate covers every request. It still runs the plain search (its proximity bonus and
+  explanations are unchanged); the engine's own `search_with` still counts nowhere.
 - `persia-engine`: L3 `prefix` expands a query's last term only from 2 characters (ROADMAP 8.1.20; SPEC §7.6,
   ADR-0057), as every other term from 3. A one-letter last word stays exact, so it no longer walks its field's term
   dictionary in every view, and a query whose other words are all shorter than 3 characters builds no L3 step.

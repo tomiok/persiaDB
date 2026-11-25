@@ -60,7 +60,7 @@ segment index, a docid, relaxation settings) that no client should build or read
    (`QueryResults::Relaxed` / `Plain`) plus `query_truncated`. A plain search does not count in the relaxation
    metrics and its explained hits have no `relaxed` node; a relaxed search with an L0-only plan would do both. This
    ADR records the behaviour, not a choice between them: ROADMAP 10.1.21 asks whether zero-result `relax: false`
-   requests belong in `empty`.
+   requests belong in `empty`. *Amended 2026-11-25:* they do, on the plain search (ADR-0065 item 10).
 10. **`"proximity": true` needs a search that does not relax** (ROADMAP 10.1.7). The relaxed search plans every step
     without the bonus (SPEC §7.2), so asking for it on a search that relaxes is an error that names the fix
     (`"relax": false`), not a silently ignored option. The bonus across relaxed steps is ROADMAP 10.1.14.
