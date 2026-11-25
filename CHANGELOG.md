@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- A relaxed search whose time budget passes before its page found a hit still runs L5 `fallback` past the budget
+  (ROADMAP 8.1.33; SPEC §7.6 "Budget"; ADR-0066), bounded by the request's deadline and cancellation, so the page holds
+  L5's hits instead of none (pillar 3). The page stays `truncated: true` and the steps the budget skipped stay skipped;
+  a plan without L5 (`fallback: "none"`) still answers the empty truncated page.
 - A cursor token records its request (ROADMAP 10.1.24; SPEC §7.4; ADR-0062 item 11, amended): cursor tokens are
   version 2, which adds a fingerprint of the request's `q`, fields, filters and query limits (`Cursor::request`,
   `QueryRequest::fingerprint`). A token given back with another `q`, `fields`, `filter`, `soft_filter` or limits is an

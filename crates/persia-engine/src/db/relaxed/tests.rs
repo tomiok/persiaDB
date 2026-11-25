@@ -1522,6 +1522,264 @@ mod budget {
             ))
         ));
     }
+
+    /// L0 and a slow L1 (100 ms to build, past a 50 ms budget, the step `hat` never searched), then L5 by recency: the
+    /// plan the tests of ROADMAP 8.1.33 run, on `clock`.
+    fn past_budget(clock: &Arc<ManualClock>, fallback: bool, min: u32) -> (RelaxPlan, Arc<Slow>) {
+        let (_, body, _) = database();
+        let synonyms = slow(clock, 100, vec![step(term(body, "hat"), "synonyms")]);
+        let options = RelaxOptions {
+            levels: Some(Levels::Custom(Vec::new())),
+            fallback: (!fallback).then_some(crate::schema::Fallback::None),
+            ..budget(50, min)
+        };
+        let relax = RelaxPlan::new(&RelaxationConfig::default(), &options)
+            .unwrap()
+            .with_level(RelaxLevel::Synonyms, Arc::clone(&synonyms) as _);
+        (relax, synonyms)
+    }
+
+    /// A budget that passes right after an empty L0 does not leave the page empty (SPEC §7.6 "Budget", ROADMAP 8.1.33,
+    /// ADR-0066): L5 still runs past it, the steps the budget skipped stay skipped, and the page is truncated.
+    #[test]
+    fn a_page_the_budget_left_empty_gets_l5s_hits_and_stays_truncated() {
+        let (db, body, _) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let clock = Arc::new(ManualClock::new(0));
+        let (relax, synonyms) = past_budget(&clock, true, 1);
+        let exec = exec().budget_clock(Arc::clone(&clock) as _);
+        let out = views
+            .search_relaxed(&term(body, "purple"), &request(10), &relax, &exec)
+            .unwrap();
+        // Every document, by recency, all of L5's step: L1's was built and never searched.
+        assert_eq!(out.hits.len(), 5);
+        assert!(out.hits.iter().all(|h| h.level == RelaxLevel::Fallback));
+        assert_eq!(synonyms.calls.load(Ordering::Relaxed), 1);
+        assert!(out.relaxation.truncated);
+        assert_eq!(out.relaxation.level, RelaxLevel::Fallback);
+        assert_eq!(out.relaxation.applied, ["fallback"]);
+        assert_eq!(
+            out.relaxation.fallback,
+            Some(crate::relax::FallbackOrder::Recency)
+        );
+        // L5 is the step after L0, and the cascade's last: its cursors record that.
+        assert!(out.hits.iter().all(|h| h.step == 1));
+        assert_eq!(
+            out.hits[0].cursor().relaxed,
+            Some(StepCursor {
+                step: 1,
+                last: 1,
+                hit: 1
+            })
+        );
+        // A query with hits at L0, fewer than `min_results` 3, is not rescued: its page is L0's, truncated before L1.
+        let (relax, _) = past_budget(&clock, true, 3);
+        let red = views
+            .search_relaxed(&term(body, "red"), &request(10), &relax, &exec)
+            .unwrap();
+        assert!(red.hits.iter().all(|h| h.level == RelaxLevel::Exact));
+        assert_eq!(red.hits.len(), 2);
+        assert!(red.relaxation.truncated);
+        // Nor a page that still holds one of them after its offset.
+        let deep = SearchRequest {
+            offset: 1,
+            ..request(10)
+        };
+        let deep = views
+            .search_relaxed(&term(body, "red"), &deep, &relax, &exec)
+            .unwrap();
+        assert_eq!(deep.hits.len(), 1);
+        assert!(deep.relaxation.truncated);
+        // A page by `offset` that L0 left empty is rescued too: L5's hits from the offset on.
+        let empty_deep = SearchRequest {
+            offset: 2,
+            ..request(10)
+        };
+        let rescued = views
+            .search_relaxed(&term(body, "purple"), &empty_deep, &relax, &exec)
+            .unwrap();
+        assert_eq!(rescued.hits.len(), 3);
+        assert!(rescued.relaxation.truncated);
+    }
+
+    /// The request's own deadline still bounds L5 past the budget: the search fails as the deadline's error.
+    #[test]
+    fn l5_past_the_budget_stops_at_the_requests_deadline() {
+        let (db, body, _) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let clock = Arc::new(ManualClock::new(0));
+        let (relax, _) = past_budget(&clock, true, 1);
+        // The deadline passes while L1 builds (at 80 ms of its 100): after L0, before L5.
+        let at = clock.now() + Duration::from_millis(80);
+        let exec = exec()
+            .deadline(Arc::clone(&clock) as _, at)
+            .budget_clock(Arc::clone(&clock) as _);
+        let err = views
+            .search_relaxed(&term(body, "purple"), &request(10), &relax, &exec)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                super::super::RelaxedSearchError::Request(RequestError::Interrupted(
+                    Interrupt::DeadlineExceeded
+                )) | super::super::RelaxedSearchError::Plan(SearchError::Interrupted(
+                    Interrupt::DeadlineExceeded
+                ))
+            ),
+            "{err:?}"
+        );
+        // A cancelled token stops it as well.
+        let token = crate::db::CancelToken::new();
+        let cancelling = Arc::new(Cancelling {
+            token: token.clone(),
+            inner: slow(&clock, 100, vec![step(term(body, "hat"), "synonyms")]),
+        });
+        let options = RelaxOptions {
+            levels: Some(Levels::Custom(Vec::new())),
+            ..budget(50, 1)
+        };
+        let relax = RelaxPlan::new(&RelaxationConfig::default(), &options)
+            .unwrap()
+            .with_level(RelaxLevel::Synonyms, Arc::clone(&cancelling) as _);
+        let cancelled = super::exec()
+            .cancel(token)
+            .budget_clock(Arc::clone(&clock) as _);
+        let err = views
+            .search_relaxed(&term(body, "purple"), &request(10), &relax, &cancelled)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                super::super::RelaxedSearchError::Request(RequestError::Interrupted(
+                    Interrupt::Cancelled
+                )) | super::super::RelaxedSearchError::Plan(SearchError::Interrupted(
+                    Interrupt::Cancelled
+                ))
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// Builds as `inner` does, then cancels `token`: a cancellation that comes after L0.
+    #[derive(Debug)]
+    struct Cancelling {
+        token: crate::db::CancelToken,
+        inner: Arc<Slow>,
+    }
+
+    impl LevelTransform for Cancelling {
+        fn steps(&self, input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
+            self.token.cancel();
+            self.inner.steps(input)
+        }
+    }
+
+    /// The page after an L5 hit of a page the budget left empty pages on from the cursor (ROADMAP 8.1.33): when its
+    /// budget passes at the same point, L5 takes the same step, and is searched after the cursor.
+    #[test]
+    fn a_cursor_from_l5_past_the_budget_pages_on_when_the_budget_passes_alike() {
+        let (db, body, _) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let clock = Arc::new(ManualClock::new(0));
+        let (relax, _) = past_budget(&clock, true, 1);
+        let exec = exec().budget_clock(Arc::clone(&clock) as _);
+        let purple = term(body, "purple");
+        let first = views
+            .search_relaxed(&purple, &request(2), &relax, &exec)
+            .unwrap();
+        let next = SearchRequest {
+            search_after: first.hits.last().map(crate::db::RelaxedHit::cursor),
+            ..request(2)
+        };
+        let second = views.search_relaxed(&purple, &next, &relax, &exec).unwrap();
+        let every = views
+            .search_relaxed(&purple, &request(10), &relax, &exec)
+            .unwrap();
+        let ids = |r: &super::super::RelaxedResults| -> Vec<String> {
+            r.hits
+                .iter()
+                .map(|h| h.hit.document.id().to_owned())
+                .collect()
+        };
+        assert!(second.relaxation.truncated);
+        assert!(
+            second
+                .hits
+                .iter()
+                .all(|h| h.level == RelaxLevel::Fallback && h.step == 1)
+        );
+        let paged: Vec<String> = ids(&first).into_iter().chain(ids(&second)).collect();
+        assert_eq!(paged, ids(&every)[..4]);
+    }
+
+    /// L5 that ran and found nothing is not run again past the budget: the page is L5's, empty (a hard filter no
+    /// document passes), and the budget passing before L6 leaves it so.
+    #[test]
+    fn l5_that_ran_is_not_run_again_past_the_budget() {
+        let (db, body, tag) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let clock = Arc::new(ManualClock::new(0));
+        let l6 = slow(&clock, 100, vec![step(term(body, "red"), "filters")]);
+        let options = RelaxOptions {
+            levels: Some(Levels::Custom(Vec::new())),
+            filters: Some(crate::schema::FilterRelaxation::LastResort),
+            ..budget(50, 1)
+        };
+        let relax = RelaxPlan::new(&RelaxationConfig::default(), &options)
+            .unwrap()
+            .with_level(RelaxLevel::Filters, Arc::clone(&l6) as _);
+        let nowhere = crate::query::Filter::Term {
+            field: tag,
+            value: crate::query::FilterValue::Keyword("nowhere".into()),
+        };
+        let query = Query::Bool(crate::query::BoolQuery {
+            must: vec![term(body, "purple")],
+            filter: vec![nowhere],
+            ..crate::query::BoolQuery::default()
+        });
+        let exec = exec().budget_clock(Arc::clone(&clock) as _);
+        let out = views
+            .search_relaxed(&query, &request(10), &relax, &exec)
+            .unwrap();
+        assert_eq!(out.hits.len(), 0);
+        assert!(out.relaxation.truncated);
+        // L6 was built, then found the budget spent; L5 is listed once.
+        assert_eq!(l6.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(out.relaxation.applied, ["fallback"]);
+    }
+
+    /// A plan without L5 (`fallback: "none"`) still answers the empty truncated page: nothing runs past the budget.
+    #[test]
+    fn without_l5_the_page_the_budget_left_empty_stays_empty() {
+        let (db, body, _) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let clock = Arc::new(ManualClock::new(0));
+        let (relax, _) = past_budget(&clock, false, 1);
+        let exec = exec().budget_clock(Arc::clone(&clock) as _);
+        let out = views
+            .search_relaxed(&term(body, "purple"), &request(10), &relax, &exec)
+            .unwrap();
+        assert_eq!(out.hits.len(), 0);
+        assert!(out.relaxation.truncated);
+        assert_eq!(out.relaxation.level, RelaxLevel::Exact);
+        assert_eq!(out.relaxation.applied.len(), 0);
+        assert_eq!(out.relaxation.fallback, None);
+    }
 }
 
 #[test]

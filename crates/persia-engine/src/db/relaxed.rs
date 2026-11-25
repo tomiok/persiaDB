@@ -129,7 +129,8 @@ pub struct Relaxation {
     /// [`Self::effective`] reads in its place. Empty at any other level, and for a query not compiled from `q`.
     pub corrected: Vec<Correction>,
     /// The budget (`budget_ms`) passed before the cascade finished (SPEC §7.6): the hits are those of the steps
-    /// completed before it, and `level` and `applied` describe those steps.
+    /// completed before it, and `level` and `applied` describe those steps. When they found none for the page, a plan
+    /// with L5 ran L5 past the budget (ROADMAP 8.1.33), and its step is among them.
     pub truncated: bool,
     /// The explicit flag that L5 `fallback` found the hits (`"fallback"`, SPEC §7.6, ROADMAP 8.2.5): the order it
     /// ranked them in when L5 is the hit step, `None` otherwise. Those hits are the collection's ranking of the
@@ -255,6 +256,15 @@ impl<'a> RelaxedQuery<'a> {
     pub fn with_soft_filter(self, soft: &'a [Filter]) -> Self {
         Self { soft, ..self }
     }
+
+    /// The query, its compilation, and the filters the filter step may drop ([`soft_filters`]).
+    fn parts(self) -> (&'a Query, Option<&'a Compiled>, Vec<Filter>) {
+        (
+            self.query,
+            self.compiled,
+            soft_filters(self.compiled, self.soft),
+        )
+    }
 }
 
 impl<'a> From<&'a Query> for RelaxedQuery<'a> {
@@ -301,6 +311,18 @@ pub enum RelaxedSearchError {
     #[error(transparent)]
     Request(#[from] RequestError),
 }
+
+/// What L5 `fallback` past the budget searches (ROADMAP 8.1.33): the query, its compilation and soft filters and the
+/// search's statistics; where the page starts, how many hits it needs and whether it counts facets.
+type PastBudget<'a, 'q> = (
+    (
+        &'q Query,
+        Option<&'q Compiled>,
+        &'a [Filter],
+        &'a SearchStatistics<'a>,
+    ),
+    (Start, Reach<'a>, bool),
+);
 
 /// A step to search: its query, the earlier steps it excludes, and whether it is L5's, which ranks its own hits.
 #[derive(Clone, Copy)]
@@ -742,12 +764,7 @@ impl CollectionViews<'_> {
         exec: &Execution,
         fingerprint: Option<u64>,
     ) -> Result<RelaxedResults, RelaxedSearchError> {
-        let RelaxedQuery {
-            query,
-            compiled,
-            soft,
-        } = query;
-        let soft = soft_filters(compiled, soft);
+        let (query, compiled, soft) = query.parts();
         // Every step is planned as `SearchPlan::with_terms` plans by default: without proximity (SPEC §7.4).
         let window = self.check_request(request, false, relax.settings(), fingerprint)?;
         let collection = self.collection();
@@ -848,10 +865,15 @@ impl CollectionViews<'_> {
                 }
             }
         }
-        let facets = Facets {
-            key: key.filter(|_| start.last.is_none() && !passed.page && !passed.counts),
-            cached,
-        };
+        // A page the budget left empty still gets L5's hits (SPEC §7.6 "Budget", ROADMAP 8.1.33, ADR-0066).
+        if passed.page && found <= request.offset && found < reach.need {
+            let rescue = (
+                (query, compiled, &soft[..], &stats),
+                (start, reach, counting),
+            );
+            self.fallback_past_budget(rescue, &mut built, (request, relax), exec)?;
+        }
+        let facets = Facets::of(key, cached, start, passed);
         let hit = built.hit_level();
         let page = (compiled, passed.page, facets, fingerprint);
         let out = self.respond(built, start, request, exec, page)?;
@@ -883,6 +905,71 @@ impl CollectionViews<'_> {
             );
         }
         out
+    }
+
+    /// L5 `fallback` past the budget (SPEC §7.6 "Budget", ROADMAP 8.1.33, ADR-0066): when the budget passed before the
+    /// page found a hit, a plan with L5 still runs it, bounded by the request's own deadline and cancellation (an error,
+    /// as at any step) and not by the budget, so the page is not empty: pillar 3. The steps the budget skipped stay
+    /// skipped and the page stays truncated. Nothing runs when L5 was already built (searched, or skipped for the
+    /// limits: its result is the page's), when the plan has no L5 (`fallback: "none"`), or when the cursor's step is
+    /// after the step L5 would take (its hits rank before the cursor).
+    fn fallback_past_budget<'q>(
+        &self,
+        rescue: PastBudget<'_, 'q>,
+        built: &mut Built<'q, '_>,
+        (request, relax): (&SearchRequest, &RelaxPlan),
+        exec: &Execution,
+    ) -> Result<(), RelaxedSearchError> {
+        let ((query, compiled, soft, stats), (start, reach, counting)) = rescue;
+        let Some(planned) = relax
+            .planned()
+            .iter()
+            .find(|p| p.level == RelaxLevel::Fallback)
+        else {
+            return Ok(());
+        };
+        if built.ran.iter().any(|r| r.level == RelaxLevel::Fallback) || built.ran.len() < start.step
+        {
+            return Ok(());
+        }
+        let expands = |field: FieldId| self.expands(field);
+        let input = LevelInput::new(query, compiled, stats)
+            .expanding(&expands)
+            .dropping(built.drops_terms())
+            .softening(soft);
+        // No budget: only the request's deadline and cancellation stop it.
+        let Some(steps) = self.budgeted_level(planned, None, input, exec, None)? else {
+            return Ok(());
+        };
+        built.begin_level();
+        let mut found = 0usize;
+        for (step, label, text, alternatives) in steps {
+            let i = built.ran.len();
+            let Held { step, label, cut } = built.fit(query, step, label, alternatives.as_ref())?;
+            let Some(step) = step else {
+                built.skip(planned.level, label, true);
+                continue;
+            };
+            let wanted = reach.need.saturating_sub(found);
+            let part = part(request, i == start.step, wanted, counting);
+            let search = StepSearch {
+                step: &step,
+                earlier: &built.earlier,
+                fallback: true,
+            };
+            let searched = self.search_step(search, stats, &part, exec)?;
+            found = found.saturating_add(searched.collected.ranked.len());
+            let covers = Covers::of(relax, planned, cut);
+            built.push(
+                planned.level,
+                step,
+                label,
+                text,
+                Some(searched),
+                (covers, true),
+            );
+        }
+        Ok(())
     }
 
     /// The response of the cascade `built` from `start`: its page of `request` and what it did, for a query
@@ -1215,6 +1302,20 @@ struct PageSteps {
 struct Facets<'a> {
     key: Option<facet_cache::KeyRef<'a>>,
     cached: Option<Vec<FacetCounts>>,
+}
+
+impl<'a> Facets<'a> {
+    /// The counts `cached`, and `key` when the page's counts are to be kept: a page from the top (`start`) whose
+    /// budget `passed` in no step.
+    fn of(
+        key: Option<facet_cache::KeyRef<'a>>,
+        cached: Option<Vec<FacetCounts>>,
+        start: Start,
+        passed: Passed,
+    ) -> Self {
+        let key = key.filter(|_| start.last.is_none() && !passed.page && !passed.counts);
+        Self { key, cached }
+    }
 }
 
 /// Where the budget passed (SPEC §7.6): in a step of the page, which truncates it, or in a step searched only to count

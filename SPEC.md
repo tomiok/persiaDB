@@ -2182,7 +2182,8 @@ so a client can tell the hits are the collection's ranking, not matches of the w
 the hits still missing, so without `fill` it runs only when the earlier steps found fewer than `min_results`, and
 with `fill` it fills the rest of the page below their hits. The request's deadline,
 cancellation and the budget apply as in any step: L5 is built only when the cascade reaches it, checked before it
-is searched and at its reads (§7.3), and dropped whole when the budget passes during it.
+is searched and at its reads (§7.3), and dropped whole when the budget passes during it, then run again past the
+budget when the page would otherwise be empty ("Budget", below).
 
 L6 `filters` (ROADMAP 8.2.6, ADR-0047). Only `filters: "last_resort"` (the request's, else the collection's) plans it,
 as the plan's last level: after L5, or after the last word level when `fallback` is `"none"`, or right after L0 when
@@ -2302,7 +2303,14 @@ On a cursor page, those before the cursor's step are steps of the page (it build
 truncated before any hit. With `fill`, those past the page's own come after its hits: the budget passing in one of
 them leaves the page whole and not truncated, and its facets partial (§7.5). Once a page from the top counted every
 one of them, later pages read the counts and search only their own steps. A cascade whose page's steps end before the
-budget passes is not truncated.
+budget passes is not truncated. When the budget passed in a step of the page and the page would otherwise be empty (the steps
+completed found no more hits than its `offset`, and the cascade still wants hits), a plan with L5 still runs L5
+`fallback` past the budget (ROADMAP 8.1.33, ADR-0066), as its own step after the steps completed, bounded by the
+request's deadline and cancellation (errors, as at any step) and not by the budget, so the page is not empty (pillar
+3). The steps the budget skipped stay skipped (L6 too), the page stays `truncated: true`, and `level`, `applied` and
+`fallback` state L5 as for any page whose hit step it is. Without L5 (`fallback: "none"`), or when L5 was already
+built (searched, or skipped for the limits), the empty truncated page is the answer; a budget that passed inside L5
+dropped it whole, so it runs again, whole.
 
 Metrics (ROADMAP 8.3.3). Each collection counts its relaxed searches since the database was opened, in counters its
 snapshots share (atomic, so a search on any thread counts without a lock; nothing is stored, a reopened database

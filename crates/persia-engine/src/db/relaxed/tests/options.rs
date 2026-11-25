@@ -266,9 +266,12 @@ fn a_query_budget_overrides_the_collections() {
             .search_relaxed(&term(body, "purple"), &request(10), &relax, &exec)
             .unwrap()
     };
-    // The collection's 50 ms pass while L1 builds: the cascade stops before its step.
+    // The collection's 50 ms pass while L1 builds: the cascade stops before its step, and L5 runs past the budget to
+    // fill the empty page (ROADMAP 8.1.33).
     let out = search("{}");
-    assert!(out.relaxation.truncated && out.hits.is_empty());
+    assert!(out.relaxation.truncated);
+    assert_ne!(out.hits.len(), 0);
+    assert!(out.hits.iter().all(|h| h.level == RelaxLevel::Fallback));
     // A query's 500 ms do not: L1's step finds the three `hat` documents.
     let out = search(r#"{"budget_ms": 500}"#);
     assert!(!out.relaxation.truncated);

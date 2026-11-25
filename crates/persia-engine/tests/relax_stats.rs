@@ -230,15 +230,19 @@ fn a_cascade_the_budget_truncates_counts_by_the_steps_it_ran() {
         (red.relaxation.level, red.hits.len()),
         (RelaxLevel::Exact, 2)
     );
+    // L0 finds nothing for `zebra`: L5 runs past the budget (ROADMAP 8.1.33), so the page is not empty.
     let zebra = search_on(a, "zebra", &request, &budget(1), &exec);
     assert!(zebra.relaxation.truncated);
     assert_eq!(
         (zebra.relaxation.level, zebra.hits.len()),
-        (RelaxLevel::Exact, 0)
+        (RelaxLevel::Fallback, 3)
     );
     let stats = a.relaxation_stats();
-    assert_eq!((stats.queries, stats.relaxed, stats.empty), (2, 0, 1));
-    assert_eq!(levels(&stats), [(RelaxLevel::Exact, 1)]);
+    assert_eq!((stats.queries, stats.relaxed, stats.empty), (2, 1, 0));
+    assert_eq!(
+        levels(&stats),
+        [(RelaxLevel::Exact, 1), (RelaxLevel::Fallback, 1)]
+    );
 
     // 1 ms a read, every budget up to 60 ms: each query counts as its response says, truncated or not.
     let mut want = (stats.queries, stats.relaxed, stats.empty);
@@ -270,7 +274,8 @@ fn a_cascade_the_budget_truncates_counts_by_the_steps_it_ran() {
                 "{context}"
             );
             assert_eq!(levels(&stats), want_levels, "{context}");
-            // The cases the budget makes: relaxed and still empty, and relaxed with a hit step after L0.
+            // The cases the budget makes: relaxed with a hit step after L0, and never relaxed and still empty: the plan
+            // has L5, which runs past the budget when the page would be empty (ROADMAP 8.1.33).
             if r.truncated && relaxed {
                 match hit {
                     None => seen.0 = true,
@@ -281,8 +286,8 @@ fn a_cascade_the_budget_truncates_counts_by_the_steps_it_ran() {
     }
     assert_eq!(
         seen,
-        (true, true),
-        "the budgets truncate no relaxed cascade of each kind"
+        (false, true),
+        "a truncated relaxed cascade is never empty with L5, and the budgets truncate one with a hit step after L0"
     );
 }
 
