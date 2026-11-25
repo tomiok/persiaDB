@@ -1277,7 +1277,8 @@ returned as it is, and copied as bytes, never re-validated.
   "facets": ["brand"],                    // or {"field": "brand", "size": 5}
   "relax": { "min_results": 1 },          // overrides collection default
   "explain": false,
-  "proximity": false                      // true scores the proximity bonus (§7.2); needs "relax": false
+  "proximity": false,                     // true scores the proximity bonus (§7.2); needs "relax": false
+  "projection": "all"                     // or "none", or ["title", "price"]: the stored fields a hit returns (§7.5.1)
 }
 ```
 Programmatic query AST (term, combined, phrase, prefix, fuzzy, bool must/should/must_not, filter, boost,
@@ -1493,11 +1494,13 @@ never fails (§7.1.1).
 | `relax` | `false`, `true` or an object (§7.6) | the collection's settings |
 | `explain` | `true` or `false` (§7.7) | `false` |
 | `proximity` | `true` or `false` (§7.2) | `false` |
+| `projection` | `"all"`, `"none"`, or a non-empty array of distinct names, each a stored field or, in a collection that is not `strict`, an extra field (§7.5.1) | `"all"` |
 
 Each value is read by the rules of its own section. A `sort` key object takes `field`, `order` and `missing`, or
 `score` alone with an object of `order` (§7.4); a facet object takes `field` and `size` (default 10); any other key in
-either is an error. There is no key for the projection of §7.5.1 yet (ROADMAP 10.1.20): a request built in code sets
-it, and a parsed one returns every stored field. The 1 MiB bound is that of a filter's JSON (§7.1.2), which the
+either is an error. `projection` (ROADMAP 10.1.20, ADR-0065) is `"all"` (every stored and extra field), `"none"` (the
+id and the blob reference only) or a list of names; `[]` is an error, since it names no field (write `"none"`), and
+so are a repeated name, another string, and a name §7.5.1 refuses (an invalid argument that names it). The 1 MiB bound is that of a filter's JSON (§7.1.2), which the
 request holds: inside a request, the request's bound is the one that applies to `filter`, `soft_filter` and `relax`
 (§7.6's 64 KiB is for a `relax` read on its own). A `filter` and a `soft_filter` are each held to §7.1.3's limits
 when parsed. When the request runs, the compiled `q` joined to both (§7.1.1) is held to them again, since the filters
@@ -1825,7 +1828,8 @@ publish.
 A hit returns its location, score, sort values (§7.4: its cursor) and document: the id, the blob reference when it has
 one (§9.1), and its stored fields (§6.4.2) after the projection. The projection is every stored and extra field
 (default), none, or a list of names: a field of the schema with `stored: true`, or in a collection that is not
-`strict` an extra field; another name is an error. A document lacking a projected field returns without it.
+`strict` an extra field; another name is an error. A document lacking a projected field returns without it. In a
+request's JSON it is the key `projection` (§7.1.4).
 
 ### 7.6 Zero-results avoidance (default on)
 If the number of hits `< relax.min_results` (default **1**), the engine runs the **relaxation cascade**,

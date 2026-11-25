@@ -148,7 +148,7 @@ impl QueryRequest {
         self
     }
 
-    /// Returns each hit's stored fields as `projection` says (SPEC §7.5.1). The request JSON has no key for it yet.
+    /// Returns each hit's stored fields as `projection` says (`projection`, SPEC §7.5.1).
     #[must_use]
     pub fn with_projection(mut self, projection: Projection) -> Self {
         self.page.projection = projection;

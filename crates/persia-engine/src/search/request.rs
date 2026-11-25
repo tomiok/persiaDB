@@ -149,8 +149,8 @@ pub enum RequestError {
         max: usize,
     },
     /// A projected name that is neither a stored field nor, in a collection that is not `strict`, an extra field
-    /// (SPEC §7.5.1).
-    #[error("cannot return field {name:?}: {reason}")]
+    /// (SPEC §7.5.1). The message names a long one by its length.
+    #[error("cannot return field {}: {reason}", crate::query::shown_name(name))]
     Projection {
         /// The name.
         name: String,

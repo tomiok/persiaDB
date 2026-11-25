@@ -15,7 +15,7 @@ use persia_engine::schema::{
     CollectionSchema, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
 };
 use persia_engine::search::request::{QueryRequest, RunOptions};
-use persia_engine::search::{MAX_FACETS, MAX_SORT_KEYS};
+use persia_engine::search::{MAX_FACETS, MAX_SORT_KEYS, Projection};
 use persia_engine::wal::Durability;
 use persia_storage::container::sim::SimFile;
 
@@ -93,6 +93,17 @@ fuzz_target!(|data: &[u8]| {
     let page = request.page();
     assert!(page.facets.len() <= MAX_FACETS);
     assert!(page.sort.keys().len() <= MAX_SORT_KEYS);
+    // A projection names only fields the schema stores (SPEC §7.5.1); the schema is `strict`, so no extra field.
+    if let Projection::Fields { fields, extra } = &page.projection {
+        assert!(extra.is_empty());
+        for field in fields {
+            let kind = collection
+                .schema()
+                .field_by_id(*field)
+                .map(|f| f.kind().stored());
+            assert_eq!(kind, Some(true));
+        }
+    }
     if let Some(cursor) = &page.search_after {
         let token = cursor.to_token();
         assert_eq!(Cursor::from_token(&token).map(|c| c.to_token()), Ok(token));

@@ -54,7 +54,8 @@ segment index, a docid, relaxation settings) that no client should build or read
 7. **`facets` entries are a field name or `{"field": name, "size": n}`.** SPEC §7.5 gave each facet a `size` but
    only the name form in JSON; the object form uses the two words the SPEC has, in the shape `sort`'s field key has.
 8. **No JSON key for the projection yet** (SPEC §7.5.1 defines the projection, not a key). The typed request carries
-   it (`with_projection`); the key is decided with the response JSON (ROADMAP 10.1.20).
+   it (`with_projection`); the key is decided with the response JSON (ROADMAP 10.1.20). *Amended 2026-11-25:* the key is
+   `projection` (ADR-0065).
 9. **The plain search for `relax: false`.** The request path returns the engine's two result types as they are
    (`QueryResults::Relaxed` / `Plain`) plus `query_truncated`. A plain search does not count in the relaxation
    metrics and its explained hits have no `relaxed` node; a relaxed search with an L0-only plan would do both. This

@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- The request JSON takes `projection` (ROADMAP 10.1.20; SPEC §7.1.4, §7.5.1; ADR-0065): `"all"` (the default), `"none"`
+  (each hit returns its id and blob reference only) or a non-empty array of distinct stored field names (in a
+  collection that is not `strict`, extra fields too). `[]`, a repeated name, another string, and a name that is not
+  stored are invalid arguments; until now the key was unknown and every stored field came back.
 - `persia bench` (ROADMAP 10.4.3; SPEC §16.3): a quick micro-benchmark of this build on this machine. It indexes a
   seeded synthetic corpus into a new database in a scratch directory it creates and removes (`--dir`, default the
   system temporary directory; no existing database is opened), commits, and runs a seeded mix of five kinds of query.

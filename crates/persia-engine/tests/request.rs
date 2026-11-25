@@ -358,6 +358,114 @@ fn facet_forms() {
     assert_eq!(parse(&sixteen).unwrap().page().facets.len(), 16);
 }
 
+/// `projection` (SPEC §7.1.4, §7.5.1, ROADMAP 10.1.20): each form parses to its `Projection`, and nothing else does.
+#[test]
+fn projection_forms() {
+    let schema = schema();
+    let projection = |json: &str| parse(json).map(|r| r.page().projection.clone());
+    assert_eq!(projection("{}").unwrap(), Projection::All);
+    assert_eq!(
+        projection(r#"{"projection": "all"}"#).unwrap(),
+        Projection::All
+    );
+    assert_eq!(
+        projection(r#"{"projection": "none"}"#).unwrap(),
+        Projection::None
+    );
+    assert_eq!(
+        projection(r#"{"projection": ["price", "title", "notes"]}"#).unwrap(),
+        Projection::fields(["notes", "price", "title"], &schema).unwrap()
+    );
+    // Every stored kind of field may be named; the order of the names does not matter.
+    let every = [
+        "title", "body", "brand", "tenant", "price", "stock", "active", "at", "notes",
+    ];
+    assert_eq!(
+        projection(&json!({ "projection": every }).to_string()).unwrap(),
+        Projection::fields(every, &schema).unwrap()
+    );
+    // Other shapes, an empty list, a repeated name, `null`, and a name of another case are shape errors.
+    for json in [
+        r#"{"projection": "All"}"#,
+        r#"{"projection": "fields"}"#,
+        r#"{"projection": ""}"#,
+        r#"{"projection": true}"#,
+        r#"{"projection": 1}"#,
+        r#"{"projection": {"fields": ["title"]}}"#,
+        r#"{"projection": []}"#,
+        r#"{"projection": ["title", "title"]}"#,
+        r#"{"projection": ["title", 1]}"#,
+        r#"{"projection": [null]}"#,
+        r#"{"projection": null}"#,
+        r#"{"projection": "none", "projection": "all"}"#,
+    ] {
+        let error = parse(json).unwrap_err();
+        assert_eq!(kind(&error), Kind::Json, "{json}: {error:?}");
+        assert!(error.to_string().contains("projection"), "{json}: {error}");
+    }
+    assert!(
+        parse(r#"{"projection": []}"#)
+            .unwrap_err()
+            .to_string()
+            .contains(r#"write "none""#)
+    );
+    assert!(
+        parse(r#"{"projection": ["price", "title", "price"]}"#)
+            .unwrap_err()
+            .to_string()
+            .contains(r#""price" twice"#)
+    );
+    // A name the schema has but does not store, and one it does not have (the collection is `strict`), are request
+    // errors that name it.
+    for (json, name, reason) in [
+        (
+            r#"{"projection": ["title", "Title"]}"#,
+            "Title",
+            "no such field in a strict collection",
+        ),
+        (
+            r#"{"projection": ["nope"]}"#,
+            "nope",
+            "no such field in a strict collection",
+        ),
+    ] {
+        match parse(json) {
+            Err(QueryRequestError::Request(RequestError::Projection { name: n, reason: r })) => {
+                assert_eq!((n.as_str(), r), (name, reason), "{json}");
+            }
+            other => panic!("{json}: {other:?}"),
+        }
+    }
+    let unstored = builder(RelaxationConfig::default())
+        .field("hidden", FieldKind::I64 { stored: false })
+        .build()
+        .unwrap();
+    match QueryRequest::from_json(r#"{"projection": ["hidden"]}"#, &unstored, &limits()) {
+        Err(QueryRequestError::Request(RequestError::Projection { name, reason })) => {
+            assert_eq!(
+                (name.as_str(), reason),
+                ("hidden", "the field is not stored")
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    // A collection that is not `strict` returns extra fields by name.
+    let open = builder(RelaxationConfig::default())
+        .strict(false)
+        .build()
+        .unwrap();
+    let parsed =
+        QueryRequest::from_json(r#"{"projection": ["title", "color"]}"#, &open, &limits()).unwrap();
+    assert_eq!(
+        parsed.page().projection,
+        Projection::fields(["title", "color"], &open).unwrap()
+    );
+    let Projection::Fields { extra, .. } = &parsed.page().projection else {
+        panic!("{parsed:?}")
+    };
+    assert_eq!(extra.iter().collect::<Vec<_>>(), ["color"]);
+}
+
 /// What a request that does not parse failed as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -395,7 +503,7 @@ fn the_json_is_read_strictly() {
         // Unknown and repeated keys, at the top and below it.
         (r#"{"query": "a"}"#, Kind::Json),
         (r#"{"Q": "a"}"#, Kind::Json),
-        (r#"{"projection": ["title"]}"#, Kind::Json),
+        (r#"{"projections": ["title"]}"#, Kind::Json),
         (r#"{"q": "a", "q": "b"}"#, Kind::Json),
         (r#"{"limit": 1, "q": "a", "limit": 1}"#, Kind::Json),
         (
@@ -1809,6 +1917,8 @@ struct Model {
     relax: Option<Relax>,
     explain: Option<bool>,
     proximity: Option<bool>,
+    /// `Some(None)`: `"all"`; `Some(Some([]))`: `"none"`; else distinct stored fields.
+    projection: Option<Option<Vec<&'static str>>>,
 }
 
 impl Model {
@@ -1868,6 +1978,18 @@ impl Model {
         if let Some(proximity) = self.proximity {
             o.insert("proximity".into(), json!(proximity));
         }
+        match &self.projection {
+            None => {}
+            Some(None) => {
+                o.insert("projection".into(), json!("all"));
+            }
+            Some(Some(names)) if names.is_empty() => {
+                o.insert("projection".into(), json!("none"));
+            }
+            Some(Some(names)) => {
+                o.insert("projection".into(), json!(names));
+            }
+        }
         J::Object(o).to_string()
     }
 
@@ -1909,6 +2031,14 @@ impl Model {
         if let Some(proximity) = self.proximity {
             r = r.with_proximity(proximity);
         }
+        match &self.projection {
+            None => {}
+            Some(None) => r = r.with_projection(Projection::All),
+            Some(Some(names)) if names.is_empty() => r = r.with_projection(Projection::None),
+            Some(Some(names)) => {
+                r = r.with_projection(Projection::fields(names, schema).unwrap());
+            }
+        }
         r
     }
 }
@@ -1938,6 +2068,13 @@ fn any_model() -> impl Strategy<Value = Model> {
         proptest::option::of(proptest::option::of(1..=1_000_usize)),
         0..4,
     );
+    // `"all"`, `"none"` (no name), or distinct stored fields in any order.
+    let stored = [
+        "title", "body", "brand", "price", "stock", "active", "at", "notes",
+    ];
+    let projection = proptest::option::of(proptest::option::of(
+        proptest::sample::subsequence(stored.to_vec(), 0..=stored.len()).prop_shuffle(),
+    ));
     (
         (
             proptest::option::of(".{0,24}"),
@@ -1955,11 +2092,13 @@ fn any_model() -> impl Strategy<Value = Model> {
             proptest::option::of(any::<bool>()),
             proptest::option::of(any::<bool>()),
         ),
+        projection,
     )
         .prop_map(
             |(
                 (q, fields, filter, soft_filter, sort),
                 (limit, offset, search_after, facets, relax, explain, proximity),
+                projection,
             )| {
                 Model {
                     q,
@@ -1974,6 +2113,7 @@ fn any_model() -> impl Strategy<Value = Model> {
                     relax,
                     explain,
                     proximity,
+                    projection,
                 }
             },
         )
@@ -2259,7 +2399,8 @@ fn a_huge_key_is_not_repeated_in_its_error() {
 
 /// A caller string of any length is named in a bounded message wherever a request echoes one (SPEC §7.1.4): an
 /// unknown field in `fields`, `sort`, `facets` and a filter, a malformed `fields` entry, an unknown filter or range
-/// bound key, and a keyword filter value past its bound. (There is no projection key yet, ROADMAP 10.1.20.)
+/// bound key, a keyword filter value past its bound, and a `projection` name that is unknown or repeated (ROADMAP
+/// 10.1.20).
 #[test]
 fn a_huge_field_name_is_not_repeated_in_its_error() {
     let huge = "f".repeat(1 << 16);
@@ -2280,6 +2421,8 @@ fn a_huge_field_name_is_not_repeated_in_its_error() {
         (json!({"filter": {h: ["brand", "x"]}}), huge.len()),
         (json!({"filter": {"range": ["price", {h: 1}]}}), huge.len()),
         (json!({"filter": {"term": ["brand", h]}}), huge.len()),
+        (json!({"projection": [h]}), huge.len()),
+        (json!({"projection": ["title", h, h]}), huge.len()),
     ] {
         let error = parse(&json.to_string()).unwrap_err();
         let message = error.to_string();

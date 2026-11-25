@@ -455,8 +455,8 @@ impl Collection {
     }
 
     /// [`search`](Self::search) of the request JSON `json` (SPEC §7.1, ADR-0062): `q`, `fields`, `filter`,
-    /// `soft_filter`, `sort`, `limit`, `offset`, `search_after` (a cursor token), `facets`, `relax`, `explain` and
-    /// `proximity`, read strictly.
+    /// `soft_filter`, `sort`, `limit`, `offset`, `search_after` (a cursor token), `facets`, `relax`, `explain`,
+    /// `proximity` and `projection`, read strictly.
     ///
     /// ```
     /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
