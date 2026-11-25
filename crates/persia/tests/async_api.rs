@@ -89,7 +89,26 @@ impl Probe {
         self.release.send(()).unwrap();
     }
 
+    /// The next event of a job on the pool (the open's own events are skipped: see [`Probe::next_any`]).
     fn next(&self) -> JobEvent {
+        loop {
+            let event = self.next_any();
+            if !matches!(
+                event,
+                JobEvent::Started {
+                    kind: JobKind::Open,
+                    ..
+                } | JobEvent::Finished {
+                    kind: JobKind::Open,
+                    ..
+                }
+            ) {
+                return event;
+            }
+        }
+    }
+
+    fn next_any(&self) -> JobEvent {
         self.events.recv().unwrap()
     }
 }
@@ -480,4 +499,54 @@ fn handles_say_what_they_are() {
     assert!(format!("{future:?}").starts_with("JobFuture"), "{future:?}");
     block_on(future).unwrap();
     block_on(db.close()).unwrap();
+}
+
+/// Handles cross threads, and a future can be stored and moved without pinning.
+#[test]
+fn handles_and_futures_are_send_sync_and_unpin() {
+    fn send_sync<T: Send + Sync>() {}
+    fn unpin<T: Unpin>() {}
+    send_sync::<AsyncDb>();
+    send_sync::<AsyncCollection>();
+    send_sync::<JobFuture<()>>();
+    send_sync::<JobFuture<Option<Document>>>();
+    send_sync::<JobFuture<persia::SearchResponse>>();
+    send_sync::<JobFuture<AsyncDb>>();
+    unpin::<JobFuture<()>>();
+    unpin::<JobFuture<AsyncDb>>();
+}
+
+/// An open whose future is dropped while it runs finishes on its thread and closes what it opened: the writer lock
+/// is free once that thread reports the open finished.
+#[test]
+fn an_open_whose_future_is_dropped_closes_what_it_opened() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    seeded(&path);
+    let (probe, options) = Probe::new();
+    probe.hold_next();
+    let opening = AsyncDb::open_with(options, &path);
+    assert!(matches!(
+        probe.next_any(),
+        JobEvent::Started {
+            kind: JobKind::Open,
+            token: None
+        }
+    ));
+    drop(opening);
+    probe.release();
+    let finished = probe.next_any();
+    assert!(
+        matches!(
+            finished,
+            JobEvent::Finished {
+                kind: JobKind::Open,
+                error: None,
+                delivered: false
+            }
+        ),
+        "{finished:?}"
+    );
+    // The dropped open's database is closed: a read-write open takes the lock.
+    Db::open(&path).unwrap().close().unwrap();
 }

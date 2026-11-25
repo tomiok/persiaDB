@@ -18,7 +18,7 @@ use persia_format::header::{Access, BLOB_PACK, Header};
 use persia_format::source::ByteSource;
 use persia_format::superblock::{FIRST_FRAME_OFFSET, Slot};
 use persia_format::widen::{u64_from_usize, usize_from_u32};
-use persia_format::{BlobId, Reader, Writer};
+use persia_format::{BlobId, Reader};
 use persia_storage::container::{
     CommittedImage, ContainerFile, Error as ContainerError, MapPermit, WriterProof,
 };
@@ -341,14 +341,14 @@ impl<F: ContainerFile + 'static> PackStore<F> {
     }
 
     /// The committed state of the pack as a [`CommittedImage`] to copy (SPEC §4.8, ROADMAP 10.1.8), or `None` if there
-    /// is no pack file: the header and both slots holding the committed superblock ([`PackStore::superblock`]), and
+    /// is no pack file: the header page as the file holds it, and both slots holding the committed superblock ([`PackStore::superblock`]), and
     /// another handle on the pack file (no lock taken) to read `12288..log_end` from. A read-write handle takes it
     /// under its writer mutex, so no bind or rewrite is half-way. Nothing after `log_end` is in it (chunks staged for
     /// an upload not bound). Binds may go on meanwhile (below a committed `log_end` the pack is never written again),
     /// and a GC rewrite renames a new file over the path, which the handle does not follow.
     ///
     /// # Errors
-    /// [`Error::PackIo`] if the header does not encode, the file has no second handle or its length cannot be read;
+    /// [`Error::PackIo`] if the file has no second handle, or its length or header page cannot be read;
     /// [`Error::CorruptAt`] if the file is shorter than `log_end`.
     pub fn committed_image(&self) -> Result<Option<CommittedImage<F>>> {
         let _no_writes = (self.mode == PackMode::ReadWrite).then(|| self.lock_writer());
@@ -356,26 +356,21 @@ impl<F: ContainerFile + 'static> PackStore<F> {
         let Some(pack) = inner.pack.as_ref() else {
             return Ok(None);
         };
-        let mut w = Writer::new();
-        pack.header
-            .encode_with(&mut w, &BLOB_PACK)
-            .map_err(|e| Error::PackIo {
-                op: "encode header",
-                source: io::Error::other(e),
-            })?;
         let slot = pack.sb.encode();
-        w.write_bytes(&slot);
-        w.write_bytes(&slot);
+        // A second handle on the pack file closes no lock: the pack's writer lock is the file beside it (SPEC §9.3).
         let file = pack
             .file
             .try_clone_handle()
             .map_err(io_err("open a second handle"))?;
         let end = pack.sb.log_end;
-        CommittedImage::new(w.into_inner(), file, end)
+        CommittedImage::with_slot(file, &slot, end)
             .map(Some)
             .map_err(|e| match e {
                 ContainerError::Io { op, source } => Error::PackIo { op, source },
-                _ => corrupt_at("the pack file is shorter than its committed log_end", end),
+                ContainerError::Format(_) => {
+                    corrupt_at("the pack file is shorter than its committed log_end", end)
+                }
+                other => Error::Container(other),
             })
     }
 

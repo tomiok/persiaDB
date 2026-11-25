@@ -18,8 +18,8 @@
 //! `serde` type with [`Collection::put_struct`]) and their blobs ([`Blob`], [`Db::put_blob`]). Reads see every write
 //! that returned; commits and merges run on the database's own thread, and [`Db::close`] joins it (ADR-0064). Every
 //! call returns [`Result`], whose [`Error`] carries a stable [`ErrorCode`] (ADR-0063). With the cargo feature
-//! `async`, `AsyncDb` and `AsyncCollection` return futures that need no runtime (ADR-0064). The engine (`persia-engine`) and the hidden `internal` layer under this crate (ADR-0051) are not stable
-//! APIs.
+//! `async`, `AsyncDb` and `AsyncCollection` return futures that need no runtime (ADR-0064). The engine
+//! (`persia-engine`) and the hidden `internal` layer under this crate (ADR-0051) are not stable APIs.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 // Sizes and offsets convert with `From` or `try_from`, never a silent `as` (CLAUDE.md checked ops).

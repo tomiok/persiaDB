@@ -14,10 +14,10 @@ use std::path::{Path, PathBuf};
 
 pub use job::JobFuture;
 use job::Slot;
-#[cfg(not(feature = "test-hooks"))]
-use pool::JobKind;
 use pool::Pool;
 pub(crate) use pool::PoolOptions;
+#[cfg(not(feature = "test-hooks"))]
+use pool::{JobEvent, JobKind};
 // Test hooks: what the pool did with each job (ADR-0064 item 9).
 #[cfg(feature = "test-hooks")]
 pub use pool::{JobEvent, JobHook, JobKind};
@@ -152,15 +152,27 @@ impl AsyncDb {
         let location: PathBuf = location.as_ref().to_owned();
         let slot = Slot::new(None);
         let delivered = std::sync::Arc::clone(&slot);
+        let hook = options.pool.hook.clone();
         let thread = std::thread::Builder::new()
             .name("persia-async-open".to_owned())
             .spawn(move || {
                 if delivered.start() {
+                    let kind = JobKind::Open;
+                    let started = JobEvent::Started { kind, token: None };
+                    pool::emit(hook.as_ref(), &started);
                     let opened = options.open(&location).map(|db| {
                         let pool = Pool::new(db.inner.options.pool.clone());
                         Self { db: Some(db), pool }
                     });
-                    delivered.finish(opened);
+                    let error = opened.as_ref().err().map(Error::code);
+                    // A dropped future's open is closed here, before `Finished`: `finish` drops the `Db`.
+                    let delivered = delivered.finish(opened);
+                    let finished = JobEvent::Finished {
+                        kind,
+                        error,
+                        delivered,
+                    };
+                    pool::emit(hook.as_ref(), &finished);
                 }
             });
         match thread {

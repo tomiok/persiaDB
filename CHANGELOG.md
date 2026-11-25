@@ -15,8 +15,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   copy opens at exactly that commit, with every blob its documents reference, and holds nothing written later. While
   it copies, no compaction or blob GC replaces a file. A read-only database backs up the state it shows. The files are
   written under temporary names, synced, and linked pack first, so `dest` never exists without its pack; a backup
-  never replaces anything (`AlreadyExists`), the directory of `dest` must exist, and its file system must support
-  hard links.
+  never replaces anything (`AlreadyExists`, a dangling symbolic link included), the directory of `dest` must exist,
+  and its file system must support hard links (ROADMAP 10.1.28). A failed backup removes what it linked, container
+  first; an error does not always mean `dest` is free (SPEC §4.8). The copy's checksums are not checked on the way
+  (run `verify` on it), and a poisoned writer's backup fails with `Poisoned`.
 - `persia`: a runtime-agnostic async API behind the cargo feature `async`, which adds no dependency (ROADMAP 10.1.11,
   ADR-0064). `AsyncDb::open`, `open_with`, `close`, `collection` and `commit`, and `AsyncCollection::put`,
   `put_batch`, `delete`, `get`, `commit` and `search`, return a `JobFuture<T>`: a std `Future` that any executor

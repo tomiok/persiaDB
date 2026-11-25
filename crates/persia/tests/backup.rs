@@ -358,3 +358,135 @@ fn a_backup_holds_every_write_that_returned() {
     }
     assert_eq!(copy.committed_seq().unwrap(), db.committed_seq().unwrap());
 }
+
+/// A dangling symbolic link at `dest` is a name that exists: refused before the commit, the link left alone.
+#[cfg(unix)]
+#[test]
+fn a_dangling_symbolic_link_at_dest_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path().join("app.persia")).unwrap();
+    put(&files(&db), "a", 1);
+    let seq = db.committed_seq().unwrap();
+    for name in ["copy.persia", "copy.persia.blobs"] {
+        let out = dir.path().join(format!("out-{name}"));
+        std::fs::create_dir(&out).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), out.join(name)).unwrap();
+        let err = db.backup(out.join("copy.persia")).unwrap_err();
+        assert_eq!(err.code(), ErrorCode::AlreadyExists, "{err}");
+        assert_eq!(names(&out), [name]);
+        assert!(
+            !dir.path().join("nowhere").exists(),
+            "nothing written through the link"
+        );
+    }
+    assert_eq!(
+        db.committed_seq().unwrap(),
+        seq,
+        "refused before the commit"
+    );
+}
+
+/// A writer a panic poisoned cannot commit: its backup fails with `Poisoned` and writes nothing.
+#[test]
+fn a_poisoned_writer_cannot_back_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path().join("app.persia")).unwrap();
+    let c = files(&db);
+    put(&c, "a", 1);
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        c.hold_writer_while(|| panic!("a write that panics"))
+            .unwrap();
+    }));
+    assert!(panicked.is_err());
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    let err = db.backup(out.join("copy.persia")).unwrap_err();
+    assert_eq!(err.code(), ErrorCode::Poisoned, "{err}");
+    assert_eq!(names(&out), Vec::<String>::new());
+}
+
+/// Where locks belong to the process (NFS-style, ADR-0019), closing any descriptor of the container drops its writer
+/// lock: `Db::backup`'s steps, run on a `SimFs` (a `Db` opens real files only), leave both writer locks held.
+#[test]
+fn with_per_process_locks_a_backup_keeps_both_writer_locks() {
+    use persia::internal::documents::BlobDatabase;
+    use persia_blob::{PackStore, pack_path};
+    use persia_engine::db::{Database, write_backup_in};
+    use persia_engine::wal::Durability;
+    use persia_storage::container::sim::SimFile;
+    use persia_storage::container::{Container, Error as ContainerError, Mode};
+    use persia_storage::vfs::Vfs;
+    use persia_storage::vfs::sim::{SimFs, SimFsFile};
+
+    const DB: &str = "/db/app.persia";
+    let fs = SimFs::new();
+    fs.create_dir(Path::new("/db")).unwrap();
+    fs.sync_dir(Path::new("/")).unwrap();
+    let vfs: Arc<dyn Vfs<File = SimFsFile>> = Arc::new(fs.clone());
+    let log = Database::create_container(
+        Container::create_in(Arc::clone(&vfs), DB).unwrap(),
+        DatabaseOptions::default(),
+    )
+    .unwrap();
+    let mut db =
+        BlobDatabase::with_pack_in(log, Arc::clone(&vfs), pack_path(Path::new(DB))).unwrap();
+    db.log_mut()
+        .create_collection(persia::SchemaBuilder::new("files").build().unwrap())
+        .unwrap();
+    db.put(
+        "files",
+        &Document::new("a"),
+        Blob::from_reader(&bytes(3000, 1)[..]),
+        Durability::Fsync,
+    )
+    .unwrap();
+    let db_uuid = db.log().container().header().db_uuid;
+
+    fs.set_per_process_locks(true);
+    for dest in ["/db/one.persia", "/db/two.persia"] {
+        db.commit().unwrap();
+        let _compaction = db.log().hold_compaction();
+        let _gc = db.hold_gc();
+        let container = db.log().committed_image().unwrap();
+        let pack = db.blobs().store().committed_image().unwrap().unwrap();
+        let pack_dest = pack_path(Path::new(dest));
+        write_backup_in(
+            &fs,
+            &[(pack_dest.as_path(), &pack), (Path::new(dest), &container)],
+        )
+        .unwrap();
+    }
+    fs.set_per_process_locks(false);
+
+    let err = Container::open_in(Arc::clone(&vfs), DB, Mode::ReadWrite).unwrap_err();
+    assert!(matches!(err, ContainerError::Locked), "{err:?}");
+    let other = Container::create_on(SimFile::new(), db_uuid).unwrap();
+    let err = PackStore::open_writer_in(
+        Arc::clone(&vfs),
+        pack_path(Path::new(DB)),
+        &other.writer_proof().unwrap(),
+    )
+    .unwrap_err();
+    assert!(matches!(err, persia_blob::Error::PackLocked), "{err:?}");
+    // Both released with the database.
+    drop(db);
+    drop(Container::open_in(vfs, DB, Mode::ReadWrite).unwrap());
+}
+
+/// A destination that cannot be looked up (under a regular file) fails before the commit.
+#[cfg(unix)]
+#[test]
+fn a_destination_that_cannot_be_looked_up_fails_before_the_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let db = Db::open(&path).unwrap();
+    put(&files(&db), "a", 1);
+    let seq = db.committed_seq().unwrap();
+    let err = db.backup(path.join("copy.persia")).unwrap_err();
+    assert_eq!(err.code(), ErrorCode::Io, "{err}");
+    assert_eq!(
+        db.committed_seq().unwrap(),
+        seq,
+        "refused before the commit"
+    );
+}

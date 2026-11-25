@@ -97,9 +97,15 @@ impl Db {
     ///
     /// The copy is durable and whole, or absent: each file is written under a temporary name beside its
     /// destination and synced, then linked to its name (which must still be free) with its directory synced, the
-    /// pack before the container. A failure removes what it made. A crash may leave `<dest>.blobs` without `dest`
-    /// (remove it before trying again), stale temporary files `<name>.backup.<nonce>.<n>`, never a `dest` without
-    /// its pack. `dest` is never replaced: back up to a new name. The file system must support hard links.
+    /// pack before the container. A failure removes what it linked, the container first, each removal synced before
+    /// the next. A crash may leave `<dest>.blobs` without `dest` (remove it before trying again) and stale temporary
+    /// files `<name>.backup.<nonce>.<n>`, never a `dest` without its pack. `dest` is never replaced: back up to a new
+    /// name. The file system must support hard links. A temporary name that cannot be removed once the backup is
+    /// complete is logged and left (it is not part of the backup), and the call succeeds.
+    ///
+    /// The bytes are copied as they are: their checksums are not checked on the way (SPEC §4.8). Run `verify` on the
+    /// copy to check it. A writer that a failed write poisoned cannot commit, so its backup fails with
+    /// [`ErrorCode::Poisoned`]: close and reopen the database first.
     ///
     /// ```
     /// use persia::{Db, ErrorCode};
@@ -126,19 +132,27 @@ impl Db {
     /// [`ErrorCode::InvalidArgument`] for an empty or malformed `dest`, [`ErrorCode::Unsupported`] for a URL of
     /// another scheme; [`ErrorCode::Io`] if the file system fails (also a missing directory of `dest`, or one without
     /// hard links); [`ErrorCode::Corrupt`] if a file is shorter than its last commit; as [`Db::commit`] for the commit
-    /// of a read-write database; [`ErrorCode::Closed`].
+    /// of a read-write database, [`ErrorCode::Poisoned`] among them; [`ErrorCode::Closed`]. Do not take an error to
+    /// mean `dest` is free: an `Io` error whose message says the backup was written comes from the last directory
+    /// sync, after both files are complete at their names (they may not survive a crash), and a removal during the
+    /// clean-up of a failed backup may itself fail (logged), leaving `dest` and its pack complete.
     pub fn backup(&self, dest: impl AsRef<Path>) -> Result<()> {
         self.inner.check_open()?;
         let dest = crate::location::path_of(dest.as_ref())?;
         let pack_dest = pack_path(&dest);
         for path in [&dest, &pack_dest] {
-            let taken = path.try_exists().map_err(|source| {
-                Error::with_source(
-                    ErrorCode::Io,
-                    format_args!("looking for {}", path.display()),
-                    source,
-                )
-            })?;
+            // Not following a symbolic link: a dangling one is a name that exists too.
+            let taken = match std::fs::symlink_metadata(path) {
+                Ok(_) => true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(source) => {
+                    return Err(Error::with_source(
+                        ErrorCode::Io,
+                        format_args!("looking for {}", path.display()),
+                        source,
+                    ));
+                }
+            };
             if taken {
                 return Err(Error::new(
                     ErrorCode::AlreadyExists,

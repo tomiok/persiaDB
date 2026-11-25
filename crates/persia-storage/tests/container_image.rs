@@ -22,7 +22,8 @@ use std::sync::Arc;
 
 use persia_format::block::Compression;
 use persia_format::frame::FrameKind;
-use persia_format::superblock::FIRST_FRAME_OFFSET;
+use persia_format::header::HEADER_LEN;
+use persia_format::superblock::{FIRST_FRAME_OFFSET, SLOT_LEN};
 use persia_storage::container::sim::{CrashLoss, SimFault, SimFile};
 use persia_storage::container::{
     Commit, CommittedImage, Container, ContainerFile, Error, Mode, write_backup_in,
@@ -60,11 +61,12 @@ fn source(uuid: u8) -> (Vec<u8>, u64) {
     (bytes, log_end)
 }
 
-/// What a copy of `bytes` committed to `log_end` must be: the prefix as read, with the active slot in both places,
-/// then the committed frames.
+/// What a copy of `bytes` committed to `log_end` must be: the header page byte for byte, the active slot in both
+/// places, then the committed frames.
 fn expected_copy(bytes: &[u8], log_end: u64) -> Vec<u8> {
     let c = Container::open_on(SimFile::from_bytes(bytes.to_vec()), Mode::ReadOnly).unwrap();
-    let mut out = prefix_of(&c);
+    let mut out = bytes[..HEADER_LEN].to_vec();
+    out.extend_from_slice(&prefix_of(&c)[HEADER_LEN..]);
     out.extend_from_slice(&bytes[F..log_end as usize]);
     out
 }
@@ -178,18 +180,20 @@ fn a_copy_reads_the_file_it_was_taken_from_not_the_path() {
 fn an_image_checks_its_parts() {
     let (bytes, log_end) = source(1);
     let file = SimFile::from_bytes(bytes.clone());
-    let err = CommittedImage::new(vec![0; 10], file.clone(), log_end).unwrap_err();
+    let err = CommittedImage::with_slot(file.clone(), &[0; 10], log_end).unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
-    let err = CommittedImage::new(vec![0; F], file.clone(), FIRST_FRAME_OFFSET - 8).unwrap_err();
+    let err = CommittedImage::with_slot(file.clone(), &[0; SLOT_LEN], FIRST_FRAME_OFFSET - 8)
+        .unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
     // A file shorter than its commit: a committed frame is missing.
     let short = SimFile::from_bytes(bytes[..log_end as usize - 8].to_vec());
-    let err = CommittedImage::new(vec![0; F], short, log_end).unwrap_err();
+    let err = CommittedImage::with_slot(short, &[0; SLOT_LEN], log_end).unwrap_err();
     assert!(err.is_corruption(), "{err:?}");
     // An image of only the prefix is empty; a copy goes into an empty file only.
-    let empty = CommittedImage::new(vec![0; F], file.clone(), FIRST_FRAME_OFFSET).unwrap();
+    let empty =
+        CommittedImage::with_slot(file.clone(), &[0; SLOT_LEN], FIRST_FRAME_OFFSET).unwrap();
     assert!(empty.is_empty());
-    let image = CommittedImage::new(vec![0; F], file, log_end).unwrap();
+    let image = CommittedImage::with_slot(file, &[0; SLOT_LEN], log_end).unwrap();
     let full = SimFile::from_bytes(vec![1]);
     assert!(matches!(
         image.write_to(&full).unwrap_err(),
@@ -357,4 +361,320 @@ fn a_crash_at_any_step_leaves_a_prefix_of_complete_files() {
     }
     // Every outcome happened somewhere: nothing, the pack alone, both.
     assert!(seen.iter().all(|&k| k > 0), "{seen:?}");
+}
+
+/// A mutating call to fail once (not sticky, unlike `SimFault`): the `skip`-th later call of `call` whose path
+/// contains `path` fails, and only that one.
+#[derive(Debug, Clone)]
+struct OneFailure {
+    call: Call,
+    path: &'static str,
+    skip: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Call {
+    Remove,
+    SyncDir,
+}
+
+/// A `SimFs` whose listed calls fail once each, with no effect.
+#[derive(Debug)]
+struct Flaky {
+    fs: SimFs,
+    failures: std::sync::Mutex<Vec<OneFailure>>,
+}
+
+impl Flaky {
+    fn new(fs: &SimFs, failures: Vec<OneFailure>) -> Self {
+        Self {
+            fs: fs.clone(),
+            failures: std::sync::Mutex::new(failures),
+        }
+    }
+
+    fn fails(&self, call: Call, path: &Path) -> std::io::Result<()> {
+        let mut failures = self.failures.lock().unwrap();
+        let shown = path.display().to_string();
+        let Some(i) = failures
+            .iter()
+            .position(|f| f.call == call && shown.contains(f.path))
+        else {
+            return Ok(());
+        };
+        if failures[i].skip > 0 {
+            failures[i].skip -= 1;
+            return Ok(());
+        }
+        failures.remove(i);
+        Err(std::io::Error::other(format!(
+            "injected {call:?} failure on {shown}"
+        )))
+    }
+
+    fn all_fired(&self) -> bool {
+        self.failures.lock().unwrap().is_empty()
+    }
+}
+
+impl Vfs for Flaky {
+    type File = SimFsFile;
+    fn open(&self, path: &Path, write: bool) -> std::io::Result<SimFsFile> {
+        self.fs.open(path, write)
+    }
+    fn create_new(&self, path: &Path) -> std::io::Result<SimFsFile> {
+        self.fs.create_new(path)
+    }
+    fn create_dir(&self, path: &Path) -> std::io::Result<()> {
+        self.fs.create_dir(path)
+    }
+    fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        self.fs.rename(from, to)
+    }
+    fn hard_link(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        self.fs.hard_link(from, to)
+    }
+    fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+        self.fails(Call::Remove, path)?;
+        self.fs.remove_file(path)
+    }
+    fn sync_dir(&self, dir: &Path) -> std::io::Result<()> {
+        self.fails(Call::SyncDir, dir)?;
+        self.fs.sync_dir(dir)
+    }
+    fn entry_kind(&self, path: &Path) -> std::io::Result<persia_storage::vfs::EntryKind> {
+        self.fs.entry_kind(path)
+    }
+    fn is_dir(&self, path: &Path) -> std::io::Result<bool> {
+        self.fs.is_dir(path)
+    }
+    fn read_dir(&self, dir: &Path) -> std::io::Result<Vec<persia_storage::vfs::DirEntry>> {
+        self.fs.read_dir(dir)
+    }
+    fn canonicalize(&self, path: &Path) -> std::io::Result<std::path::PathBuf> {
+        self.fs.canonicalize(path)
+    }
+    fn same_file(&self, file: &SimFsFile, path: &Path) -> std::io::Result<bool> {
+        self.fs.same_file(file, path)
+    }
+    fn lock_beside(&self, path: &Path) -> std::io::Result<Option<SimFsFile>> {
+        self.fs.lock_beside(path)
+    }
+}
+
+/// The sync of `/d` after the container's link fails (the first sync of `/d` follows the pack's link, the second the
+/// container's), so the backup is undone.
+fn last_link_sync_fails() -> OneFailure {
+    OneFailure {
+        call: Call::SyncDir,
+        path: "/d",
+        skip: 1,
+    }
+}
+
+fn names_of(fs: &SimFs) -> Vec<std::path::PathBuf> {
+    fs.files().into_iter().map(|(p, _)| p).collect()
+}
+
+/// Invariant 3 with a clean-up that fails part-way: the earlier file is never removed before the later one is gone
+/// and durably so, so `dest` never survives without `<dest>.blobs`.
+#[test]
+fn an_undo_that_fails_part_way_keeps_the_earlier_files() {
+    let (a, a_end) = source(1);
+    let (b, b_end) = source(2);
+    // The container's removal fails: both stay, complete.
+    // The container's removal succeeds and its sync fails: the pack stays, complete.
+    let cases = [
+        (
+            OneFailure {
+                call: Call::Remove,
+                path: DEST,
+                skip: 0,
+            },
+            true,
+        ),
+        (
+            OneFailure {
+                call: Call::SyncDir,
+                path: "/d",
+                skip: 0,
+            },
+            false,
+        ),
+    ];
+    for (second, container_left) in cases {
+        let (fs, container, pack) = sources(&a, &b);
+        let flaky = Flaky::new(&fs, vec![last_link_sync_fails(), second.clone()]);
+        let err = write_backup_in(
+            &flaky,
+            &[(Path::new(DEST_PACK), &pack), (Path::new(DEST), &container)],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::Io {
+                    op: "sync directory",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(flaky.all_fired(), "{second:?}");
+        for fs in [
+            fs.clone(),
+            fs.crash(CrashLoss::All),
+            fs.crash(CrashLoss::Nothing),
+        ] {
+            assert_eq!(
+                fs.read(Path::new(DEST_PACK)).as_deref(),
+                Some(expected_copy(&b, b_end).as_slice()),
+                "{second:?}: the pack must stay"
+            );
+            let left = fs.read(Path::new(DEST));
+            if container_left {
+                assert_eq!(left.as_deref(), Some(expected_copy(&a, a_end).as_slice()));
+            }
+            assert!(
+                !names_of(&fs)
+                    .iter()
+                    .any(|p| p.to_string_lossy().contains(".backup.")),
+                "{second:?}: temporary names are removed"
+            );
+        }
+        assert_eq!(
+            fs.read(Path::new(DEST)).is_some(),
+            container_left,
+            "{second:?}"
+        );
+    }
+}
+
+/// Invariant 4 over the clean-up: the backup is undone (its last link's sync fails), and a crash hits at every later
+/// mutating call, with every fault kind and loss.
+#[test]
+fn a_crash_during_an_undo_never_leaves_a_container_without_its_pack() {
+    let (a, a_end) = source(1);
+    let (b, b_end) = source(2);
+    let want_container = expected_copy(&a, a_end);
+    let want_pack = expected_copy(&b, b_end);
+    let calls = {
+        let (fs, container, pack) = sources(&a, &b);
+        let flaky = Flaky::new(&fs, vec![last_link_sync_fails()]);
+        let start = fs.mutations();
+        write_backup_in(
+            &flaky,
+            &[(Path::new(DEST_PACK), &pack), (Path::new(DEST), &container)],
+        )
+        .unwrap_err();
+        // The undo removed everything.
+        assert_eq!(
+            names_of(&fs),
+            ["/d/src.pack", "/d/src.persia"].map(std::path::PathBuf::from)
+        );
+        fs.mutations() - start
+    };
+    for n in 0..calls {
+        for apply in [false, true] {
+            for loss in [CrashLoss::All, CrashLoss::Nothing, CrashLoss::Seeded(n)] {
+                let (fs, container, pack) = sources(&a, &b);
+                let flaky = Flaky::new(&fs, vec![last_link_sync_fails()]);
+                let at = fs.mutations() + n;
+                fs.set_fault(Some(if apply {
+                    SimFault::ApplyThenFail(at)
+                } else {
+                    SimFault::FailAt(at)
+                }));
+                assert!(
+                    write_backup_in(
+                        &flaky,
+                        &[(Path::new(DEST_PACK), &pack), (Path::new(DEST), &container)],
+                    )
+                    .is_err()
+                );
+                let crashed = fs.crash(loss);
+                let ctx = format!("fault at {n}, apply {apply}, {loss:?}");
+                let got_pack = crashed.read(Path::new(DEST_PACK));
+                if let Some(p) = &got_pack {
+                    assert_eq!(p, &want_pack, "{ctx}");
+                }
+                if let Some(c) = crashed.read(Path::new(DEST)) {
+                    assert_eq!(c, want_container, "{ctx}");
+                    assert!(got_pack.is_some(), "a container without its pack: {ctx}");
+                }
+            }
+        }
+    }
+}
+
+/// A complete backup whose temporary name cannot be removed succeeds (the name is litter, not part of the backup);
+/// one whose last directory sync fails is an error that says the backup was written.
+#[test]
+fn after_every_link_only_the_last_sync_fails_a_backup() {
+    let (a, a_end) = source(1);
+    let (b, _) = source(2);
+    let (fs, container, pack) = sources(&a, &b);
+    let flaky = Flaky::new(
+        &fs,
+        vec![OneFailure {
+            call: Call::Remove,
+            path: "backup.persia.backup.",
+            skip: 0,
+        }],
+    );
+    write_backup_in(
+        &flaky,
+        &[(Path::new(DEST_PACK), &pack), (Path::new(DEST), &container)],
+    )
+    .unwrap();
+    assert!(flaky.all_fired());
+    assert_eq!(fs.read(Path::new(DEST)).unwrap(), expected_copy(&a, a_end));
+    let left: Vec<_> = names_of(&fs)
+        .into_iter()
+        .filter(|p| p.to_string_lossy().contains(".backup."))
+        .collect();
+    assert_eq!(left.len(), 1, "{left:?}");
+
+    let (fs, container, pack) = sources(&a, &b);
+    let flaky = Flaky::new(
+        &fs,
+        vec![OneFailure {
+            call: Call::SyncDir,
+            path: "/d",
+            skip: 2,
+        }],
+    );
+    let err = write_backup_in(
+        &flaky,
+        &[(Path::new(DEST_PACK), &pack), (Path::new(DEST), &container)],
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, Error::Io { op, .. } if op.starts_with("sync the directory of a backup that was written")),
+        "{err:?}"
+    );
+    assert_eq!(fs.read(Path::new(DEST)).unwrap(), expected_copy(&a, a_end));
+    assert!(fs.read(Path::new(DEST_PACK)).is_some());
+}
+
+/// Where locks belong to the process (NFS-style, ADR-0019), closing any descriptor of the container drops its writer
+/// lock: an image's second handle is kept with the container, so a backup leaves the lock held.
+#[test]
+fn with_per_process_locks_a_backup_keeps_the_writer_lock() {
+    let fs = SimFs::new();
+    fs.create_dir(Path::new("/d")).unwrap();
+    fs.sync_dir(Path::new("/")).unwrap();
+    let c = Container::create_in(vfs(&fs), "/d/app.persia").unwrap();
+    fs.set_per_process_locks(true);
+    for dest in [DEST, "/d/second.persia"] {
+        let image = c.committed_image().unwrap();
+        write_backup_in(&fs, &[(Path::new(dest), &image)]).unwrap();
+        drop(image);
+    }
+    fs.set_per_process_locks(false);
+    let err = Container::open_in(vfs(&fs), "/d/app.persia", Mode::ReadWrite).unwrap_err();
+    assert!(matches!(err, Error::Locked), "{err:?}");
+    // Released with the container.
+    drop(c);
+    drop(Container::open_in(vfs(&fs), "/d/app.persia", Mode::ReadWrite).unwrap());
 }

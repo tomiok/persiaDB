@@ -227,7 +227,9 @@ impl<T> Future for JobFuture<T> {
         };
         drop(state);
         this.taken = true;
-        // The thread stored its result as its last step, so this join is a short wait for its exit.
+        // An open or a close runs on a thread of its own (`on_thread`): joined here, in `poll`, so no thread outlives
+        // its taken result. The thread stored the result as its last step (but for a test hook's event), so this
+        // join only waits for the thread to exit, not for work.
         if let Some(thread) = this.thread.take()
             && thread.join().is_err()
         {

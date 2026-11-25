@@ -2,22 +2,25 @@
 //! 10.1.8; ADR-0067).
 //!
 //! A [`CommittedImage`] is what one commit of a file of the §4.2 layout (the container, or the blob pack of SPEC §9.3)
-//! needs: the 12288-byte prefix, its header and both slots holding that commit, built in memory when the image is
-//! taken; and a handle on the file the commit was made in, to copy `12288..log_end` from. Below a committed `log_end`
-//! a writer never writes again (SPEC §4.7), a compaction or a pack rewrite renames a new file over the path instead
-//! (the handle keeps reading the old one), and the slots, the only bytes rewritten in place, are not read from the
-//! file at all. So the copy is that commit's state whatever the writer does meanwhile, and it never reads what came
-//! after: a WAL frame after `log_end`, a chunk staged for an upload not bound.
+//! needs: the 12288-byte prefix, built when the image is taken from the header page as the file holds it and both
+//! slots holding that commit (from memory); and a handle on the file the commit was made in, to copy
+//! `12288..log_end` from. Below a committed `log_end` a writer never writes again (SPEC §4.7), a compaction or a pack
+//! rewrite renames a new file over the path instead (the handle keeps reading the old one), and the slots, the only
+//! bytes rewritten in place, are not read from the file at all. So the copy is that commit's state whatever the
+//! writer does meanwhile, and it never reads what came after: a WAL frame after `log_end`, a chunk staged for an
+//! upload not bound.
 //!
 //! [`write_backup_in`] writes images to new files that do not exist yet: each to a temporary name beside its
 //! destination, synced; then each hard-linked to its destination (which fails if the name exists) and its directory
 //! synced, in the order given, so a later file never survives a crash without an earlier one; then the temporary names
-//! removed and the directory synced. A failure removes what it created.
+//! removed and the directory synced. A failure removes what it linked, newest first, one synced removal at a time.
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use persia_format::superblock::FIRST_FRAME_OFFSET;
+use persia_format::header::HEADER_LEN;
+use persia_format::superblock::{FIRST_FRAME_OFFSET, SLOT_LEN};
 use persia_format::widen::u64_from_usize;
 
 use super::path::temp_path;
@@ -60,25 +63,33 @@ const COPY_CHUNK: usize = 64 * 1024;
 pub struct CommittedImage<F> {
     /// The header page and both slots, each holding the commit.
     prefix: Vec<u8>,
-    /// A handle on the file the commit was made in.
-    file: F,
+    /// A handle on the file the commit was made in. Shared: where locks belong to the process, the container keeps
+    /// this handle open as long as itself, since closing any descriptor of the file would drop its writer lock.
+    file: Arc<F>,
     /// The commit's `log_end`: where the copy ends.
     end: u64,
 }
 
 impl<F: ContainerFile> CommittedImage<F> {
-    /// The image of the commit whose prefix (header page and both slots, [`FIRST_FRAME_OFFSET`] bytes) is `prefix`,
-    /// whose frames end at `end`, made in `file`.
+    /// The image of the commit whose superblock slot (its [`SLOT_LEN`] encoded bytes) is `slot`, whose frames end at
+    /// `end`, made in `file`: the header page is read from `file` as it is (never rewritten in place, so a header
+    /// with flags this build does not know is copied unchanged), then `slot` is put in both slot places.
     ///
     /// # Errors
-    /// [`Error::InvalidInput`] if `prefix` is not [`FIRST_FRAME_OFFSET`] bytes or `end` is below it;
+    /// [`Error::InvalidInput`] if `slot` is not [`SLOT_LEN`] bytes or `end` is below [`FIRST_FRAME_OFFSET`];
     /// [`Error::Format`] (corruption) if `file` is shorter than `end`: a committed frame is missing;
-    /// [`Error::Io`] if its length cannot be read.
-    pub fn new(prefix: Vec<u8>, file: F, end: u64) -> Result<Self> {
-        if u64_from_usize(prefix.len()) != FIRST_FRAME_OFFSET || end < FIRST_FRAME_OFFSET {
+    /// [`Error::Io`] if its length or its header page cannot be read.
+    pub fn with_slot(file: F, slot: &[u8], end: u64) -> Result<Self> {
+        Self::shared(Arc::new(file), slot, end)
+    }
+
+    /// [`CommittedImage::with_slot`] on a handle shared with its container.
+    pub(super) fn shared(file: Arc<F>, slot: &[u8], end: u64) -> Result<Self> {
+        if slot.len() != SLOT_LEN || end < FIRST_FRAME_OFFSET {
             return Err(Error::InvalidInput(format!(
-                "an image needs a prefix of {FIRST_FRAME_OFFSET} bytes and an end at or past it, not {} and {end}",
-                prefix.len()
+                "an image needs a slot of {SLOT_LEN} bytes and an end at or past {FIRST_FRAME_OFFSET}, not {} and \
+                 {end}",
+                slot.len()
             )));
         }
         let file_len = file.file_len().map_err(Error::io("stat"))?;
@@ -91,6 +102,11 @@ impl<F: ContainerFile> CommittedImage<F> {
                 },
             }));
         }
+        let mut prefix = vec![0; HEADER_LEN];
+        file.read_exact_at(&mut prefix, 0)
+            .map_err(Error::io("read the header page"))?;
+        prefix.extend_from_slice(slot);
+        prefix.extend_from_slice(slot);
         Ok(Self { prefix, file, end })
     }
 
@@ -143,8 +159,10 @@ impl<F: ContainerFile> CommittedImage<F> {
 /// nothing is written unless every path is free; then the files are written under temporary names and synced, and
 /// linked to their paths in the order given, each link's directory synced before the next link. Either every path
 /// names its complete copy, or (after a failure this returns) none of them names anything this call made, unless
-/// removing a link it made fails too, which is logged. A crash
-/// leaves a prefix of `files` linked, each complete, and maybe stale temporary files `<name>.backup.<nonce>.<n>`.
+/// removing a link it made fails too (logged): then a prefix of `files` stays, each complete. A crash, at any point,
+/// also leaves a prefix of `files` linked, each complete, and maybe stale temporary files
+/// `<name>.backup.<nonce>.<n>`. A temporary name whose removal fails after every link is logged and left: the backup
+/// is complete and returns `Ok`.
 /// The file system must support hard links.
 ///
 /// ```
@@ -163,9 +181,10 @@ impl<F: ContainerFile> CommittedImage<F> {
 ///
 /// # Errors
 /// [`Error::AlreadyExists`] if a path exists (before anything is written) or appears before its link;
-/// [`Error::InvalidInput`] for a path with no file name; [`Error::Io`] if the file system fails. An `Io` error from
-/// removing a temporary name or the last directory sync comes after every link: the copies are then complete at their
-/// paths, but the last sync may not have made the removal durable, and a retry gets `AlreadyExists`.
+/// [`Error::InvalidInput`] for a path with no file name; [`Error::Io`] if the file system fails. Do not take an error
+/// to mean the paths are free: a removal during the clean-up may have failed (above), and the `Io` error of the last
+/// directory sync (op `"sync the directory of a backup that was written: ..."`) comes after every link, with every
+/// copy complete at its path but maybe not durable; a retry then gets `AlreadyExists`.
 pub fn write_backup_in<V: Vfs + ?Sized, F: ContainerFile>(
     vfs: &V,
     files: &[(&Path, &CommittedImage<F>)],
@@ -210,13 +229,16 @@ pub fn write_backup_in<V: Vfs + ?Sized, F: ContainerFile>(
         undo(vfs, &linked, &temps);
         return Err(e);
     }
-    let mut removed = Ok(());
+    // Every file is complete at its name: a temporary name left behind is not part of the backup, only litter.
     for temp in &temps {
         if let Err(e) = vfs.remove_file(temp)
             && e.kind() != io::ErrorKind::NotFound
-            && removed.is_ok()
         {
-            removed = Err(Error::io("remove temporary file")(e));
+            tracing::warn!(
+                path = %temp.display(),
+                error = %e,
+                "a backup is complete, but removing its temporary file failed: remove it by hand"
+            );
         }
     }
     let mut synced = Ok(());
@@ -224,19 +246,37 @@ pub fn write_backup_in<V: Vfs + ?Sized, F: ContainerFile>(
         if let Err(e) = vfs.sync_dir(dir)
             && synced.is_ok()
         {
-            synced = Err(Error::io("sync directory")(e));
+            synced = Err(Error::io(
+                "sync the directory of a backup that was written: it may not survive a crash",
+            )(e));
         }
     }
-    removed.and(synced)
+    synced
 }
 
-/// After a failure: removes the paths linked so far (newest first, so no later file outlives an earlier one) and the
-/// temporary names, then syncs their directories. Its own failures are logged: the error the caller gets is the
-/// first one, and what is left is a prefix of the files (complete) or stale temporary names.
+/// After a failure: removes the paths linked so far, newest first, each removal's directory synced before the next
+/// removal (the link order backwards, so at every instant and across a crash the names left are a prefix of `files`:
+/// no later file ever outlives an earlier one). The first removal or sync that fails stops it: the earlier paths stay,
+/// complete. Then the temporary names are removed and their directories synced. Its own failures are logged: the error
+/// the caller gets is the first one.
 fn undo<V: Vfs + ?Sized>(vfs: &V, linked: &[&Path], temps: &[PathBuf]) {
     for path in linked.iter().rev() {
         if let Err(e) = vfs.remove_file(path) {
-            tracing::error!(path = %path.display(), error = %e, "removing a partial backup failed");
+            tracing::error!(
+                path = %path.display(),
+                error = %e,
+                "removing part of a failed backup failed: it and the files before it are left, complete"
+            );
+            break;
+        }
+        let dir = parent_or_cwd(path);
+        if let Err(e) = vfs.sync_dir(dir) {
+            tracing::error!(
+                dir = %dir.display(),
+                error = %e,
+                "syncing a directory while removing a failed backup failed: the files before it are left"
+            );
+            break;
         }
     }
     for temp in temps {
@@ -246,12 +286,7 @@ fn undo<V: Vfs + ?Sized>(vfs: &V, linked: &[&Path], temps: &[PathBuf]) {
             tracing::warn!(path = %temp.display(), error = %e, "removing a backup's temporary file failed");
         }
     }
-    for dir in directories(
-        linked
-            .iter()
-            .copied()
-            .chain(temps.iter().map(PathBuf::as_path)),
-    ) {
+    for dir in directories(temps.iter().map(PathBuf::as_path)) {
         if let Err(e) = vfs.sync_dir(dir) {
             tracing::warn!(dir = %dir.display(), error = %e, "syncing a directory after a failed backup failed");
         }

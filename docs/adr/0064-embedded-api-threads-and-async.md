@@ -87,14 +87,14 @@ decisions d, e and o).
       `close` future lets the close finish.
     - Besides the eight calls, `AsyncDb` has `open_with(OpenOptions, location)` (an open needs its options) and a
       synchronous `collection(name)` (a lookup in the published state, which takes no lock). Collection management,
-      blobs, `refresh` and the JSON and typed variants are not async yet (ROADMAP 10.1.25).
+      blobs, `refresh` and the JSON and typed variants are not async yet (ROADMAP 10.1.26).
     - A get that has started checks its token before it reads: a get is one lookup, with no point to stop at inside.
     - Dropping an `AsyncDb` without `close` closes the pool (later jobs `Closed`, queued ones completed with
       `Closed`) but does not join its threads, which end after the job each runs: a destructor does not wait behind
       a long write. The `Db` inside is then dropped as item 6 says.
     - A job that panics resolves to `ErrorCode::Io` (an internal invariant that did not hold): `Panic` is the C
       ABI's alone. A panic inside a write still poisons the writer (item 7).
-    - The pool size is a hidden test option (`OpenOptions::async_threads`); a public one is ROADMAP 10.1.26.
+    - The pool size is a hidden test option (`OpenOptions::async_threads`); a public one is ROADMAP 10.1.27.
 
 ## Consequences
 

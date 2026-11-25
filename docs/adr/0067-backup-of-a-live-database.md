@@ -16,7 +16,7 @@ backup under `dest`.
 ## Decision
 
 1. **Committed images, not byte copies of the files.** A `CommittedImage` (`persia-storage`) is the 12288-byte
-   prefix built in memory (the header and **both** slots holding the commit, as a compaction writes them, SPEC §4.6)
+   prefix (the header page and **both** slots holding the commit, as a compaction writes them, SPEC §4.6)
    and a second handle on the file the commit was made in (`ContainerFile::try_clone_handle`, no lock), from which
    `12288..log_end` is copied in 64 KiB chunks. Below a committed `log_end` nothing is written again (SPEC §4.7) and
    the in-place slots are never read from the file, so the copy is the commit whatever the writer does meanwhile,
@@ -43,6 +43,24 @@ backup under `dest`.
    exists without its pack. A failure removes what it linked. Hard links are required, as for `Container::create`.
 5. **`dest` is never replaced** (SPEC did not say): `AlreadyExists` if anything is at `dest` or `<dest>.blobs`. Its
    directory must exist; it is not created. `dest` is a path or a `file://` URL, read as `Db::open` reads one.
+6. **Amended in review (2026-11-25).**
+   - The header page is copied as the file holds it, read when the image is taken (no writer of this version rewrites
+     it in place), not encoded again: a read-only handle of a file with `rocompat_flags` this build does not know
+     backs it up unchanged. Only the slots are written from memory.
+   - **Locks that belong to the process** (`locks_per_handle` false, NFS-style emulated `flock`, ADR-0019): closing
+     any descriptor of the container drops its writer lock, so the container's second handle is opened once, kept in
+     the container, and closed only when the container drops, after its lock is released. The pack's second handle
+     closes no lock: its writer lock is the file beside it.
+   - **Undo in the reverse order of the links**: the container's link removed first, the directory synced, then the
+     pack's; the first removal or sync that fails stops the undo and leaves the earlier files, complete. So the names
+     left are, at every instant and across a crash, a prefix of the link order: never `dest` without its pack.
+   - **After both links**, a temporary name that cannot be removed is logged and left (it is not part of the backup)
+     and the backup succeeds; the last directory sync failing is an `Io` error whose message says the backup was
+     written (both files complete, maybe not durable). An error therefore does not mean `dest` is free.
+   - The destination check does not follow a symbolic link (a dangling link is a name that exists). A poisoned
+     writer cannot commit, so its backup fails with `Poisoned`. Checksums are not checked on the way: `verify` the
+     copy to check it.
+   - A file system without hard links (FAT32, exFAT) refuses the backup with `Io`: ROADMAP 10.1.28.
 
 ## Consequences
 

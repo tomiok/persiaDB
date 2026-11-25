@@ -33,6 +33,8 @@ pub enum JobKind {
     Commit,
     /// `AsyncCollection::search`.
     Search,
+    /// `AsyncDb::open`, on its own thread.
+    Open,
 }
 
 impl JobKind {
@@ -115,11 +117,7 @@ where
 {
     fn run(self: Box<Self>, hook: Option<&JobHook>) {
         let Self { kind, slot, work } = *self;
-        let emit = |event: JobEvent| {
-            if let Some(hook) = hook {
-                hook(&event);
-            }
-        };
+        let emit = |event: JobEvent| emit(hook, &event);
         if !slot.start() {
             emit(JobEvent::Skipped { kind });
             return;
@@ -313,5 +311,68 @@ pub(crate) fn join(threads: Vec<JoinHandle<()>>) {
         if thread.join().is_err() {
             tracing::error!("a thread of the database's async pool panicked");
         }
+    }
+}
+
+/// Calls the test hook, if there is one, with `event`.
+pub(crate) fn emit(hook: Option<&JobHook>, event: &JobEvent) {
+    if let Some(hook) = hook {
+        hook(event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)] // Tests: inputs are fixed.
+
+    use std::future::Future;
+    use std::pin::pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    use super::*;
+
+    struct Unpark(std::thread::Thread);
+
+    impl Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
+        let mut cx = Context::from_waker(&waker);
+        let mut future = pin!(future);
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(output) => return output,
+                Poll::Pending => std::thread::park(),
+            }
+        }
+    }
+
+    #[test]
+    fn a_job_that_panics_is_an_io_error_and_its_thread_serves_the_next_job() {
+        let pool = Pool::new(PoolOptions {
+            threads: NonZeroUsize::new(1),
+            hook: None,
+        });
+        let panicked = pool.submit(JobKind::Put, |_| -> Result<()> { panic!("a bug in a job") });
+        let err = block_on(panicked).unwrap_err();
+        assert_eq!(err.code(), ErrorCode::Io);
+        // The one thread survived the panic: it runs the next job.
+        let next = pool.submit(JobKind::Get, |token| Ok(token.is_some()));
+        assert!(block_on(next).unwrap(), "a read runs with a token");
+        join(pool.close());
+    }
+
+    #[test]
+    fn a_closed_pool_refuses_jobs() {
+        let pool = Pool::new(PoolOptions::default());
+        join(pool.close());
+        let refused = pool.submit(JobKind::Commit, |_| Ok(()));
+        assert_eq!(block_on(refused).unwrap_err().code(), ErrorCode::Closed);
+        assert!(pool.close().is_empty(), "closed once");
     }
 }
