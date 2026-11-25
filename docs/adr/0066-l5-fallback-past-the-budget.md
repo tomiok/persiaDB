@@ -56,8 +56,9 @@ meant to bound latency, not to give up on the one level that needs no words (fou
   it past the budget costs about one more step; the deadline bounds it.
 - After a page L5 filled past the budget, the query's later pages are L5's ranking from that point (they do not go back
   to the levels the budget skipped): the pages by cursor are the pages by offset of that page's ranking.
-- With `fill` and facets, a page after an L5 cursor does not build the steps past its own only to count them, so its
-  facets may count fewer steps; a cursor page keeps no counts anyway (SPEC §7.5).
+- With `fill` and facets, a page after an L5 cursor does not build the steps past its own only to count them, and its
+  counts are still those of a page holding every hit: L5 matches every document the filters keep that no earlier
+  step matched, so the steps through L5 count each such document once (SPEC §7.5; a test compares them).
 
 ## Alternatives considered
 

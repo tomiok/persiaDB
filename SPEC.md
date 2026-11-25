@@ -1826,6 +1826,9 @@ counts its cut matches, as every page cuts it alike. A page with `fill` and face
 hits, the remaining steps of the levels that fill, and searches each only to count it: those steps collect no hit, are
 not listed in `applied` or `level`, and are not the cascade's last step a hit's cursor records. They are excluded from
 the later steps and held to the limits as any step. A page the budget truncates (§7.6) counts the steps it completed.
+After a cursor of L5's step (§7.6 "Budget", ROADMAP 8.1.34), a `fill` page with facets builds no step past its own
+only to count it, and still counts as a page holding every hit: L5 matches every document the filters keep that no
+earlier step matched, so the steps through L5 count each such document once, whichever steps came before it.
 When the budget passes in a step a page searches only to count it, the page is not truncated (its hits, `level` and
 `applied` are whole, §7.6), but its facets count only the steps searched before that one: they are partial, and the
 response does not say so (ROADMAP 8.1.31). The counts are kept once per query (ROADMAP 8.1.11): a collection's

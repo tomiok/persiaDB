@@ -1959,6 +1959,128 @@ mod budget {
         assert_eq!(out.relaxation.applied, ["fallback"]);
     }
 
+    /// L0, then a level of three rungs (`nosuch`, `hat`, `shoes`), then L5 by recency; `budget_ms` and `fill` as given.
+    fn rungs(body: FieldId, ms: u32, fill: bool) -> RelaxPlan {
+        let steps = vec![
+            step(term(body, "nosuch"), "drop_terms:75%"),
+            step(term(body, "hat"), "drop_terms:50%"),
+            step(term(body, "shoes"), "drop_terms:1"),
+        ];
+        let options = RelaxOptions {
+            levels: Some(Levels::Custom(Vec::new())),
+            fill: Some(fill),
+            ..budget(ms, 1)
+        };
+        RelaxPlan::new(&RelaxationConfig::default(), &options)
+            .unwrap()
+            .with_level(RelaxLevel::DropTerms, Stub::new(steps) as _)
+    }
+
+    /// The budget, on a clock that moves 1 ms a read, at which `purple`'s cascade is cut after the first rung and L5
+    /// fills the page past the budget: L5 takes step 2, inside the level of rungs.
+    fn cut_after_the_first_rung(
+        views: &crate::db::CollectionViews<'_>,
+        body: FieldId,
+        request: &SearchRequest,
+        fill: bool,
+    ) -> super::super::RelaxedResults {
+        for ms in 1..=500 {
+            let relax = rungs(body, ms, fill);
+            let exec = exec().budget_clock(Ticking::new(1));
+            let out = views
+                .search_relaxed(&term(body, "purple"), request, &relax, &exec)
+                .unwrap();
+            if out.relaxation.truncated && out.relaxation.applied == ["drop_terms:75%", "fallback"]
+            {
+                return out;
+            }
+        }
+        panic!("no budget cuts the cascade after the first rung");
+    }
+
+    /// L5's step falls inside a level of several steps (ROADMAP 8.1.34): the page L5 filled after the first of three
+    /// rungs gives a cursor of step 2, and the next page, under a plan the budget does not cut, builds L0 and the first
+    /// rung, stops the level at its second rung (it would take L5's step) and runs L5 there after the cursor. The pages
+    /// by cursor are the pages by offset of the page L5 filled.
+    #[test]
+    fn a_cursor_of_l5s_step_inside_a_level_pages_on_exactly() {
+        let (db, body, _) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let first = cut_after_the_first_rung(&views, body, &request(2), false);
+        assert!(
+            first
+                .hits
+                .iter()
+                .all(|h| h.level == RelaxLevel::Fallback && h.step == 2)
+        );
+        let every = cut_after_the_first_rung(&views, body, &request(10), false);
+        let ids = |hits: &[crate::db::RelaxedHit]| -> Vec<String> {
+            hits.iter()
+                .map(|h| h.hit.document.id().to_owned())
+                .collect()
+        };
+        assert_eq!(ids(&first.hits), ids(&every.hits)[..2]);
+        let roomy = rungs(body, 60_000, false);
+        let mut cursor = first.hits.last().map(crate::db::RelaxedHit::cursor);
+        let mut paged = ids(&first.hits);
+        while let Some(after) = cursor {
+            let next = SearchRequest {
+                search_after: Some(after),
+                ..request(2)
+            };
+            let out = views
+                .search_relaxed(&term(body, "purple"), &next, &roomy, &exec())
+                .unwrap();
+            // The second rung, at L5's step, is never searched: every hit is L5's at step 2.
+            assert!(
+                out.hits
+                    .iter()
+                    .all(|h| h.level == RelaxLevel::Fallback && h.step == 2)
+            );
+            assert_eq!(out.relaxation.applied, ["drop_terms:75%", "fallback"]);
+            paged.extend(ids(&out.hits));
+            cursor = out.hits.last().map(crate::db::RelaxedHit::cursor);
+        }
+        assert_eq!(paged, ids(&every.hits));
+    }
+
+    /// After a cursor of L5's step, a `fill` page with facets builds no step past its own only to count it, and its
+    /// counts are still those of a page holding every hit (SPEC §7.5): L5 matches every document the filters keep that
+    /// no earlier step matched, so the steps up to L5 count every such document, once.
+    #[test]
+    fn facets_after_a_cursor_of_l5s_step_count_every_document() {
+        let (db, body, tag) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let faceted = |limit| SearchRequest {
+            facets: vec![FacetRequest::new(tag, 10, c.schema()).unwrap()],
+            ..request(limit)
+        };
+        let first = cut_after_the_first_rung(&views, body, &faceted(2), true);
+        let roomy = rungs(body, 60_000, true);
+        let next = SearchRequest {
+            search_after: first.hits.last().map(crate::db::RelaxedHit::cursor),
+            ..faceted(2)
+        };
+        let second = views
+            .search_relaxed(&term(body, "purple"), &next, &roomy, &exec())
+            .unwrap();
+        let whole = views
+            .search_relaxed(&term(body, "purple"), &faceted(10), &roomy, &exec())
+            .unwrap();
+        assert!(!whole.relaxation.truncated);
+        assert_eq!(second.facets, whole.facets);
+        assert_eq!(first.facets, whole.facets);
+        // Five documents: three tagged `x`, two `y`.
+        let counts: Vec<u64> = whole.facets[0].values.iter().map(|v| v.count).collect();
+        assert_eq!(counts, [3, 2]);
+    }
+
     /// After a cursor of L5's step, a page whose budget passes before L5 still runs L5 there, past the budget and after
     /// the cursor (ROADMAP 8.1.34): it continues the cursor's ranking exactly, and is truncated.
     #[test]

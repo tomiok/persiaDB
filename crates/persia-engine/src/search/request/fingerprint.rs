@@ -283,6 +283,13 @@ mod deep {
     use super::*;
     use crate::schema::FieldId;
 
+    /// Takes a chain of `Not` apart from the top, each box freed after its inner filter moved out of it.
+    fn dismantle(mut filter: Filter) {
+        while let Filter::Not(inner) = filter {
+            filter = *inner;
+        }
+    }
+
     /// A filter built in code may nest deeper than any limit before it is validated: it is walked without recursion.
     #[test]
     fn a_deep_filter_is_walked_without_recursion() {
@@ -296,9 +303,13 @@ mod deep {
         };
         let f = DefaultFields::all(&crate::schema::SchemaBuilder::new("c").build().unwrap());
         let limits = QueryLimits::default();
-        let (deep, deeper) = (nested(10_000), nested(10_001));
+        let (deep, deeper, again) = (nested(10_000), nested(10_001), nested(10_000));
         let hash = |filter: &Filter| fingerprint("", &f, (Some(filter), None), &limits);
         assert_ne!(hash(&deep), hash(&deeper));
-        assert_eq!(hash(&deep), hash(&nested(10_000)));
+        assert_eq!(hash(&deep), hash(&again));
+        // Dropping the chain would recurse once per `Not`: taken apart one box at a time instead.
+        for filter in [deep, deeper, again] {
+            dismantle(filter);
+        }
     }
 }
