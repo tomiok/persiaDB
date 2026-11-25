@@ -770,8 +770,8 @@ typo            0          0          0            -            -            -  
     }
 
     /// A relaxation budget that has always run out by the next read: the `typo` queries, which find their word only
-    /// through relaxation, are counted as truncated (each at most once), and the hits of a truncated page are the
-    /// ones it found before it stopped.
+    /// through relaxation, are counted as truncated (each at most once). A truncated page that found nothing before the
+    /// budget passed is filled by L5 `fallback` past it (ROADMAP 8.1.33), so every query of the kind still has a hit.
     #[test]
     fn a_page_the_budget_truncated_is_counted_per_kind() {
         let base = tempfile::tempdir().unwrap();
@@ -786,7 +786,8 @@ typo            0          0          0            -            -            -  
         let typo = |r: &Report| r.kinds.iter().find(|k| k.kind == QueryKind::Typo).cloned();
         let (typo, calm_typo) = (typo(&report).unwrap(), typo(&calm).unwrap());
         assert!(typo.truncated > 0, "{report:?}");
-        assert!(typo.hits < calm_typo.hits, "{typo:?} {calm_typo:?}");
+        // Every query has a hit, truncated or not: pillar 3.
+        assert!(typo.hits >= typo.count, "{typo:?} {calm_typo:?}");
         assert_eq!(
             (report.corpus, report.query_mix),
             (calm.corpus, calm.query_mix)
