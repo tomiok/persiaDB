@@ -59,6 +59,9 @@ mod snapshot;
 mod verify;
 mod views;
 
+// A copy of the committed state and the writing of a backup (ROADMAP 10.1.8, ADR-0067).
+mod backup;
+
 // -- gc (9.5) --
 // The blob references GC marks (ROADMAP 9.5.1): `Database` methods in `blob_refs`; its `pub use` lines go here.
 mod blob_refs;
@@ -77,8 +80,9 @@ use persia_format::source::ByteSource;
 use persia_storage::container::{self, Commit, Container, ContainerFile, Mode};
 use roaring::RoaringBitmap;
 
+pub use backup::{CommittedImage, write_backup, write_backup_in};
 pub use clock::{Clock, ManualClock, SegmentIds, SystemClock};
-pub use compaction::{Compacted, CompactionOptions, CompactionStats};
+pub use compaction::{Compacted, CompactionHold, CompactionOptions, CompactionStats};
 pub use exec::{CancelToken, ExecTerms, Execution, PoolError, SearchPool, Threads};
 pub use merging::{MergeOutcome, MergeStats};
 pub use objects::ContainerObjects;
@@ -620,6 +624,8 @@ pub struct Database<F = File> {
     replaying: Option<u64>,
     /// What became of the compactions since the open.
     compactions: CompactionStats,
+    /// How many [`CompactionHold`]s live: while any does, no automatic compaction runs (a backup copies the file).
+    compaction_holds: Arc<std::sync::atomic::AtomicUsize>,
     /// What the relaxed searches of the collections dropped since the open counted (ROADMAP 8.3.3), so that
     /// [`Database::relaxation_stats`] never goes down.
     relaxation_dropped: RelaxationStats,
@@ -750,6 +756,7 @@ impl<F: ContainerFile + Sync> Database<F> {
             poisoned: false,
             replaying: None,
             compactions: CompactionStats::default(),
+            compaction_holds: Arc::default(),
             relaxation_dropped: RelaxationStats::default(),
         }
     }

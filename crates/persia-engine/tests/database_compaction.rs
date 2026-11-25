@@ -662,3 +662,46 @@ fn unflushed_records_survive_a_merge_commit_after_a_compaction() {
     let db = open(&fs.crash(CrashLoss::All)).unwrap();
     assert_docs(&db, &docs, &[], "reopened after the merge commit");
 }
+
+/// ROADMAP 10.1.8: while a `CompactionHold` lives (a backup copying the container), no automatic compaction runs,
+/// however due; once it is dropped, the next merge step compacts.
+#[test]
+fn a_compaction_hold_keeps_merge_step_from_compacting() {
+    let fs = SimFs::new();
+    let mut db = create(&fs, true);
+    let hold = db.hold_compaction();
+    let second = db.hold_compaction();
+    assert!(db.compaction_held());
+    for round in 0..10 {
+        for i in 0..4 {
+            db.put(
+                "a",
+                &doc(&format!("d{i}"), &format!("r{round}")),
+                Durability::Buffered,
+            )
+            .unwrap();
+        }
+        db.commit().unwrap();
+        db.merge_step().unwrap();
+        assert!(db.compact_if_due().unwrap().is_none());
+    }
+    assert_eq!(db.compaction_stats().compacted, 0);
+    assert!(
+        db.space_usage().unwrap().is_due(40),
+        "{:?}",
+        db.space_usage()
+    );
+    // Released from another thread, one hold at a time: both must go.
+    std::thread::spawn(move || drop(hold)).join().unwrap();
+    assert!(db.compaction_held());
+    assert!(db.compact_if_due().unwrap().is_none());
+    drop(second);
+    assert!(!db.compaction_held());
+    db.merge_step().unwrap();
+    assert_eq!(db.compaction_stats().compacted, 1);
+    assert!(!db.space_usage().unwrap().is_due(40));
+    // An explicit compaction is the caller's request: a hold does not refuse it.
+    let _hold = db.hold_compaction();
+    db.compact().unwrap();
+    assert_eq!(db.compaction_stats().compacted, 2);
+}

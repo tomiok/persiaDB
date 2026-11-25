@@ -294,6 +294,17 @@ impl Db {
         Ok(self.inner.snapshot()?.seq())
     }
 
+    /// Test hook: `f` on the writer (the engine's database with its pack) under the writer mutex, as a write runs:
+    /// for what the facade does not offer, such as a blob GC (`BlobDatabase::gc`).
+    ///
+    /// # Errors
+    /// As a write: [`ErrorCode::ReadOnly`], [`ErrorCode::Closed`], [`ErrorCode::Poisoned`].
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn with_writer<T>(&self, f: impl FnOnce(&mut Writer) -> T) -> Result<T> {
+        self.inner.write("use the writer", |db| Ok(f(db)))
+    }
+
     /// How the database's block cache is used (SPEC §10.6, ROADMAP 10.2.5), for metrics: every segment the `Db`
     /// opens reads through this one cache, sized by [`OpenOptions::block_cache_bytes`].
     ///
@@ -528,6 +539,43 @@ impl Inner {
     /// [`Db::commit`]: every collection's unflushed writes flushed and committed, under the writer mutex.
     pub(crate) fn commit(&self) -> Result<()> {
         self.write("commit", |db| db.commit().map(drop).map_err(Error::wrap))
+    }
+
+    /// What [`Db::backup`](crate::Db::backup) copies (SPEC §4.8): on a read-write database, under the writer mutex, a
+    /// commit, then the holds on compaction and GC, then the container's image, then the pack's; on a read-only one,
+    /// the images of the state it shows. The mutex is released when this returns: the copy does not hold it.
+    pub(crate) fn committed_images(&self) -> Result<crate::backup::Images> {
+        let pack_image = |store: &PackStore| store.committed_image().map_err(Error::wrap);
+        match &self.mode {
+            Mode::ReadWrite { .. } => self.write("back up", |db| {
+                db.commit().map_err(Error::wrap)?;
+                // The holds first: from here on no compaction or GC replaces a file the images read.
+                let holds = crate::backup::Holds::new(db.log().hold_compaction(), db.hold_gc());
+                // The container first, then the pack: every blob the commit references was bound before it was
+                // logged, so the pack's committed state, taken after, holds it (SPEC §4.8, §9.5).
+                let container = db.log().committed_image().map_err(Error::wrap)?;
+                let pack = pack_image(db.blobs().store())?;
+                Ok(crate::backup::Images::new(
+                    container,
+                    pack,
+                    db.log().container().superblock().seq,
+                    Some(holds),
+                ))
+            }),
+            Mode::ReadOnly(state) => {
+                self.check_open()?;
+                let guard = read_lock(state);
+                let db = guard.as_ref().ok_or_else(Error::closed)?;
+                let container = db.database().committed_image().map_err(Error::wrap)?;
+                let pack = pack_image(db.blobs().store())?;
+                Ok(crate::backup::Images::new(
+                    container,
+                    pack,
+                    db.database().container().superblock().seq,
+                    None,
+                ))
+            }
+        }
     }
 
     /// [`ErrorCode::Closed`] once closed, [`ErrorCode::ReadOnly`] (naming `what`) on a read-only database.

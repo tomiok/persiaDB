@@ -487,7 +487,35 @@ reader is open. That is why the default on Windows is `MappedReads::Never`; ROAD
 A database is both of its files (§4). A copy of `<name>.persia` alone keeps every document's `BlobRef` but none of
 the bytes behind it: each reference is dangling, `get_blob` fails for it, and `verify` reports it (§9.5). A
 database that never stored a blob has no `.persia.blobs` file (§9.3), and is copied whole by copying `<name>.persia`.
-Until `backup` copies both files consistently (ROADMAP 10.1.8), a manual copy is safe in these ways:
+**`Db::backup(dest)`** (ROADMAP 10.1.8, ADR-0067) copies both files consistently, with the writer open and not
+blocked for the copy:
+1. `dest` names the copy's container; its pack goes to `<dest>.blobs` beside it (§9.3), only if the database has a
+   pack. If anything is at either name the backup fails with `AlreadyExists` before anything is written: a backup
+   never replaces a file. The directory of `dest` must exist (it is not created) and support hard links.
+2. On a read-write database, under the writer mutex (one write's time): a commit (§4.5), so the copy holds every
+   write that returned before the call; then a hold on automatic compaction (§4.6) and one on blob GC (§9.5), kept
+   until the copy ends; then the container's committed state, then the pack's, in that order (the rule of the third
+   way below). A committed state is the header, the active superblock, and the frames `12288..log_end`, read from a
+   second handle on the file the commit was made in. The writer mutex is then released: writes, commits and reads go
+   on during the copy, and none of them is in it. On a read-only database (its writer is another process, or none):
+   the last commit of the state it shows (its open's or its last refresh's, §8.4) and its pack handle's committed
+   state, under its own state lock, with no hold: another process's compaction or GC renames a new file over a path,
+   which a handle the copy holds does not follow (§4.6, §9.3). The WAL records a read-only open replayed after its
+   commit are not copied.
+3. Each copy is the header, **both** slots holding that commit (as after a compaction, §4.6 step 3), and the frames
+   `12288..log_end` copied byte for byte. No byte at or after `log_end` is copied (acknowledged WAL frames after the
+   commit, §8.2; chunks staged for an unbound upload, §9.3), and the slots, the only bytes rewritten in place, are
+   written from memory: the copy opens at exactly that commit, with no torn tail. Below a committed `log_end` no writer
+   writes again (§4.7), so the bytes read are the commit's even while the writer appends.
+4. Durable, whole or absent: each file is written to a temporary name `<name>.backup.<nonce>.<n>` beside its
+   destination and synced (data and length, §4.5.2); then hard-linked to its name, which fails if the name has
+   appeared, and its directory synced, **the pack before the container**, so a crash never leaves `dest` without its
+   pack; then the temporary names are removed and the directory synced. A failure removes what the backup linked and
+   its temporary files. A crash may leave `<dest>.blobs` alone (no `dest`: remove it before trying again) or stale
+   temporary files, never a partial file under either name. An error from removing a temporary name or the last
+   directory sync comes after both links: the backup is then complete at `dest`.
+
+Besides `backup`, a manual copy is safe in these ways:
 - **Closed.** Copy both files while no process has the database open read-write (read-only opens may stay: they
   write nothing to either file). This is the recommended way. `<name>.lock` (Windows, ADR-0016) holds no data and is
   not copied. A copy need not take `<name>.persia.blobs.leases/` either: a copied reader lease is unlocked, so the

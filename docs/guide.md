@@ -357,7 +357,8 @@ The `.persia.blobs` file is created by the first blob stored, so a database with
 file. A database with blobs is both files: copy them with the database closed, or with the writer
 open copy the container first and then the pack, with blob GC and compaction paused until both
 copies finish (either one rewrites a file mid-copy). Copying only the `.persia` file leaves every blob
-reference dangling (SPEC §4.8). `Db::backup` will copy both consistently (ROADMAP 10.1.8).
+reference dangling (SPEC §4.8). `Db::backup(dest)` copies both consistently with the writer open: one
+commit, every blob it references, written to new files and never replacing one (ROADMAP 10.1.8, ADR-0067).
 
 Done so far (ROADMAP 9.1, 9.4.4): the content hasher, the fixed-size chunker and the blob manifest
 codec in `persia-blob`, and the `BlobId` and `BlobRef` value types in `persia-format` (ROADMAP

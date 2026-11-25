@@ -78,6 +78,9 @@ pub struct OpenOptions {
     pub(crate) drop_wait: Duration,
     /// Test hook: where a `Drop` puts the thread it detached.
     pub(crate) detached: Option<DetachedSlot>,
+    /// Test hook: called by `Db::backup` at each of its steps.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) backup_hook: Option<crate::BackupHook>,
     /// How the async pool is set up (ADR-0064 item 12).
     #[cfg(feature = "async")]
     pub(crate) pool: crate::asynchronous::PoolOptions,
@@ -115,6 +118,8 @@ impl OpenOptions {
             hold_maintenance: false,
             drop_wait: DROP_WAIT,
             detached: None,
+            #[cfg(feature = "test-hooks")]
+            backup_hook: None,
             #[cfg(feature = "async")]
             pool: crate::asynchronous::PoolOptions::default(),
         }
@@ -308,6 +313,16 @@ impl OpenOptions {
     #[must_use]
     pub fn clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = Some(clock);
+        self
+    }
+
+    /// Test hook: called by `Db::backup` at each of its steps, on the caller's thread; a hook that blocks holds the
+    /// backup there (with the writer mutex released).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn backup_hook(mut self, hook: crate::BackupHook) -> Self {
+        self.backup_hook = Some(hook);
         self
     }
 

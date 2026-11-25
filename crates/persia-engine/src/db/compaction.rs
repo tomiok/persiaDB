@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use persia_format::block::Compression;
 use persia_storage::container::{self, ContainerFile, Relocation, SpaceUsage};
@@ -62,6 +63,45 @@ pub struct Compacted {
     pub before: SpaceUsage,
     /// The space of the new one.
     pub after: SpaceUsage,
+}
+
+/// Holds a [`Database`]'s automatic compaction back while it lives ([`Database::hold_compaction`]): a copy of the
+/// container's committed state (a backup, SPEC §4.8) takes one, so that no compaction replaces the file until the
+/// copy ends. It is released when dropped, from any thread, without the database.
+#[derive(Debug)]
+pub struct CompactionHold(Arc<AtomicUsize>);
+
+impl Drop for CompactionHold {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl<F> Database<F> {
+    /// Holds automatic compaction back until the returned hold is dropped (SPEC §4.6, §4.8): while any hold lives,
+    /// [`Database::compact_if_due`] compacts nothing, so neither does [`Database::merge_step`]. An explicit
+    /// [`Database::compact`] still runs: the caller asked for it.
+    ///
+    /// ```
+    /// use persia_engine::db::{Database, DatabaseOptions};
+    ///
+    /// # let dir = tempfile::tempdir()?;
+    /// let db = Database::create(dir.path().join("app.persia"), DatabaseOptions::default())?;
+    /// let hold = db.hold_compaction();
+    /// assert!(db.compaction_held());
+    /// drop(hold);
+    /// assert!(!db.compaction_held());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn hold_compaction(&self) -> CompactionHold {
+        self.compaction_holds.fetch_add(1, Ordering::SeqCst);
+        CompactionHold(Arc::clone(&self.compaction_holds))
+    }
+
+    /// Whether a [`CompactionHold`] lives.
+    pub fn compaction_held(&self) -> bool {
+        self.compaction_holds.load(Ordering::SeqCst) > 0
+    }
 }
 
 impl<F: ContainerFile + Sync + 'static> Database<F> {
@@ -182,13 +222,13 @@ impl<F: ContainerFile + Sync + 'static> Database<F> {
     }
 
     /// [`Database::compact`] if the container was opened from a path and its dead bytes reach both thresholds of
-    /// [`CompactionOptions`]; returns what it did, `None` if it was not due.
+    /// [`CompactionOptions`]; returns what it did, `None` if it was not due, or a [`CompactionHold`] lives.
     ///
     /// # Errors
     /// As [`Database::compact`].
     pub fn compact_if_due(&mut self) -> Result<Option<Compacted>, DatabaseError> {
         self.usable()?;
-        if self.wal.log().path().is_none() {
+        if self.wal.log().path().is_none() || self.compaction_held() {
             return Ok(None);
         }
         let usage = self.space_usage()?;

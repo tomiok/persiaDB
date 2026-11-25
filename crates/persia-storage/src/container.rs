@@ -13,6 +13,8 @@
 
 mod error;
 pub mod file;
+// A committed state copied out, and a backup written (ROADMAP 10.1.8, ADR-0067).
+mod image;
 mod mapped;
 mod path;
 mod side;
@@ -42,6 +44,7 @@ use persia_format::{Corruption, Reader, Writer};
 use crate::vfs::Vfs;
 pub use error::{Error, ErrorKind, ReadOnlyReason, Result};
 pub use file::ContainerFile;
+pub use image::{CommittedImage, write_backup_in};
 pub use mapped::MapPermit;
 pub use stream::FrameWriter;
 pub use tail::Repair;
@@ -628,6 +631,30 @@ impl<F: ContainerFile> Container<F> {
     /// The container header.
     pub fn header(&self) -> &Header {
         &self.header
+    }
+
+    /// The committed state this handle has ([`Container::superblock`]), as a [`CommittedImage`] to copy (SPEC §4.8,
+    /// ROADMAP 10.1.8): the header and both slots holding that commit, and another handle on this file
+    /// ([`ContainerFile::try_clone_handle`], no lock taken) to read `12288..log_end` from. Nothing after `log_end` is
+    /// in it: a copy opens at exactly this commit. The writer may go on meanwhile: below a committed `log_end` it
+    /// never writes again (SPEC §4.7), and a compaction renames a new file over the path, which the handle does not
+    /// follow.
+    ///
+    /// # Errors
+    /// [`Error::Encode`] if the header has a flag this build does not know (a read-only handle of a newer file);
+    /// [`Error::Io`] if the file has no second handle ([`io::ErrorKind::Unsupported`]) or its length cannot be read;
+    /// [`Error::Format`] if the file is shorter than `log_end`.
+    pub fn committed_image(&self) -> Result<CommittedImage<F>> {
+        let mut w = Writer::new();
+        self.header.encode(&mut w)?;
+        let sb = self.active.superblock;
+        sb.encode(&mut w)?;
+        sb.encode(&mut w)?;
+        let file = self
+            .file
+            .try_clone_handle()
+            .map_err(Error::io("open a second handle"))?;
+        CommittedImage::new(w.into_inner(), file, sb.log_end)
     }
 
     /// How the container was opened.
