@@ -1,4 +1,4 @@
-//! The `persia` command-line tool: inspect, dump, verify, compact, bench.
+//! The `persia` command-line tool: inspect, dump, verify, compact, import, search, bench.
 //!
 //! Maintenance commands (ROADMAP 2.3.8, 2.4.19, 9.2.10; ADR-0019) list and remove the files a crash or a recovery leaves
 //! next to a container (its blob pack's included) or inside a local store. Each found file is printed as one
@@ -25,8 +25,12 @@
 //! collection's schema, documents and segments (module `stats`, which defines its `--json` shape; it is the
 //! whole-database inspection, so there is no `inspect database`). `persia dump documents` writes a collection's live
 //! documents as JSON Lines in the output form of SPEC §6.4.1, in storage order (module `documents`). `persia compact`
-//! rewrites the container without its dead frames (SPEC §4.6, module `compact`); it is the one database command that
-//! opens read-write.
+//! rewrites the container without its dead frames (SPEC §4.6, module `compact`).
+//!
+//! For quick experiments (ROADMAP 10.4.2), through the embedded API: `persia import` reads JSON Lines (a file, or the
+//! standard input) into a collection, one document per line in the form `dump documents` writes, and stops at the first
+//! bad line, naming it (module `import`); `persia search` runs one query, user text or a request JSON, on a read-only
+//! open (module `search`). `compact` and `import` are the database commands that open read-write.
 //!
 //! The command tree. A file or directory is the positional argument (`<PATH>`; `<ROOT>` for a store), every other
 //! argument is a `--flag`, and `--json` asks for one JSON object on one line where a command has one:
@@ -43,6 +47,8 @@
 //! persia verify <PATH> [--quick | --deep]
 //! persia stats <PATH> [--json]
 //! persia compact <PATH> [--json]
+//! persia import <PATH> --collection <COLLECTION> [--input <FILE>] [--schema <SCHEMA>] [--json]
+//! persia search <PATH> --collection <COLLECTION> (--query <TEXT> | --request <JSON>) [--json]
 //! persia bench [--dir <DIR>] [--docs <DOCS>] [--queries <QUERIES>] [--seed <SEED>] [--json]
 //! ```
 //!
@@ -69,16 +75,21 @@
 //! | `dump documents` | 0 | 1 | 4 | 3 | 0 |
 //! | `inspect container` | 0 | 1 | 4 | 3 | 0 |
 //! | `compact` | 0 | 1 | 4 | 3 | 1 |
+//! | `import` | 0 | 1 | 4 | 3 | 1 |
+//! | `search` | 0 | 1 | 4 | 3 | 0 |
 //! | `container sweep` | 0 | 1 | 4 | 3 | 1 |
 //! | `container files` | 0 | 1 | 0 | 0 | 0 |
 //!
-//! The read-only commands take no lock, so a live writer does not fail them; `compact` and `container sweep` open
-//! read-write and fail with status 1 while another writer has the database. `container files` opens nothing: it lists
-//! the files beside any existing file. `inspect container` reports damage after the last commit on its rows and
-//! still exits 0 (it is a debugging aid; `verify` is the check). Besides the table: `dump documents` exits 1 for a
-//! collection the database lacks, `compact` exits 1 for a schema that names an analyzer registered by the application
-//! (it has the built-in ones only), the segment commands exit 3 for a corrupt segment file and 1 for a missing one or
-//! a `--schema` that is not the segment's, and the store commands exit 1 for a root that is not a directory.
+//! The read-only commands (`search` among them) take no lock, so a live writer does not fail them; `compact`, `import`
+//! and `container sweep` open read-write and fail with status 1 while another writer has the database. `container
+//! files` opens nothing: it lists the files beside any existing file. `inspect container` reports damage after the
+//! last commit on its rows and still exits 0 (it is a debugging aid; `verify` is the check). Besides the table: `dump
+//! documents` exits 1 for a collection the database lacks, `compact` exits 1 for a schema that names an analyzer
+//! registered by the application (it has the built-in ones only), `import` and `search` exit 1 for a collection the
+//! database lacks (`import` creates it with `--schema`) and for a schema naming a registered analyzer, `import` exits 1
+//! at the first bad line of its input (naming it, after committing the lines before it), the segment commands exit 3
+//! for a corrupt segment file and 1 for a missing one or a `--schema` that is not the segment's, and the store commands
+//! exit 1 for a root that is not a directory.
 //!
 //! `persia bench` (ROADMAP 10.4.3, module `bench`) is a quick micro-benchmark: it indexes a seeded synthetic corpus
 //! into a new database in a scratch directory it creates and removes, then runs a seeded query mix, and reports
@@ -93,7 +104,9 @@ mod compact;
 mod container;
 mod database;
 mod documents;
+mod import;
 mod open;
+mod search;
 mod segment;
 mod stats;
 
@@ -167,6 +180,38 @@ enum Command {
         /// The container file.
         path: PathBuf,
         /// Write one JSON object (its keys are listed in the README's command-line section) instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Imports JSON Lines into a collection, for quick experiments: one document per line, in the form `persia dump
+    /// documents` writes (SPEC §6.4.1), each put as an upsert by id, committed at the end. Opens the database
+    /// read-write, as a writer does, so it fails (status 1) while another writer has it open. The collection must
+    /// exist unless `--schema` is given. Empty and blank lines are skipped. THE FIRST BAD LINE STOPS THE IMPORT (not
+    /// UTF-8, over 16 MiB, not JSON, not a document of the schema, refused by the database, or referencing a blob this
+    /// database's blob store does not hold): the documents of the lines before it are committed, nothing from it on,
+    /// and the error names the line (1-based). Exits with status 3 on corruption, 4 when the file is not a Persia
+    /// container, and 1 on any other failure.
+    Import(import::Options),
+    /// Runs one search of a collection, for quick experiments: `--query` searches the user text with every default
+    /// (relaxed, so by default never empty when the collection has a document; 20 hits), `--request` takes a request
+    /// JSON (SPEC §7.1.4). Read-only, without the writer lock, so a live writer may have the database open; it takes a
+    /// reader lease beside the blob pack. Prints each hit's rank, score and document, or with `--json` the response
+    /// JSON of SPEC §7.5.2. Exits with status 3 on corruption, 4 when the file is not a Persia container, and 1 on any
+    /// other failure.
+    #[command(group(clap::ArgGroup::new("what").required(true).args(["query", "request"])))]
+    Search {
+        /// The container file.
+        path: PathBuf,
+        /// The collection to search.
+        #[arg(long)]
+        collection: String,
+        /// The user text (SPEC §7.1.1).
+        #[arg(long)]
+        query: Option<String>,
+        /// A request JSON (SPEC §7.1.4), such as '{"q": "lamp", "limit": 5, "relax": false}'.
+        #[arg(long)]
+        request: Option<String>,
+        /// Write the response JSON (SPEC §7.5.2) on one line instead of text.
         #[arg(long)]
         json: bool,
     },
@@ -429,6 +474,17 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Compact { path, json } => to_stdout(|out| compact::compact(out, &path, json))?,
         Command::Stats { path, json } => to_stdout(|out| stats::stats(out, &path, json))?,
+        Command::Import(options) => to_stdout(|out| import::import(out, &options))?,
+        Command::Search {
+            path,
+            collection,
+            query,
+            request,
+            json,
+        } => {
+            let query = search::Query::of(query, request)?;
+            to_stdout(|out| search::search(out, &path, &collection, &query, json))?;
+        }
         Command::Bench {
             dir,
             docs,

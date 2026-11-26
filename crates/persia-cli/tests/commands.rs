@@ -1,7 +1,8 @@
 //! The `persia` binary's database commands, end to end (ROADMAP 10.4.1): `stats`, `compact` and `dump documents`,
 //! their output and `--json` shapes, and the exit status of every command that takes a container, for a sound
 //! database, a missing path, a file that is not a container, a damaged one and one a live writer holds (the crate
-//! docs of `persia-cli` hold the same table).
+//! docs of `persia-cli` hold the same table). The table covers `import` and `search` too (ROADMAP 10.4.2; their own
+//! tests are in `tests/import.rs`).
 
 #![allow(
     clippy::unwrap_used,
@@ -959,7 +960,7 @@ fn in_state(dir: &Path, state: State) -> PathBuf {
 }
 
 /// The arguments of every command that takes a container, by a name for messages; `{}` stands for the path.
-const COMMANDS: [(&str, &[&str]); 10] = [
+const COMMANDS: [(&str, &[&str]); 13] = [
     ("verify", &["verify", "{}"]),
     ("verify --quick", &["verify", "--quick", "{}"]),
     ("stats", &["stats", "{}"]),
@@ -971,6 +972,23 @@ const COMMANDS: [(&str, &[&str]); 10] = [
     ("inspect container", &["inspect", "container", "{}"]),
     ("compact", &["compact", "{}"]),
     ("compact --json", &["compact", "{}", "--json"]),
+    ("import", &["import", "{}", "--collection", "notes"]),
+    (
+        "search",
+        &["search", "{}", "--collection", "notes", "--query", "note"],
+    ),
+    (
+        "search --json",
+        &[
+            "search",
+            "{}",
+            "--collection",
+            "notes",
+            "--query",
+            "note",
+            "--json",
+        ],
+    ),
     ("container sweep", &["container", "sweep", "{}"]),
     ("container files", &["container", "files", "{}"]),
 ];
@@ -1039,7 +1057,10 @@ fn every_command_exits_with_its_documented_status_beside_a_live_writer() {
         let path = dir.path().join("app.persia");
         let writer = database(&path);
         let out = run_on(args, &path);
-        let read_write = matches!(name, "compact" | "compact --json" | "container sweep");
+        let read_write = matches!(
+            name,
+            "compact" | "compact --json" | "import" | "container sweep"
+        );
         assert_eq!(
             out.status.code(),
             Some(i32::from(read_write)),
@@ -1066,6 +1087,8 @@ fn a_damaged_committed_segment_exits_with_3() {
         &["stats", "{}"][..],
         &["dump", "documents", "{}", "--collection", "notes"],
         &["compact", "{}"],
+        &["import", "{}", "--collection", "notes"],
+        &["search", "{}", "--collection", "notes", "--query", "note"],
         &["verify", "{}"],
     ] {
         let dir = tempfile::tempdir().unwrap();
@@ -1122,6 +1145,8 @@ fn help_lists_the_command_tree_and_each_commands_exit_statuses() {
         "verify",
         "compact",
         "stats",
+        "import",
+        "search",
     ] {
         assert!(
             root.lines()
@@ -1148,6 +1173,8 @@ fn help_lists_the_command_tree_and_each_commands_exit_statuses() {
         &["compact", "--help"][..],
         &["stats", "--help"],
         &["dump", "documents", "--help"],
+        &["import", "--help"],
+        &["search", "--help"],
     ] {
         let help = stdout(&persia(args));
         let flat = help.split_whitespace().collect::<Vec<_>>().join(" ");

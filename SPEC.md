@@ -2857,6 +2857,24 @@ ascending docid, then the documents of the WAL records not yet in a segment, in 
 dump of one file state; a merge or a commit changes the order, not the set. A segment's documents are streamed one at a time; the WAL's
 are in memory, as the open replayed them (§8.6).
 
+**Import and search** (ROADMAP 10.4.2), for quick experiments, go through the embedded API. `persia import <path>
+--collection <name> [--input <file>]` reads JSON Lines (the file, or the standard input) into the collection: one
+document per line in the JSON form of §6.4.1, so a `dump documents` line imports back. It opens read-write as any
+writer does (it fails while another writer holds the lock, and recovery runs first). The collection must exist unless
+`--schema <file>` gives its schema (§6.2): the database is then created if no file is at the path, the collection if
+the database lacks it, and an existing collection must have exactly that schema. A line ends at `\n` (a `\r` before it
+is dropped), is at most 16 MiB (the longest document JSON text, checked in bounded memory) and valid UTF-8; empty and
+blank lines (JSON whitespace only) are skipped and still counted. Each document is put (an upsert by id, §8.3), logged
+`Buffered`, and the import commits once at its end. **The first bad line stops it**: a line that is not UTF-8, too
+long, not JSON, not a document of the schema, or that the put refuses (a blob reference, §9.6, or a memtable
+rejection). The command then commits the documents of the lines before it and fails, naming the line (1-based) and
+why: nothing from that line on is imported, so an import resumes there, and running one again is harmless. A crash
+leaves a prefix of the lines imported. `persia search <path> --collection <name> (--query <text> | --request <json>)`
+runs one search (§7.1.1 user text with every default, or a request JSON, §7.1.4) on a read-only open, without the
+lock; as any read-only handle of the embedded API, it takes a reader lease (§9.3). It prints each hit's rank, score
+and document, or with `--json` the response JSON of §7.5.2. Both have the built-in analyzers only: a schema that names
+a registered analyzer (§6.2.2) fails their open.
+
 ### 8.7 Manifest
 A manifest is the snapshot one commit publishes (ADR-0024): the commit's `seq`, the committing writer's
 `fence_token` (§11.3), `wal_start`, and per collection its current schema and live segments, each with its current
@@ -3384,7 +3402,10 @@ Blob::Stored(reference))` (ADR-0063 item 5), and in Rust `put(doc, blob)` is `Co
 gets a blob only through `put(doc, blob)`, where `blob` is either bytes to store (`Blob::from_path`, `Blob::from_reader`),
 which `put` stores first (§9.5), or a `BlobRef` that this database's `put_blob` returned, which `put` checks is bound
 in this database's store (and pinned, §9.5) before it logs the document; a `BlobRef` it does not find is an error
-and logs nothing. The server and the SDKs (M11, M14) go through the same calls. A dangling reference that reaches a
+and logs nothing. The server and the SDKs (M11, M14) go through the same calls, and so does `persia import` (§8.6),
+which stops at a line whose reference this database's store does not hold, naming the line and the `blob_id`: a dump
+carries references, not blob bytes, so it imports with its blobs only into the database it came from, or a copy with
+its pack (§4.8), until `dump documents` exports blobs (ROADMAP 10.4.6). A dangling reference that reaches a
 database anyway (written below the public API, or by copying only the container, §4.8) is reported by `verify`
 (§9.5), and `get_blob` fails for it.
 

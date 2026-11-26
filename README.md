@@ -163,6 +163,8 @@ The binary is `persia`. These subcommands exist:
 | `persia dump documents <file> --collection <name>` | The collection's live documents as JSON Lines (the `get` form of a document), in storage order. A segment's documents are streamed one at a time; the WAL's are in memory, as the open replayed them. |
 | `persia compact <file> [--json]` | Rewrites the container without its dead frames and prints the space before and after. Opens read-write, so it fails while another writer has the database. Commits no document of its own, but its open recovers as any writer's does (a WAL backlog over the default 64 MiB memtable is flushed). Leaves the blob pack alone. |
 | `persia bench [--dir <dir>] [--docs <n>] [--queries <n>] [--seed <n>] [--json]` | A quick local micro-benchmark on a seeded synthetic corpus in a scratch directory it removes. Its numbers are local guidance only, not a published benchmark. |
+| `persia import <file> --collection <name> [--input <jsonl>] [--schema <json>] [--json]` | Reads JSON Lines (a file, or the standard input) into a collection, one document per line in the form `dump documents` writes; commits once at the end. Opens read-write. `--schema` creates the database and the collection when missing. The first bad line (not UTF-8, over 16 MiB, not JSON, not a document of the schema, or a blob reference this database's blob store does not hold) stops the import with status 1, naming the line: the lines before it are imported and committed, nothing from it on. A dump carries blob references, not blob bytes, so a dump with blobs imports only into its own database (ROADMAP 10.4.6). |
+| `persia search <file> --collection <name> (--query <text> \| --request <json>) [--json]` | One search, by user text with every default (relaxed, 20 hits) or by request JSON. Read-only, without the writer lock. Prints each hit's rank, score and document; `--json` writes the response JSON of SPEC §7.5.2. |
 
 Every command exits with status 0 on success, 1 on any other failure, 2 on a usage error, 3 on corrupt Persia data (or, for `verify`, a missing referenced blob), and 4 when the file is not a Persia container. The `persia-cli` crate docs ([`main.rs`](./crates/persia-cli/src/main.rs)) hold the table of each command's status by what it finds at the path.
 
@@ -175,14 +177,14 @@ Every command exits with status 0 on success, 1 on any other failure, 2 on a usa
   - `collections`, by name: `{name, schema: {hash, strict, fields: [{name, type}]}, documents, segment_documents, deleted, wal_documents, segment_bytes, segments: [{id, documents, deleted, bytes}]}`; `documents` counts the live documents a reader sees;
   - `blob_pack` `{present, bytes}`, `bytes` `null` without a pack.
 - `persia compact --json`: `seq` (the compacted file's), `before` and `after` `{bytes, live_bytes, dead_bytes}`, `reclaimed_bytes`.
+- `persia import --json`: `collection`, `created` (whether `--schema` created the collection), `lines` (read), `blank_lines` (skipped), `documents` (put; a replaced id counts each time).
+- `persia search --json`: the response JSON of SPEC §7.5.2 (`hits`, `facets`, `relaxation`, `query_truncated`), as the embedded API's `SearchResponse::to_json` writes it.
 - `persia bench --json`:
   - `notice` (the numbers are local guidance only), `build` (`release` or `debug`), `seed`, `docs`, `queries`;
   - `corpus` `{fingerprint, container_bytes}`, `indexing` `{nanos, docs_per_second, commit_nanos}` (`docs_per_second` `null` when the clock read no time), `query_mix` `{fingerprint}` (fingerprints are 16 hex digits);
   - `query_kinds`, in rotation order (`term`, `terms`, `phrase`, `filter`, `typo`): `{kind, count, hits, empty, truncated, latency_nanos: {p50, p90, p99, max}}`. `latency_nanos` is `null` for a kind that ran no query; `empty` counts the queries that returned no hit. `truncated` counts the queries whose page the relaxation time budget (SPEC §7.6) cut short; `hits` repeat for a seed only where `truncated` is 0.
 
 The golden segment above is format 1.0 and holds 300 documents (`doc_count` in the inspect output; see [`crates/persia-cli/tests/segment.rs`](./crates/persia-cli/tests/segment.rs)).
-
-**Planned** (ROADMAP 10.4.2): `import` (JSONL) and `search`.
 
 ### Planned embedded API
 

@@ -9,6 +9,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-cli`: `persia import <path> --collection <name> [--input <file>] [--schema <file>] [--json]` and `persia
+  search <path> --collection <name> (--query <text> | --request <json>) [--json]` (ROADMAP 10.4.2; SPEC §8.6), for
+  quick experiments, through the embedded API. `import` reads JSON Lines (the file, or the standard input), one
+  document per line in the form `persia dump documents` writes, so a dump imports back; lines end at `\n` or `\r\n`,
+  are at most 16 MiB (read in bounded memory) and blank ones are skipped. Each document is put (an upsert by id) and
+  the import commits once at the end. It opens read-write (status 1 while another writer holds the database); the
+  collection must exist unless `--schema` gives its schema, which creates the database and the collection when
+  missing (an existing collection must have exactly that schema). **The first bad line stops the import** with status
+  1 and an error naming the line (1-based) and why: not UTF-8, too long, not JSON, not a document of the schema, or a
+  put the database refuses. The documents of the lines before it are committed, nothing from it on, so an import
+  resumes there and repeats harmlessly. **A `BlobRef` the target database's blob store does not hold is refused** (the
+  embedded API never logs a dangling reference, SPEC §9.6): the error names the line and the `blob_id`. A dump carries
+  references, not blob bytes, so a dump with blobs imports only into its own database (or a copy with its pack) until
+  ROADMAP 10.4.6. `search` opens read-only, without the lock (it takes a reader lease, as any read-only handle), and
+  prints each hit's rank, score and document, or with `--json` the response JSON of SPEC §7.5.2. Both fail (status 1)
+  on a schema that names a registered analyzer. `persia::internal::jsonl` holds the bounded line reader, for the CLI
+  and the new `jsonl_lines` fuzz target.
 - `cargo xtask public-api [--check]` and `just public-api` (ROADMAP 10.1.12, ADR-0063 amended): the public API of
   `persia` (default features and `async`), rendered from rustdoc's JSON with the dated nightly, re-exported engine
   items expanded, committed as `crates/persia/public-api.txt`; CI fails when the surface changes without it.
