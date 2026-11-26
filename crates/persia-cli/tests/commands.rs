@@ -1068,7 +1068,7 @@ fn in_state(dir: &Path, state: State) -> PathBuf {
 }
 
 /// The arguments of every command that takes a container, by a name for messages; `{}` stands for the path.
-const COMMANDS: [(&str, &[&str]); 13] = [
+const COMMANDS: [(&str, &[&str]); 15] = [
     ("verify", &["verify", "{}"]),
     ("verify --quick", &["verify", "--quick", "{}"]),
     ("stats", &["stats", "{}"]),
@@ -1080,6 +1080,8 @@ const COMMANDS: [(&str, &[&str]); 13] = [
     ("inspect container", &["inspect", "container", "{}"]),
     ("compact", &["compact", "{}"]),
     ("compact --json", &["compact", "{}", "--json"]),
+    ("gc", &["gc", "{}"]),
+    ("gc --json", &["gc", "{}", "--json"]),
     ("import", &["import", "{}", "--collection", "notes"]),
     (
         "search",
@@ -1167,7 +1169,7 @@ fn every_command_exits_with_its_documented_status_beside_a_live_writer() {
         let out = run_on(args, &path);
         let read_write = matches!(
             name,
-            "compact" | "compact --json" | "import" | "container sweep"
+            "compact" | "compact --json" | "gc" | "gc --json" | "import" | "container sweep"
         );
         assert_eq!(
             out.status.code(),
@@ -1195,6 +1197,7 @@ fn a_damaged_committed_segment_exits_with_3() {
         &["stats", "{}"][..],
         &["dump", "documents", "{}", "--collection", "notes"],
         &["compact", "{}"],
+        &["gc", "{}"],
         &["import", "{}", "--collection", "notes"],
         &["search", "{}", "--collection", "notes", "--query", "note"],
         &["verify", "{}"],
@@ -1252,6 +1255,7 @@ fn help_lists_the_command_tree_and_each_commands_exit_statuses() {
         "dump",
         "verify",
         "compact",
+        "gc",
         "stats",
         "import",
         "search",
@@ -1279,6 +1283,7 @@ fn help_lists_the_command_tree_and_each_commands_exit_statuses() {
     }
     for args in [
         &["compact", "--help"][..],
+        &["gc", "--help"],
         &["stats", "--help"],
         &["dump", "documents", "--help"],
         &["import", "--help"],

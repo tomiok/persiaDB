@@ -30,7 +30,12 @@
 //! For quick experiments (ROADMAP 10.4.2), through the embedded API: `persia import` reads JSON Lines (a file, or the
 //! standard input) into a collection, one document per line in the form `dump documents` writes, and stops at the first
 //! bad line, naming it (module `import`); `persia search` runs one query, user text or a request JSON, on a read-only
-//! open (module `search`). `compact` and `import` are the database commands that open read-write.
+//! open (module `search`).
+//!
+//! `persia gc` (ROADMAP 10.4.5, module `gc`) collects the blob pack on request (SPEC §9.5), through the internal
+//! layer's `BlobDatabase::gc`: mark, sweep, pack rewrite. It reports what it deleted, what it kept, the pack's size
+//! before and after, and the reader leases that may hold the sweep back. `compact`, `import` and `gc` are the database
+//! commands that open read-write.
 //!
 //! The command tree. A file or directory is the positional argument (`<PATH>`; `<ROOT>` for a store), every other
 //! argument is a `--flag`, and `--json` asks for one JSON object on one line where a command has one:
@@ -47,6 +52,7 @@
 //! persia verify <PATH> [--quick | --deep]
 //! persia stats <PATH> [--json]
 //! persia compact <PATH> [--json]
+//! persia gc <PATH> [--grace <DURATION>] [--json]
 //! persia import <PATH> --collection <COLLECTION> [--input <FILE>] [--schema <SCHEMA>] [--json]
 //! persia search <PATH> --collection <COLLECTION> (--query <TEXT> | --request <JSON>) [--json]
 //! persia bench [--dir <DIR>] [--docs <DOCS>] [--queries <QUERIES>] [--seed <SEED>] [--json]
@@ -75,20 +81,23 @@
 //! | `dump documents` | 0 | 1 | 4 | 3 | 0 |
 //! | `inspect container` | 0 | 1 | 4 | 3 | 0 |
 //! | `compact` | 0 | 1 | 4 | 3 | 1 |
+//! | `gc` | 0 | 1 | 4 | 3 | 1 |
 //! | `import` | 0 | 1 | 4 | 3 | 1 |
 //! | `search` | 0 | 1 | 4 | 3 | 0 |
 //! | `container sweep` | 0 | 1 | 4 | 3 | 1 |
 //! | `container files` | 0 | 1 | 0 | 0 | 0 |
 //!
-//! The read-only commands (`search` among them) take no lock, so a live writer does not fail them; `compact`, `import`
-//! and `container sweep` open read-write and fail with status 1 while another writer has the database. `container
+//! The read-only commands (`search` among them) take no lock, so a live writer does not fail them; `compact`, `import`,
+//! `gc` and `container sweep` open read-write and fail with status 1 while another writer has the database. `container
 //! files` opens nothing: it lists the files beside any existing file. `inspect container` reports damage after the
 //! last commit on its rows and still exits 0 (it is a debugging aid; `verify` is the check). Besides the table: `dump
 //! documents` exits 1 for a collection the database lacks, `compact` exits 1 when its recovery would have to flush a
 //! WAL backlog of a collection whose schema names an analyzer registered by the application (it has the built-in ones
 //! only; it compacts such a database otherwise, ROADMAP 10.4.4), `import` and `search` exit 1 for a collection the
 //! database lacks (`import` creates it with `--schema`) and for a schema naming a registered analyzer, `import` exits 1
-//! at the first bad line of its input (naming it, after committing the lines before it), the segment commands exit 3
+//! at the first bad line of its input (naming it, after committing the lines before it), `gc` exits 1 for a schema
+//! naming a registered analyzer and for a `--grace` below 2 h (2 for a malformed one) and 0 when reader leases held its
+//! sweep back (the report says so), the segment commands exit 3
 //! for a corrupt segment file and 1 for a missing one or a `--schema` that is not the segment's, and the store commands
 //! exit 1 for a root that is not a directory.
 //!
@@ -105,6 +114,7 @@ mod compact;
 mod container;
 mod database;
 mod documents;
+mod gc;
 mod import;
 mod open;
 mod search;
@@ -118,6 +128,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use persia::internal::documents::Error as BlobDatabaseError;
+use persia::internal::gc::GcError;
 use persia::internal::verify::{Scan, VerifyError};
 use persia_engine::db::DatabaseError;
 use persia_engine::segment::ReadError;
@@ -183,6 +194,26 @@ enum Command {
     Compact {
         /// The container file.
         path: PathBuf,
+        /// Write one JSON object (its keys are listed in the README's command-line section) instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Collects the blob pack (`<name>.persia.blobs`, SPEC §9.5): marks every blob a document or a WAL record still
+    /// references, deletes the others with their staged chunks, and rewrites the pack when enough is dropped. Prints
+    /// what it deleted, what it kept and why, the pack's size before and after, and the reader leases it found. Opens
+    /// the database read-write, as a writer does, so it fails (status 1) while another writer has it open. A read-only
+    /// handle of another process that has not refreshed since the last commit holds the sweep back: nothing is deleted,
+    /// and the report says so. A database without a pack has nothing to collect. It has the built-in analyzers only: a
+    /// schema naming an analyzer the application registered fails the open (status 1). Exits with status 3 on
+    /// corruption, 4 when the file is not a Persia container, and 1 on any other failure.
+    Gc {
+        /// The container file.
+        path: PathBuf,
+        /// How long an unmarked object of a remote store is kept after it was written, as <number><unit> with unit s,
+        /// m, h or d; at least 2h (twice the longest bind budget, SPEC §9.4), else the command fails. The local pack
+        /// keeps no ages: it drops what is unmarked at once (SPEC §9.3).
+        #[arg(long, default_value = "24h", value_parser = gc::parse_grace)]
+        grace: std::time::Duration,
         /// Write one JSON object (its keys are listed in the README's command-line section) instead of text.
         #[arg(long)]
         json: bool,
@@ -400,6 +431,8 @@ fn is_corruption(err: &anyhow::Error) -> bool {
                 Some(e.is_corruption())
             } else if let Some(e) = c.downcast_ref::<BlobDatabaseError>() {
                 Some(e.is_corruption())
+            } else if let Some(e) = c.downcast_ref::<GcError>() {
+                Some(gc::is_corruption(e))
             } else if let Some(e) = c.downcast_ref::<ReadError>() {
                 Some(e.is_corruption())
             } else {
@@ -477,6 +510,7 @@ fn run(cli: Cli) -> Result<()> {
             to_stdout(|out| documents::dump(out, &path, &collection))?;
         }
         Command::Compact { path, json } => to_stdout(|out| compact::compact(out, &path, json))?,
+        Command::Gc { path, grace, json } => to_stdout(|out| gc::gc(out, &path, grace, json))?,
         Command::Stats { path, json } => to_stdout(|out| stats::stats(out, &path, json))?,
         Command::Import(options) => to_stdout(|out| import::import(out, &options))?,
         Command::Search {

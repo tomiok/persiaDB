@@ -21,9 +21,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
-use persia_blob::gc::{GcObject, Mark, PinCheck, PinGate, Sweep, SweepOptions, SweepReport};
-use persia_blob::pack::lease::ReaderLeaseReport;
+pub use persia_blob::gc::SweepReport;
+use persia_blob::gc::{GcObject, Mark, PinCheck, PinGate, Sweep, SweepOptions};
+pub use persia_blob::pack::lease::ReaderLeaseReport;
 use persia_blob::{BlobId, BlobStore};
+// What [`GcReport`] holds, for the CLI (`persia gc`, ROADMAP 10.4.5), which reaches `persia-blob` only through here.
+pub use persia_blob::Error as BlobError;
+pub use persia_blob::gc::Rewrite;
 use persia_engine::db::{Database, DatabaseError};
 
 use super::blob::MAX_BIND_BUDGET;

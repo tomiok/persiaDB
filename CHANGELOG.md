@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia gc <path> [--grace <dur>] [--json]` (ROADMAP 10.4.5; SPEC §9.5): blob garbage collection from the command
+  line, through `persia::internal`'s `BlobDatabase::gc` (mark, sweep, pack rewrite at the default ratio). It opens the
+  database read-write with its pack, so it fails (status 1) while another writer holds either; the built-in analyzers
+  only (a schema naming a registered one fails the open, ROADMAP 10.4.7). It reports what it marked, deleted (blobs,
+  uploads, chunks) and kept (pinned, young, of unknown age, changed, unreadable), the rewrite's outcome and frame bytes,
+  the pack file's size before and after, dangling references (`missing`), and the reader leases by state: a lease
+  behind the committed seq (or opening, ahead, unreadable) holds the sweep back, and the report says so with status 0.
+  `--grace` (`<n>s`, `m`, `h` or `d`; `24h` by default) is checked by the GC, which refuses one below 2 h (status 1); a
+  malformed one is a usage error (status 2). The local pack keeps no ages: what the mark does not keep is dropped at
+  once, so `young` is 0 locally. A database without a pack is a no-op report (the pack's writer lock file appears, no
+  pack). `--json` keys are in the README. `persia::internal::gc` re-exports `SweepReport`, `Rewrite`,
+  `ReaderLeaseReport` and `BlobError` for it.
 - `persia_engine::db::CompactOnlyDatabase` (ROADMAP 10.4.4, ADR-0068; SPEC §4.6): `open(path, options)` and
   `open_container(container, options)` run the writer's open exactly (lock, recovery, every segment checked, the whole
   WAL replayed, a cut commit retired), except that a `text` field whose analyzer `options.registry` lacks is indexed

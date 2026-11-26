@@ -3313,7 +3313,12 @@ the same process that runs `put_blob`, and keeps a **pin set** with it:
   A caller that holds a bare `Arc<Segment>` and has dropped the snapshot and the tombstones it was read with is not
   tracked. Then the pinned ids, then the upload ids their blob manifests name (none for an inline manifest; a marked
   blob whose manifest was missing is not resolved, so a later pin still makes the sweep read it), and the pinned
-  upload ids. GC runs only when the writer calls `gc`, never in the background, and between writes.
+  upload ids. GC runs only when the writer calls `gc`, never in the background, and between writes. `persia gc <path>`
+  (ROADMAP 10.4.5) is such a writer: it opens the database read-write with its pack (the writer locks of both, so it
+  fails while another writer has it, and recovery runs first; built-in analyzers only, ROADMAP 10.4.7), runs one GC
+  with the default rewrite ratio and `--grace` (24 h by default; the GC refuses one below its floor), and reports the
+  mark, the sweep, the rewrite, the pack's size before and after and the reader leases (§9.3). A database without a
+  pack has nothing to collect.
 - Sweep: unmarked blob manifests, then staged chunks of uploads no marked manifest names, each only once older than a
   grace period (default 24 h, and at least `2 * MAX_BIND_BUDGET`, §9.4; for staged chunks counted from the upload's
   newest chunk, so an idle upload stays
