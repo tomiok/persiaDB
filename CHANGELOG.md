@@ -698,6 +698,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   skip like unknown kinds. Golden files in `tests/fixtures/blob-pack/v1/`.
 
 ### Fixed
+- `persia`: a create whose blob pack fails to open removes the new container while it still holds the writer lock
+  (ROADMAP 10.2.7), not after releasing it: an open or a create racing it can no longer open the file being removed,
+  or have a database it just created there removed. On Windows the removal deletes the file when the handle closes,
+  and an open of it fails meanwhile.
 - Scores that overflow (a `constant_score` near `f64::MAX` under a `boost`, a `bool` summing large ones) saturate at
   `f64::MAX` instead of becoming `+∞`, in hits, rank scores and explanations (SPEC §7.2, ROADMAP 8.1.12).
 - A relaxation step no longer counts again, against `max_expansions`, an expansion of an earlier step it holds itself:

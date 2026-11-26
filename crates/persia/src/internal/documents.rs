@@ -497,8 +497,14 @@ impl<L: DocumentLog + ?Sized> Drop for LogMut<'_, L> {
     }
 }
 
-/// Removes the container `create` just made, after the pack failed to open. The database was dropped already, so
-/// its writer lock is released. A removal that fails is reported with the pack error: a retry would not work.
+/// Removes the container `create` just made, after the pack failed to open. The caller still holds the database, and
+/// with it the writer lock (ROADMAP 10.2.7): no other open can take the lock and open the file, and no create can
+/// make a new file at the path (the name is taken until this removal), so the file removed is the one `create` made.
+/// On Unix the name goes now; an open that had the file before the removal finds it unlinked once it takes the lock,
+/// and opens the path again (`Container::open`). On Windows the
+/// container is open with delete sharing (the standard library's default), so the removal deletes it on close, and
+/// an open of a file being deleted fails until the name goes. A removal that fails is reported with the pack error: a
+/// retry would not work.
 fn remove_created_container(container: &Path, error: Error) -> Error {
     match std::fs::remove_file(container) {
         Ok(()) => error,
@@ -511,6 +517,22 @@ fn remove_created_container(container: &Path, error: Error) -> Error {
             )),
         }),
     }
+}
+
+/// Where [`BlobDatabase::finish_create_observed`] calls its observer, the database still held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreateStage {
+    /// The pack failed to open; the container is still at its path.
+    PackFailed,
+    /// The container was removed.
+    Removed,
+}
+
+/// The pack at `pack`, opened read-write with `db`'s writer proof ([`PackStore::open_writer`]). `db` is borrowed, so a
+/// failure leaves it with the caller, its lock still held.
+fn open_writer_pack(db: &Database, pack: &Path) -> Result<PackStore, Error> {
+    let proof = db.writer_proof();
+    Ok(PackStore::open_writer(pack, &proof)?)
 }
 
 impl From<DatabaseError> for Error {
@@ -587,15 +609,33 @@ impl BlobDatabase<PackStore> {
             .path()
             .map_or_else(|| path.to_path_buf(), Path::to_path_buf);
         let pack = pack_beside(Some(container.as_path()), path);
-        Self::finish_create(db, pack, &container)
+        Self::finish_create(db, &pack, &container)
     }
 
     /// `db`, just created at `container`, with its pack. A pack error removes the container: it was created for this
-    /// call and never returned, and a retry must not find it (SPEC §9.3).
-    fn finish_create(db: Database, pack: PathBuf, container: &Path) -> Result<Self, Error> {
-        match Self::with_pack(db, pack) {
-            Ok(opened) => Ok(opened),
-            Err(error) => Err(remove_created_container(container, error)),
+    /// call and never returned, and a retry must not find it (SPEC §9.3). It is removed before `db` drops, while the
+    /// writer lock is still held (ROADMAP 10.2.7).
+    fn finish_create(db: Database, pack: &Path, container: &Path) -> Result<Self, Error> {
+        Self::finish_create_observed(db, pack, container, |_| {})
+    }
+
+    /// [`Self::finish_create`], calling `observe` while `db` still holds its lock: once the pack failed to open, and
+    /// once the container is removed. Tests race other opens there.
+    fn finish_create_observed(
+        db: Database,
+        pack: &Path,
+        container: &Path,
+        mut observe: impl FnMut(CreateStage),
+    ) -> Result<Self, Error> {
+        match open_writer_pack(&db, pack) {
+            Ok(store) => Ok(Self::with_writer_pack(db, store)),
+            Err(error) => {
+                observe(CreateStage::PackFailed);
+                let error = remove_created_container(container, error);
+                observe(CreateStage::Removed);
+                drop(db);
+                Err(error)
+            }
         }
     }
 
@@ -618,12 +658,16 @@ impl BlobDatabase<PackStore> {
     /// # Errors
     /// As [`PackStore::open_writer`]: [`persia_blob::Error::PackLocked`] while another handle writes the pack.
     pub fn with_pack(db: Database, pack: impl AsRef<Path>) -> Result<Self, Error> {
+        let store = open_writer_pack(&db, pack.as_ref())?;
+        Ok(Self::with_writer_pack(db, store))
+    }
+
+    /// `db` with `store`, a pack opened with `db`'s writer proof.
+    fn with_writer_pack(db: Database, store: PackStore) -> Self {
         let db_uuid = db.writer_proof().db_uuid();
-        let proof = db.writer_proof();
-        let store = PackStore::open_writer(pack, &proof)?;
         let mut opened = Self::new(db, Blobs::new(Arc::new(store)));
         opened.pack_db_uuid = Some(db_uuid);
-        Ok(opened)
+        opened
     }
 }
 
@@ -1076,7 +1120,10 @@ impl<S: BlobStore + ?Sized, F: ContainerFile + Sync> BlobDatabase<S, Database<F>
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use persia_engine::db::DatabaseOptions;
+    use persia_storage::container;
 
     use super::*;
 
@@ -1094,7 +1141,7 @@ mod tests {
         // A directory is not a pack. `open` fails with an I/O error, not [`Error::PackExists`] (that check runs
         // before anything is created, and only when the path already exists).
         std::fs::create_dir(&pack).unwrap();
-        let err = BlobDatabase::finish_create(db, pack.clone(), &path).unwrap_err();
+        let err = BlobDatabase::finish_create(db, &pack, &path).unwrap_err();
         assert!(
             matches!(err, Error::Blob(persia_blob::Error::PackIo { .. })),
             "{err:?}"
@@ -1105,5 +1152,169 @@ mod tests {
         );
         std::fs::remove_dir(&pack).unwrap();
         BlobDatabase::create(&path, DatabaseOptions::default()).unwrap();
+    }
+
+    /// A database just created at `path`, with a directory where its pack goes, so the pack open of `finish_create`
+    /// fails with an I/O error.
+    fn created_with_a_failing_pack(path: &Path) -> (Database, PathBuf) {
+        let db = Database::create(path, DatabaseOptions::default()).unwrap();
+        let pack = pack_path(path);
+        std::fs::create_dir(&pack).unwrap();
+        (db, pack)
+    }
+
+    /// The file the writer lock of the container at `path` is taken on: the container itself (Unix), or the lock
+    /// file beside it (Windows, SPEC §4.5.1).
+    fn writer_lock_file(path: &Path) -> File {
+        let lock = if cfg!(windows) {
+            let mut name = path.file_name().unwrap().to_owned();
+            name.push(".lock");
+            path.with_file_name(name)
+        } else {
+            path.to_path_buf()
+        };
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(lock)
+            .unwrap()
+    }
+
+    /// ROADMAP 10.2.7: the container is removed while the creating handle still holds the writer lock. An open that
+    /// races in once the pack failed finds the lock taken (no handle on a file about to be removed), and once the
+    /// file is removed it finds nothing to open: never the removed file, never a database without its pack.
+    #[test]
+    fn the_failed_create_removes_its_container_while_it_holds_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.persia");
+        let (db, pack) = created_with_a_failing_pack(&path);
+        let mut stages = Vec::new();
+        // A handle on the file the lock is on, taken while the container is still there: its lock being taken
+        // tells that the creator still holds it, also once the container's name is gone.
+        let mut lock_probe = None;
+        let err = BlobDatabase::finish_create_observed(db, &pack, &path, |stage| {
+            stages.push(stage);
+            let probe = lock_probe.get_or_insert_with(|| writer_lock_file(&path));
+            assert!(
+                matches!(probe.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+                "the creator holds the writer lock at {stage:?}"
+            );
+            let raced = BlobDatabase::open(&path, DatabaseOptions::default());
+            match stage {
+                CreateStage::PackFailed => {
+                    assert!(path.exists(), "removed only after the pack failed");
+                    let Err(Error::Database(e)) = raced else {
+                        panic!("an open while the creator holds the lock must fail: {raced:?}");
+                    };
+                    assert!(
+                        matches!(*e, DatabaseError::Container(container::Error::Locked)),
+                        "{e:?}"
+                    );
+                }
+                CreateStage::Removed => {
+                    assert!(!path.exists(), "removed before the lock is released");
+                    let Err(Error::Database(e)) = raced else {
+                        panic!("nothing is left to open: {raced:?}");
+                    };
+                    // Unix: the name is gone. Windows: the lock beside the container is still taken (and the file,
+                    // deleted when the creator closes it, refuses opens meanwhile).
+                    let refused = if cfg!(windows) {
+                        matches!(*e, DatabaseError::Container(container::Error::Locked))
+                    } else {
+                        matches!(&*e, DatabaseError::Container(container::Error::Io { source, .. })
+                            if source.kind() == io::ErrorKind::NotFound)
+                    };
+                    assert!(refused, "{e:?}");
+                    // Unix: the name is free while the lock is still held (it is on the removed file), so a create
+                    // makes a new database there, which the failed create must leave alone.
+                    #[cfg(unix)]
+                    drop(Database::create(&path, DatabaseOptions::default()).unwrap());
+                }
+            }
+        })
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::Blob(persia_blob::Error::PackIo { .. })),
+            "{err:?}"
+        );
+        assert_eq!(stages, [CreateStage::PackFailed, CreateStage::Removed]);
+        #[cfg(unix)]
+        drop(Database::open(&path, DatabaseOptions::default()).unwrap());
+        #[cfg(not(unix))]
+        assert!(!path.exists());
+    }
+
+    /// Sets its flag when dropped, also while a panic unwinds.
+    struct StopOnDrop<'a>(&'a AtomicBool);
+
+    impl Drop for StopOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    /// A removal that finds the container gone already reports the pack error alone; one that fails otherwise
+    /// reports both, as an I/O error of the pack (a retry would not work).
+    #[test]
+    fn a_removal_that_fails_is_reported_with_the_pack_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack_error = || Error::PackExists {
+            path: dir.path().join("pack"),
+        };
+        let gone = remove_created_container(&dir.path().join("gone.persia"), pack_error());
+        assert!(matches!(gone, Error::PackExists { .. }), "{gone:?}");
+        // A directory cannot be removed as a file.
+        let stuck = dir.path().join("stuck.persia");
+        std::fs::create_dir(&stuck).unwrap();
+        let failed = remove_created_container(&stuck, pack_error());
+        let Error::Blob(persia_blob::Error::PackIo { op, source }) = &failed else {
+            panic!("{failed:?}");
+        };
+        assert_eq!(
+            *op,
+            "remove the database created before its pack failed to open"
+        );
+        assert_ne!(source.kind(), io::ErrorKind::NotFound);
+        assert!(stuck.exists());
+    }
+
+    /// ROADMAP 10.2.7, raced on real threads: an open of the path in a loop, while creates whose pack fails come and
+    /// go, never opens one of their containers (each is removed before its lock is released).
+    #[test]
+    fn an_open_racing_failed_creates_never_gets_their_container() {
+        const CREATES: usize = 16;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.persia");
+        let done = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let racer = scope.spawn(|| {
+                let mut attempts = 0_u64;
+                while !done.load(Ordering::Acquire) {
+                    attempts += 1;
+                    if BlobDatabase::open(&path, DatabaseOptions::default()).is_ok() {
+                        return Err(attempts);
+                    }
+                }
+                Ok(attempts)
+            });
+            // Stops the racer however this thread leaves the loop: a failed assertion fails the test, never hangs it.
+            let stop = StopOnDrop(&done);
+            for _ in 0..CREATES {
+                let (db, pack) = created_with_a_failing_pack(&path);
+                let err = BlobDatabase::finish_create(db, &pack, &path).unwrap_err();
+                assert!(
+                    matches!(err, Error::Blob(persia_blob::Error::PackIo { .. })),
+                    "{err:?}"
+                );
+                std::fs::remove_dir(&pack).unwrap();
+            }
+            drop(stop);
+            let outcome = racer.join().unwrap();
+            assert!(
+                outcome.is_ok(),
+                "an open got a container being removed, at attempt {outcome:?}"
+            );
+        });
+        assert!(!path.exists());
     }
 }
