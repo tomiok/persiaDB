@@ -66,9 +66,14 @@ pub use error::{Error, ErrorCode, Result};
 #[doc(hidden)]
 pub use options::DetachedSlot;
 pub use options::OpenOptions;
-// Search requests and responses (SPEC §7): plain values (ADR-0063 item 2).
+// Search requests and responses (SPEC §7): plain values (ADR-0063 item 2). Every re-export of a lower crate is
+// `#[doc(inline)]`: its items are documented here, as part of this crate, and its public-API snapshot lists them in
+// full (ROADMAP 10.1.12, `crates/persia/public-api.txt`).
+#[doc(inline)]
 pub use persia_engine::query::{Filter, FilterValue};
+#[doc(inline)]
 pub use persia_engine::relax::{RelaxLevel, RelaxOptions};
+#[doc(inline)]
 pub use persia_engine::search::{
     Explanation, FacetCounts, FacetRequest, FacetValue, FieldExplanation, Missing, Order,
     PairExplanation, PhraseExplanation, ProximityExplanation, RelaxedExplanation, Sort, SortKey,
@@ -76,12 +81,16 @@ pub use persia_engine::search::{
 };
 pub use search::{Hit, Relaxation, SearchRequest, SearchResponse};
 // Blob references (SPEC §9.1): plain values (ADR-0063 item 2).
+#[doc(inline)]
 pub use persia_blob::{BlobId, BlobRef};
 // Documents (SPEC §6.4): plain values (ADR-0063 item 2).
+#[doc(inline)]
 pub use persia_engine::document::{Document, Value};
 /// How durable a write is before its call returns (SPEC §8.2.1): `Buffered`, `Async` or `Fsync` (the default).
+#[doc(inline)]
 pub use persia_engine::wal::Durability;
 // Collection schemas (SPEC §6.2): plain values, re-exported as the engine has them (ADR-0063 item 2).
+#[doc(inline)]
 pub use persia_engine::schema::{
     AnalyzerRef, BuiltinAnalyzer, CollectionSchema, Fallback, Field, FieldId, FieldKind, FieldType,
     FilterRelaxation, KeywordOptions, Level, Levels, RankFn, RankingConfig, RelaxationConfig,

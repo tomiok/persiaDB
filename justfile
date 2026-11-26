@@ -28,12 +28,13 @@ test:
 test-slow:
     PROPTEST_CASES=10000 cargo test --workspace --features slow --release
 
-# Dependency direction/allowlist, script tests, PROGRESS.md and fixture freshness, `just miri` filters
+# Dependency direction/allowlist, script tests, PROGRESS.md and fixture freshness, `just miri` filters, the public-API snapshot
 repo-checks:
     cargo xtask check-deps
     cargo xtask progress --check
     cargo xtask fixtures --check
     cargo xtask miri-filters
+    cargo xtask public-api --check
 
 # Miri covers persia-format and the pure parsers of persia-engine (ROADMAP 0.6.6): documents (CBOR, datetimes),
 # tombstone sidecars, segment section kinds, norms, the FST check, the manifest codec, WAL chunks and the document
@@ -48,6 +49,10 @@ repo-checks:
 # the pack store's tests (a `PackStore` draws its `pack_id` from the real-time clock, which Miri's isolation lacks; the
 # pack's codecs, `pack::layout`, run). Native runs cover all of those.
 # CI runs this recipe.
+
+# Regenerate crates/persia/public-api.txt, the public API of `persia` (ROADMAP 10.1.12; rustdoc JSON, needs the dated nightly)
+public-api:
+    cargo xtask public-api
 
 # Undefined-behavior check under Miri: persia-format, the engine's pure parsers and persia-blob (needs the dated nightly)
 miri:

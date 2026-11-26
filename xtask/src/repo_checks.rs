@@ -245,8 +245,8 @@ mod tests {
         "crates/persia-storage/src/sys.rs",   // ADR-0021
         "crates/persia-engine/src/db/read_only/mapped.rs", // ADR-0017 amended: the read-only open's mapping
         "crates/persia-blob/src/pack/store/read_only_mapped.rs", // ADR-0017 amended: the read-only pack's mapping
-        "crates/persia-analysis/tests/allocations.rs",     // ADR-0026: counting allocator
-        "crates/persia-engine/tests/flush_memory.rs",      // ADR-0026: counting allocator
+        "crates/persia-analysis/tests/allocations.rs",           // ADR-0026: counting allocator
+        "crates/persia-engine/tests/flush_memory.rs",            // ADR-0026: counting allocator
     ];
 
     #[test]

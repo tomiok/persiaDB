@@ -111,6 +111,11 @@ jobs:
       - name: just miri filters and skips match the tests they name (ROADMAP 0.6.9)
         # Lists the persia-format and persia-engine tests natively: Miri runs the same test binaries.
         run: cargo xtask miri-filters
+      - name: Install dated nightly (rustdoc JSON for the public-API snapshot)
+        run: rustup toolchain install "$(cat .github/nightly-toolchain)" --profile minimal
+      - name: The public API of persia matches crates/persia/public-api.txt (ROADMAP 10.1.12)
+        # A change of the surface comes with the regenerated file (`just public-api`), so a reviewer sees it.
+        run: cargo xtask public-api --check
       - name: Dev compose file is valid and its pinned images resolve
         # Manifests only, no layers: catches an image that was deleted upstream (as minio/minio was).
         run: |

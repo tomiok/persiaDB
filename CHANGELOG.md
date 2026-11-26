@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `cargo xtask public-api [--check]` and `just public-api` (ROADMAP 10.1.12, ADR-0063 amended): the public API of
+  `persia` (default features and `async`), rendered from rustdoc's JSON with the dated nightly, re-exported engine
+  items expanded, committed as `crates/persia/public-api.txt`; CI fails when the surface changes without it.
+  `persia`'s re-exports of lower crates are `#[doc(inline)]`, so its documentation shows those items in full.
 - `persia`: a read-only `Db` reads its blob pack as it reads its container (ROADMAP 10.1.23; SPEC §4.7; ADR-0017
   amended): through a memory mapping on a local disk by default (not on Windows), mapped again as the writer binds,
   and over the new file after a GC rewrite; `OpenOptions::mapped_reads` now chooses for both files (`false` reads
