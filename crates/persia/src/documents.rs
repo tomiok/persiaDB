@@ -71,7 +71,9 @@ impl Collection {
     /// # Errors
     /// [`ErrorCode::InvalidArgument`](crate::ErrorCode::InvalidArgument) for a document that breaks a rule of SPEC
     /// §6.4.1 ([`ErrorCode::Limit`](crate::ErrorCode::Limit) past a limit); [`ErrorCode::NotFound`](crate::ErrorCode::NotFound)
-    /// if the collection was dropped, or for a blob reference this database's store does not hold;
+    /// if the collection was dropped, or for a blob reference this database's store does not hold
+    /// ([`ErrorCode::InvalidArgument`](crate::ErrorCode::InvalidArgument) for one that names a stored blob with another
+    /// size or chunk size, SPEC §9.6);
     /// [`ErrorCode::ReadOnly`](crate::ErrorCode::ReadOnly), [`ErrorCode::Closed`](crate::ErrorCode::Closed);
     /// [`ErrorCode::Io`](crate::ErrorCode::Io) if the log cannot be written, after which every write fails with
     /// [`ErrorCode::Poisoned`](crate::ErrorCode::Poisoned).
@@ -155,7 +157,9 @@ impl Collection {
     ///
     /// # Errors
     /// As [`Db::put_blob`] for bytes (nothing is logged); [`ErrorCode::NotFound`](crate::ErrorCode::NotFound) for a
-    /// reference the store does not hold (nothing is logged); then as [`put`](Self::put).
+    /// reference the store does not hold (nothing is logged), and
+    /// [`ErrorCode::InvalidArgument`](crate::ErrorCode::InvalidArgument) for one that names a stored blob with another
+    /// size or chunk size (nothing is logged); then as [`put`](Self::put).
     pub fn put_with_blob(&self, doc: &Document, blob: Blob<'_>) -> Result<BlobRef> {
         let durability = self.durability();
         self.db.check_writable("put a document")?;

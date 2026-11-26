@@ -108,7 +108,7 @@ impl Db {
     pub fn get_blob(&self, blob_ref: &BlobRef) -> Result<BlobReader> {
         let pins = self.inner.with_blobs(|blobs| {
             blobs
-                .pin_contained(blob_ref)
+                .pin_for_read(blob_ref)
                 .map_err(Error::wrap)?
                 .ok_or_else(|| not_stored(blob_ref))
         })?;

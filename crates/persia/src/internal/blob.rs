@@ -337,11 +337,31 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
 
     /// Pins the blob `blob_ref` refers to, then checks that this store holds it ([`BlobStore::contains`]): what
     /// `put(doc, blob)` does with a `BlobRef` it was given, before it logs the document (SPEC §9.6). `None` when the
-    /// store does not hold it (and nothing stays pinned).
+    /// store does not hold it (and nothing stays pinned). The reference is the caller's input, so it is checked with
+    /// [`BlobManifest::check_given_ref`] (ROADMAP 10.1.33); a read checks its reference with [`Self::pin_for_read`].
     ///
     /// # Errors
-    /// As [`BlobStore::contains`]: [`Error::Corrupt`] when the manifest bound under the id does not match `blob_ref`.
+    /// As [`BlobStore::contains`]: [`Error::BlobRefMismatch`] when the manifest bound under the id has another size or
+    /// chunk size than `blob_ref`, [`Error::Corrupt`] when it names another blob.
     pub fn pin_contained(&self, blob_ref: &BlobRef) -> Result<Option<Pins>> {
+        self.pin_checked(blob_ref, BlobManifest::check_given_ref)
+    }
+
+    /// [`Self::pin_contained`] for a read of the blob (the embedded API's `get_blob`): its reference is the one a
+    /// stored document holds, so a manifest that does not match it is checked with [`BlobManifest::check_ref`].
+    ///
+    /// # Errors
+    /// [`Error::Corrupt`] when the manifest bound under the id does not match `blob_ref`; the store's errors.
+    pub fn pin_for_read(&self, blob_ref: &BlobRef) -> Result<Option<Pins>> {
+        self.pin_checked(blob_ref, BlobManifest::check_ref)
+    }
+
+    /// Pins the blob `blob_ref` refers to, looks its manifest up, checks it with `check` and pins its upload.
+    fn pin_checked(
+        &self,
+        blob_ref: &BlobRef,
+        check: fn(&BlobManifest, &BlobRef) -> Result<()>,
+    ) -> Result<Option<Pins>> {
         // Pinned before the lookup (SPEC §9.5), so GC cannot sweep it between the check and the document's log. The
         // lookup is `BlobStore::contains`'s (the manifest, checked against the reference), and pins the upload the
         // manifest names too, so its chunks are pinned beside it (ADR-0051 item 5).
@@ -349,7 +369,7 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         let Some(manifest) = self.store.manifest(blob_ref.blob_id())? else {
             return Ok(None);
         };
-        manifest.check_ref(blob_ref)?;
+        check(&manifest, blob_ref)?;
         pins.add(Pinned::Upload(manifest.upload_id()));
         Ok(Some(pins))
     }

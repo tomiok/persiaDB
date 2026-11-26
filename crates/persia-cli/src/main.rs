@@ -96,10 +96,12 @@
 //! (it has the built-in ones only; it compacts such a database otherwise, ROADMAP 10.4.4, ADR-0068), `import` and
 //! `search` exit 1 for a collection the database lacks (`import` creates it with `--schema`) and for a schema naming a
 //! registered analyzer, `import` exits 1 at the first bad line of its input (naming it, after committing the lines
-//! before it), `gc` exits 1 for a schema naming a registered analyzer and for a `--grace` below 2 h (2 for a malformed
-//! one) and 0 when reader leases held its sweep back (the report says so), the segment commands exit 3 for a corrupt
-//! segment file and 1 for a missing one or a `--schema` that is not the segment's, and the store commands exit 1 for a
-//! root that is not a directory.
+//! before it; a blob reference that names a stored blob with another size or chunk size is such a line, and a put
+//! that finds stored damage exits 3, ROADMAP 10.1.33), `import` and `search` read the embedded API's `ErrorCode` for
+//! their status (3 for `Corrupt` only), `gc` exits 1 for a schema naming a registered analyzer and for a `--grace`
+//! below 2 h (2 for a malformed one) and 0 when reader leases held its sweep back (the report says so), the segment
+//! commands exit 3 for a corrupt segment file and 1 for a missing one or a `--schema` that is not the segment's, and
+//! the store commands exit 1 for a root that is not a directory.
 //!
 //! `persia bench` (ROADMAP 10.4.3, module `bench`) is a quick micro-benchmark: it indexes a seeded synthetic corpus
 //! into a new database in a scratch directory it creates and removes, then runs a seeded query mix, and reports
@@ -421,11 +423,16 @@ fn status_of(err: &anyhow::Error) -> u8 {
 }
 
 /// Whether `err` reports corrupt stored bytes: the outermost Persia error in its chain decides, since it knows
-/// what its sources mean (an I/O error reading a segment is not a corruption).
+/// what its sources mean (an I/O error reading a segment is not a corruption). A command of the embedded API
+/// (`import`, `search`) fails with its `persia::Error`, whose stable code decides (ROADMAP 10.1.33): a caller's
+/// blob reference that does not match its blob is `InvalidArgument` there, though the layers below may still
+/// call the same mismatch read from a stored document damage.
 fn is_corruption(err: &anyhow::Error) -> bool {
     err.chain()
         .find_map(|c| {
-            if let Some(e) = c.downcast_ref::<DatabaseError>() {
+            if let Some(e) = c.downcast_ref::<persia::Error>() {
+                Some(e.code() == persia::ErrorCode::Corrupt)
+            } else if let Some(e) = c.downcast_ref::<DatabaseError>() {
                 Some(e.is_corruption())
             } else if let Some(e) = c.downcast_ref::<VerifyError>() {
                 Some(e.is_corruption())

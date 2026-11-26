@@ -47,10 +47,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   end (the maintenance thread may commit during a long import). It opens read-write (status 1 while another writer
   holds the database); the collection must exist unless `--schema` gives its schema, which creates the database and
   the collection when missing (an existing collection must have exactly that schema). **The first bad line stops the
-  import** with status 1 (3 when the put's failure is corruption, ROADMAP 10.1.33) and an error naming the line
-  (1-based) and why: not UTF-8, too long, not JSON, not a document of the schema, or a put the database refuses. The
-  documents of the lines before it are committed, nothing from it on, so an import
-  resumes there and repeats harmlessly. **A `BlobRef` the target database's blob store does not hold is refused** (the
+  import** with status 1 (3 when the put reaches stored damage, `ErrorCode::Corrupt`, ROADMAP 10.1.33) and an
+  error naming the line (1-based) and why: not UTF-8, too long, not JSON, not a document of the schema, or a put the
+  database refuses. The documents of the lines before it are committed, nothing from it on, so an import resumes
+  there and repeats harmlessly. **A `BlobRef` the target database's blob store does not hold is refused** (the
   embedded API never logs a dangling reference, SPEC §9.6): the error names the line and the `blob_id`. A dump carries
   references, not blob bytes, so a dump with blobs imports only into its own database (or a copy with its pack) until
   ROADMAP 10.4.6. `search` opens read-only, without the lock (it takes a reader lease, as any read-only handle), and
@@ -471,6 +471,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- `persia`: a `put` given a `BlobRef` that names a stored blob with another `size` or `chunk_size` than the blob's
+  (`Collection::put`, `put_batch`, `put_with_blob` with `Blob::Stored`) now fails with `ErrorCode::InvalidArgument`
+  instead of `ErrorCode::Corrupt` (ROADMAP 10.1.33; SPEC §9.6): the reference is the caller's input, not damage, and
+  nothing is logged, as before. `Db::get_blob` and `get_blob_range` given such a reference still report `Corrupt` (a
+  read's reference is a stored document's). Underneath: the new `persia_blob::Error::BlobRefMismatch { blob_id, field,
+  given, stored }` (with `persia_blob::error::BlobRefField`), reported by the new `BlobManifest::check_given_ref`,
+  which `BlobStore::contains` and the put path use; `BlobManifest::check_ref` is unchanged.
+- `persia import` and `persia search` take their exit status from the embedded API's `ErrorCode` (ROADMAP 10.1.33):
+  3 for `Corrupt` only, so a reference line with another `size` or `chunk_size` than its blob exits 1 (it exited 3),
+  naming its line, and a damaged blob manifest frame a put reaches still exits 3.
 - `persia`: for a plain search (`relax: false`), `SearchResponse::relaxation.effective` is now L0's text, as the response
   JSON states it, instead of `None` (ROADMAP 10.1.25). `Relaxation` has `corrected()`, `fallback()` and
   `filters_dropped()`, and `persia` re-exports `Correction` and `FallbackOrder`. **Breaking** (`persia-engine`):

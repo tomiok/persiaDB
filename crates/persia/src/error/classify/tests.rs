@@ -1269,6 +1269,15 @@ fn blob_rows() -> Vec<(ErrorCode, persia_blob::Error)> {
                 actual: 5,
             },
         ),
+        (
+            InvalidArgument,
+            B::BlobRefMismatch {
+                blob_id: blob_id(),
+                field: persia_blob::error::BlobRefField::ChunkSize,
+                given: 5,
+                stored: 4,
+            },
+        ),
         (Transient, B::LeaseContended { attempts: 3 }),
     ];
     rows.extend(

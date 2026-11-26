@@ -211,15 +211,16 @@ pub trait BlobStore: Send + Sync {
     fn discard_upload(&self, upload_id: UploadId) -> Result<()>;
 
     /// Whether the blob `blob_ref` refers to is bound here and its manifest matches it
-    /// ([`BlobManifest::check_ref`]): what `put(doc, blob)` checks before it logs a document with a `BlobRef` it
-    /// was given (SPEC §9.6).
+    /// ([`BlobManifest::check_given_ref`]): what `put(doc, blob)` checks before it logs a document with a `BlobRef`
+    /// it was given (SPEC §9.6).
     ///
     /// # Errors
-    /// [`Error::Corrupt`] when a manifest is bound under the id but does not match `blob_ref`, or the store's errors.
+    /// [`Error::BlobRefMismatch`] when a manifest is bound under the id with another size or chunk size than
+    /// `blob_ref`'s, [`Error::Corrupt`] when the manifest names another blob, or the store's errors.
     fn contains(&self, blob_ref: &BlobRef) -> Result<bool> {
         match self.manifest(blob_ref.blob_id())? {
             None => Ok(false),
-            Some(manifest) => manifest.check_ref(blob_ref).map(|()| true),
+            Some(manifest) => manifest.check_given_ref(blob_ref).map(|()| true),
         }
     }
 
@@ -571,6 +572,9 @@ mod tests {
         ));
     }
 
+    /// A read by a reference that differs from the bound manifest is corruption (its reference is a stored
+    /// document's); `contains`, what a put checks a caller's reference with, reports the caller's error instead
+    /// (ROADMAP 10.1.33).
     #[test]
     fn a_reference_that_differs_from_the_manifest_is_corrupt() {
         let store = MemoryBlobStore::new();
@@ -578,9 +582,15 @@ mod tests {
         let wrong_size = BlobRef::new(m.blob_id(), 11, "a/b", 4, BTreeMap::new()).unwrap();
         let wrong_chunk = BlobRef::new(m.blob_id(), 10, "a/b", 5, BTreeMap::new()).unwrap();
         for r in [wrong_size, wrong_chunk] {
-            assert!(store.contains(&r).unwrap_err().is_corruption());
+            let given = store.contains(&r).unwrap_err();
+            assert!(
+                matches!(given, Error::BlobRefMismatch { blob_id, .. } if blob_id == m.blob_id()),
+                "{given:?}"
+            );
+            assert!(!given.is_corruption());
             assert!(read_range(&store, &r, 0..1).unwrap_err().is_corruption());
         }
+        assert!(store.contains(&reference(&m)).unwrap());
     }
 
     #[test]

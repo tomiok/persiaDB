@@ -10,7 +10,9 @@
 //! search sees what that writer had made durable when the command started. As every read-only handle of the embedded
 //! API it takes a reader lease beside the blob pack (SPEC §9.3), so it creates `<name>.persia.blobs.leases/` where
 //! there is none. A query is analyzed with the analyzers of the collection's schema, and the command has the
-//! built-in ones only: a schema that names a registered analyzer (SPEC §6.2.2) fails the open (status 1).
+//! built-in ones only: a schema that names a registered analyzer (SPEC §6.2.2) fails the open (status 1). A failure
+//! of the embedded API exits by its code (ROADMAP 10.1.33): 3 for `ErrorCode::Corrupt` (stored damage, a damaged
+//! segment or blob pack), 1 for any other (4 for a file that is not a container, as every command).
 //!
 //! **Output.** Text: `key  value` rows (`hits`, `relaxation` with the level and what each step applied, `truncated`
 //! when the relaxation budget or the query limits cut something), an empty line, then one line per hit, best first:

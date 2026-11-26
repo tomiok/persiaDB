@@ -38,7 +38,7 @@ use persia_format::widen::{u64_from_usize, usize_from_u32};
 use persia_format::{BlobId, BlobRef, Reader, Writer};
 
 use crate::chunking::ChunkSize;
-use crate::error::{Error, Result};
+use crate::error::{BlobRefField, Error, Result};
 use crate::hash::blob_id_of;
 
 /// `"PBLM"`: the first bytes of every blob manifest.
@@ -248,24 +248,78 @@ impl BlobManifest {
     }
 
     /// Checks that this manifest describes the blob `blob_ref` refers to: same id, size and chunk size (SPEC §9.4).
+    /// What a read checks (`get_blob`, `get_blob_range`, `verify`): its reference is the one a stored document holds,
+    /// so a mismatch is damage. A reference a caller gives to be logged is checked by [`Self::check_given_ref`].
     ///
     /// # Errors
     /// [`Error::Corrupt`] for the first field that differs.
     pub fn check_ref(&self, blob_ref: &BlobRef) -> Result<()> {
         self.check_blob_id(blob_ref.blob_id())?;
-        let corrupt = |what| {
-            Err(Error::Corrupt {
+        match self.differing(blob_ref) {
+            None => Ok(()),
+            Some((BlobRefField::Size, ..)) => Err(Error::Corrupt {
                 encoding: ENCODING,
-                what,
-            })
-        };
+                what: "the manifest's size differs from the blob reference's",
+            }),
+            Some((BlobRefField::ChunkSize, ..)) => Err(Error::Corrupt {
+                encoding: ENCODING,
+                what: "the manifest's chunk size differs from the blob reference's",
+            }),
+        }
+    }
+
+    /// Checks that this manifest, the one bound under `blob_ref`'s id, describes the blob a caller's reference
+    /// refers to: what `put(doc, blob)` checks before it logs a document with a `BlobRef` it was given (SPEC §9.6,
+    /// ROADMAP 10.1.33). The reference is input, not stored bytes, so another size or chunk size is the caller's
+    /// error; a manifest that names another blob than the id it was looked up by is still damage.
+    ///
+    /// ```
+    /// use std::collections::BTreeMap;
+    /// use persia_blob::{BlobManifest, ChunkSize, Error, UploadId, blob_id_of};
+    /// use persia_blob::error::BlobRefField;
+    /// use persia_format::{BlobRef, checksum::crc32c};
+    ///
+    /// let data = b"hello, chunks";
+    /// let crcs = data.chunks(5).map(crc32c).collect();
+    /// let m = BlobManifest::new(blob_id_of(data), 13, ChunkSize::from_encoding(5)?, UploadId::new(7), crcs)?;
+    /// let given = BlobRef::new(m.blob_id(), 14, "text/plain", 5, BTreeMap::new())?;
+    /// let err = m.check_given_ref(&given).unwrap_err();
+    /// assert!(matches!(err, Error::BlobRefMismatch { field: BlobRefField::Size, given: 14, stored: 13, .. }));
+    /// assert!(!err.is_corruption());
+    /// assert!(m.check_ref(&given).unwrap_err().is_corruption()); // the same reference, read from a document
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// - [`Error::Corrupt`] when the manifest names another blob ([`Self::check_blob_id`]);
+    /// - [`Error::BlobRefMismatch`] for the first of the size and the chunk size that differs.
+    pub fn check_given_ref(&self, blob_ref: &BlobRef) -> Result<()> {
+        self.check_blob_id(blob_ref.blob_id())?;
+        match self.differing(blob_ref) {
+            None => Ok(()),
+            Some((field, given, stored)) => Err(Error::BlobRefMismatch {
+                blob_id: self.blob_id,
+                field,
+                given,
+                stored,
+            }),
+        }
+    }
+
+    /// The first of the size and the chunk size `blob_ref` gives otherwise than this manifest: the field, the
+    /// reference's value and the manifest's.
+    fn differing(&self, blob_ref: &BlobRef) -> Option<(BlobRefField, u64, u64)> {
         if self.size != blob_ref.size() {
-            return corrupt("the manifest's size differs from the blob reference's");
+            return Some((BlobRefField::Size, blob_ref.size(), self.size));
         }
-        if self.chunk_size.get() != blob_ref.chunk_size() {
-            return corrupt("the manifest's chunk size differs from the blob reference's");
-        }
-        Ok(())
+        let stored = self.chunk_size.get();
+        (stored != blob_ref.chunk_size()).then(|| {
+            (
+                BlobRefField::ChunkSize,
+                u64::from(blob_ref.chunk_size()),
+                u64::from(stored),
+            )
+        })
     }
 
     /// The length of the version-1, no-flags encoding of the manifest of a blob of `size` bytes in chunks of

@@ -23,16 +23,19 @@
 //! **A bad line stops the import.** Not UTF-8, longer than 16 MiB, not JSON, not a document of the schema, past a
 //! limit of SPEC §6.4.1, or refused by the database when it is put (its blob reference, below, or a document the
 //! memtable rejects, SPEC §8.2): the command commits the documents of the lines before it and exits with status 1,
-//! naming the line (1-based) and why (status 3 when the put's failure is corruption, ROADMAP 10.1.33). Nothing
-//! from that line on is imported, so an import resumes from it (`tail -n +<line>`), and running it again is harmless
-//! (every put replaces the document of its id). A crash, or a kill, leaves a prefix of the lines imported (the log
-//! keeps their order, SPEC §8.2.1).
+//! naming the line (1-based) and why, unless the put's failure is stored damage: the status follows the embedded
+//! API's code, 3 for `ErrorCode::Corrupt` (such as a damaged blob manifest frame the put reached) and 1 for any other
+//! code (ROADMAP 10.1.33). Nothing from that line on is imported, so an import resumes from it (`tail -n +<line>`),
+//! and running it again is harmless (every put replaces the document of its id). A crash, or a kill, leaves a prefix
+//! of the lines imported (the log keeps their order, SPEC §8.2.1).
 //!
 //! **Blob references.** A line may carry a `blob` reference (as a dump writes it, SPEC §6.4.1). The embedded API
 //! never logs a reference its blob store does not hold (SPEC §9.6, "No dangling references"), so a line whose blob
 //! is not in this database's blob pack (`<name>.persia.blobs`) stops the import like any bad line, naming the
-//! `blob_id`. A dump carries references, not bytes, so the dump of a database with blobs imports only into that
-//! database (or a copy with its pack, SPEC §4.8) until `dump documents` exports blobs (ROADMAP 10.4.6).
+//! `blob_id`. So does a reference that names a blob the pack holds with another `size` or `chunk_size` than the
+//! blob's: the input's error (`ErrorCode::InvalidArgument`, status 1; SPEC §9.6), not damage. A dump carries
+//! references, not bytes, so the dump of a database with blobs imports only into that database (or a copy with its
+//! pack, SPEC §4.8) until `dump documents` exports blobs (ROADMAP 10.4.6).
 //!
 //! The text output is `key  value` rows. `--json` writes one object on one line, with these keys and no others:
 //! `{"collection": .., "created": .., "lines": .., "blank_lines": .., "documents": ..}`, where `created` says whether

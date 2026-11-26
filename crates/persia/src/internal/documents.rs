@@ -341,6 +341,8 @@ impl<S: BlobStore + ?Sized, L: DocumentLog> BlobDatabase<S, L> {
     /// # Errors
     /// - [`Error::Blob`] or [`Error::Open`] when the blob cannot be read or stored: nothing is logged;
     /// - [`Error::BlobNotStored`] for a [`Blob::Stored`] the store lacks: nothing is logged;
+    /// - [`Error::Blob`] of [`persia_blob::Error::BlobRefMismatch`] for a [`Blob::Stored`] whose size or chunk size is
+    ///   not the bound blob's (the caller's error, ROADMAP 10.1.33): nothing is logged;
     /// - [`Error::Database`] as [`Database::put`]; the blob is stored and, unless the record may have reached the
     ///   WAL, unpinned (an orphan GC reclaims).
     pub fn put(

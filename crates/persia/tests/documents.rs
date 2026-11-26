@@ -563,16 +563,22 @@ fn a_put_whose_bind_stays_unknown_logs_nothing() {
     }
 }
 
-/// A stored reference whose size or chunk size differs from the bound blob's is corrupt and logs nothing.
+/// A given (`Blob::Stored`) reference whose size or chunk size differs from the bound blob's is the caller's
+/// error, `BlobRefMismatch` and not corruption (ROADMAP 10.1.33), and logs nothing.
 #[test]
 fn a_stored_reference_that_differs_from_its_manifest_logs_nothing() {
+    use persia_blob::error::BlobRefField;
+
     let dir = tempfile::tempdir().unwrap();
     let mut db = BlobDatabase::new(
         database(&dir.path().join("a.persia")),
         Blobs::new(Arc::new(MemoryBlobStore::new())),
     );
     let (r, _pins) = db.put_blob(&b"0123456789"[..], &options()).unwrap();
-    for (size, chunk) in [(11, r.chunk_size()), (10, r.chunk_size() + 1)] {
+    for (size, chunk, field) in [
+        (11, r.chunk_size(), BlobRefField::Size),
+        (10, r.chunk_size() + 1, BlobRefField::ChunkSize),
+    ] {
         let wrong =
             BlobRef::new(r.blob_id(), size, r.mime(), chunk, r.user_meta().clone()).unwrap();
         let before = db.log().wal_mark();
@@ -580,7 +586,12 @@ fn a_stored_reference_that_differs_from_its_manifest_logs_nothing() {
         else {
             panic!("a mismatched reference was logged");
         };
-        assert!(e.is_corruption());
+        assert!(!e.is_corruption(), "{e}");
+        assert!(
+            matches!(e, persia_blob::Error::BlobRefMismatch { blob_id, field: f, .. }
+                if blob_id == r.blob_id() && f == field),
+            "{e:?}"
+        );
         assert_eq!(db.log().wal_mark(), before);
     }
     assert!(documents(db.log()).is_empty());

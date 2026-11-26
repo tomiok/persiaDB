@@ -2890,7 +2890,10 @@ running one again is harmless. A crash leaves a prefix of the lines imported. `p
 <name> (--query <text> | --request <json>)` runs one search (§7.1.1 user text with every default, or a request
 JSON, §7.1.4) on a read-only open, without the lock; as any read-only handle of the embedded API, it takes a reader
 lease (§9.3). It prints each hit's rank, score and document, or with `--json` the response JSON of §7.5.2. Both have
-the built-in analyzers only: a schema that names a registered analyzer (§6.2.2) fails their open.
+the built-in analyzers only: a schema that names a registered analyzer (§6.2.2) fails their open. Both take their exit
+status from the embedded API's `ErrorCode` (ROADMAP 10.1.33): 3 for `Corrupt` (stored damage, also when a put or a
+read reaches it, such as a damaged blob manifest frame), 4 for a file that is not a container, and 1 for any other
+failure (a blob reference that names a stored blob with another size or chunk size is `InvalidArgument`, §9.6).
 
 ### 8.7 Manifest
 A manifest is the snapshot one commit publishes (ADR-0024): the commit's `seq`, the committing writer's
@@ -3430,6 +3433,18 @@ carries references, not blob bytes, so it imports with its blobs only into the d
 its pack (§4.8), until `dump documents` exports blobs (ROADMAP 10.4.6). A dangling reference that reaches a
 database anyway (written below the public API, or by copying only the container, §4.8) is reported by `verify`
 (§9.5), and `get_blob` fails for it.
+
+**A caller's reference that does not match its blob** (ROADMAP 10.1.33). `put(doc, blob)` given a `BlobRef` whose
+`blob_id` this store has bound, but whose `size` or `chunk_size` is not the bound manifest's, refuses it and logs
+nothing, as for a reference it does not find. The reference is the caller's input, not stored bytes, so this is a
+caller's error, not corruption: `BlobManifest::check_given_ref` reports `persia_blob::Error::BlobRefMismatch {
+blob_id, field, given, stored }` (the first of the size and the chunk size that differs), `ErrorCode::InvalidArgument`
+in the embedded API, and `persia import` exits 1 at its line (§8.6). The path decides, by call site, never by an
+error's text: only the put path checks a reference as given. A read (`get_blob`, `get_blob_range`) and `verify` check
+the reference with `check_ref`, which reports the same mismatch as corruption (`Corrupt`; for `verify`, a dangling
+reference, §9.5): their reference is the one a stored document holds, so a manifest that disagrees with it is damage.
+On every path a manifest bound under the id that names another blob is corruption, and so is any stored damage a
+put reaches (a damaged blob manifest frame, `ErrorCode::Corrupt`).
 
 ---
 

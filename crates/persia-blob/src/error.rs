@@ -255,6 +255,43 @@ pub enum Error {
     /// corruption (an argument the image refused, a bug).
     #[error("a container operation of the pack failed")]
     Container(#[source] persia_storage::container::Error),
+    // -- caller references (10.1.33) --
+    /// A `BlobRef` a caller gave to be logged (`put(doc, blob)` with a stored reference, SPEC §9.6) names a blob this
+    /// store has bound, but its size or chunk size is not the bound manifest's
+    /// ([`BlobManifest::check_given_ref`](crate::BlobManifest::check_given_ref); ROADMAP 10.1.33): a caller's error,
+    /// not corruption, and nothing is logged. The same mismatch in the reference a read is given
+    /// ([`BlobManifest::check_ref`](crate::BlobManifest::check_ref)) is [`Error::Corrupt`].
+    #[error(
+        "the blob reference to {blob_id} gives {field} {given}, but the stored blob's is {stored}"
+    )]
+    BlobRefMismatch {
+        /// The blob the reference names.
+        blob_id: BlobId,
+        /// The first attribute that differs.
+        field: BlobRefField,
+        /// The reference's value of it.
+        given: u64,
+        /// The bound manifest's.
+        stored: u64,
+    },
+}
+
+/// An attribute of a `BlobRef` that its blob's manifest also records, checked against it ([`Error::BlobRefMismatch`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BlobRefField {
+    /// The blob's length in bytes.
+    Size,
+    /// The chunk size the blob was stored with.
+    ChunkSize,
+}
+
+impl core::fmt::Display for BlobRefField {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Size => "size",
+            Self::ChunkSize => "chunk size",
+        })
+    }
 }
 
 impl Error {
@@ -350,5 +387,21 @@ mod tests {
         assert_eq!(wrap(read()).corrupt_offset(), None);
         assert!(!wrap(read()).is_store_poisoned());
         assert!(!wrap(corrupt()).is_bind_outcome_unknown());
+    }
+
+    /// ROADMAP 10.1.33: a caller's reference that does not match its blob is the caller's error, not damage.
+    #[test]
+    fn a_mismatched_caller_reference_is_not_corruption() {
+        let e = Error::BlobRefMismatch {
+            blob_id: BlobId::from_bytes([7; 32]),
+            field: BlobRefField::ChunkSize,
+            given: 65_537,
+            stored: 65_536,
+        };
+        assert!(!e.is_corruption());
+        assert!(!e.is_store_poisoned());
+        assert_eq!(e.corrupt_offset(), None);
+        assert_eq!(BlobRefField::Size.to_string(), "size");
+        assert_eq!(BlobRefField::ChunkSize.to_string(), "chunk size");
     }
 }
