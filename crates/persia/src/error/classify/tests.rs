@@ -977,6 +977,15 @@ fn database_rows() -> Vec<(ErrorCode, DatabaseError)> {
                 analyzer: "mine@1".into(),
             },
         ),
+        // A compaction-only open refusing to flush what a stand-in analyzer indexed (ADR-0068): an analyzer it lacks.
+        (
+            Unsupported,
+            DatabaseError::AnalysisSkipped {
+                collection: c(),
+                field: "f".into(),
+                analyzer: "mine@1".into(),
+            },
+        ),
         (
             Conflict,
             DatabaseError::RefreshRefused {

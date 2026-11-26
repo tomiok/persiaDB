@@ -9,6 +9,54 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia gc <path> [--grace <dur>] [--json]` (ROADMAP 10.4.5; SPEC §9.5): blob garbage collection from the command
+  line, through `persia::internal`'s `BlobDatabase::gc` (mark, sweep, pack rewrite at the default ratio). It opens the
+  database read-write with its pack, so it fails (status 1) while another writer holds either; the built-in analyzers
+  only (a schema naming a registered one fails the open, ROADMAP 10.4.7). It reports what it marked, deleted (blobs,
+  uploads, chunks) and kept (pinned, young, of unknown age, changed, unreadable), the rewrite's outcome and frame bytes,
+  the pack file's size before and after, dangling references (`missing`), and the reader leases by state: a lease
+  behind the committed seq (or opening, ahead, unreadable) holds the sweep back, and the report says so with status 0.
+  `--grace` (`<n>s`, `m`, `h` or `d`; `24h` by default) is checked by the GC's own rule, the new
+  `GcOptions::validate` (which `BlobDatabase::gc` also calls), before the database is opened: one below 2 h exits 1
+  with every file unchanged; a malformed one is a usage error (status 2). The local pack keeps no ages: what the mark
+  does not keep is dropped at once, so `young` is 0 locally. A database without a pack is a no-op report (the pack's
+  writer lock file appears, no pack). A pack size that cannot be read after a successful GC is `null` in the report
+  (said on stderr), not a failure. `--json` keys are in the README. `persia::internal::gc` re-exports `SweepReport`,
+  `Rewrite`, `ReaderLeaseReport` and `BlobError` for it.
+- `persia_engine::db::CompactOnlyDatabase` (ROADMAP 10.4.4, ADR-0068; SPEC §4.6): `open(path, options)` and
+  `open_container(container, options)` run the writer's open exactly (lock, recovery, every segment checked, the whole
+  WAL replayed, a cut commit retired), except that a `text` field whose analyzer `options.registry` lacks is indexed
+  with a no-token stand-in (`skipped_analysis()` lists it) and no commit may flush a non-empty memtable of its
+  collection: such a commit fails with the new `DatabaseError::AnalysisSkipped` before anything is written (code
+  `Unsupported` in the embedded API). The handle offers `compact`, `space_usage` and `seq` only: no document write,
+  commit, merge or schema change. Its WAL records of such a collection stay WAL records, which the compaction copies
+  and the next writer's open indexes with the real analyzer. With every analyzer it is the writer's open.
+- `persia compact` compacts a database whose schema names an analyzer registered by its application (ROADMAP 10.4.4):
+  it opens with `CompactOnlyDatabase` and the built-in analyzers. It fails (status 1; the refused commit writes
+  nothing) only when its recovery would flush any collection while such a collection holds a replayed WAL record:
+  every flush flushes every memtable. A replay flushes when a memtable reaches the default 64 MiB (that of the
+  stand-in, for such a collection: it holds no terms of the skipped field) or runs out of docids. Open the database
+  with its application and commit (closing a `persia::Db` commits; a reopen alone may flush nothing), then compact.
+  Exit statuses and `--json` output are unchanged.
+- `persia-cli`: `persia import <path> --collection <name> [--input <file>] [--schema <file>] [--json]` and `persia
+  search <path> --collection <name> (--query <text> | --request <json>) [--json]` (ROADMAP 10.4.2; SPEC §8.6), for
+  quick experiments, through the embedded API. `import` reads JSON Lines (the file, or the standard input), one
+  document per line in the form `persia dump documents` writes, so a dump imports back; lines end at `\n` or `\r\n`,
+  are at most 16 MiB (read in bounded memory) and blank ones are skipped; an input that starts with a UTF-8 byte order
+  mark is refused at line 1, saying so. Each document is put (an upsert by id) and the import commits at least at the
+  end (the maintenance thread may commit during a long import). It opens read-write (status 1 while another writer
+  holds the database); the collection must exist unless `--schema` gives its schema, which creates the database and
+  the collection when missing (an existing collection must have exactly that schema). **The first bad line stops the
+  import** with status 1 (3 when the put's failure is corruption, ROADMAP 10.1.33) and an error naming the line
+  (1-based) and why: not UTF-8, too long, not JSON, not a document of the schema, or a put the database refuses. The
+  documents of the lines before it are committed, nothing from it on, so an import
+  resumes there and repeats harmlessly. **A `BlobRef` the target database's blob store does not hold is refused** (the
+  embedded API never logs a dangling reference, SPEC §9.6): the error names the line and the `blob_id`. A dump carries
+  references, not blob bytes, so a dump with blobs imports only into its own database (or a copy with its pack) until
+  ROADMAP 10.4.6. `search` opens read-only, without the lock (it takes a reader lease, as any read-only handle), and
+  prints each hit's rank, score and document, or with `--json` the response JSON of SPEC §7.5.2. Both fail (status 1)
+  on a schema that names a registered analyzer. `persia::internal::jsonl` holds the bounded line reader, for the CLI
+  and the new `jsonl_lines` fuzz target.
 - `cargo xtask public-api [--check]` and `just public-api` (ROADMAP 10.1.12, ADR-0063 amended): the public API of
   `persia` (default features and `async`), rendered from rustdoc's JSON with the dated nightly, re-exported engine
   items expanded, committed as `crates/persia/public-api.txt`; CI fails when the surface changes without it.

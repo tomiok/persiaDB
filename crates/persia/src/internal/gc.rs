@@ -21,9 +21,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
-use persia_blob::gc::{GcObject, Mark, PinCheck, PinGate, Sweep, SweepOptions, SweepReport};
-use persia_blob::pack::lease::ReaderLeaseReport;
+pub use persia_blob::gc::SweepReport;
+use persia_blob::gc::{GcObject, Mark, PinCheck, PinGate, Sweep, SweepOptions};
+pub use persia_blob::pack::lease::ReaderLeaseReport;
 use persia_blob::{BlobId, BlobStore};
+// What [`GcReport`] holds, for the CLI (`persia gc`, ROADMAP 10.4.5), which reaches `persia-blob` only through here.
+pub use persia_blob::Error as BlobError;
+pub use persia_blob::gc::Rewrite;
 use persia_engine::db::{Database, DatabaseError};
 
 use super::blob::MAX_BIND_BUDGET;
@@ -58,6 +62,40 @@ impl Default for GcOptions {
             rewrite_ratio: DEFAULT_REWRITE_RATIO,
             now: None,
         }
+    }
+}
+
+impl GcOptions {
+    /// Checks these options as [`BlobDatabase::gc`] does before it reads anything: a caller such as `persia gc` calls
+    /// it before opening the database, so options GC would refuse never cost an open (locks, recovery).
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// use persia::internal::gc::{GcError, GcOptions};
+    ///
+    /// assert!(GcOptions::default().validate().is_ok());
+    /// let short = GcOptions { grace: Duration::from_hours(1), ..GcOptions::default() };
+    /// assert!(matches!(short.validate(), Err(GcError::GraceBelowBindBudget { .. })));
+    /// let ratio = GcOptions { rewrite_ratio: -1.0, ..GcOptions::default() };
+    /// assert!(matches!(ratio.validate(), Err(GcError::InvalidRewriteRatio(_))));
+    /// ```
+    ///
+    /// # Errors
+    /// [`GcError::GraceBelowBindBudget`] for a grace below twice [`MAX_BIND_BUDGET`]; [`GcError::InvalidRewriteRatio`]
+    /// for a negative or NaN ratio.
+    pub fn validate(&self) -> Result<(), GcError> {
+        // Twice the cap, not the cap: a `put_if_absent` started inside the budget can land after it (SPEC §9.4).
+        if self.grace < 2 * MAX_BIND_BUDGET {
+            return Err(GcError::GraceBelowBindBudget {
+                grace: self.grace,
+                floor: 2 * MAX_BIND_BUDGET,
+            });
+        }
+        if self.rewrite_ratio.is_nan() || self.rewrite_ratio < 0.0 {
+            return Err(GcError::InvalidRewriteRatio(self.rewrite_ratio));
+        }
+        Ok(())
     }
 }
 
@@ -206,16 +244,7 @@ impl<S: BlobStore + Sweep + ?Sized, L: DocumentLog + BlobReferences> BlobDatabas
     /// [`BlobDatabase::mark`] and the store's sweep ([`GcError::Blob`]): the sweep stops at the first error, and what
     /// it deleted before was unmarked.
     pub fn gc(&self, options: &GcOptions) -> Result<GcReport, GcError> {
-        // Twice the cap, not the cap: a `put_if_absent` started inside the budget can land after it (SPEC §9.4).
-        if options.grace < 2 * MAX_BIND_BUDGET {
-            return Err(GcError::GraceBelowBindBudget {
-                grace: options.grace,
-                floor: 2 * MAX_BIND_BUDGET,
-            });
-        }
-        if options.rewrite_ratio.is_nan() || options.rewrite_ratio < 0.0 {
-            return Err(GcError::InvalidRewriteRatio(options.rewrite_ratio));
-        }
+        options.validate()?;
         if self.gc_held() {
             return Ok(GcReport {
                 held_by_copy: true,

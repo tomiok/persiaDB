@@ -279,3 +279,10 @@ path = "fuzz_targets/cursor_token.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "jsonl_lines"
+path = "fuzz_targets/jsonl_lines.rs"
+test = false
+doc = false
+bench = false

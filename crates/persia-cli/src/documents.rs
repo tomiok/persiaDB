@@ -83,8 +83,9 @@ fn write_live<V: SearchView>(
     Ok(())
 }
 
+/// Its strategies and helpers are shared with the property test of `import` (the round trip of a dump).
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::BTreeMap;
 
     use persia_engine::db::{Database, DatabaseOptions};
@@ -98,7 +99,7 @@ mod tests {
     use super::*;
 
     /// Every field type of SPEC §6.1, all stored, and not strict, so documents carry extra fields too.
-    fn schema() -> CollectionSchema {
+    pub(crate) fn schema() -> CollectionSchema {
         SchemaBuilder::new("c")
             .field("title", FieldKind::Text(TextOptions::default()))
             .field("tags", FieldKind::Keyword(KeywordOptions::default()))
@@ -187,13 +188,13 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
-    enum Op {
+    pub(crate) enum Op {
         Put(Document),
         Delete(String),
         Commit,
     }
 
-    fn op() -> impl Strategy<Value = Op> {
+    pub(crate) fn op() -> impl Strategy<Value = Op> {
         prop_oneof![
             6 => document().prop_map(Op::Put),
             2 => "d[0-5]".prop_map(Op::Delete),
@@ -203,7 +204,7 @@ mod tests {
 
     /// Runs `ops` on a new database at `path` and returns the documents left live, by id. Writes reach the file
     /// (`Async`) without a sync, so a read-only open sees those after the last commit as WAL records.
-    fn apply(path: &Path, ops: Vec<Op>) -> (Database, BTreeMap<String, Document>) {
+    pub(crate) fn apply(path: &Path, ops: Vec<Op>) -> (Database, BTreeMap<String, Document>) {
         let mut db = Database::create(path, DatabaseOptions::default()).unwrap();
         db.create_collection(schema()).unwrap();
         let mut live = BTreeMap::new();

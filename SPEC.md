@@ -374,13 +374,24 @@ from `wal_start` to the end of the valid frames; the rest of that end is *dead*.
 reach the dead-space ratio of the end (default 40%). Dead frames in `wal_start..log_end` (an old Manifest) count as
 live; they are few and small.
 
-**From the command line** (ROADMAP 10.4.1). `persia compact <path>` runs one compaction on request, whatever the
+**From the command line** (ROADMAP 10.4.1, 10.4.4). `persia compact <path>` runs one compaction on request, whatever the
 dead space. It opens the database read-write as any writer does, so it fails while another writer holds the lock, and
 recovery runs first (§8.6). It commits no document of its own; as with any writer's open, recovery may flush a WAL
 backlog larger than the default memtable, or retire a cut commit (§8.6), so the compacted `seq` may be more than one
 above the last commit before the command. Otherwise the WAL records after the last commit stay WAL records. It
-prints the space before and after (`--json` for one JSON object, keys in the README's command-line section). It has the built-in analyzers only, so a database
-whose schema names a registered analyzer (§6.2.2) fails that read-write open, and is compacted by its application.
+prints the space before and after (`--json` for one JSON object, keys in the README's command-line section). It has
+the built-in analyzers only, so it opens with the **compaction-only open** (ROADMAP 10.4.4, ADR-0068,
+`CompactOnlyDatabase`): the writer's open above, except that a `text` field whose analyzer it lacks (a registered one,
+§6.2.2) is indexed with the stand-in of a read-only open that skips analysis (§8.6, one that emits no token), and
+that no commit may flush a non-empty memtable of a collection with such a field. Such a commit is refused before
+anything is written (`AnalysisSkipped`), so the open fails (status 1) when its replay would flush any collection
+(every flush flushes every memtable, §8.2) while such a collection holds a replayed record: a memtable at the
+default size (for such a collection, the stand-in's, which holds none of the skipped field's terms) or out of
+docids. The application then opens the database with its analyzer and commits (closing a `persia::Db` does; an open
+alone may flush nothing), and the command compacts after it. Otherwise that collection's WAL records stay WAL
+records, which the compaction copies (above) and the next writer's open replays and indexes with the real
+analyzer: nothing is lost, resurrected, or committed without its terms. The handle has no call that writes a
+document, commits, merges or changes a schema; when its registry has every analyzer it is exactly the writer's open.
 It never opens the blob pack (§9.3), whose space blob GC reclaims (§9.5). `persia stats` reports whether a
 compaction is due by the default thresholds only, and says so: the application's own are not in the file. Like every compaction it puts the read-only
 handles of other processes behind until they refresh (§9.5), and it must not run during a copy taken with the files
@@ -976,7 +987,10 @@ A stored schema (§8.7) is read without a registry, and its `analyzer` is:
   `DatabaseError::UnregisteredAnalyzer` before any segment is read, for the same reason; that is not corruption
   either. The open cannot tell a registered analyzer from a newer build's built-in it lacks (`nl@1`): both are
   unregistered to it. A build from before registered analyzers reads such a schema as written by a newer build
-  (unsupported), since the name has built-in shape;
+  (unsupported), since the name has built-in shape. Two opens are the exception, for a tool that has the built-ins
+  only: a read-only open that skips analysis (`ReadOnlyDatabase::open_skipping_analysis`, ROADMAP 6.6.8, §8.6) and
+  the compaction-only open (`CompactOnlyDatabase`, §4.6, ADR-0068) index such a field with a stand-in that emits no
+  token, and the latter never commits a memtable so indexed;
 - a malformed one (`es@01`, `ES@1`): corruption.
 
 #### 6.2.3 Ranking and relaxation
@@ -2769,7 +2783,9 @@ an empty memtable would not report) it commits and applies the record again. Suc
 the records from there on may not be in a memtable yet. The records of that chunk before the flush are then replayed
 again by the next open, which is harmless (§8.2.1). Records replayed after the last such commit hold `wal_start` back
 until a later flush covers them, like records written after the open. An open that fails or crashes during these
-commits leaves a state from which the next open reaches the same documents.
+commits leaves a state from which the next open reaches the same documents. The compaction-only open (§4.6,
+ADR-0068) refuses such a flush while a collection whose analysis it skips holds a replayed record
+(`AnalysisSkipped`, before anything of that commit is written), and so fails; its other commits are these.
 
 A **read-only open** (ROADMAP 6.6.2) runs the same sequence on a container opened read-only (§4.5.1): no lock, no
 write, so it opens beside a live writer, any number at once. It cannot flush, and it does not stop at the size
@@ -2856,6 +2872,25 @@ the output form of §6.4.1 (what `get` returns: the stored fields, and a blob as
 ascending docid, then the documents of the WAL records not yet in a segment, in log order. It is the same for every
 dump of one file state; a merge or a commit changes the order, not the set. A segment's documents are streamed one at a time; the WAL's
 are in memory, as the open replayed them (§8.6).
+
+**Import and search** (ROADMAP 10.4.2), for quick experiments, go through the embedded API. `persia import <path>
+--collection <name> [--input <file>]` reads JSON Lines (the file, or the standard input) into the collection: one
+document per line in the JSON form of §6.4.1, so a `dump documents` line imports back. It opens read-write as any
+writer does (it fails while another writer holds the lock, and recovery runs first). The collection must exist unless
+`--schema <file>` gives its schema (§6.2): the database is then created if no file is at the path, the collection if
+the database lacks it, and an existing collection must have exactly that schema. A line ends at `\n` (a `\r` before it
+is dropped), is at most 16 MiB (the longest document JSON text, checked in bounded memory) and valid UTF-8; empty and
+blank lines (JSON whitespace only) are skipped and still counted; an input that starts with a UTF-8 byte order mark
+is refused at line 1. Each document is put (an upsert by id, §8.3), logged `Buffered`, and the import commits at
+least at its end (the maintenance thread may commit during a long import, as for any write, §8.2). **The first bad
+line stops it**: a line that is not UTF-8, too long, not JSON, not a document of the schema, or that the put refuses
+(a blob reference, §9.6, or a memtable rejection). The command then commits the documents of the lines before it
+and fails, naming the line (1-based) and why: nothing from that line on is imported, so an import resumes there, and
+running one again is harmless. A crash leaves a prefix of the lines imported. `persia search <path> --collection
+<name> (--query <text> | --request <json>)` runs one search (§7.1.1 user text with every default, or a request
+JSON, §7.1.4) on a read-only open, without the lock; as any read-only handle of the embedded API, it takes a reader
+lease (§9.3). It prints each hit's rank, score and document, or with `--json` the response JSON of §7.5.2. Both have
+the built-in analyzers only: a schema that names a registered analyzer (§6.2.2) fails their open.
 
 ### 8.7 Manifest
 A manifest is the snapshot one commit publishes (ADR-0024): the commit's `seq`, the committing writer's
@@ -3279,7 +3314,12 @@ the same process that runs `put_blob`, and keeps a **pin set** with it:
   A caller that holds a bare `Arc<Segment>` and has dropped the snapshot and the tombstones it was read with is not
   tracked. Then the pinned ids, then the upload ids their blob manifests name (none for an inline manifest; a marked
   blob whose manifest was missing is not resolved, so a later pin still makes the sweep read it), and the pinned
-  upload ids. GC runs only when the writer calls `gc`, never in the background, and between writes.
+  upload ids. GC runs only when the writer calls `gc`, never in the background, and between writes. `persia gc <path>`
+  (ROADMAP 10.4.5) is such a writer: it opens the database read-write with its pack (the writer locks of both, so it
+  fails while another writer has it, and recovery runs first; built-in analyzers only, ROADMAP 10.4.7), runs one GC
+  with the default rewrite ratio and `--grace` (24 h by default; the GC refuses one below its floor), and reports the
+  mark, the sweep, the rewrite, the pack's size before and after and the reader leases (§9.3). A database without a
+  pack has nothing to collect.
 - Sweep: unmarked blob manifests, then staged chunks of uploads no marked manifest names, each only once older than a
   grace period (default 24 h, and at least `2 * MAX_BIND_BUDGET`, §9.4; for staged chunks counted from the upload's
   newest chunk, so an idle upload stays
@@ -3384,7 +3424,10 @@ Blob::Stored(reference))` (ADR-0063 item 5), and in Rust `put(doc, blob)` is `Co
 gets a blob only through `put(doc, blob)`, where `blob` is either bytes to store (`Blob::from_path`, `Blob::from_reader`),
 which `put` stores first (§9.5), or a `BlobRef` that this database's `put_blob` returned, which `put` checks is bound
 in this database's store (and pinned, §9.5) before it logs the document; a `BlobRef` it does not find is an error
-and logs nothing. The server and the SDKs (M11, M14) go through the same calls. A dangling reference that reaches a
+and logs nothing. The server and the SDKs (M11, M14) go through the same calls, and so does `persia import` (§8.6),
+which stops at a line whose reference this database's store does not hold, naming the line and the `blob_id`: a dump
+carries references, not blob bytes, so it imports with its blobs only into the database it came from, or a copy with
+its pack (§4.8), until `dump documents` exports blobs (ROADMAP 10.4.6). A dangling reference that reaches a
 database anyway (written below the public API, or by copying only the container, §4.8) is reported by `verify`
 (§9.5), and `get_blob` fails for it.
 

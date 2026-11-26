@@ -30,7 +30,7 @@
 </p>
 
 <!-- BEGIN GENERATED progress:summary by `cargo xtask progress`. Do not edit by hand. -->
-**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **459 of 615** MVP leaves done (75%), 0 in progress (last snapshot 2026-11-26). Post-MVP work is 0 of 228 and sits outside that percentage.
+**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **462 of 617** MVP leaves done (75%), 0 in progress (last snapshot 2026-11-26). Post-MVP work is 0 of 228 and sits outside that percentage.
 <!-- END GENERATED progress:summary -->
 
 On `main` today, the [`persia`](./crates/persia/src/lib.rs) crate opens a single-file database, stores documents and blobs, and runs a ranked search (BM25F, filters, sorts, facets, cursors) that relaxes by default when a query finds too few hits. Writes go through a checksummed WAL with crash recovery, and commits, merges, and compaction run on the database's own thread. Nothing is published yet, and format 1.0 is unstable until the v1.0 release ([SPEC §15](./SPEC.md#15-versioning-and-compatibility)); the internals are in [`SPEC.md`](./SPEC.md).
@@ -129,7 +129,10 @@ cargo run -p persia-cli -- stats path/to/app.persia
 |---|---|
 | `persia stats <file> [--json]` | What a read-only open reports, without the writer lock: the last commit, the container's live and dead space, the WAL after the last commit, the blob pack's size, and each collection's schema, documents and segments. |
 | `persia verify <file> [--quick \| --deep]` | Checks a whole database read-only: every check an open makes, every segment's bytes, one live copy per document id, then every referenced blob in the pack. `--quick` skips the pack's checksum scan; `--deep` also re-hashes every referenced blob. |
-| `persia compact <file> [--json]` | Rewrites the container without its dead frames and prints the space before and after. Opens read-write, so it fails while another writer has the database. Commits no document of its own, but its open recovers as any writer's does (a WAL backlog over the default 64 MiB memtable is flushed). Leaves the blob pack alone. |
+| `persia compact <file> [--json]` | Rewrites the container without its dead frames and prints the space before and after. Opens read-write, so it fails while another writer has the database. Commits no document of its own, but its open recovers as any writer's does (a WAL backlog over the default 64 MiB memtable is flushed). Leaves the blob pack alone. Has the built-in analyzers only, yet compacts a database whose schema names a registered one: that field is not analyzed and its WAL records stay in the WAL; it fails (status 1) only when its recovery would flush any collection while such a collection holds a replayed WAL record (a replay flushes a memtable at the default 64 MiB, measured on the stand-in for such a collection, or out of docids): open the database with its application and commit (e.g. `Db::close`; a reopen alone may flush nothing), then compact. |
+| `persia gc <file> [--grace <dur>] [--json]` | Blob garbage collection (SPEC §9.5): marks every blob a document or WAL record references, deletes the others and their staged chunks, and rewrites the pack when at least half its frame bytes are dead. Opens read-write, so it fails while another writer has the database; built-in analyzers only. Reports what it deleted and kept, the pack's size before and after, and the reader leases: a read-only handle of another process that has not refreshed since the last commit holds the sweep back (nothing deleted, said in the report). `--grace` (`<n>s/m/h/d`, default `24h`, at least `2h`) ages a remote store's objects; the local pack keeps no ages and drops what is unmarked at once. A database without a pack is a no-op (only the pack's writer lock file appears). |
+| `persia import <file> --collection <name> [--input <jsonl>] [--schema <json>] [--json]` | Reads JSON Lines (a file, or the standard input) into a collection, one document per line in the form `dump documents` writes; commits at least at the end. Opens read-write. `--schema` creates the database and the collection when missing. The first bad line (not UTF-8, over 16 MiB, not JSON, not a document of the schema, or a blob reference this database's blob store does not hold) stops the import with status 1 (3 when the put's failure is corruption, a mismatched `BlobRef` included, ROADMAP 10.1.33), naming the line: the lines before it are imported and committed, nothing from it on. A dump carries blob references, not blob bytes, so a dump with blobs imports only into its own database (ROADMAP 10.4.6). |
+| `persia search <file> --collection <name> (--query <text> \| --request <json>) [--json]` | One search, by user text with every default (relaxed, 20 hits) or by request JSON. Read-only, without the writer lock. Prints each hit's rank, score and document; `--json` writes the response JSON of SPEC §7.5.2. |
 | `persia dump documents <file> --collection <name>` | The collection's live documents as JSON Lines (the `get` form of a document), in storage order. |
 | `persia inspect container <file> [--id <id>]` | The active superblock and every frame recovery reads; with `--id`, the WAL records that put or delete that document id. |
 | `persia inspect segment <file> --schema <json> [--verify]` | Footer, sections, per-field statistics. `--verify` checks every CRC and fails on a corrupt segment. |
@@ -151,14 +154,20 @@ Every command exits with status 0 on success, 1 on any other failure, 2 on a usa
   - `collections`, by name: `{name, schema: {hash, strict, fields: [{name, type}]}, documents, segment_documents, deleted, wal_documents, segment_bytes, segments: [{id, documents, deleted, bytes}]}`; `documents` counts the live documents a reader sees;
   - `blob_pack` `{present, bytes}`, `bytes` `null` without a pack.
 - `persia compact --json`: `seq` (the compacted file's), `before` and `after` `{bytes, live_bytes, dead_bytes}`, `reclaimed_bytes`.
+- `persia gc --json`:
+  - `grace_secs`, `held_back` (the sweep did not run: a reader lease or a backup in progress), `held_by_copy`;
+  - `pack` `{present, bytes_before, bytes_after}` (the pack file's size around the command, `null` without one; `bytes_after` is also `null` when the size could not be read after a GC that succeeded, said on stderr), `marked` `{blobs, uploads}`, `missing` (hex ids of referenced blobs the pack lacks: dangling references, which `verify` fails on);
+  - `deleted` `{blobs, uploads, chunks}`, `kept` `{pinned, young, unknown_age, changed, unreadable, uploads_skipped}` (unmarked objects the sweep kept, and whether it left the staged chunks alone; `young` is always 0 for the local pack);
+  - `rewrite` `{outcome, dead_bytes, frame_bytes, generation, frame_bytes_before, frame_bytes_after}`, `outcome` one of `no_pack`, `below_ratio`, `deferred`, `done`, `not_run`, the other keys `null` where the outcome has none;
+  - `readers`, `null` without a pack, else `{live, current, opening, behind, ahead, unreadable, stale_removed, oldest_seq}` (the reader leases' states; their paths go to the GC's log, not the report).
+- `persia import --json`: `collection`, `created` (whether `--schema` created the collection), `lines` (read), `blank_lines` (skipped), `documents` (put; a replaced id counts each time).
+- `persia search --json`: the response JSON of SPEC §7.5.2 (`hits`, `facets`, `relaxation`, `query_truncated`), as the embedded API's `SearchResponse::to_json` writes it.
 - `persia bench --json`:
   - `notice` (the numbers are local guidance only), `build` (`release` or `debug`), `seed`, `docs`, `queries`;
   - `corpus` `{fingerprint, container_bytes}`, `indexing` `{nanos, docs_per_second, commit_nanos}` (`docs_per_second` `null` when the clock read no time), `query_mix` `{fingerprint}` (fingerprints are 16 hex digits);
   - `query_kinds`, in rotation order (`term`, `terms`, `phrase`, `filter`, `typo`): `{kind, count, hits, empty, truncated, latency_nanos: {p50, p90, p99, max}}`. `latency_nanos` is `null` for a kind that ran no query; `empty` counts the queries that returned no hit. `truncated` counts the queries whose page the relaxation time budget (SPEC §7.6) cut short; `hits` repeat for a seed only where `truncated` is 0.
 
 The golden segment above is format 1.0 and holds 300 documents (`doc_count` in the inspect output; see [`crates/persia-cli/tests/segment.rs`](./crates/persia-cli/tests/segment.rs)).
-
-**Planned:** `persia import` (JSON Lines), `persia search`, and `persia gc` (blob garbage collection).
 
 ## Format
 
@@ -209,7 +218,7 @@ flowchart TD
 | `persia-engine` | Schema, documents, manifests, segments, memtable, WAL, commit, recovery, merges, compaction, query compilation, BM25F, search, and the relaxation cascade. Synchronous. I/O only through `Storage`. | Implemented (M6–M8). Not a stable API: applications use `persia`. |
 | `persia-blob` | Content-addressed chunks, dedup, the blob pack, GC. | Implemented (M9). |
 | `persia` | The embedded facade: `Db`, `Collection`. | Core implemented: open, collections, documents, search, blobs, `Db::backup`, and the optional `async` API. Still in M10: the rest of the async API, API polish, examples, and release engineering. |
-| `persia-cli` | The `persia` binary. | Implemented: stats, verify, compact, dump, inspect, file sweeps, and bench. See [CLI](#cli). |
+| `persia-cli` | The `persia` binary. | Implemented: stats, verify, compact, gc, import, search, dump, inspect, file sweeps, and bench. See [CLI](#cli). |
 | `persia-proto`, `persia-server` | gRPC and HTTP. The server depends on `persia` and `persia-proto`. | Placeholders for M11. The server binary exits with "not implemented". |
 
 `persia-server` is drawn in [`docs/architecture.md`](./docs/architecture.md) above `persia`. Today it is a placeholder binary that prints "not implemented (M11)" and exits with status 1, so it stays out of the figure.
@@ -292,7 +301,7 @@ MVP (M0–M15) is the v1.0 release. The live graph, the burn-up, and the ready-n
 | **M7** Query engine & ranking | ✅ done | 51/51 |
 | **M8** Zero-results avoidance | ✅ done | 55/55 |
 | **M9** Blob store | ✅ done | 44/44 |
-| **M10** Embedded API | 🔨 in progress | 28/42 |
+| **M10** Embedded API | 🔨 in progress | 31/44 |
 | **M11** Server | ⏳ blocked | 0/24 |
 | **M12** Cloud storage backends | ⏳ blocked | 0/29 |
 | **M13** Distribution & Kubernetes | ⏳ blocked | 0/33 |

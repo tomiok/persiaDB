@@ -948,17 +948,19 @@ fn replay<F: ContainerFile + Sync>(
     Ok(applied)
 }
 
-/// Whether a read-only open needs every `text` field's analyzer.
+/// Whether an open needs every `text` field's analyzer. A read-only open ([`ReadOnlyDatabase`], ROADMAP 6.6.8) and a
+/// [`super::CompactOnlyDatabase`]'s writer open (`Database::recover_as`, ADR-0068) may skip the missing ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Analysis {
+pub(super) enum Analysis {
     /// A missing one fails the open ([`DatabaseError::UnregisteredAnalyzer`]).
     Required,
     /// A missing one is replaced by one that emits no token, and the field is listed as skipped.
     SkipUnregistered,
 }
 
-/// A `text` field whose analysis a read-only open skipped, because its registry lacks the field's analyzer
-/// ([`ReadOnlyDatabase::open_container_skipping_analysis`], ROADMAP 6.6.8).
+/// A `text` field whose analysis an open skipped, because its registry lacks the field's analyzer: a read-only open
+/// ([`ReadOnlyDatabase::open_container_skipping_analysis`], ROADMAP 6.6.8) or a [`super::CompactOnlyDatabase`]
+/// (ADR-0068, which never flushes its collection).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SkippedAnalysis {
@@ -980,7 +982,7 @@ impl Tokenizer for NoTokens {
 /// Registers, for every `text` field of `schema` whose analyzer `registry` lacks, an analyzer that emits no token
 /// under its name and version, and lists the field in `skipped`. A built-in name cannot be registered: its versions
 /// this build lacks were refused when the manifest was decoded (SPEC §6.2.2), so that fails the open as unregistered.
-fn skip_unregistered(
+pub(super) fn skip_unregistered(
     collection: &str,
     schema: &CollectionSchema,
     registry: &mut AnalyzerRegistry,
