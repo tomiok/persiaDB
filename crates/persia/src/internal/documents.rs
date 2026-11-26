@@ -481,15 +481,14 @@ impl<L: DocumentLog + ?Sized> Drop for LogMut<'_, L> {
 /// Removes the container `create` just made at `container` on `vfs`, after the pack failed to open, and syncs its
 /// directory so the removal is durable: a retry, also after a crash, must not find it (SPEC §9.3).
 ///
-/// The caller still holds the database, and with it the writer lock (ROADMAP 10.2.7); the removal's safety rests on
-/// that lock, held until the caller drops the database after this returns. On Unix the lock is on the container file
-/// itself: no other open can take it, and an open that had the file before the removal finds it unlinked once it
-/// takes the lock and opens the path again (`Container::open`). On Windows the lock is the `<name>.lock` file beside
-/// the container: a racing open or create stops at it (`Locked`, or `AlreadyExists` for a create) until the database
-/// drops, and by then the name is gone, whichever way the file system deletes a file that is still open (the
-/// container is open with the standard library's delete sharing). No create can make a new file at the path while
-/// this runs (the name is taken until the removal, and on Windows the lock beside it is held), so the file removed is
-/// the one `create` made. A removal or sync that fails is reported with the pack error: a retry would not work.
+/// The caller still holds the database, and with it the writer lock (ROADMAP 10.2.7), until it drops the database
+/// after this returns. A racing open stops at that lock while the name exists (`Locked`: on Unix the lock is on the
+/// container file, on Windows the `<name>.lock` file beside it), and at its path lookup once the name is removed
+/// (`NotFound`; on Windows also `PermissionDenied`, while a file the creator still has open waits to be deleted). On
+/// Unix an open that had the file before the removal finds it unlinked once it takes the lock, and opens the path
+/// again (`Container::open`). A racing create takes the lock beside the path first (Windows) or links its new file to
+/// the name (Unix) and gets `AlreadyExists` while the name, or that lock, is taken; so the file removed is the one
+/// `create` made. A removal or sync that fails is reported with the pack error: a retry would not work.
 fn remove_created_container<F: ContainerFile>(
     vfs: &dyn Vfs<File = F>,
     container: &Path,
@@ -1239,14 +1238,17 @@ mod tests {
                     let Err(Error::Database(e)) = raced else {
                         panic!("nothing is left to open: {raced:?}");
                     };
-                    // Unix: the name is gone. Windows: the lock beside the container is still taken, so the open stops
-                    // there, whatever the file system does with a removed file that is still open.
-                    let refused = if cfg!(windows) {
-                        matches!(*e, DatabaseError::Container(container::Error::Locked))
-                    } else {
-                        matches!(&*e, DatabaseError::Container(container::Error::Io { source, .. })
-                            if source.kind() == io::ErrorKind::NotFound)
-                    };
+                    // The open stops at its path lookup (`canonicalize`), before any lock: the name is gone (`NotFound`),
+                    // or on Windows the file waits to be deleted while the creator still has it open, and the lookup is
+                    // refused (`PermissionDenied`).
+                    let refused = matches!(
+                        &*e,
+                        DatabaseError::Container(container::Error::Io { source, .. })
+                            if matches!(
+                                source.kind(),
+                                io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                            )
+                    );
                     assert!(refused, "{e:?}");
                     // Unix: the name is free while the lock is still held (it is on the removed file), so a create
                     // makes a new database there, which the failed create must leave alone.

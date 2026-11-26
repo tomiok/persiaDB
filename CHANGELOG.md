@@ -425,8 +425,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Changed
 - `persia`: for a plain search (`relax: false`), `SearchResponse::relaxation.effective` is now L0's text, as the response
   JSON states it, instead of `None` (ROADMAP 10.1.25). `Relaxation` has `corrected()`, `fallback()` and
-  `filters_dropped()`, and `persia` re-exports `Correction` (now `#[non_exhaustive]`) and `FallbackOrder`. `persia::Blob`
-  is `#[non_exhaustive]`.
+  `filters_dropped()`, and `persia` re-exports `Correction` and `FallbackOrder`. **Breaking** (`persia-engine`):
+  `relax::Correction` is `#[non_exhaustive]` (no struct literal outside the engine). `persia::Blob` is `#[non_exhaustive]`.
 - `persia`: a read-only `Db` reads its blob pack as it reads its container (ROADMAP 10.1.23; SPEC §4.7; ADR-0017
   amended): through a memory mapping on a local disk by default (not on Windows), mapped again as the writer binds,
   and over the new file after a GC rewrite; `OpenOptions::mapped_reads` now chooses for both files (`false` reads
