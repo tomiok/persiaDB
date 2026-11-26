@@ -1,13 +1,16 @@
 //! Mapped reads of the committed frames (SPEC §4.7, ADR-0049 item 12).
 
 use super::{
-    ByteSource, ContainerFile, FIRST_FRAME_OFFSET, File, MapPermit, Pack, PackStore, Range, io,
+    ByteSource, ContainerFile, FIRST_FRAME_OFFSET, File, MapPermit, Pack, PackStore, Path, Range,
+    Result, io, read_only_mapped,
 };
 #[cfg(test)]
 use std::sync::{Arc, atomic::Ordering};
 
-/// Maps `range` of a pack's file: the real mapping for a [`File`], a copy in tests.
-pub(super) type MapFn<F> = Box<dyn Fn(&F, Range<u64>) -> io::Result<ByteSource> + Send + Sync>;
+/// Maps `range` of a pack's file: the real mapping for a [`File`], a copy in tests. `Ok(None)` when this file is not
+/// to be mapped (a read-only pack off a local disk, ROADMAP 10.1.23): it is read with `pread`, and that is no failure.
+pub(super) type MapFn<F> =
+    Box<dyn Fn(&F, Range<u64>) -> io::Result<Option<ByteSource>> + Send + Sync>;
 
 /// Mapped reads of the committed frames (SPEC §4.7, ADR-0049 item 12).
 pub(super) struct Mapper<F> {
@@ -33,7 +36,8 @@ impl<F: ContainerFile> Mapper<F> {
             return;
         }
         match (self.map)(&pack.file, FIRST_FRAME_OFFSET..log_end) {
-            Ok(window) => pack.window = Some(window),
+            Ok(Some(window)) => pack.window = Some(window),
+            Ok(None) => pack.window = None,
             Err(e) => {
                 self.failures = self.failures.saturating_add(1);
                 // SPEC §4.7: the fallback to pread is logged and counted, as for the container.
@@ -49,7 +53,7 @@ impl<F: ContainerFile> Mapper<F> {
 
 impl<F: ContainerFile + 'static> PackStore<F> {
     /// Turns mapped reads on with `map` (see [`PackStore::enable_mapped_reads`]); maps now if the pack exists.
-    fn enable_mapper(&self, map: MapFn<F>) {
+    pub(super) fn enable_mapper(&self, map: MapFn<F>) {
         let mut guard = self.write();
         let inner = &mut *guard;
         let mut mapper = Mapper { map, failures: 0 };
@@ -84,7 +88,7 @@ impl<F: ContainerFile + 'static> PackStore<F> {
                 usize::try_from(range.end.saturating_sub(range.start)).map_err(io::Error::other)?;
             let mut buf = vec![0; len];
             file.read_exact_at(&mut buf, range.start)?;
-            Ok(ByteSource::with_base_offset(buf.into(), range.start))
+            Ok(Some(ByteSource::with_base_offset(buf.into(), range.start)))
         }));
     }
 }
@@ -176,8 +180,57 @@ impl PackStore<File> {
     /// ```
     pub fn enable_mapped_reads(&self, permit: MapPermit) {
         self.enable_mapper(Box::new(move |file: &File, range: Range<u64>| {
-            permit.map(file, range)
+            permit.map(file, range).map(Some)
         }));
+    }
+
+    /// [`PackStore::open`] (read-only, by path, on the operating system's file system), reading the committed frames
+    /// through a memory mapping where the pack is on a local disk file system (ADR-0021), with `pread` elsewhere:
+    /// the default of read-only handles, as for their container (SPEC §4.7, ROADMAP 10.1.23; ADR-0017 amended). The
+    /// mapping covers `12288..log_end` and follows the handle: a [`refresh`](PackStore::refresh) maps the frames
+    /// committed since, or the pack the writer created since the open, and the [`reopen`](PackStore::reopen) after a
+    /// GC rewrite maps the new file. A failed mapping is no error: the pack is read with `pread`
+    /// ([`PackStore::mapping_failures`] counts it). A read-write pack never maps this way.
+    ///
+    /// Persia keeps its own side of the mapping contract ([`MapPermit::read_only_if_local`]). The other side is the
+    /// deployment's, as for a mapped container: while the handle is open, no other program, and no other handle of
+    /// the file in this process, writes or truncates the pack. A write under a mapping is undefined behavior, and a
+    /// truncation ends the process (`SIGBUS`, or `EXCEPTION_IN_PAGE_ERROR` on Windows). Where that cannot be excluded,
+    /// open with [`PackStore::open`]. On Windows a reader's mapping also keeps the writer's next open from truncating
+    /// a torn tail of the pack (ADR-0049, Consequences), which is why the embedded API does not map there by default.
+    ///
+    /// ```
+    /// use persia_blob::pack::{PackStore, pack_path};
+    /// use persia_blob::{BindOutcome, BlobManifest, BlobStore, ChunkSize, UploadId, blob_id_of};
+    /// use persia_storage::container::Container;
+    ///
+    /// # if cfg!(miri) { return Ok(()); } // a real mapped file: Miri has neither a filesystem nor file-backed mmap
+    /// # let dir = tempfile::tempdir()?;
+    /// let container = Container::create(dir.path().join("app.persia"))?;
+    /// let path = pack_path(&dir.path().join("app.persia"));
+    /// let writer = PackStore::open_writer(&path, &container.writer_proof().ok_or("read-only")?)?;
+    /// let reader = PackStore::open_mapped_if_local(&path, container.header().db_uuid)?;
+    /// assert_eq!(reader.mapped_range(), None); // no pack yet
+    /// let m = BlobManifest::new(blob_id_of(b"mapped"), 6, ChunkSize::from_encoding(6)?, UploadId::new(1),
+    ///     vec![persia_format::checksum::crc32c(b"mapped")])?;
+    /// writer.stage_chunk(m.upload_id(), 0, b"mapped")?;
+    /// assert_eq!(writer.bind(&m)?, BindOutcome::Bound);
+    /// assert_eq!(writer.mapped_range(), None); // the writer never maps by default
+    /// assert!(reader.refresh()?);
+    /// let local = container.is_on_local_disk()?;
+    /// assert_eq!(reader.mapped_range().is_some(), local);
+    /// assert_eq!(&*reader.read_chunk_source(&m, 0)?, b"mapped");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// As [`PackStore::open`].
+    pub fn open_mapped_if_local(path: impl AsRef<Path>, db_uuid: [u8; 16]) -> Result<Self> {
+        let store = Self::open(path, db_uuid)?;
+        let make: fn() -> MapFn<File> = read_only_mapped::read_only_if_local;
+        store.enable_mapper(make());
+        store.write().remap_on_reopen = Some(make);
+        Ok(store)
     }
 }
 
@@ -332,7 +385,7 @@ mod tests {
         let (fs, store) = store();
         let m = put(&store, b"0123456789ab", 8, 1);
         drop(store);
-        let bytes = fs.read(std::path::Path::new("/p.blobs")).unwrap();
+        let bytes = fs.read(Path::new("/p.blobs")).unwrap();
         let frames =
             crate::pack::layout::chunk_frame_len(8) + crate::pack::layout::chunk_frame_len(4);
         let second = FIRST_FRAME_OFFSET + crate::pack::layout::chunk_frame_len(8);
@@ -345,8 +398,7 @@ mod tests {
             let mut damaged = bytes.clone();
             damaged[at as usize] ^= 0xff;
             let fs = SimFs::new();
-            let file = persia_storage::vfs::Vfs::create_new(&fs, std::path::Path::new("/p.blobs"))
-                .unwrap();
+            let file = persia_storage::vfs::Vfs::create_new(&fs, Path::new("/p.blobs")).unwrap();
             file.write_all_at(&damaged, 0).unwrap();
             file.sync_data().unwrap();
             let opened = PackStore::open_in(Arc::new(fs), "/p.blobs", [0; 16]);
@@ -480,7 +532,7 @@ mod tests {
         assert!(log_end < before.end, "the rewrite dropped frames");
         assert_eq!(store.mapped_range(), Some(FIRST_FRAME_OFFSET..log_end));
         assert_eq!(store.mapping_failures(), 0);
-        let file = fs.read(std::path::Path::new("/p.blobs")).unwrap();
+        let file = fs.read(Path::new("/p.blobs")).unwrap();
         let window = {
             let inner = store.read();
             let window = inner.pack.as_ref().unwrap().window.clone().unwrap();
@@ -573,6 +625,99 @@ mod tests {
                 .manifest(blob_id_of(b"dropped by the rewrite"))
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// A copy of the committed frames, as the real mapping would hand them out: what a test's `remap_on_reopen` makes.
+    fn copied() -> MapFn<SimFsFile> {
+        Box::new(|file: &SimFsFile, range: Range<u64>| {
+            let len = usize::try_from(range.end - range.start).map_err(io::Error::other)?;
+            let mut buf = vec![0; len];
+            file.read_exact_at(&mut buf, range.start)?;
+            Ok(Some(ByteSource::with_base_offset(buf.into(), range.start)))
+        })
+    }
+
+    /// ROADMAP 10.1.23: the reopen of a handle that maps on reopen (as `open_mapped_if_local`'s do) maps the
+    /// replacement, and so does the reopen of that one.
+    #[test]
+    fn a_reopen_maps_the_replacement_when_the_handle_maps_on_reopen() {
+        let (fs, writer) = store();
+        let kept = put(&writer, b"kept by the mark", 4, 1);
+        put(&writer, b"dropped by the rewrite", 4, 2);
+        let reader = PackStore::open_in(Arc::new(fs.clone()), "/p.blobs", [0; 16]).unwrap();
+        reader.enable_mapper(copied());
+        reader.write().remap_on_reopen = Some(copied);
+        writer
+            .rewrite(&crate::gc::Mark::new([kept.blob_id()], []), &NoPins, 0.0)
+            .unwrap();
+        let reopened = reader.reopen().unwrap();
+        let log_end = reopened.superblock().unwrap().log_end;
+        assert_eq!(reopened.mapped_range(), Some(FIRST_FRAME_OFFSET..log_end));
+        let chunk = reopened.read_chunk_source(&kept, 0).unwrap();
+        assert!(
+            (FIRST_FRAME_OFFSET..log_end).contains(&chunk.base_offset()),
+            "from the new file's window"
+        );
+        assert_eq!(&*chunk, b"kept");
+        assert!(
+            reopened.reopen().unwrap().mapped_range().is_some(),
+            "and again"
+        );
+    }
+
+    /// A map function that declines a file (`Ok(None)`: a read-only pack off a local disk) leaves no window and counts
+    /// no failure: the pack is read with `pread`.
+    #[test]
+    fn a_declined_mapping_reads_with_pread_and_is_no_failure() {
+        let (_fs, store) = store();
+        store.enable_mapper(Box::new(|_: &SimFsFile, _: Range<u64>| Ok(None)));
+        let m = put(&store, b"not mapped here", 4, 1);
+        assert_eq!(store.mapped_range(), None);
+        assert_eq!(store.mapping_failures(), 0);
+        assert_eq!(read_chunk_checked(&store, &m, 1).unwrap(), b"mapp");
+    }
+
+    /// ROADMAP 10.1.23 (the `SAFETY` of `read_only_mapped.rs`): the only file handle a store `open_mapped_if_local`
+    /// opened hands out, the duplicate inside its `committed_image`, is of the read-only open: no write and no
+    /// truncation goes through it, and copying the image leaves the pack as it was.
+    #[test]
+    fn a_mapped_read_only_store_hands_out_no_handle_that_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let container = Container::create(dir.path().join("app.persia")).unwrap();
+        let path = crate::pack::pack_path(&dir.path().join("app.persia"));
+        let writer = PackStore::open_writer(&path, &container.writer_proof().unwrap()).unwrap();
+        let m = manifest_of(b"kept as it is", 8, 1);
+        writer.stage_chunk(m.upload_id(), 0, b"kept as ").unwrap();
+        writer.stage_chunk(m.upload_id(), 1, b"it is").unwrap();
+        assert_eq!(writer.bind(&m).unwrap(), BindOutcome::Bound);
+        let reader = PackStore::open_mapped_if_local(&path, container.header().db_uuid).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        // The handle `committed_image` duplicates, duplicated the same way.
+        let duplicate = {
+            let inner = reader.read();
+            inner
+                .pack
+                .as_ref()
+                .unwrap()
+                .file
+                .try_clone_handle()
+                .unwrap()
+        };
+        assert!(duplicate.write_all_at(b"x", 0).is_err(), "written through");
+        assert!(
+            duplicate.write_all_at(b"x", before.len() as u64).is_err(),
+            "appended through"
+        );
+        assert!(duplicate.set_len(0).is_err(), "truncated through");
+        let image = reader.committed_image().unwrap().unwrap();
+        let copy = File::create(dir.path().join("copy.blobs")).unwrap();
+        image.write_to(&copy).unwrap();
+        drop((image, copy));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "the pack is unchanged"
         );
     }
 }

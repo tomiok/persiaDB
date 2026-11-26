@@ -104,12 +104,20 @@ impl<F: ContainerFile + 'static> PackStore<F> {
     /// [`PackStore::refresh`] returns [`Error::PackReplaced`] and stays on the file it opened (ROADMAP 9.2.13): that file,
     /// and what this handle mapped of it, stay valid until the handle drops, so nothing in the handle has to be reopened
     /// or remapped. A caller that holds `&mut` to its reader, so nothing still borrows this handle, opens the
-    /// replacement with this. The new handle starts with mapped reads off, as any open: turn them on again with
-    /// [`PackStore::enable_mapped_reads`].
+    /// replacement with this. The new handle starts with mapped reads off, as any open (turn them on again with
+    /// [`PackStore::enable_mapped_reads`]), except the reopen of a handle [`PackStore::open_mapped_if_local`] opened,
+    /// which maps the replacement the same way (ROADMAP 10.1.23).
     ///
     /// # Errors
     /// As [`PackStore::open_in`].
     pub fn reopen(&self) -> Result<Self> {
-        Self::open_in(std::sync::Arc::clone(&self.vfs), &self.path, self.db_uuid)
+        let reopened = Self::open_in(std::sync::Arc::clone(&self.vfs), &self.path, self.db_uuid)?;
+        // A handle `open_mapped_if_local` opened maps the replacement as it mapped this file (ROADMAP 10.1.23).
+        let remap = self.read().remap_on_reopen;
+        if let Some(make) = remap {
+            reopened.enable_mapper(make());
+            reopened.write().remap_on_reopen = Some(make);
+        }
+        Ok(reopened)
     }
 }

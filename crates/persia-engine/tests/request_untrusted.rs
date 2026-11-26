@@ -59,10 +59,7 @@ const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx
 
 /// The schema of the `request_json` fuzz target, so its seeds can be checked against it.
 fn schema() -> CollectionSchema {
-    let facet = KeywordOptions {
-        facet: true,
-        ..KeywordOptions::default()
-    };
+    let facet = KeywordOptions::default().facet(true);
     SchemaBuilder::new("c")
         .field("title", FieldKind::Text(TextOptions::default()))
         .field("brand", FieldKind::Keyword(facet))

@@ -181,14 +181,14 @@ fn schema(p: &Params, synonyms: &[Vec<String>]) -> CollectionSchema {
     // (none a stopword) both give the words as they are, at positions 0, 1, 2... (the reference's tokens); user text
     // and synonym terms analyze apart in them ([`analyze`]).
     let text = |analyzer: &str, (boost, k1, b)| {
-        FieldKind::Text(TextOptions {
-            analyzer: AnalyzerRef::parse_in(&format!("{analyzer}@1"), registry()).unwrap(),
-            boost,
-            k1,
-            b,
-            positions: true,
-            ..TextOptions::default()
-        })
+        FieldKind::Text(
+            TextOptions::default()
+                .analyzer(AnalyzerRef::parse_in(&format!("{analyzer}@1"), registry()).unwrap())
+                .boost(boost)
+                .k1(k1)
+                .b(b)
+                .positions(true),
+        )
     };
     SchemaBuilder::new("c")
         .field("title", text("whitespace", p[0]))

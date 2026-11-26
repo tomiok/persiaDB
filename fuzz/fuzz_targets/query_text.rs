@@ -18,18 +18,13 @@ static SETUP: LazyLock<(CollectionSchema, QueryCompiler)> = LazyLock::new(|| {
     let schema = SchemaBuilder::new("c")
         .field(
             "title",
-            FieldKind::Text(TextOptions {
-                positions: true,
-                boost: 3.0,
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().positions(true).boost(3.0)),
         )
         .field(
             "body",
-            FieldKind::Text(TextOptions {
-                analyzer: AnalyzerRef::builtin("es").expect("built-in"),
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(
+                TextOptions::default().analyzer(AnalyzerRef::builtin("es").expect("built-in")),
+            ),
         )
         .field("brand", FieldKind::Keyword(KeywordOptions::default()))
         .field("price", FieldKind::F64 { stored: true })

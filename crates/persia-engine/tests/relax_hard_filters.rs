@@ -112,12 +112,7 @@ struct Fields {
 }
 
 fn schema() -> CollectionSchema {
-    let facet = || {
-        FieldKind::Keyword(KeywordOptions {
-            facet: true,
-            ..KeywordOptions::default()
-        })
-    };
+    let facet = || FieldKind::Keyword(KeywordOptions::default().facet(true));
     SchemaBuilder::new("c")
         .field("body", FieldKind::Text(TextOptions::default()))
         .field("tenant", facet())

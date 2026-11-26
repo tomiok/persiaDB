@@ -21,7 +21,7 @@ mod response;
 pub use cursor::{CURSOR_TOKEN_VERSION, CursorTokenError, MAX_CURSOR_TOKEN_LEN};
 pub use json::MAX_REQUEST_JSON_LEN;
 pub use query::{QueryRequest, QueryRequestError, QueryResponse, QueryResults, RunOptions};
-pub use response::ResponseJsonError;
+pub use response::{ResponseJsonError, TypedSortValue, base64url_text};
 
 /// The largest `offset + limit` of a page (SPEC §7.4): deeper pages use a cursor.
 pub const MAX_WINDOW: usize = 10_000;

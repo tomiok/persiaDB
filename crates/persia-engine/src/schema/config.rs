@@ -6,13 +6,26 @@ use serde::{Deserialize, Serialize};
 
 /// Ranking settings (SPEC §6.2.3).
 #[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct RankingConfig {
     /// A per-document score added to the text score, or none.
     pub static_rank: Option<StaticRank>,
 }
 
+// The setters of `#[non_exhaustive]` settings (ROADMAP 10.1.16, ADR-0063 amended): another crate starts from
+// `default()` and sets what it needs.
+impl RankingConfig {
+    /// These settings with `static_rank` (see [`StaticRank::weight`] for an example).
+    #[must_use]
+    pub fn static_rank(mut self, static_rank: Option<StaticRank>) -> Self {
+        self.static_rank = static_rank;
+        self
+    }
+}
+
 /// `weight · function(value of field)`, added to every hit's score (SPEC §6.2.3, §7.2).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct StaticRank {
     /// An `i64`, `f64` or `datetime` field.
     pub field: String,
@@ -31,11 +44,35 @@ impl StaticRank {
             function: RankFn::default(),
         }
     }
+
+    /// This static rank with weight `weight`.
+    ///
+    /// ```
+    /// use persia_engine::schema::{RankFn, RankingConfig, StaticRank};
+    ///
+    /// let rank = StaticRank::new("sales").weight(0.5).function(RankFn::Linear);
+    /// assert_eq!((rank.field.as_str(), rank.weight, rank.function), ("sales", 0.5, RankFn::Linear));
+    /// let ranking = RankingConfig::default().static_rank(Some(rank));
+    /// assert!(ranking.static_rank.is_some());
+    /// ```
+    #[must_use]
+    pub const fn weight(mut self, weight: f64) -> Self {
+        self.weight = weight;
+        self
+    }
+
+    /// This static rank with `function`.
+    #[must_use]
+    pub const fn function(mut self, function: RankFn) -> Self {
+        self.function = function;
+        self
+    }
 }
 
 /// The function of a [`StaticRank`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum RankFn {
     /// `ln(1 + max(value, 0))`: diminishing returns, the default (SPEC §6.2.3).
     #[default]
@@ -56,6 +93,7 @@ impl RankFn {
 
 /// Collection defaults of the relaxation cascade (SPEC §6.2.3, §7.6); a query's `relax` overrides them.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RelaxationConfig {
     /// `false` runs L0 (`exact`) only.
     pub enabled: bool,
@@ -98,6 +136,72 @@ impl Default for RelaxationConfig {
     }
 }
 
+impl RelaxationConfig {
+    /// These settings with relaxation on, or off (`false` runs L0 only).
+    ///
+    /// ```
+    /// use persia_engine::schema::{Fallback, FilterRelaxation, Level, Levels, RelaxationConfig};
+    ///
+    /// let relax = RelaxationConfig::default()
+    ///     .min_results(5)
+    ///     .levels(Levels::Custom(vec![Level::Prefix, Level::Fuzzy]))
+    ///     .fallback(Fallback::None)
+    ///     .fill(true)
+    ///     .filters(FilterRelaxation::LastResort)
+    ///     .budget_ms(20);
+    /// assert_eq!((relax.min_results, relax.fill, relax.budget_ms), (5, true, 20));
+    /// assert_eq!(relax.levels, Levels::Custom(vec![Level::Prefix, Level::Fuzzy]));
+    /// assert_eq!((relax.fallback, relax.filters), (Fallback::None, FilterRelaxation::LastResort));
+    /// assert!(!RelaxationConfig::default().enabled(false).enabled);
+    /// ```
+    #[must_use]
+    pub const fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// These settings relaxing while there are fewer hits than `min_results`.
+    #[must_use]
+    pub const fn min_results(mut self, min_results: u32) -> Self {
+        self.min_results = min_results;
+        self
+    }
+
+    /// These settings with `levels` after L0.
+    #[must_use]
+    pub fn levels(mut self, levels: Levels) -> Self {
+        self.levels = levels;
+        self
+    }
+
+    /// These settings with `fallback` at L5.
+    #[must_use]
+    pub const fn fallback(mut self, fallback: Fallback) -> Self {
+        self.fallback = fallback;
+        self
+    }
+
+    /// These settings filling the page past `min_results`, or not.
+    #[must_use]
+    pub const fn fill(mut self, fill: bool) -> Self {
+        self.fill = fill;
+        self
+    }
+
+    /// These settings with `filters`: whether filters may be relaxed.
+    #[must_use]
+    pub const fn filters(mut self, filters: FilterRelaxation) -> Self {
+        self.filters = filters;
+        self
+    }
+
+    /// These settings with a work budget of `budget_ms` milliseconds.
+    #[must_use]
+    pub const fn budget_ms(mut self, budget_ms: u32) -> Self {
+        self.budget_ms = budget_ms;
+        self
+    }
+}
 /// Which relaxation levels run after L0 (SPEC §7.6).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Levels {
@@ -135,6 +239,7 @@ impl Levels {
 /// A relaxation level between L0 (`exact`) and L5 (`fallback`); ordered as the cascade runs them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Level {
     /// L1: expand terms with the collection's synonyms.
     Synonyms,
@@ -170,6 +275,7 @@ impl fmt::Display for Level {
 /// What the last relaxation level (L5) returns (SPEC §7.6).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Fallback {
     /// The top documents by static rank, or the most recently indexed without one.
     #[default]
@@ -191,6 +297,7 @@ impl Fallback {
 /// Whether the cascade may relax filters (SPEC §7.6).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum FilterRelaxation {
     /// Filters always hold.
     #[default]

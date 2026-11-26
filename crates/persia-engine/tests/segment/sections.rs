@@ -2455,10 +2455,9 @@ fn keyword_column_matches_postings() {
     let schema = persia_engine::schema::SchemaBuilder::new("k")
         .field(
             "k",
-            persia_engine::schema::FieldKind::Keyword(persia_engine::schema::KeywordOptions {
-                facet: false,
-                stored: false,
-            }),
+            persia_engine::schema::FieldKind::Keyword(
+                persia_engine::schema::KeywordOptions::default().stored(false),
+            ),
         )
         .build()
         .unwrap();
@@ -2856,10 +2855,9 @@ fn keyword_dictionary_matches_terms() {
     let schema = persia_engine::schema::SchemaBuilder::new("k")
         .field(
             "k",
-            persia_engine::schema::FieldKind::Keyword(persia_engine::schema::KeywordOptions {
-                facet: false,
-                stored: false,
-            }),
+            persia_engine::schema::FieldKind::Keyword(
+                persia_engine::schema::KeywordOptions::default().stored(false),
+            ),
         )
         .build()
         .unwrap();

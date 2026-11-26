@@ -54,18 +54,11 @@ fn products_v1() -> CollectionSchema {
     SchemaBuilder::new("products")
         .field(
             "title",
-            FieldKind::Text(TextOptions {
-                boost: 3.0,
-                positions: true,
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().boost(3.0).positions(true)),
         )
         .field(
             "brand",
-            FieldKind::Keyword(KeywordOptions {
-                facet: true,
-                stored: true,
-            }),
+            FieldKind::Keyword(KeywordOptions::default().facet(true).stored(true)),
         )
         .build()
         .unwrap()
@@ -77,17 +70,11 @@ fn products_v2() -> CollectionSchema {
     let proposed = SchemaBuilder::new("products")
         .field(
             "title",
-            FieldKind::Text(TextOptions {
-                positions: true,
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().positions(true)),
         )
         .field(
             "brand",
-            FieldKind::Keyword(KeywordOptions {
-                facet: true,
-                stored: true,
-            }),
+            FieldKind::Keyword(KeywordOptions::default().facet(true).stored(true)),
         )
         .field("price", FieldKind::F64 { stored: true })
         .field("body", text())
@@ -1793,43 +1780,38 @@ fn catalog(extra: Option<&str>) -> CollectionSchema {
     let mut b = SchemaBuilder::new("catalog")
         .field(
             "title",
-            FieldKind::Text(TextOptions {
-                analyzer: AnalyzerRef::builtin("es").unwrap(),
-                boost: 2.5,
-                positions: true,
-                k1: 1.5,
-                b: 0.5,
-                stored: false,
-            }),
+            FieldKind::Text(
+                TextOptions::default()
+                    .analyzer(AnalyzerRef::builtin("es").unwrap())
+                    .boost(2.5)
+                    .positions(true)
+                    .k1(1.5)
+                    .b(0.5)
+                    .stored(false),
+            ),
         )
         .field(
             "sku",
-            FieldKind::Keyword(KeywordOptions {
-                facet: true,
-                stored: false,
-            }),
+            FieldKind::Keyword(KeywordOptions::default().facet(true).stored(false)),
         )
         .field("qty", FieldKind::I64 { stored: false })
         .field("price", FieldKind::F64 { stored: true })
         .field("active", FieldKind::Bool { stored: false })
         .field("added", FieldKind::Datetime { stored: true })
         .field("raw", FieldKind::Stored)
-        .ranking(RankingConfig {
-            static_rank: Some(StaticRank {
-                field: "qty".into(),
-                weight: 0.25,
-                function: RankFn::Linear,
-            }),
-        })
-        .relaxation(RelaxationConfig {
-            enabled: true,
-            min_results: 7,
-            levels: Levels::Custom(vec![Level::DropTerms, Level::Fuzzy]),
-            fallback: Fallback::None,
-            fill: true,
-            filters: FilterRelaxation::LastResort,
-            budget_ms: 120,
-        })
+        .ranking(RankingConfig::default().static_rank(Some(
+            StaticRank::new("qty").weight(0.25).function(RankFn::Linear),
+        )))
+        .relaxation(
+            RelaxationConfig::default()
+                .enabled(true)
+                .min_results(7)
+                .levels(Levels::Custom(vec![Level::DropTerms, Level::Fuzzy]))
+                .fallback(Fallback::None)
+                .fill(true)
+                .filters(FilterRelaxation::LastResort)
+                .budget_ms(120),
+        )
         .synonyms(vec![
             vec!["tv".into(), "télévision".into()],
             vec![
@@ -2889,19 +2871,21 @@ fn any_field_kind() -> impl Strategy<Value = FieldKind> {
         any::<bool>(),
     )
         .prop_map(|(analyzer, boost, positions, k1, b, stored)| {
-            FieldKind::Text(TextOptions {
-                analyzer: AnalyzerRef::new(analyzer.name, analyzer.version).unwrap(),
-                boost,
-                positions,
-                k1,
-                b,
-                stored,
-            })
+            FieldKind::Text(
+                TextOptions::default()
+                    .analyzer(AnalyzerRef::new(analyzer.name, analyzer.version).unwrap())
+                    .boost(boost)
+                    .positions(positions)
+                    .k1(k1)
+                    .b(b)
+                    .stored(stored),
+            )
         });
     prop_oneof![
         text,
-        (any::<bool>(), any::<bool>())
-            .prop_map(|(facet, stored)| FieldKind::Keyword(KeywordOptions { facet, stored })),
+        (any::<bool>(), any::<bool>()).prop_map(|(facet, stored)| FieldKind::Keyword(
+            KeywordOptions::default().facet(facet).stored(stored)
+        )),
         any::<bool>().prop_map(|stored| FieldKind::I64 { stored }),
         any::<bool>().prop_map(|stored| FieldKind::F64 { stored }),
         any::<bool>().prop_map(|stored| FieldKind::Bool { stored }),
@@ -2945,19 +2929,17 @@ fn any_schema() -> impl Strategy<Value = CollectionSchema> {
                         .synonyms(synonyms.clone())
                         .strict(strict);
                     if let (true, Some(field)) = (rank, &rank_field) {
-                        b = b.ranking(RankingConfig {
-                            static_rank: Some(StaticRank {
-                                weight: 0.5,
-                                ..StaticRank::new(field.clone())
-                            }),
-                        });
+                        b = b.ranking(
+                            RankingConfig::default()
+                                .static_rank(Some(StaticRank::new(field.clone()).weight(0.5))),
+                        );
                     }
                     if relax {
-                        b = b.relaxation(RelaxationConfig {
-                            levels: Levels::Custom(vec![Level::Prefix]),
-                            fallback: Fallback::None,
-                            ..RelaxationConfig::default()
-                        });
+                        b = b.relaxation(
+                            RelaxationConfig::default()
+                                .levels(Levels::Custom(vec![Level::Prefix]))
+                                .fallback(Fallback::None),
+                        );
                     }
                     b
                 };

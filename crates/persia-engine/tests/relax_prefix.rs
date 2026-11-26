@@ -276,13 +276,7 @@ proptest! {
 #[test]
 fn a_completion_scores_as_a_term_of_its_field() {
     let schema = SchemaBuilder::new("c")
-        .field(
-            "title",
-            FieldKind::Text(TextOptions {
-                boost: 3.0,
-                ..TextOptions::default()
-            }),
-        )
+        .field("title", FieldKind::Text(TextOptions::default().boost(3.0)))
         .field("body", FieldKind::Text(TextOptions::default()))
         .build()
         .unwrap();

@@ -36,10 +36,7 @@ fn schema() -> CollectionSchema {
     SchemaBuilder::new("bench")
         .field(
             "title",
-            FieldKind::Text(TextOptions {
-                positions: true,
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().positions(true)),
         )
         .field("body", FieldKind::Text(TextOptions::default()))
         .field("brand", FieldKind::Keyword(KeywordOptions::default()))

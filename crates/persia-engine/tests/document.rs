@@ -839,19 +839,10 @@ fn stored_row_with_a_stored_field_golden() {
     let schema = SchemaBuilder::new("r")
         .field(
             "k",
-            FieldKind::Keyword(KeywordOptions {
-                facet: true,
-                stored: false,
-            }),
+            FieldKind::Keyword(KeywordOptions::default().facet(true).stored(false)),
         )
         .field("s", FieldKind::Stored)
-        .field(
-            "t",
-            FieldKind::Text(TextOptions {
-                stored: false,
-                ..TextOptions::default()
-            }),
-        )
+        .field("t", FieldKind::Text(TextOptions::default().stored(false)))
         .build()
         .unwrap();
     let doc = Document::new("1")
@@ -931,14 +922,10 @@ fn to_json_refuses_what_would_not_read_back() {
 
 fn field_kind() -> impl Strategy<Value = FieldKind> {
     prop_oneof![
-        any::<bool>().prop_map(|stored| FieldKind::Text(TextOptions {
-            stored,
-            ..TextOptions::default()
-        })),
-        any::<bool>().prop_map(|stored| FieldKind::Keyword(KeywordOptions {
-            facet: false,
-            stored
-        })),
+        any::<bool>().prop_map(|stored| FieldKind::Text(TextOptions::default().stored(stored))),
+        any::<bool>().prop_map(|stored| FieldKind::Keyword(
+            KeywordOptions::default().facet(false).stored(stored)
+        )),
         any::<bool>().prop_map(|stored| FieldKind::I64 { stored }),
         any::<bool>().prop_map(|stored| FieldKind::F64 { stored }),
         any::<bool>().prop_map(|stored| FieldKind::Bool { stored }),
@@ -1024,6 +1011,7 @@ fn value(t: FieldType) -> BoxedStrategy<Value> {
         .prop_map(Value::Datetime)
         .boxed(),
         FieldType::Stored => stored_value().prop_map(Value::Json).boxed(),
+        other => panic!("a field type this test does not know: {other}"),
     }
 }
 

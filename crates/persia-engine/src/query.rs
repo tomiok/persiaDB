@@ -11,7 +11,7 @@
 //! use persia_engine::schema::{FieldKind, KeywordOptions, SchemaBuilder, TextOptions};
 //!
 //! let schema = SchemaBuilder::new("products")
-//!     .field("title", FieldKind::Text(TextOptions { positions: true, ..TextOptions::default() }))
+//!     .field("title", FieldKind::Text(TextOptions::default().positions(true)))
 //!     .field("brand", FieldKind::Keyword(KeywordOptions::default()))
 //!     .field("price", FieldKind::F64 { stored: true })
 //!     .build()?;

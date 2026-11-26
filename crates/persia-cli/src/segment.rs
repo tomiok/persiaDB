@@ -194,7 +194,8 @@ fn write_field(
                 .count();
             (docs.to_string(), "-".into(), "-".into(), "-".into())
         }
-        FieldType::Stored => ("-".into(), "-".into(), "-".into(), "-".into()),
+        // `stored`, and a type this build does not know (`FieldType` is `#[non_exhaustive]`): no statistics to show.
+        _ => ("-".into(), "-".into(), "-".into(), "-".into()),
     };
     writeln!(
         out,

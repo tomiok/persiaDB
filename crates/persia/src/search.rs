@@ -6,16 +6,21 @@
 //! crosses the API as an opaque token (SPEC §7.4): [`Hit::cursor`], [`SearchResponse::next_cursor`] and
 //! [`SearchRequest::after`].
 
-use persia_engine::db::{RelaxedHit, SearchHit};
+use std::sync::Arc;
+
+use persia_engine::db::{Relaxation as EngineRelaxation, RelaxedHit, SearchHit};
 use persia_engine::document::Document;
 use persia_engine::query::{DefaultFields, Filter, QueryLimits};
-use persia_engine::relax::{RelaxLevel, RelaxOptions};
+use persia_engine::relax::{Correction, FallbackOrder, RelaxLevel, RelaxOptions};
 use persia_engine::schema::CollectionSchema;
 use persia_engine::search::request::{QueryRequest, QueryResponse, QueryResults, RunOptions};
-use persia_engine::search::{Explanation, FacetCounts, FacetRequest, Sort};
+use persia_engine::search::{Explanation, FacetCounts, FacetRequest, Sort, SortKey, SortValue};
 
 use crate::collection::Collection;
 use crate::{Error, Result};
+
+// The response JSON (ROADMAP 10.1.25): `SearchResponse` is `Serialize`, and `to_json` writes it.
+mod json;
 
 /// A search request (SPEC §7.1): the user text `q`, and what narrows, orders and pages its hits. Build it with
 /// [`SearchRequest::new`] and the setters; [`Collection::search`] runs it. Field ids come from the collection's
@@ -186,7 +191,7 @@ impl SearchRequest {
     /// ```
     /// use persia::{FacetRequest, FieldKind, KeywordOptions, SchemaBuilder, SearchRequest};
     ///
-    /// let facet = KeywordOptions { facet: true, ..KeywordOptions::default() };
+    /// let facet = KeywordOptions::default().facet(true);
     /// let schema = SchemaBuilder::new("c").field("brand", FieldKind::Keyword(facet)).build()?;
     /// let brand = schema.field("brand").map(|f| f.id()).ok_or("no field")?;
     /// let request = SearchRequest::new("shoes").facets([FacetRequest::new(brand, 10, &schema)?]);
@@ -283,7 +288,7 @@ impl SearchRequest {
 }
 
 /// The page a search returns (SPEC §7.5).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct SearchResponse {
     /// The page, best first (or in the request's sort).
@@ -294,6 +299,20 @@ pub struct SearchResponse {
     pub relaxation: Relaxation,
     /// Whether part of `q` was left out to stay within the query limits (SPEC §7.1.1).
     pub query_truncated: bool,
+    /// The schema of the collection that answered, which names the response's fields in its JSON ([`Self::to_json`]).
+    schema: Arc<CollectionSchema>,
+}
+
+/// Every public field; the schema it keeps to write its JSON is left out.
+impl std::fmt::Debug for SearchResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SearchResponse")
+            .field("hits", &self.hits)
+            .field("facets", &self.facets)
+            .field("relaxation", &self.relaxation)
+            .field("query_truncated", &self.query_truncated)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SearchResponse {
@@ -335,6 +354,20 @@ pub struct Hit {
     pub explanation: Option<Explanation>,
     /// The cursor token of the page after this hit (SPEC §7.4), for [`SearchRequest::after`].
     pub cursor: String,
+    /// Its values for the sort keys, as the engine ranks them, typed by the schema in the response JSON.
+    sort: Vec<SortValue>,
+    /// The keys of the sort that ranked it, one per value.
+    sort_keys: Vec<SortKey>,
+    /// Its step and rank score, for a hit of a relaxed search (SPEC §7.6).
+    relaxed: Option<RelaxedStep>,
+}
+
+/// The step that matched a relaxed search's hit, and its rank score (SPEC §7.6): what the response JSON states beside
+/// the hit's level.
+#[derive(Debug, Clone, Copy)]
+struct RelaxedStep {
+    step: usize,
+    rank_score: f64,
 }
 
 /// What the relaxation cascade did for a response (SPEC §7.6).
@@ -351,65 +384,134 @@ pub struct Relaxation {
     pub effective: Option<String>,
     /// Whether the cascade's time budget cut it short (`"truncated"`).
     pub truncated: bool,
+    /// The words the fuzzy level replaced (`"corrected"`), in query order.
+    corrected: Vec<Correction>,
+    /// The order L5 found the hits in (`"fallback"`), when it did.
+    fallback: Option<FallbackOrder>,
+    /// Whether the last resort dropped the filters (`"filters_dropped"`).
+    filters_dropped: bool,
 }
 
 impl Relaxation {
-    fn exact(original: &str) -> Self {
+    /// The words the fuzzy level replaced, in query order (`"corrected"`, SPEC §7.6): each required word no document
+    /// holds and the term searched instead ("did you mean"). Empty unless L4 found the hits.
+    ///
+    /// ```
+    /// use persia::SearchRequest;
+    ///
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// # let db = persia::Db::open(dir.path().join("app.persia"))?;
+    /// let shoes = db.create_collection_json(r#"{"name": "shoes", "fields": {"title": {"type": "text"}}}"#)?;
+    /// shoes.put_json(r#"{"id": "a", "title": "red sandals"}"#)?;
+    /// let response = shoes.search_json(r#"{"q": "red snadals", "relax": {"levels": ["fuzzy"]}}"#)?;
+    /// let corrected = response.relaxation.corrected();
+    /// assert_eq!((corrected[0].original.as_str(), corrected[0].corrected.as_str()), ("snadals", "sandals"));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn corrected(&self) -> &[Correction] {
+        &self.corrected
+    }
+
+    /// The order L5 `fallback` ranked the hits in (`"fallback"`, SPEC §7.6), when L5 found them.
+    ///
+    /// ```
+    /// use persia::FallbackOrder;
+    ///
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// # let db = persia::Db::open(dir.path().join("app.persia"))?;
+    /// let notes = db.create_collection_json(r#"{"name": "notes", "fields": {"body": {"type": "text"}}}"#)?;
+    /// notes.put_json(r#"{"id": "n1", "body": "hello"}"#)?;
+    /// let response = notes.search_json(r#"{"q": "purple"}"#)?;
+    /// assert_eq!(response.relaxation.fallback(), Some(FallbackOrder::Recency)); // no static rank
+    /// assert_eq!(notes.search_json(r#"{"q": "hello"}"#)?.relaxation.fallback(), None);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn fallback(&self) -> Option<FallbackOrder> {
+        self.fallback
+    }
+
+    /// Whether the last resort dropped the filters to find the hits (`"filters_dropped"`, SPEC §7.6): only in a
+    /// collection whose relaxation allows it (`filters: "last_resort"`).
+    ///
+    /// ```
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// # let db = persia::Db::open(dir.path().join("app.persia"))?;
+    /// let notes = db.create_collection_json(r#"{"name": "notes", "fields": {"body": {"type": "text"}}}"#)?;
+    /// notes.put_json(r#"{"id": "n1", "body": "hello"}"#)?;
+    /// assert!(!notes.search_json(r#"{"q": "hello"}"#)?.relaxation.filters_dropped());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn filters_dropped(&self) -> bool {
+        self.filters_dropped
+    }
+
+    /// The facade's value of what the engine's cascade did, or of the `exact` a plain search states.
+    fn of(r: &EngineRelaxation) -> Self {
         Self {
-            level: RelaxLevel::Exact,
-            applied: Vec::new(),
-            original: Some(original.to_owned()),
-            effective: None,
-            truncated: false,
+            level: r.level,
+            applied: r.applied.clone(),
+            original: r.original.clone(),
+            effective: r.effective.clone(),
+            truncated: r.truncated,
+            corrected: r.corrected.clone(),
+            fallback: r.fallback,
+            filters_dropped: r.filters_dropped,
         }
     }
 }
 
 fn plain_hit(hit: SearchHit) -> Hit {
+    let sort_keys = hit.sort_keys().to_vec();
     Hit {
         cursor: hit.cursor().to_token(),
         document: hit.document,
         score: hit.score,
         level: RelaxLevel::Exact,
         explanation: hit.explanation,
+        sort: hit.sort,
+        sort_keys,
+        relaxed: None,
     }
 }
 
 fn relaxed_hit(hit: RelaxedHit) -> Hit {
-    let cursor = hit.cursor().to_token();
+    let relaxed = Some(RelaxedStep {
+        step: hit.step,
+        rank_score: hit.rank_score,
+    });
     Hit {
-        cursor,
         level: hit.level,
-        score: hit.hit.score,
-        document: hit.hit.document,
-        explanation: hit.hit.explanation,
+        relaxed,
+        ..plain_hit(hit.hit)
     }
 }
 
-fn response(q: &str, response: QueryResponse) -> Result<SearchResponse> {
+/// The facade's response for `response`, a search of the collection of `schema`.
+fn response(response: QueryResponse, schema: Arc<CollectionSchema>) -> Result<SearchResponse> {
     let query_truncated = response.query_truncated;
+    // A plain search states level `exact` with L0's text (SPEC §7.6), as the engine's response JSON does.
+    let relaxation = Relaxation::of(response.relaxation());
     match response.results {
         QueryResults::Plain(results) => Ok(SearchResponse {
             hits: results.hits.into_iter().map(plain_hit).collect(),
             facets: results.facets,
-            relaxation: Relaxation::exact(q),
+            relaxation,
             query_truncated,
+            schema,
         }),
-        QueryResults::Relaxed(results) => {
-            let r = results.relaxation;
-            Ok(SearchResponse {
-                hits: results.hits.into_iter().map(relaxed_hit).collect(),
-                facets: results.facets,
-                relaxation: Relaxation {
-                    level: r.level,
-                    applied: r.applied,
-                    original: r.original,
-                    effective: r.effective,
-                    truncated: r.truncated,
-                },
-                query_truncated,
-            })
-        }
+        QueryResults::Relaxed(results) => Ok(SearchResponse {
+            hits: results.hits.into_iter().map(relaxed_hit).collect(),
+            facets: results.facets,
+            relaxation,
+            query_truncated,
+            schema,
+        }),
         // `#[non_exhaustive]`: a kind of results this build does not know.
         _ => Err(Error::new(
             crate::ErrorCode::Unsupported,
@@ -470,7 +572,7 @@ impl Collection {
         self.read(|c| {
             let lowered = request.lower(c.schema())?;
             let ran = lowered.run(c, run).map_err(Error::wrap)?;
-            response(&request.q, ran)
+            response(ran, c.shared_schema())
         })
     }
 
@@ -499,9 +601,8 @@ impl Collection {
             let limits = QueryLimits::default();
             let request =
                 QueryRequest::from_json(json, c.schema(), &limits).map_err(Error::wrap)?;
-            let q = request.q().to_owned();
             let ran = request.run(c, &RunOptions::new()).map_err(Error::wrap)?;
-            response(&q, ran)
+            response(ran, c.shared_schema())
         })
     }
 }

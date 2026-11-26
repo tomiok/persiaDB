@@ -20,10 +20,7 @@ use persia_engine::wal::Durability;
 use persia_storage::container::sim::SimFile;
 
 fn schema() -> CollectionSchema {
-    let facet = KeywordOptions {
-        facet: true,
-        ..KeywordOptions::default()
-    };
+    let facet = KeywordOptions::default().facet(true);
     SchemaBuilder::new("c")
         .field("title", FieldKind::Text(TextOptions::default()))
         .field("brand", FieldKind::Keyword(facet))

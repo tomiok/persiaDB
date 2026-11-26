@@ -301,6 +301,20 @@ impl ReadOnlyOptions {
         self
     }
 
+    /// The mapping these options choose ([`Self::mapped_reads`]): what the embedded API's read-only open also uses for
+    /// the blob pack beside the container (ROADMAP 10.1.23), so one setting covers both files.
+    ///
+    /// ```
+    /// use persia_engine::db::{MappedReads, ReadOnlyOptions};
+    ///
+    /// assert_eq!(ReadOnlyOptions::new().mapped_reads_choice(), MappedReads::default());
+    /// let never = ReadOnlyOptions::new().mapped_reads(MappedReads::Never);
+    /// assert_eq!(never.mapped_reads_choice(), MappedReads::Never);
+    /// ```
+    pub const fn mapped_reads_choice(&self) -> MappedReads {
+        self.mapped_reads
+    }
+
     /// The cache of a database opened with these options.
     fn cache(&self) -> Arc<BlockCache> {
         self.block_cache.clone().unwrap_or_else(new_cache)

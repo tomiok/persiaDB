@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `cargo xtask public-api [--check]` and `just public-api` (ROADMAP 10.1.12, ADR-0063 amended): the public API of
+  `persia` (default features and `async`), rendered from rustdoc's JSON with the dated nightly, re-exported engine
+  items expanded, committed as `crates/persia/public-api.txt`; CI fails when the surface changes without it.
+  `persia`'s re-exports of lower crates are `#[doc(inline)]`, so its documentation shows those items in full.
 - `persia_engine::search::request::QueryResponse::to_json` writes a search response as the response JSON of SPEC §7.5.2
   (ROADMAP 10.1.13, ADR-0065): each hit's projected document, score, typed sort values, cursor token and, for a
   relaxed search, its level, step and rank score; the facets; `relaxation` as SPEC §7.6 lists it (a `relax: false`
@@ -419,6 +423,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- `persia`: for a plain search (`relax: false`), `SearchResponse::relaxation.effective` is now L0's text, as the response
+  JSON states it, instead of `None` (ROADMAP 10.1.25). `Relaxation` has `corrected()`, `fallback()` and
+  `filters_dropped()`, and `persia` re-exports `Correction` and `FallbackOrder`. **Breaking** (`persia-engine`):
+  `relax::Correction` is `#[non_exhaustive]` (no struct literal outside the engine). `persia::Blob` is `#[non_exhaustive]`.
+- `persia`: a read-only `Db` reads its blob pack as it reads its container (ROADMAP 10.1.23; SPEC §4.7; ADR-0017
+  amended): through a memory mapping on a local disk by default (not on Windows), mapped again as the writer binds,
+  and over the new file after a GC rewrite; `OpenOptions::mapped_reads` now chooses for both files (`false` reads
+  both with `pread`). A read-write `Db` never maps its pack. Underneath: `persia_blob::PackStore::open_mapped_if_local`,
+  the `unsafe` `persia_storage::container::MapPermit::read_only_if_local`, and
+  `persia_engine::db::ReadOnlyOptions::mapped_reads_choice`.
+- `persia`: the response JSON of SPEC §7.5.2 from the embedded API (ROADMAP 10.1.25, ADR-0065 amended):
+  `SearchResponse::to_json()`, and `SearchResponse` implements `serde::Serialize` with the same output, the text the
+  engine's `QueryResponse::to_json` writes for the same search. New in `persia-engine`:
+  `search::request::TypedSortValue`, `search::request::base64url_text`, `CollectionSnapshot::shared_schema`, and
+  `SearchHit::sort_keys` is public.
+- **Breaking** (`persia`, `persia-engine`): the re-exported schema types are `#[non_exhaustive]` (ROADMAP 10.1.16,
+  ADR-0063 amended): `TextOptions`, `KeywordOptions`, `RankingConfig`, `RelaxationConfig` and `StaticRank` are built
+  from `default()` (or `StaticRank::new`) with one setter per field (`TextOptions::default().positions(true)`,
+  `KeywordOptions::default().facet(true)`, `RelaxationConfig::default().min_results(5)`, `StaticRank::new("sales")
+  .weight(0.5)`) instead of a struct literal; their fields stay public. A match on `FieldKind`, `FieldType`, `Level`,
+  `Fallback`, `FilterRelaxation` or `RankFn` outside the engine needs a wildcard arm. `CollectionSchema::hash`,
+  `hash_at`, `canonical_index_definition` and `from_json_in`, `AnalyzerRef::parse_in` and `Document::encode`,
+  `decode` and `encoded_id` are hidden from the documentation (`#[doc(hidden)]`, engine detail with no stability
+  promise); `Document::extra` and `insert_extra` stay, and make `serde_json` a public dependency of `persia`.
+- **Breaking** (`persia`): `PutBlobOptions` is the facade's own `#[non_exhaustive]` builder (ROADMAP 10.1.15, ADR-0063
+  amended): `PutBlobOptions::new().mime("text/plain").chunk_size(64 << 10)` instead of a struct literal; setters
+  `mime`, `user_meta(key, value)`, `expected_id`, `expected_size`, `chunk_size(u32)`, `bind_budget` and `resume`. A
+  chunk size outside 64 KiB..=64 MiB is `InvalidArgument` when the blob is stored. `persia::Blob` is the facade's own
+  enum, with the same variants and constructors. New: `persia::ResumeToken` (`new(upload_id, chunk_size)`,
+  `upload_id()`, `chunk_size()`) and `Error::resume_token()`, which returns it for an interrupted upload. No
+  `persia-blob` type is needed to set any option.
 - **Breaking** (`persia-engine`): cursor tokens are version 2 (ROADMAP 10.1.24, 8.1.34; SPEC §7.4; ADR-0062 item 11,
   amended), and version 1 tokens are refused as an invalid argument (pre-1.0: request the first page again). A token
   records a fingerprint of its request's `q`, fields, filters and query limits (`Cursor::request`, a new public field,
@@ -698,6 +733,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   skip like unknown kinds. Golden files in `tests/fixtures/blob-pack/v1/`.
 
 ### Fixed
+- `persia`: a create whose blob pack fails to open removes the new container while it still holds the writer lock
+  (ROADMAP 10.2.7), not after releasing it: an open or a create racing it can no longer open the file being removed,
+  or have a database it just created there removed. The writer lock is what keeps them out: on Unix the lock on the
+  container file, on Windows the `<name>.lock` file beside it, which a racing open or create finds taken until the
+  database is dropped, after the removal. The removal is then made durable (the directory is synced), so a retry
+  after a crash does not find the container either; a failed sync is reported with the pack error.
 - Scores that overflow (a `constant_score` near `f64::MAX` under a `boost`, a `bool` summing large ones) saturate at
   `f64::MAX` instead of becoming `+∞`, in hits, rank scores and explanations (SPEC §7.2, ROADMAP 8.1.12).
 - A relaxation step no longer counts again, against `max_expansions`, an expansion of an earlier step it holds itself:

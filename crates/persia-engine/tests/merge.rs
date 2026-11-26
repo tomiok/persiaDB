@@ -59,25 +59,19 @@ fn schema() -> CollectionSchema {
 fn text_fields(b: SchemaBuilder) -> SchemaBuilder {
     b.field(
         "title",
-        FieldKind::Text(TextOptions {
-            positions: true,
-            ..TextOptions::default()
-        }),
+        FieldKind::Text(TextOptions::default().positions(true)),
     )
     .field(
         "body",
-        FieldKind::Text(TextOptions {
-            analyzer: AnalyzerRef::builtin("en").unwrap(),
-            stored: false,
-            ..TextOptions::default()
-        }),
+        FieldKind::Text(
+            TextOptions::default()
+                .analyzer(AnalyzerRef::builtin("en").unwrap())
+                .stored(false),
+        ),
     )
     .field(
         "tag",
-        FieldKind::Keyword(KeywordOptions {
-            facet: true,
-            ..KeywordOptions::default()
-        }),
+        FieldKind::Keyword(KeywordOptions::default().facet(true)),
     )
 }
 

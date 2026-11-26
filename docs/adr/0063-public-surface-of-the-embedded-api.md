@@ -110,3 +110,75 @@ would freeze the engine's shape. The owner decided the surface on 2026-11-23 (wa
   public surface; the conversions are crate-private functions instead.
 - **Wrapper types for `Document` and `CollectionSchema`.** A parallel value model to keep in step with the engine's,
   for types that are already plain data with a documented JSON form (SPEC §6.2, §6.4.1).
+
+## Amendment (2026-11-26): the facade's own blob options (ROADMAP 10.1.15)
+
+`PutBlobOptions` was the `internal` layer's struct, re-exported, whose public fields named two `persia-blob` types
+that are on no list here (`ChunkSize`, `ResumeToken`): a caller could not set `chunk_size` or `resume` without
+depending on `persia-blob`. The owner chose a facade type over adding the two to item 2:
+
+- `persia::PutBlobOptions` is the facade's own `#[non_exhaustive]` struct with private fields: `new()` (also
+  `Default`) and one consuming setter per option, `mime`, `user_meta(key, value)` (adds one entry), `expected_id`,
+  `expected_size`, `chunk_size(u32)` (bytes), `bind_budget(Duration)` and `resume(ResumeToken)`. It converts to the
+  blob layer's options inside the facade, when the blob is stored; a chunk size outside 64 KiB..=64 MiB is then
+  `INVALID_ARGUMENT`, and the blob layer checks the rest as before.
+- `persia::ResumeToken` is the facade's value of SPEC §9.4's token, the upload id (`u128`) and the chunk size
+  (`u32`): `new(upload_id, chunk_size)`, `upload_id()`, `chunk_size()`, so a caller can keep it across a restart.
+  `Error::resume_token()` finds it behind an interrupted upload's error (a downcast of the source chain, never its
+  text). This narrows the first Consequence above: the resume token is no longer reachable only through `source()`.
+- `persia::Blob` is the facade's own enum too (the same variants, `Reader`, `Path` and `Stored`, holding the facade's
+  options), since its `with_options` takes them; it converts to the `internal` layer's `Blob` the same way.
+
+No public signature of `persia` names a `persia-blob` type now other than `BlobRef` and `BlobId` (item 2).
+
+## Amendment (2026-11-26): `#[non_exhaustive]` and the trim of the re-exported engine types (ROADMAP 10.1.16)
+
+The Consequence "What the re-exports freeze" listed what item 4 made part of `persia`'s surface. Each item is now
+hidden, wrapped or kept, before the first publish (ROADMAP 10.5.1):
+
+| Item | Decision |
+|---|---|
+| `TextOptions`, `KeywordOptions`, `RankingConfig`, `RelaxationConfig`, `StaticRank` | **`#[non_exhaustive]`.** The public fields stay (read them, or set them on a value you have), so a field can be added; another crate cannot write a struct literal, so each gets one consuming setter per field (`TextOptions::default().boost(3.0).positions(true)`, `StaticRank::new("sales").weight(0.5)`, `RelaxationConfig::default().min_results(5)`, ...). |
+| `FieldKind`, `FieldType`, `Level`, `Fallback`, `FilterRelaxation`, `RankFn` | **`#[non_exhaustive]`**: a variant can be added; a match outside the engine needs a wildcard arm. The fields of `FieldKind`'s struct variants (`I64 { stored }`, ...) are **kept** exhaustive on purpose: they are the field's options, and a new option of those types would be a new variant holding an options struct, as `Text` and `Keyword` do. |
+| `CollectionSchema::hash`, `hash_at`, `canonical_index_definition` | **Hidden** (`#[doc(hidden)]` on the engine's methods): the schema hash segments record (SPEC §6.2.5) is format detail, and `hash` named `SchemaHash`, on no list here. The engine, its tests and the CLI still call them. |
+| `CollectionSchema::from_json_in`, `AnalyzerRef::parse_in` | **Hidden**: they take `persia_analysis::AnalyzerRegistry`, which `persia` does not export, and the facade has no way to register an analyzer yet. A registry option of `OpenOptions` would bring a facade path back. |
+| `Document::encode`, `decode`, `encoded_id` | **Hidden**: the binary encoding of SPEC §6.4.2 is the engine's; a caller has the JSON form (`Collection::get_json`, `Document::to_json`) and the typed values. |
+| `Document::extra`, `insert_extra` | **Kept**: the extra fields of a collection that is not `strict` (SPEC §6.4.1) are a user feature, and `serde_json::Value` is how they are typed. `serde_json` 1.x becomes a public dependency of `persia` (as `serde` is through `Collection::put_struct`), so a major version of `serde_json` would be a breaking change of `persia`. |
+
+"Hidden" is `#[doc(hidden)]`, as for `persia::internal` (ADR-0051): the methods stay callable, outside the documented
+surface and the public-API snapshot (ROADMAP 10.1.12), and carry no stability promise. In-repo users that need one
+keep calling it through the engine, or through `persia::internal`; none moved to a new public item.
+
+## Amendment (2026-11-26): the public-API snapshot is `cargo xtask public-api` (ROADMAP 10.1.12)
+
+Item 10 left the snapshot to ROADMAP 10.1.12, and Step 0 decision (a) of wave 7 had named a `cargo public-api`
+snapshot. The owner replaced it (2026-11-25): the repository's own `cargo xtask public-api`, with no `cargo-public-api`
+to install, in the repo tooling that already reads JSON (`serde_json`, allowed in `xtask`).
+
+1. **What it reads.** rustdoc's JSON (an unstable output, built with the dated nightly of `.github/nightly-toolchain`,
+   as Miri and the fuzz targets are) for `persia` and for the workspace crates it re-exports from (`persia-engine`,
+   `persia-blob`, `persia-format`, `persia-analysis`), into `target/public-api`. The renderer reads one format version
+   (61, the pinned nightly's) and refuses another, so bumping the nightly is where it is updated.
+2. **Re-exports expanded.** rustdoc's JSON keeps a re-export of another crate's item as a `use`, even with
+   `#[doc(inline)]` (which `persia`'s re-exports now carry, for its HTML docs). The renderer follows each one into the
+   defining crate's JSON and lists the item's fields, variants, methods and trait impls under the path a user writes
+   (`persia::TextOptions::boost`); signatures name a type by that path when the surface reaches it, else by its
+   canonical path (`persia_engine::schema::SchemaError`, `core::option::Option`).
+3. **What it lists.** One sorted line per public item, field, variant, method, associated item and trait impl, with
+   `#[non_exhaustive]`; auto-trait impls only for `Send`, `Sync`, `Unpin`, `UnwindSafe` and `RefUnwindSafe`; no
+   blanket impls, no `StructuralPartialEq`, no docs. `#[doc(hidden)]` items are not in the JSON, so the hidden engine
+   detail of the 10.1.16 amendment is not listed.
+4. **Which features.** The ones a user can enable and rely on: the default and `async`. Not `internal` (the hidden
+   layer, ADR-0051) or `test-hooks`, which are not stable.
+5. **The gate.** The listing is committed as `crates/persia/public-api.txt`; `just public-api` regenerates it, and
+   `cargo xtask public-api --check` (CI's `repo-checks` job, and `just repo-checks`) fails with the lines added and
+. **Generated on Linux.** rustdoc renders the target it runs on, so the committed file is the surface on Linux
+   (x86_64): CI's `repo-checks` job runs on `ubuntu-latest`. Items behind `cfg(windows)` or another target are not in
+   it; none of `persia`'s public items is target-specific today.
+
+## Amendment (2026-11-26): `Correction` and `FallbackOrder` join item 2 (ROADMAP 10.1.25, review)
+
+`persia::Relaxation` has typed getters for what the response JSON states beside its public fields: `corrected()`
+(`&[Correction]`), `fallback()` (`Option<FallbackOrder>`) and `filters_dropped()`. The two engine types they name are
+plain values of the relaxation cascade, re-exported under `persia::` beside `RelaxLevel`; `Correction` is now
+`#[non_exhaustive]`, so its fields can grow. `persia::Blob` is `#[non_exhaustive]` too.

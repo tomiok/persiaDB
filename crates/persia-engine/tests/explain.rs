@@ -45,13 +45,7 @@ const STRATEGIES: [Pruning; 3] = [
 ];
 
 fn schema() -> CollectionSchema {
-    let text = |boost| {
-        FieldKind::Text(TextOptions {
-            boost,
-            positions: true,
-            ..TextOptions::default()
-        })
-    };
+    let text = |boost| FieldKind::Text(TextOptions::default().boost(boost).positions(true));
     SchemaBuilder::new("c")
         .field("title", text(2.0))
         .field("body", text(1.0))

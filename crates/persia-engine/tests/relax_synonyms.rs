@@ -45,17 +45,11 @@ fn schema(synonyms: &[&[&str]]) -> CollectionSchema {
     SchemaBuilder::new("c")
         .field(
             "title",
-            FieldKind::Text(TextOptions {
-                positions: true,
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().positions(true)),
         )
         .field(
             "body",
-            FieldKind::Text(TextOptions {
-                analyzer: AnalyzerRef::builtin("en").unwrap(),
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().analyzer(AnalyzerRef::builtin("en").unwrap())),
         )
         .synonyms(groups(synonyms))
         .build()
@@ -121,10 +115,7 @@ fn a_run_of_whole_clauses_matches_in_each_field_with_its_stopword_gaps() {
     let body_only = SchemaBuilder::new("c")
         .field(
             "body",
-            FieldKind::Text(TextOptions {
-                analyzer: AnalyzerRef::builtin("en").unwrap(),
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().analyzer(AnalyzerRef::builtin("en").unwrap())),
         )
         .synonyms(groups(&[&["statue liberty", "monument"]]))
         .build()
@@ -142,10 +133,7 @@ fn a_run_of_whole_clauses_matches_in_each_field_with_its_stopword_gaps() {
     let body_only = SchemaBuilder::new("c")
         .field(
             "body",
-            FieldKind::Text(TextOptions {
-                analyzer: AnalyzerRef::builtin("en").unwrap(),
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().analyzer(AnalyzerRef::builtin("en").unwrap())),
         )
         .synonyms(groups(&[&["statue of liberty", "monument"]]))
         .build()
@@ -588,10 +576,7 @@ fn english(synonyms: &[&[&str]]) -> CollectionSchema {
     SchemaBuilder::new("c")
         .field(
             "body",
-            FieldKind::Text(TextOptions {
-                analyzer: AnalyzerRef::builtin("en").unwrap(),
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().analyzer(AnalyzerRef::builtin("en").unwrap())),
         )
         .synonyms(groups(synonyms))
         .build()

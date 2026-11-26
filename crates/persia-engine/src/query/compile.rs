@@ -153,7 +153,7 @@ enum OnePart<'a> {
 /// use persia_engine::query::{DefaultFields, QueryCompiler, QueryLimits};
 /// use persia_engine::schema::{AnalyzerRef, FieldKind, SchemaBuilder, TextOptions};
 ///
-/// let en = TextOptions { analyzer: AnalyzerRef::builtin("en").ok_or("no en")?, ..TextOptions::default() };
+/// let en = TextOptions::default().analyzer(AnalyzerRef::builtin("en").ok_or("no en")?);
 /// let schema = SchemaBuilder::new("c").field("title", FieldKind::Text(en)).build()?;
 /// let compiler = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin())?;
 /// let compiled = compiler.compile("red  the -\"running shoes\"", &DefaultFields::all(&schema), &QueryLimits::default());

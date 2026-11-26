@@ -59,10 +59,7 @@ pub fn database(shape: &Shape) -> (Database<SimFile>, Fields) {
         .field("price", FieldKind::I64 { stored: false })
         .field(
             "sku",
-            FieldKind::Keyword(KeywordOptions {
-                facet: true,
-                ..KeywordOptions::default()
-            }),
+            FieldKind::Keyword(KeywordOptions::default().facet(true)),
         )
         .build()
         .unwrap();

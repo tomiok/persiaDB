@@ -65,13 +65,13 @@ struct Params {
 }
 
 fn text(analyzer: &AnalyzerRef, (boost, k1, b): (f64, f64, f64)) -> FieldKind {
-    FieldKind::Text(TextOptions {
-        analyzer: analyzer.clone(),
-        boost,
-        k1,
-        b,
-        ..TextOptions::default()
-    })
+    FieldKind::Text(
+        TextOptions::default()
+            .analyzer(analyzer.clone())
+            .boost(boost)
+            .k1(k1)
+            .b(b),
+    )
 }
 
 fn schema(p: Params) -> CollectionSchema {

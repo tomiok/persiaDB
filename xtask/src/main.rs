@@ -8,6 +8,7 @@ mod fixtures;
 mod github_setup;
 mod miri_filters;
 mod progress;
+mod public_api;
 mod repo_checks;
 
 use std::path::PathBuf;
@@ -22,6 +23,7 @@ commands:
   progress     regenerate PROGRESS.md from ROADMAP.md [--record [--date YYYY-MM-DD] | --check]
   fixtures     write the current format version's golden fixtures in tests/fixtures/format/ [--check]
   miri-filters check that `just miri`'s test filters and --skips match the tests they name
+  public-api   write crates/persia/public-api.txt, persia's public API from rustdoc JSON (dated nightly) [--check]
   github-setup create/update GitHub labels and milestones [--repo OWNER/NAME] [--apply]";
 
 fn main() -> ExitCode {
@@ -44,6 +46,7 @@ fn run() -> Result<bool> {
         Some("progress") => progress::run(&repo_root()?, rest),
         Some("fixtures") => fixtures::run(&repo_root()?, rest),
         Some("miri-filters") => miri_filters::run(&repo_root()?),
+        Some("public-api") => public_api::run(&repo_root()?, rest),
         Some("github-setup") => github_setup::run(&repo_root()?, rest),
         _ => {
             eprintln!("{USAGE}");

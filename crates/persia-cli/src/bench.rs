@@ -314,10 +314,7 @@ impl Sample {
 
 /// The schema of the bench collection. `body` indexes positions, so a phrase is a phrase there (SPEC §7.1.1).
 fn schema() -> Result<CollectionSchema> {
-    let body = TextOptions {
-        positions: true,
-        ..TextOptions::default()
-    };
+    let body = TextOptions::default().positions(true);
     SchemaBuilder::new(COLLECTION)
         .field("title", FieldKind::Text(TextOptions::default()))
         .field("body", FieldKind::Text(body))

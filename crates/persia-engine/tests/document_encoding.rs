@@ -186,10 +186,7 @@ fn stored_row_golden() {
     let schema = SchemaBuilder::new("row")
         .field(
             "body",
-            FieldKind::Text(TextOptions {
-                stored: false,
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().stored(false)),
         )
         .field("n", FieldKind::I64 { stored: false })
         .field("tag", FieldKind::Keyword(KeywordOptions::default()))
@@ -668,6 +665,7 @@ fn decoder_limits() {
                 FieldType::Bool => Value::Bool(true),
                 FieldType::Datetime => Value::Datetime(1),
                 FieldType::Stored => Value::Json(json!(1)),
+                other => panic!("a field type this test does not know: {other}"),
             };
             d.with(schema.fields()[i].id(), v)
         });
@@ -959,14 +957,10 @@ fn rows_holding_what_new_documents_cannot() {
 
 fn field_kind() -> impl Strategy<Value = FieldKind> {
     prop_oneof![
-        any::<bool>().prop_map(|stored| FieldKind::Text(TextOptions {
-            stored,
-            ..TextOptions::default()
-        })),
-        any::<bool>().prop_map(|stored| FieldKind::Keyword(KeywordOptions {
-            facet: false,
-            stored
-        })),
+        any::<bool>().prop_map(|stored| FieldKind::Text(TextOptions::default().stored(stored))),
+        any::<bool>().prop_map(|stored| FieldKind::Keyword(
+            KeywordOptions::default().facet(false).stored(stored)
+        )),
         any::<bool>().prop_map(|stored| FieldKind::I64 { stored }),
         any::<bool>().prop_map(|stored| FieldKind::F64 { stored }),
         any::<bool>().prop_map(|stored| FieldKind::Bool { stored }),
@@ -1050,6 +1044,7 @@ fn value(t: FieldType) -> BoxedStrategy<Value> {
             .prop_filter("not null", |v| !v.is_null())
             .prop_map(Value::Json)
             .boxed(),
+        other => panic!("a field type this test does not know: {other}"),
     }
 }
 

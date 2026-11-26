@@ -27,7 +27,7 @@ use crate::query::limits::QueryLimits;
 /// use persia_engine::schema::{FieldKind, SchemaBuilder, TextOptions};
 ///
 /// let schema = SchemaBuilder::new("c")
-///     .field("title", FieldKind::Text(TextOptions { positions: true, ..TextOptions::default() }))
+///     .field("title", FieldKind::Text(TextOptions::default().positions(true)))
 ///     .synonyms(vec![vec!["TV".into(), "television set".into()]])
 ///     .build()?;
 /// let compiler = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin())?;

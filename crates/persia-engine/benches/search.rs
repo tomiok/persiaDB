@@ -70,10 +70,7 @@ fn segment() -> (Arc<CollectionSchema>, Arc<Segment>, [FieldId; 4]) {
     let schema = SchemaBuilder::new("bench")
         .field(
             "body",
-            FieldKind::Text(TextOptions {
-                positions: true,
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().positions(true)),
         )
         .field("price", FieldKind::I64 { stored: false })
         .field("at", FieldKind::Datetime { stored: false })
@@ -483,14 +480,9 @@ fn ranked_collection(segments: u64) -> (Database<SimFile>, [FieldId; 4]) {
         .field("at", FieldKind::Datetime { stored: false })
         .field(
             "tag",
-            FieldKind::Keyword(KeywordOptions {
-                facet: true,
-                ..KeywordOptions::default()
-            }),
+            FieldKind::Keyword(KeywordOptions::default().facet(true)),
         )
-        .ranking(RankingConfig {
-            static_rank: Some(StaticRank::new("price")),
-        })
+        .ranking(RankingConfig::default().static_rank(Some(StaticRank::new("price"))))
         .build()
         .unwrap();
     let id = |name| schema.field(name).unwrap().id();
@@ -503,19 +495,13 @@ fn bench_schema(positions: bool, synonyms: Vec<Vec<String>>) -> CollectionSchema
     SchemaBuilder::new("bench")
         .field(
             "body",
-            FieldKind::Text(TextOptions {
-                positions,
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().positions(positions)),
         )
         .field("price", FieldKind::I64 { stored: true })
         .field("at", FieldKind::Datetime { stored: false })
         .field(
             "tag",
-            FieldKind::Keyword(KeywordOptions {
-                facet: true,
-                ..KeywordOptions::default()
-            }),
+            FieldKind::Keyword(KeywordOptions::default().facet(true)),
         )
         .synonyms(synonyms)
         .build()

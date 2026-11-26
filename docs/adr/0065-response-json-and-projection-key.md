@@ -83,3 +83,29 @@ request JSON.
   boolean would leave the list form as a third type for one key.
 - **Ignoring a repeated name.** Nothing in a request is guessed (SPEC §7.1.4): a repeated name is likely a mistake
   in the program that wrote it.
+
+## Amendment (2026-11-26): the embedded API writes the response JSON (ROADMAP 10.1.25)
+
+`persia::SearchResponse` was a converted value that dropped what the JSON needs (each hit's step, rank score and sort
+values; `corrected`, `fallback` and `filters_dropped`), so the facade could not write it. The owner decided that the
+facade's JSON comes from one facade type, not from hand-built strings:
+
+1. **`SearchResponse` is the source.** It keeps, privately, the collection's schema (an `Arc`, shared with the
+   snapshot: `CollectionSnapshot::shared_schema`), each hit's sort keys and raw sort values and, for a relaxed search,
+   its step and rank score, and the whole `relaxation` of SPEC §7.6. It implements `serde::Serialize` (the response
+   JSON of SPEC §7.5.2), and `SearchResponse::to_json()` is `serde_json::to_string` of it. The `Serialize` impls
+   (in `crates/persia/src/search/json.rs`) build maps and structs through `serde`; no JSON text is concatenated or
+   formatted. Non-finite numbers are an error, never `null`.
+2. **Shared primitives, not a shared writer.** The engine exposes what both writers type values with:
+   `TypedSortValue::of` (a sort value typed by its key's field; the engine's own writer uses it too), `base64url_text`
+   (the `{"base64url": ...}` form of a keyword that is not UTF-8), and `SearchHit::sort_keys` (now public). A hit's
+   document is the engine's JSON form (`Document::to_json`), carried as a value with `id` and `blob` first and its
+   fields by name, as SPEC §7.5.2 orders them.
+3. **The same text.** The facade's JSON equals the engine's `QueryResponse::to_json` for the same request on the same
+   snapshot, byte for byte: tested on a table of requests (plain with every sort type, relaxed with corrections, L5,
+   phrases and proximity, facets, explanations, projections, a missing sort value) and on 64 seeded random requests
+   (`crates/persia/src/search/json.rs`).
+4. **A plain search's `relaxation`** in the typed response is now the engine's (`QueryResponse::relaxation`): for
+   `relax: false`, `effective` is L0's text, as the JSON states it, instead of `None`.
+
+The C ABI (ADR-0018) and the server (M11) pass the facade's text through.

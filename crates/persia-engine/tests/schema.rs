@@ -96,10 +96,7 @@ fn spec_example_parses_with_defaults_filled_in() {
     assert!(!body.positions);
     assert_eq!(
         s.field("brand").unwrap().kind(),
-        &FieldKind::Keyword(KeywordOptions {
-            facet: true,
-            stored: true
-        })
+        &FieldKind::Keyword(KeywordOptions::default().facet(true).stored(true))
     );
     assert_eq!(s.field("price").unwrap().field_type(), FieldType::F64);
     let rank = s.ranking().static_rank.as_ref().unwrap();
@@ -369,10 +366,7 @@ fn numeric_ranges() {
     }
     // Non-finite values cannot come from JSON, but can from code.
     for boost in [f64::NAN, f64::INFINITY] {
-        let kind = FieldKind::Text(TextOptions {
-            boost,
-            ..TextOptions::default()
-        });
+        let kind = FieldKind::Text(TextOptions::default().boost(boost));
         let err = SchemaBuilder::new("c")
             .field("t", kind)
             .build()
@@ -477,9 +471,7 @@ fn static_rank_field_must_be_a_numeric_or_datetime_field() {
     }
     let s = SchemaBuilder::new("c")
         .field("at", FieldKind::Datetime { stored: true })
-        .ranking(RankingConfig {
-            static_rank: Some(StaticRank::new("at")),
-        })
+        .ranking(RankingConfig::default().static_rank(Some(StaticRank::new("at"))))
         .build()
         .unwrap();
     assert_eq!(
@@ -502,15 +494,14 @@ fn relaxation_options() {
     let r = parse(&v).unwrap().relaxation().clone();
     assert_eq!(
         r,
-        RelaxationConfig {
-            enabled: false,
-            min_results: 5,
-            levels: Levels::Custom(vec![Level::Synonyms, Level::Fuzzy]),
-            fallback: Fallback::None,
-            fill: true,
-            filters: FilterRelaxation::LastResort,
-            budget_ms: 200,
-        }
+        RelaxationConfig::default()
+            .enabled(false)
+            .min_results(5)
+            .levels(Levels::Custom(vec![Level::Synonyms, Level::Fuzzy]))
+            .fallback(Fallback::None)
+            .fill(true)
+            .filters(FilterRelaxation::LastResort)
+            .budget_ms(200)
     );
     let empty = parse(&patched("/relaxation/levels", Some(json!([])))).unwrap();
     assert_eq!(empty.relaxation().levels.resolve(), []);
@@ -588,19 +579,10 @@ fn to_json_writes_every_option() {
 #[test]
 fn canonical_encoding_golden() {
     let s = SchemaBuilder::new("c")
-        .field(
-            "t",
-            FieldKind::Text(TextOptions {
-                positions: true,
-                ..TextOptions::default()
-            }),
-        )
+        .field("t", FieldKind::Text(TextOptions::default().positions(true)))
         .field(
             "k",
-            FieldKind::Keyword(KeywordOptions {
-                facet: true,
-                stored: false,
-            }),
+            FieldKind::Keyword(KeywordOptions::default().facet(true).stored(false)),
         )
         .field("s", FieldKind::Stored)
         .field("n", FieldKind::I64 { stored: true })
@@ -828,19 +810,21 @@ fn field_kind() -> impl Strategy<Value = FieldKind> {
         any::<bool>(),
     )
         .prop_map(|(analyzer, boost, positions, k1, b, stored)| {
-            FieldKind::Text(TextOptions {
-                analyzer: AnalyzerRef::new(analyzer.name, analyzer.version).unwrap(),
-                boost,
-                positions,
-                k1,
-                b,
-                stored,
-            })
+            FieldKind::Text(
+                TextOptions::default()
+                    .analyzer(AnalyzerRef::new(analyzer.name, analyzer.version).unwrap())
+                    .boost(boost)
+                    .positions(positions)
+                    .k1(k1)
+                    .b(b)
+                    .stored(stored),
+            )
         });
     prop_oneof![
         text,
-        (any::<bool>(), any::<bool>())
-            .prop_map(|(facet, stored)| FieldKind::Keyword(KeywordOptions { facet, stored })),
+        (any::<bool>(), any::<bool>()).prop_map(|(facet, stored)| FieldKind::Keyword(
+            KeywordOptions::default().facet(facet).stored(stored)
+        )),
         any::<bool>().prop_map(|stored| FieldKind::I64 { stored }),
         any::<bool>().prop_map(|stored| FieldKind::F64 { stored }),
         any::<bool>().prop_map(|stored| FieldKind::Bool { stored }),
@@ -864,22 +848,23 @@ fn relaxation() -> impl Strategy<Value = RelaxationConfig> {
         1..=60_000u32,
     )
         .prop_map(
-            |(enabled, min_results, levels, none, fill, last_resort, budget_ms)| RelaxationConfig {
-                enabled,
-                min_results,
-                levels,
-                fallback: if none {
-                    Fallback::None
-                } else {
-                    Fallback::StaticRank
-                },
-                fill,
-                filters: if last_resort {
-                    FilterRelaxation::LastResort
-                } else {
-                    FilterRelaxation::Never
-                },
-                budget_ms,
+            |(enabled, min_results, levels, none, fill, last_resort, budget_ms)| {
+                RelaxationConfig::default()
+                    .enabled(enabled)
+                    .min_results(min_results)
+                    .levels(levels)
+                    .fallback(if none {
+                        Fallback::None
+                    } else {
+                        Fallback::StaticRank
+                    })
+                    .fill(fill)
+                    .filters(if last_resort {
+                        FilterRelaxation::LastResort
+                    } else {
+                        FilterRelaxation::Never
+                    })
+                    .budget_ms(budget_ms)
             },
         )
 }
@@ -908,17 +893,15 @@ fn schema() -> impl Strategy<Value = (Vec<(String, FieldKind)>, SchemaBuilder)> 
                     FieldKind::I64 { .. } | FieldKind::F64 { .. } | FieldKind::Datetime { .. }
                 )
             });
-            let ranking = RankingConfig {
-                static_rank: rank_field.map(|(n, _)| StaticRank {
-                    field: n.clone(),
-                    weight,
-                    function: if linear {
+            let ranking = RankingConfig::default().static_rank(rank_field.map(|(n, _)| {
+                StaticRank::new(n.clone())
+                    .weight(weight)
+                    .function(if linear {
                         RankFn::Linear
                     } else {
                         RankFn::Log1p
-                    },
-                }),
-            };
+                    })
+            }));
             let builder = fields
                 .iter()
                 .fold(SchemaBuilder::new(name), |b, (n, k)| {
@@ -1344,20 +1327,10 @@ fn boundary_floats_round_trip_bit_exactly() {
         let s = SchemaBuilder::new("c")
             .field(
                 "t",
-                FieldKind::Text(TextOptions {
-                    boost,
-                    k1,
-                    b,
-                    ..TextOptions::default()
-                }),
+                FieldKind::Text(TextOptions::default().boost(boost).k1(k1).b(b)),
             )
             .field("n", FieldKind::F64 { stored: true })
-            .ranking(RankingConfig {
-                static_rank: Some(StaticRank {
-                    weight: boost,
-                    ..StaticRank::new("n")
-                }),
-            })
+            .ranking(RankingConfig::default().static_rank(Some(StaticRank::new("n").weight(boost))))
             .build()
             .unwrap();
         let via_text = CollectionSchema::from_json(&s.to_json().unwrap()).unwrap();
@@ -1386,13 +1359,13 @@ fn canonical_encoding_golden_remaining_types() {
     let s = SchemaBuilder::new("g")
         .field(
             "x",
-            FieldKind::Text(TextOptions {
-                analyzer: AnalyzerRef::builtin("es").unwrap(),
-                boost: 2.0, // query-time: not encoded
-                positions: false,
-                stored: false,
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(
+                TextOptions::default()
+                    .analyzer(AnalyzerRef::builtin("es").unwrap())
+                    .boost(2.0) // query-time: not encoded
+                    .positions(false)
+                    .stored(false),
+            ),
         )
         .field("f", FieldKind::F64 { stored: false })
         .field("d", FieldKind::Datetime { stored: true })
@@ -1641,20 +1614,19 @@ fn apply_index_change(
             | FieldKind::Bool { stored }
             | FieldKind::Datetime { stored } => *stored = !*stored,
             FieldKind::Stored => *kind = FieldKind::I64 { stored: true },
+            other => panic!("a field kind this test does not know: {other:?}"),
         },
         IndexChange::Type => {
             *kind = match kind {
                 FieldKind::Text(_) | FieldKind::Stored => {
                     FieldKind::Keyword(KeywordOptions::default())
                 }
-                FieldKind::Keyword(o) => FieldKind::Text(TextOptions {
-                    stored: o.stored,
-                    ..TextOptions::default()
-                }),
+                FieldKind::Keyword(o) => FieldKind::Text(TextOptions::default().stored(o.stored)),
                 FieldKind::I64 { stored } => FieldKind::F64 { stored: *stored },
                 FieldKind::F64 { stored } => FieldKind::Bool { stored: *stored },
                 FieldKind::Bool { stored } => FieldKind::Datetime { stored: *stored },
                 FieldKind::Datetime { stored } => FieldKind::I64 { stored: *stored },
+                other => panic!("a field kind this test does not know: {other:?}"),
             };
         }
         IndexChange::PositionsOrFacet => match kind {
@@ -1950,7 +1922,7 @@ proptest! {
             .into_iter()
             .zip(boosts)
             .map(|((n, k), (boost, k1, b))| match k {
-                FieldKind::Text(o) => (n, FieldKind::Text(TextOptions { boost, k1, b, ..o })),
+                FieldKind::Text(o) => (n, FieldKind::Text(o.boost(boost).k1(k1).b(b))),
                 other => (n, other),
             })
             .fold(SchemaBuilder::new(s.name()), |b, (n, k)| b.field(n, k))

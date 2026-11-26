@@ -206,6 +206,8 @@ impl Document {
     ///
     /// # Errors
     /// As [`Self::validate`].
+    // Engine detail, hidden from the public API of `persia`, which re-exports this type (ROADMAP 10.1.16, ADR-0063).
+    #[doc(hidden)]
     pub fn encode(
         &self,
         schema: &CollectionSchema,
@@ -221,6 +223,8 @@ impl Document {
     /// # Errors
     /// [`DecodeError::Corrupt`] if `bytes` is not exactly one valid encoding, [`DecodeError::UnsupportedVersion`]
     /// for an encoding version this build does not read.
+    // Engine detail, hidden from the public API of `persia`, which re-exports this type (ROADMAP 10.1.16, ADR-0063).
+    #[doc(hidden)]
     pub fn decode(bytes: &[u8], schema: &CollectionSchema) -> Result<Self, DecodeError> {
         codec::decode(bytes, schema)
     }
@@ -241,6 +245,8 @@ impl Document {
     ///
     /// # Errors
     /// As [`Self::decode`], for the bytes it reads.
+    // Engine detail, hidden from the public API of `persia`, which re-exports this type (ROADMAP 10.1.16, ADR-0063).
+    #[doc(hidden)]
     pub fn encoded_id(bytes: &[u8]) -> Result<String, DecodeError> {
         codec::encoded_id(bytes)
     }

@@ -37,10 +37,7 @@ use serde_json::{Value as J, json};
 const PROPTEST_SEED: u64 = 0x1011_3000_0001;
 
 fn schema() -> CollectionSchema {
-    let facet = KeywordOptions {
-        facet: true,
-        ..KeywordOptions::default()
-    };
+    let facet = KeywordOptions::default().facet(true);
     SchemaBuilder::new("shoes")
         .field("title", FieldKind::Text(TextOptions::default()))
         .field("brand", FieldKind::Keyword(facet))

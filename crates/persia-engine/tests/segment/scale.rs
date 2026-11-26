@@ -133,10 +133,7 @@ fn large_schema() -> CollectionSchema {
     SchemaBuilder::new("large")
         .field(
             "title",
-            FieldKind::Text(TextOptions {
-                positions: true,
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().positions(true)),
         )
         .field("tag", FieldKind::Keyword(KeywordOptions::default()))
         .field("raw", FieldKind::Stored)
@@ -555,11 +552,7 @@ fn single_document_per_field_type() {
                 vec![TermDict, TermInfo, Postings, Freqs, Norms],
             ),
             (
-                FieldKind::Text(TextOptions {
-                    positions: true,
-                    stored: false,
-                    ..TextOptions::default()
-                }),
+                FieldKind::Text(TextOptions::default().positions(true).stored(false)),
                 Value::Strings(vec!["one".into(), "two two".into()]),
                 vec![TermDict, TermInfo, Postings, Freqs, Positions, Norms],
             ),
@@ -633,10 +626,7 @@ fn tiny_schema() -> CollectionSchema {
     SchemaBuilder::new("tiny")
         .field(
             "tag",
-            FieldKind::Keyword(KeywordOptions {
-                facet: true,
-                ..KeywordOptions::default()
-            }),
+            FieldKind::Keyword(KeywordOptions::default().facet(true)),
         )
         .field("n", FieldKind::I64 { stored: true })
         .field("flag", FieldKind::Bool { stored: false })

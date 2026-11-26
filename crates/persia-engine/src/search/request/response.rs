@@ -117,6 +117,84 @@ impl QueryResponse {
     }
 }
 
+/// A sort value as the response JSON types it (SPEC §7.4, §7.5.2): by its key's field, the score and an `f64` as a
+/// number, an `i64` as an integer, a `datetime` in the document's output form, a `bool`, and a keyword's bytes. What
+/// [`QueryResponse::to_json`] writes, and what another writer of the response JSON (the embedded API's, ROADMAP
+/// 10.1.25) types a hit's sort values with.
+///
+/// ```
+/// use persia_engine::schema::SchemaBuilder;
+/// use persia_engine::search::request::TypedSortValue;
+/// use persia_engine::search::{Order, SortKey, SortValue};
+///
+/// let schema = SchemaBuilder::new("c").build()?;
+/// let score = SortKey::Score { order: Order::Desc };
+/// assert_eq!(TypedSortValue::of(score, &SortValue::Score(1.5), &schema)?, TypedSortValue::Number(1.5));
+/// assert_eq!(TypedSortValue::of(score, &SortValue::Missing, &schema)?, TypedSortValue::Missing);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum TypedSortValue {
+    /// The document has no value in the field (`null`).
+    Missing,
+    /// The score, or an `f64` field's value.
+    Number(f64),
+    /// An `i64` field's value.
+    Integer(i64),
+    /// A `datetime` field's value, in the document's output form (SPEC §6.4.1).
+    Datetime(String),
+    /// A `bool` field's value.
+    Bool(bool),
+    /// A `keyword` field's bytes: a string when they are UTF-8, else `{"base64url": ...}` ([`base64url_text`]).
+    Keyword(Vec<u8>),
+}
+
+impl TypedSortValue {
+    /// `value`, a hit's value for the sort key `key`, typed by `key`'s field in `schema`.
+    ///
+    /// # Errors
+    /// [`ResponseJsonError::UnknownField`] for a key on a field `schema` does not have;
+    /// [`ResponseJsonError::SortValue`] for a value of another type than its key's field, or a datetime out of range.
+    pub fn of(
+        key: SortKey,
+        value: &SortValue,
+        schema: &CollectionSchema,
+    ) -> Result<Self, ResponseJsonError> {
+        let field_type = match key {
+            SortKey::Score { .. } => None,
+            SortKey::Field { field, .. } => Some(
+                schema
+                    .field_by_id(field)
+                    .ok_or(ResponseJsonError::UnknownField(field))?
+                    .field_type(),
+            ),
+        };
+        Ok(match (field_type, value) {
+            (_, SortValue::Missing) => Self::Missing,
+            (None, SortValue::Score(score)) => Self::Number(*score),
+            (Some(FieldType::I64), SortValue::Key(key)) => Self::Integer(key_to_i64(*key)),
+            (Some(FieldType::F64), SortValue::Key(key)) => Self::Number(key_to_f64(*key)),
+            (Some(FieldType::Datetime), SortValue::Key(key)) => Self::Datetime(
+                datetime::format(key_to_i64(*key)).ok_or(ResponseJsonError::SortValue)?,
+            ),
+            (Some(FieldType::Bool), SortValue::Key(0)) => Self::Bool(false),
+            (Some(FieldType::Bool), SortValue::Key(1)) => Self::Bool(true),
+            (Some(FieldType::Keyword), SortValue::Keyword(bytes)) => Self::Keyword(bytes.clone()),
+            _ => return Err(ResponseJsonError::SortValue),
+        })
+    }
+}
+
+/// The base64url text, without padding, that the response JSON writes a keyword's bytes as when they are not UTF-8
+/// (`{"base64url": "..."}`, SPEC §7.5.2): the cursor token's alphabet.
+///
+/// ```
+/// assert_eq!(persia_engine::search::request::base64url_text(&[0xff, 0xfe]), "__4");
+/// ```
+pub fn base64url_text(bytes: &[u8]) -> String {
+    base64url::encode(bytes)
+}
 /// Writes the parts of a response that name fields, by `schema`.
 struct Writer<'a> {
     schema: &'a CollectionSchema,
@@ -173,42 +251,27 @@ impl Writer<'_> {
         Ok(())
     }
 
-    /// A sort value as its key's field types it (SPEC §7.4, §7.5.2): the score and an `f64` as numbers, an `i64` as an
-    /// integer, a `datetime` in the document's output form, a `bool`, a keyword ([`keyword`]), and `null` for a
-    /// document without a value.
+    /// A sort value as its key's field types it ([`TypedSortValue::of`]).
     fn sort_value(
         &self,
         out: &mut String,
         key: SortKey,
         value: &SortValue,
     ) -> Result<(), ResponseJsonError> {
-        let field_type = match key {
-            SortKey::Score { .. } => None,
-            SortKey::Field { field, .. } => Some(
-                self.schema
-                    .field_by_id(field)
-                    .ok_or(ResponseJsonError::UnknownField(field))?
-                    .field_type(),
-            ),
-        };
-        match (field_type, value) {
-            (_, SortValue::Missing) => out.push_str("null"),
-            (None, SortValue::Score(score)) => number(out, *score, "a score")?,
-            (Some(FieldType::I64), SortValue::Key(key)) => {
-                out.push_str(&key_to_i64(*key).to_string());
+        match TypedSortValue::of(key, value, self.schema)? {
+            TypedSortValue::Missing => out.push_str("null"),
+            TypedSortValue::Number(n) => {
+                let what = if matches!(key, SortKey::Score { .. }) {
+                    "a score"
+                } else {
+                    "a sort value"
+                };
+                number(out, n, what)?;
             }
-            (Some(FieldType::F64), SortValue::Key(key)) => {
-                number(out, key_to_f64(*key), "a sort value")?;
-            }
-            (Some(FieldType::Datetime), SortValue::Key(key)) => {
-                let text =
-                    datetime::format(key_to_i64(*key)).ok_or(ResponseJsonError::SortValue)?;
-                string(out, &text);
-            }
-            (Some(FieldType::Bool), SortValue::Key(0)) => out.push_str("false"),
-            (Some(FieldType::Bool), SortValue::Key(1)) => out.push_str("true"),
-            (Some(FieldType::Keyword), SortValue::Keyword(bytes)) => keyword(out, bytes),
-            _ => return Err(ResponseJsonError::SortValue),
+            TypedSortValue::Integer(i) => out.push_str(&i.to_string()),
+            TypedSortValue::Datetime(text) => string(out, &text),
+            TypedSortValue::Bool(b) => out.push_str(bool_text(b)),
+            TypedSortValue::Keyword(bytes) => keyword(out, &bytes),
         }
         Ok(())
     }

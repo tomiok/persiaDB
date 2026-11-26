@@ -60,14 +60,8 @@ use serde_json::{Value as J, json};
 const PROPTEST_SEED: u64 = 0x1011_0000_0001;
 
 fn builder(relaxation: RelaxationConfig) -> SchemaBuilder {
-    let en = TextOptions {
-        analyzer: AnalyzerRef::builtin("en").unwrap(),
-        ..TextOptions::default()
-    };
-    let facet = KeywordOptions {
-        facet: true,
-        ..KeywordOptions::default()
-    };
+    let en = TextOptions::default().analyzer(AnalyzerRef::builtin("en").unwrap());
+    let facet = KeywordOptions::default().facet(true);
     SchemaBuilder::new("shoes")
         .field("title", FieldKind::Text(TextOptions::default()))
         .field("body", FieldKind::Text(en))
@@ -938,11 +932,7 @@ fn the_search_is_relaxed_unless_the_settings_run_l0_alone() {
 
 #[test]
 fn the_collections_settings_apply_as_the_request_overrides_them() {
-    let disabled = RelaxationConfig {
-        enabled: false,
-        min_results: 3,
-        ..RelaxationConfig::default()
-    };
+    let disabled = RelaxationConfig::default().enabled(false).min_results(3);
     let db = database(builder(disabled).build().unwrap());
     let snapshot = db.snapshot();
     let c = snapshot.collection("shoes").unwrap();
@@ -1195,10 +1185,7 @@ fn a_request_built_for_another_schema_is_refused() {
         .field("a", FieldKind::I64 { stored: true })
         .field(
             "b",
-            FieldKind::Keyword(KeywordOptions {
-                facet: true,
-                ..KeywordOptions::default()
-            }),
+            FieldKind::Keyword(KeywordOptions::default().facet(true)),
         )
         .field("c", FieldKind::I64 { stored: true })
         .build()

@@ -33,18 +33,11 @@ fn schema() -> CollectionSchema {
     SchemaBuilder::new("products")
         .field(
             "title",
-            FieldKind::Text(TextOptions {
-                positions: true,
-                boost: 3.0,
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().positions(true).boost(3.0)),
         )
         .field(
             "body",
-            FieldKind::Text(TextOptions {
-                analyzer: AnalyzerRef::builtin("en").unwrap(),
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().analyzer(AnalyzerRef::builtin("en").unwrap())),
         )
         .field("brand", FieldKind::Keyword(KeywordOptions::default()))
         .field("price", FieldKind::F64 { stored: true })
@@ -1517,10 +1510,9 @@ fn fields_that_split_a_word_differently_do_not_constrain_each_other() {
         .field("title", FieldKind::Text(TextOptions::default()))
         .field(
             "sku",
-            FieldKind::Text(TextOptions {
-                analyzer: AnalyzerRef::builtin("whitespace").unwrap(),
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(
+                TextOptions::default().analyzer(AnalyzerRef::builtin("whitespace").unwrap()),
+            ),
         )
         .build()
         .unwrap();
@@ -1705,10 +1697,9 @@ fn a_field_without_a_language_flags_no_stopword() {
     let schema = SchemaBuilder::new("c")
         .field(
             "raw",
-            FieldKind::Text(TextOptions {
-                analyzer: AnalyzerRef::builtin("whitespace").unwrap(),
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(
+                TextOptions::default().analyzer(AnalyzerRef::builtin("whitespace").unwrap()),
+            ),
         )
         .field("title", FieldKind::Text(TextOptions::default()))
         .build()
@@ -1731,17 +1722,13 @@ fn a_language_field_without_a_word_flags_no_stopword() {
     let schema = SchemaBuilder::new("c")
         .field(
             "body",
-            FieldKind::Text(TextOptions {
-                analyzer: AnalyzerRef::builtin("en").unwrap(),
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().analyzer(AnalyzerRef::builtin("en").unwrap())),
         )
         .field(
             "raw",
-            FieldKind::Text(TextOptions {
-                analyzer: AnalyzerRef::builtin("whitespace").unwrap(),
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(
+                TextOptions::default().analyzer(AnalyzerRef::builtin("whitespace").unwrap()),
+            ),
         )
         .build()
         .unwrap();
@@ -1967,10 +1954,7 @@ fn a_compilation_of_no_clause_has_no_added_required_clause() {
     let schema = SchemaBuilder::new("c")
         .field(
             "body",
-            FieldKind::Text(TextOptions {
-                analyzer: AnalyzerRef::builtin("en").unwrap(),
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().analyzer(AnalyzerRef::builtin("en").unwrap())),
         )
         .field("brand", FieldKind::Keyword(KeywordOptions::default()))
         .build()

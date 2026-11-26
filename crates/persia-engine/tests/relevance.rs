@@ -103,12 +103,12 @@ fn ndcg_by_hand() {
 fn store(corpus: &str) -> Database<SimFile> {
     let en = AnalyzerRef::new("en", 1).unwrap();
     let text = |boost| {
-        FieldKind::Text(TextOptions {
-            analyzer: en.clone(),
-            boost,
-            positions: true,
-            ..TextOptions::default()
-        })
+        FieldKind::Text(
+            TextOptions::default()
+                .analyzer(en.clone())
+                .boost(boost)
+                .positions(true),
+        )
     };
     let schema = SchemaBuilder::new("store")
         .field("title", text(2.0))
