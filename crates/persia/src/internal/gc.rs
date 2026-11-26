@@ -202,10 +202,10 @@ impl<S: BlobStore + ?Sized, L: BlobReferences> BlobDatabase<S, L> {
     /// [`GcError::Database`] when the log cannot list its references; [`GcError::Blob`] when the store cannot be
     /// read (an unreadable manifest is listed in [`Mark::unreadable`] instead).
     pub fn mark(&self) -> Result<Mark, GcError> {
-        let pinned = PinGate::pinned(&**self.blobs().pin_set());
+        let pinned = PinGate::pinned(&**self.blobs.pin_set());
         let referenced = self.log().referenced_blobs()?;
         let mut mark = Mark::new(referenced, pinned);
-        mark.add_manifest_uploads(&**self.blobs().store())?;
+        mark.add_manifest_uploads(&**self.blobs.store())?;
         Ok(mark)
     }
 }
@@ -269,7 +269,7 @@ impl<S: BlobStore + Sweep + ?Sized, L: BlobReferences> BlobDatabase<S, L> {
         let mark = self.mark()?;
         // With the log frozen (this borrow), the committed seq is the mark's (SPEC §9.5, ADR-0054 item 9).
         let readers = self
-            .blobs()
+            .blobs
             .store()
             .reader_leases()?
             .map(|scan| scan.judge(self.log().committed_seq()));
@@ -289,9 +289,9 @@ impl<S: BlobStore + Sweep + ?Sized, L: BlobReferences> BlobDatabase<S, L> {
             rewrite_ratio: options.rewrite_ratio,
         };
         let swept = self
-            .blobs()
+            .blobs
             .store()
-            .sweep(&mark, &**self.blobs().pin_set(), &sweep)?;
+            .sweep(&mark, &**self.blobs.pin_set(), &sweep)?;
         Ok(GcReport {
             marked_blobs: mark.blobs.len(),
             marked_uploads: mark.uploads.len(),

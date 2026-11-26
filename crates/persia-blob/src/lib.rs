@@ -21,7 +21,7 @@ pub mod store;
 
 pub use chunker::{Chunk, ChunkedBlob, Chunker, chunk_all};
 pub use chunking::ChunkSize;
-pub use error::{Error, Result};
+pub use error::{BlobRefField, Error, Result};
 pub use hash::{ContentHasher, blob_id_of};
 pub use manifest::{BlobManifest, UploadId};
 pub use persia_format::BlobId;

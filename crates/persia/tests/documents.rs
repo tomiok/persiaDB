@@ -564,7 +564,7 @@ fn a_put_whose_bind_stays_unknown_logs_nothing() {
 }
 
 /// A given (`Blob::Stored`) reference whose size or chunk size differs from the bound blob's is the caller's
-/// error, `BlobRefMismatch` and not corruption (ROADMAP 10.1.33), and logs nothing.
+/// error, `BlobRefMismatch` and not corruption (ROADMAP 10.1.33), and logs nothing; a read given it is refused alike.
 #[test]
 fn a_stored_reference_that_differs_from_its_manifest_logs_nothing() {
     use persia_blob::error::BlobRefField;
@@ -582,8 +582,12 @@ fn a_stored_reference_that_differs_from_its_manifest_logs_nothing() {
         let wrong =
             BlobRef::new(r.blob_id(), size, r.mime(), chunk, r.user_meta().clone()).unwrap();
         let before = db.log().wal_mark();
-        let Err(Error::Blob(e)) = db.put("c", &doc("x"), Blob::Stored(wrong), Durability::Fsync)
-        else {
+        let Err(Error::Blob(e)) = db.put(
+            "c",
+            &doc("x"),
+            Blob::Stored(wrong.clone()),
+            Durability::Fsync,
+        ) else {
             panic!("a mismatched reference was logged");
         };
         assert!(!e.is_corruption(), "{e}");
@@ -593,6 +597,17 @@ fn a_stored_reference_that_differs_from_its_manifest_logs_nothing() {
             "{e:?}"
         );
         assert_eq!(db.log().wal_mark(), before);
+        // A read given the same reference: the caller's error too (SPEC §9.6), on both read paths.
+        let read = db.blobs().get_blob(&wrong).map(drop).unwrap_err();
+        assert!(
+            matches!(read, persia_blob::Error::BlobRefMismatch { .. }),
+            "{read:?}"
+        );
+        let read = db.blobs().get_blob_range(&wrong, 0..1).unwrap_err();
+        assert!(
+            matches!(read, persia_blob::Error::BlobRefMismatch { .. }),
+            "{read:?}"
+        );
     }
     assert!(documents(db.log()).is_empty());
 }

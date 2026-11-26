@@ -57,6 +57,7 @@ use anyhow::{Context, Result, bail};
 use persia::internal::documents::{BlobDatabase, Error as BlobDatabaseError};
 use persia::internal::gc::{GcError, GcOptions, GcReport, Rewrite};
 use persia_engine::db::{DatabaseError, DatabaseOptions};
+use persia_engine::manifest::ManifestError;
 use persia_storage::container::Error as ContainerError;
 use serde_json::{Value, json};
 
@@ -160,10 +161,17 @@ fn opening(path: &Path, err: BlobDatabaseError) -> anyhow::Error {
             "{} is open by a writer; collect it once that is closed",
             path.display()
         ),
-        // The mark-only open skips a registered analyzer (ADR-0069); what it still refuses is a version of a built-in
-        // one this build lacks.
-        Some(DatabaseError::UnregisteredAnalyzer { .. }) => format!(
+        // The mark-only open skips a registered analyzer (ADR-0069). A version of a built-in one this build lacks fails
+        // when the manifest is decoded.
+        Some(DatabaseError::Manifest(ManifestError::UnsupportedAnalyzer { .. })) => format!(
             "opening {} (an analyzer version this build of persia gc lacks: collect it with a newer build)",
+            path.display()
+        ),
+        // Defensive: the stand-in could not be registered under the analyzer's name (a reserved or invalid one). With
+        // the built-in registry `persia gc` cannot reach it: a built-in name's missing version fails at the manifest
+        // (above), and any other well-formed name registers.
+        Some(DatabaseError::UnregisteredAnalyzer { .. }) => format!(
+            "opening {} (persia gc cannot stand in for that analyzer: collect it from its application)",
             path.display()
         ),
         Some(DatabaseError::AnalysisSkipped { .. }) => format!(
@@ -407,6 +415,42 @@ mod tests {
 
     use super::*;
 
+    /// The open's analyzer failures each get their hint: a built-in analyzer version this build lacks (refused when
+    /// the manifest is decoded) says to use a newer build; a stand-in that could not be registered, a generic one.
+    #[test]
+    fn an_analyzer_the_open_cannot_load_gets_its_hint() {
+        let path = Path::new("app.persia");
+        let newer = BlobDatabaseError::Database(Box::new(DatabaseError::Manifest(
+            ManifestError::UnsupportedAnalyzer {
+                offset: 0,
+                field: "body".into(),
+                analyzer: "standard@99".into(),
+            },
+        )));
+        let shown = format!("{:#}", opening(path, newer));
+        assert!(
+            shown.starts_with(
+                "opening app.persia (an analyzer version this build of persia gc lacks: collect it with a newer \
+                 build)"
+            ),
+            "{shown}"
+        );
+        assert!(shown.contains("standard@99"), "{shown}");
+        let unregistered =
+            BlobDatabaseError::Database(Box::new(DatabaseError::UnregisteredAnalyzer {
+                collection: "notes".into(),
+                field: "tags".into(),
+                analyzer: "tags@1".into(),
+            }));
+        let shown = format!("{:#}", opening(path, unregistered));
+        assert!(
+            shown.starts_with(
+                "opening app.persia (persia gc cannot stand in for that analyzer: collect it from its application)"
+            ),
+            "{shown}"
+        );
+        assert!(!shown.contains("newer build"), "{shown}");
+    }
     #[test]
     fn a_grace_is_a_whole_number_and_a_unit() {
         assert_eq!(parse_grace("24h"), Ok(Duration::from_hours(24)));

@@ -29,7 +29,6 @@ use std::path::Path;
 use persia_format::BlobId;
 use persia_storage::container::{Container, ContainerFile, Mode, WriterProof};
 
-use super::compact_only::open_skipping_analysis;
 use super::read_only::SkippedAnalysis;
 use super::{Database, DatabaseError, DatabaseOptions};
 
@@ -92,7 +91,7 @@ impl<F: ContainerFile + Sync> MarkOnlyDatabase<F> {
         container: Container<F>,
         options: DatabaseOptions,
     ) -> Result<Self, DatabaseError> {
-        open_skipping_analysis(container, options).map(|db| Self { db })
+        Database::open_skipping_analysis(container, options).map(|db| Self { db })
     }
 
     /// The `text` fields whose analysis is skipped, in collection then field order: those whose analyzer the

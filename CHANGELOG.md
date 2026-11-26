@@ -18,22 +18,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   1, nothing marked or swept, the files as the refused open leaves them) only when its recovery would flush any
   collection while such a collection holds a replayed record; open the database with its application and commit,
   then collect. Exit statuses and `--json` output are otherwise unchanged. Underneath, `persia::internal`:
-  `BlobDatabase::open_mark_only`, `BlobReferences` for `MarkOnlyDatabase`, and `BlobDatabase::mark`/`gc` (and `log`,
-  `blobs`) no longer need a `DocumentLog`.
+  `BlobDatabase::open_mark_only`, `BlobReferences` for `MarkOnlyDatabase`, and `BlobDatabase::mark`/`gc` (and `log`)
+  no longer need a `DocumentLog`; `blobs` still does, so nothing can be stored through such a handle.
 - `persia gc <path> [--grace <dur>] [--json]` (ROADMAP 10.4.5; SPEC §9.5): blob garbage collection from the command
   line, through `persia::internal`'s `BlobDatabase::gc` (mark, sweep, pack rewrite at the default ratio). It opens the
   database read-write with its pack, so it fails (status 1) while another writer holds either; the built-in analyzers
-  only (a schema naming a registered one is collected with the mark-only open, ROADMAP 10.4.7, below). It reports what it marked, deleted (blobs,
-  uploads, chunks) and kept (pinned, young, of unknown age, changed, unreadable), the rewrite's outcome and frame bytes,
-  the pack file's size before and after, dangling references (`missing`), and the reader leases by state: a lease
-  behind the committed seq (or opening, ahead, unreadable) holds the sweep back, and the report says so with status 0.
-  `--grace` (`<n>s`, `m`, `h` or `d`; `24h` by default) is checked by the GC's own rule, the new
-  `GcOptions::validate` (which `BlobDatabase::gc` also calls), before the database is opened: one below 2 h exits 1
-  with every file unchanged; a malformed one is a usage error (status 2). The local pack keeps no ages: what the mark
-  does not keep is dropped at once, so `young` is 0 locally. A database without a pack is a no-op report (the pack's
-  writer lock file appears, no pack). A pack size that cannot be read after a successful GC is `null` in the report
-  (said on stderr), not a failure. `--json` keys are in the README. `persia::internal::gc` re-exports `SweepReport`,
-  `Rewrite`, `ReaderLeaseReport` and `BlobError` for it.
+  only (a schema naming a registered one is collected with the mark-only open, ROADMAP 10.4.7, above). It reports
+  what it marked, deleted (blobs, uploads, chunks) and kept (pinned, young, of unknown age, changed, unreadable), the
+  rewrite's outcome and frame bytes, the pack file's size before and after, dangling references (`missing`), and the
+  reader leases by state: a lease behind the committed seq (or opening, ahead, unreadable) holds the sweep back, and
+  the report says so with status 0. `--grace` (`<n>s`, `m`, `h` or `d`; `24h` by default) is checked by the GC's own
+  rule, the new `GcOptions::validate` (which `BlobDatabase::gc` also calls), before the database is opened: one below
+  2 h exits 1 with every file unchanged; a malformed one is a usage error (status 2). The local pack keeps no ages:
+  what the mark does not keep is dropped at once, so `young` is 0 locally. A database without a pack is a no-op report
+  (the pack's writer lock file appears, no pack). A pack size that cannot be read after a successful GC is `null` in
+  the report (said on stderr), not a failure. `--json` keys are in the README. `persia::internal::gc` re-exports
+  `SweepReport`, `Rewrite`, `ReaderLeaseReport` and `BlobError` for it.
 - `persia_engine::db::CompactOnlyDatabase` (ROADMAP 10.4.4, ADR-0068; SPEC §4.6): `open(path, options)` and
   `open_container(container, options)` run the writer's open exactly (lock, recovery, every segment checked, the whole
   WAL replayed, a cut commit retired), except that a `text` field whose analyzer `options.registry` lacks is indexed
@@ -482,13 +482,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
-- `persia`: a `put` given a `BlobRef` that names a stored blob with another `size` or `chunk_size` than the blob's
-  (`Collection::put`, `put_batch`, `put_with_blob` with `Blob::Stored`) now fails with `ErrorCode::InvalidArgument`
-  instead of `ErrorCode::Corrupt` (ROADMAP 10.1.33; SPEC §9.6): the reference is the caller's input, not damage, and
-  nothing is logged, as before. `Db::get_blob` and `get_blob_range` given such a reference still report `Corrupt` (a
-  read's reference is a stored document's). Underneath: the new `persia_blob::Error::BlobRefMismatch { blob_id, field,
-  given, stored }` (with `persia_blob::error::BlobRefField`), reported by the new `BlobManifest::check_given_ref`,
-  which `BlobStore::contains` and the put path use; `BlobManifest::check_ref` is unchanged.
+- `persia`: a `BlobRef` the caller passes that names a stored blob with another `size` or `chunk_size` than the blob's
+  now fails with `ErrorCode::InvalidArgument` instead of `ErrorCode::Corrupt` (ROADMAP 10.1.33; SPEC §9.6), on a put
+  (`Collection::put`, `put_batch`, `put_with_blob` with `Blob::Stored`; nothing is logged, as before) and on a read
+  (`Db::get_blob`, `get_blob_range`): a reference the caller passes is input, and the same `blob_id` can hold another
+  chunk size in another database. A stored reference that disagrees with its manifest is still damage (`verify`).
+  Underneath: the new `persia_blob::Error::BlobRefMismatch { blob_id, field, given, stored }` (with
+  `persia_blob::BlobRefField`), reported by the new `BlobManifest::check_given_ref`, which `BlobStore::contains`,
+  `read_range` and the put and read paths use; `BlobManifest::check_ref` is unchanged, and only `verify` uses it.
 - `persia import` and `persia search` take their exit status from the embedded API's `ErrorCode` (ROADMAP 10.1.33):
   3 for `Corrupt` only, so a reference line with another `size` or `chunk_size` than its blob exits 1 (it exited 3),
   naming its line, and a damaged blob manifest frame a put reaches still exits 3.

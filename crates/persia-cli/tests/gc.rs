@@ -532,8 +532,8 @@ fn gc_collects_a_schema_naming_a_registered_analyzer() {
 }
 
 /// ROADMAP 10.4.7, ADR-0069: a blob referenced only by a WAL record of a collection whose analysis the open skips
-/// (never flushed: it stays in the WAL) is marked, so the sweep keeps it while it drops the orphans. The record is still
-/// a WAL record after the run, and the application reads the document and its blob.
+/// (never flushed: it stays in the WAL) is marked, so the sweep keeps it while it drops the orphans. The record is
+/// still a WAL record after the run, and the application reads the document and its blob.
 #[test]
 fn a_blob_only_an_unflushed_record_of_a_skipped_collection_references_survives_gc() {
     let _serial = serial();
@@ -630,7 +630,7 @@ fn gc_refuses_to_flush_a_backlog_that_needs_a_registered_analyzer() {
     assert_eq!(out.stdout, b"");
     let err = stderr(&out);
     assert!(
-        err.contains(r#"collection "notes": its unflushed writes would have to be flushed, which needs the analyzer tags@1 of field "tags""#),
+        err.contains(r#"collection "notes": its unflushed writes would have to be flushed, which needs the analyzer tags@1 of field "tags" that this open lacks (an open that skips analysis never flushes them without it); open the database with its application, commit (closing a `persia::Db` does), then retry"#),
         "{err}"
     );
     assert!(

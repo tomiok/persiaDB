@@ -256,11 +256,11 @@ pub enum Error {
     #[error("a container operation of the pack failed")]
     Container(#[source] persia_storage::container::Error),
     // -- caller references (10.1.33) --
-    /// A `BlobRef` a caller gave to be logged (`put(doc, blob)` with a stored reference, SPEC §9.6) names a blob this
-    /// store has bound, but its size or chunk size is not the bound manifest's
+    /// A `BlobRef` the caller passes (to `put(doc, blob)` with a stored reference, to `get_blob` or `get_blob_range`;
+    /// SPEC §9.6) names a blob this store has bound, but its size or chunk size is not the bound manifest's
     /// ([`BlobManifest::check_given_ref`](crate::BlobManifest::check_given_ref); ROADMAP 10.1.33): a caller's error,
-    /// not corruption, and nothing is logged. The same mismatch in the reference a read is given
-    /// ([`BlobManifest::check_ref`](crate::BlobManifest::check_ref)) is [`Error::Corrupt`].
+    /// not corruption; a put logs nothing. The same mismatch in a reference read out of stored data (`verify`,
+    /// [`BlobManifest::check_ref`](crate::BlobManifest::check_ref)) is [`Error::Corrupt`].
     #[error(
         "the blob reference to {blob_id} gives {field} {given}, but the stored blob's is {stored}"
     )]

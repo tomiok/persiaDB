@@ -3103,8 +3103,8 @@ visible once a durable slot covers its `BlobIndex` frame; the writer shows a bin
 lookups) only after its slot sync returns. Chunk frames no committed `BlobIndex` names are staging or orphans. The
 open rebuilds the index by scanning the frames of `12288..log_end`; a read-write open then commits the longest fully
 valid frame run after `log_end` that ends in a complete `BlobIndex` whose chunk frames match its manifest (a cut
-bind, or one whose newer slot was damaged) and truncates the rest. A read checks the manifest it found against the `BlobRef` it reads by (`check_ref`: id, size, chunk
-size), then each chunk's length and CRC32C. A pack reader reads each chunk's `BlobChunk` frame in one read sized by the
+bind, or one whose newer slot was damaged) and truncates the rest. A read checks the manifest it found against the `BlobRef` it reads by (`check_given_ref`: id,
+size, chunk size; a size or chunk-size mismatch is the caller's error, §9.6), then each chunk's length and CRC32C. A pack reader reads each chunk's `BlobChunk` frame in one read sized by the
 manifest (`24 + pad8(32 + len) + 8`, bounded by the frames it knows; a frame that would run past them is corruption)
 and checks the frame (§4.4) and the chunk's CRC32C in one pass over its bytes (ROADMAP 9.2.9). A corruption error of
 the pack names the offset of the slot or frame it found damaged (the header: 0; ROADMAP 9.2.8).
@@ -3240,7 +3240,8 @@ only a reopen tells what was bound (ROADMAP 9.4.7). The writer never deletes the
 (an S3 conditional write still in flight may land later), leaving them to GC under that same grace floor.
 A backend without
 `conditional_put` cannot store blobs (`Unsupported`). A read gets the blob manifest, checks it against the `BlobRef`
-(`check_ref`; a manifest under the wrong key would otherwise serve another blob's bytes with every CRC valid), then
+(`check_given_ref`; a manifest under the wrong key would otherwise serve another blob's bytes with every CRC valid;
+a size or chunk-size mismatch is the caller's error, §9.6), then
 gets whole chunks and checks each chunk's length and CRC32C against it (a mismatch is `Corrupt`).
 **Resume** (ROADMAP 9.3.2). The resume token is the `upload_id` and the `chunk_size` the upload started with (chunk
 objects do not record it). The writer lists the staged chunks (their indices taken sorted and without duplicates, whatever order the backend
@@ -3403,7 +3404,7 @@ it logs or commits a document (it does not depend on `persia-blob`); the public 
 ### 9.6 API
 `put_blob(reader, &PutBlobOptions { mime, user_meta, expected_id, expected_size, chunk_size, bind_budget, resume }) -> BlobRef`,
 `get_blob(blob_ref) -> Stream`, `get_blob_range(blob_ref, range)` (by reference: a read checks the manifest against it,
-`check_ref`, and a stream reads by that manifest, looked up once), `delete` via document delete + GC.
+`check_given_ref`, and a stream reads by that manifest, looked up once), `delete` via document delete + GC.
 In the embedded API, `persia::PutBlobOptions` is a builder of those seven options (`PutBlobOptions::new().mime(..)
 .chunk_size(..)`; ROADMAP 10.1.15, ADR-0063 amended), checked when the blob is stored, and the token is a
 `persia::ResumeToken` (its `upload_id` and `chunk_size`), which `persia::Error::resume_token()` returns for an
@@ -3443,17 +3444,18 @@ its pack (§4.8), until `dump documents` exports blobs (ROADMAP 10.4.6). A dangl
 database anyway (written below the public API, or by copying only the container, §4.8) is reported by `verify`
 (§9.5), and `get_blob` fails for it.
 
-**A caller's reference that does not match its blob** (ROADMAP 10.1.33). `put(doc, blob)` given a `BlobRef` whose
-`blob_id` this store has bound, but whose `size` or `chunk_size` is not the bound manifest's, refuses it and logs
-nothing, as for a reference it does not find. The reference is the caller's input, not stored bytes, so this is a
-caller's error, not corruption: `BlobManifest::check_given_ref` reports `persia_blob::Error::BlobRefMismatch {
-blob_id, field, given, stored }` (the first of the size and the chunk size that differs), `ErrorCode::InvalidArgument`
-in the embedded API, and `persia import` exits 1 at its line (§8.6). The path decides, by call site, never by an
-error's text: only the put path checks a reference as given. A read (`get_blob`, `get_blob_range`) and `verify` check
-the reference with `check_ref`, which reports the same mismatch as corruption (`Corrupt`; for `verify`, a dangling
-reference, §9.5): their reference is the one a stored document holds, so a manifest that disagrees with it is damage.
-On every path a manifest bound under the id that names another blob is corruption, and so is any stored damage a
-put reaches (a damaged blob manifest frame, `ErrorCode::Corrupt`).
+**A caller's reference that does not match its blob** (ROADMAP 10.1.33). The rule: a reference the caller passes is
+input; a stored reference that disagrees with its manifest is damage. A `BlobRef` given to `put(doc, blob)`, to
+`get_blob` or to `get_blob_range` whose `blob_id` this store has bound, but whose `size` or `chunk_size` is not the
+bound manifest's, is refused (a put logs nothing, as for a reference it does not find). It is the caller's error,
+not corruption (`BlobRef::new` is public, and the same `blob_id` can hold another chunk size in another database):
+`BlobManifest::check_given_ref` reports `persia_blob::Error::BlobRefMismatch { blob_id, field, given, stored }` (the
+first of the size and the chunk size that differs), `ErrorCode::InvalidArgument` in the embedded API, and `persia
+import` exits 1 at its line (§8.6). The call site decides, never an error's text: `check_ref`, which reports the
+same mismatch as corruption, is used only where the reference is read out of stored data, by `verify` (a document of
+a segment or a WAL record: a dangling reference, §9.5). On every path a manifest bound under the id that names
+another blob is corruption, and so is any stored damage a put or a read reaches (a damaged blob manifest frame,
+`ErrorCode::Corrupt`).
 
 ---
 

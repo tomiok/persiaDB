@@ -248,8 +248,9 @@ impl BlobManifest {
     }
 
     /// Checks that this manifest describes the blob `blob_ref` refers to: same id, size and chunk size (SPEC §9.4).
-    /// What a read checks (`get_blob`, `get_blob_range`, `verify`): its reference is the one a stored document holds,
-    /// so a mismatch is damage. A reference a caller gives to be logged is checked by [`Self::check_given_ref`].
+    /// What `verify` checks a reference read out of stored data with (a document of a segment or a WAL record): a
+    /// stored reference that disagrees with its manifest is damage. A reference the caller passes (to a put or a read)
+    /// is input, checked by [`Self::check_given_ref`] (SPEC §9.6, ROADMAP 10.1.33).
     ///
     /// # Errors
     /// [`Error::Corrupt`] for the first field that differs.
@@ -269,9 +270,11 @@ impl BlobManifest {
     }
 
     /// Checks that this manifest, the one bound under `blob_ref`'s id, describes the blob a caller's reference
-    /// refers to: what `put(doc, blob)` checks before it logs a document with a `BlobRef` it was given (SPEC §9.6,
-    /// ROADMAP 10.1.33). The reference is input, not stored bytes, so another size or chunk size is the caller's
-    /// error; a manifest that names another blob than the id it was looked up by is still damage.
+    /// refers to: what `put(doc, blob)` checks before it logs a document with a `BlobRef` it was given, and what
+    /// `get_blob` and `get_blob_range` check the reference they are given with (SPEC §9.6, ROADMAP 10.1.33). The
+    /// reference is input, not stored bytes (the same `blob_id` may hold another chunk size in another database), so
+    /// another size or chunk size is the caller's error; a manifest that names another blob than the id it was looked
+    /// up by is still damage.
     ///
     /// ```
     /// use std::collections::BTreeMap;
@@ -286,7 +289,7 @@ impl BlobManifest {
     /// let err = m.check_given_ref(&given).unwrap_err();
     /// assert!(matches!(err, Error::BlobRefMismatch { field: BlobRefField::Size, given: 14, stored: 13, .. }));
     /// assert!(!err.is_corruption());
-    /// assert!(m.check_ref(&given).unwrap_err().is_corruption()); // the same reference, read from a document
+    /// assert!(m.check_ref(&given).unwrap_err().is_corruption()); // the same reference, read out of stored data
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///

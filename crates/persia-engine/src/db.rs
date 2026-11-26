@@ -44,11 +44,9 @@
 
 mod clock;
 mod compact_only;
-// The writer's open for the blob GC's mark only, with stand-in analyzers (ROADMAP 10.4.7, ADR-0069).
 mod compaction;
 mod exec;
 mod flush;
-mod mark_only;
 mod merging;
 mod objects;
 mod obsolete;
@@ -68,6 +66,9 @@ mod backup;
 // -- gc (9.5) --
 // The blob references GC marks (ROADMAP 9.5.1): `Database` methods in `blob_refs`; its `pub use` lines go here.
 mod blob_refs;
+
+// The writer's open for the blob GC's mark only, with stand-in analyzers (ROADMAP 10.4.7, ADR-0069).
+mod mark_only;
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -243,14 +244,15 @@ pub enum DatabaseError {
         /// The analyzer, `name@version`.
         analyzer: String,
     },
-    /// A [`CompactOnlyDatabase`] skips the analysis of a `text` field of the collection (its registry lacks the
-    /// field's analyzer), and a commit would have to flush that collection's unflushed writes, which a segment would
-    /// then hold without the field's terms (ADR-0068). Refused before anything is written; in practice at its open,
-    /// when its replay would flush (any collection: every flush flushes every memtable) while such a collection holds
-    /// a replayed record. Open the database with a registry that has the analyzer (its application) and commit (closing
-    /// a `persia::Db` commits): a reopen alone may flush nothing. Then compact. Not corruption.
+    /// An open that skips the analysis of a `text` field whose analyzer its registry lacks (a [`CompactOnlyDatabase`]
+    /// or a [`MarkOnlyDatabase`], ADR-0068, ADR-0069) refuses a commit that would flush that collection's unflushed
+    /// writes, which a segment would then hold without the field's terms. Refused before anything is written; in
+    /// practice at its open, when its replay would flush (any collection: every flush flushes every memtable) while
+    /// such a collection holds a replayed record. Open the database with its application (a registry that has the
+    /// analyzer) and commit (closing a `persia::Db` commits): a reopen alone may flush nothing. Then retry. Not
+    /// corruption.
     #[error(
-        "collection {collection:?}: its unflushed writes would have to be flushed, which needs the analyzer {analyzer} of field {field:?} that this open lacks (a compaction-only open never flushes them without it); open the database with a registry that has it, commit (closing a `persia::Db` does), then compact"
+        "collection {collection:?}: its unflushed writes would have to be flushed, which needs the analyzer {analyzer} of field {field:?} that this open lacks (an open that skips analysis never flushes them without it); open the database with its application, commit (closing a `persia::Db` does), then retry"
     )]
     AnalysisSkipped {
         /// The collection.
@@ -1305,10 +1307,10 @@ impl<F: ContainerFile + Sync> Database<F> {
         self.commit_guarded(planned, diff, Structural::Drop(name.to_owned()))
     }
 
-    /// Refuses a flush of a memtable that indexed a field with a stand-in analyzer (a [`CompactOnlyDatabase`],
-    /// ADR-0068): such a memtable never becomes a segment. Checked before [`Self::plan_flushes`] builds any segment
-    /// or takes a segment id, and for the whole commit, since every flush flushes every memtable with operations (but
-    /// `skip`'s).
+    /// Refuses a flush of a memtable that indexed a field with a stand-in analyzer (a [`CompactOnlyDatabase`] or a
+    /// [`MarkOnlyDatabase`], ADR-0068, ADR-0069): such a memtable never becomes a segment. Checked before
+    /// [`Self::plan_flushes`] builds any segment or takes a segment id, and for the whole commit, since every flush
+    /// flushes every memtable with operations (but `skip`'s).
     fn check_no_skipped_flush(&self, skip: Option<&str>) -> Result<(), DatabaseError> {
         let flushed = |s: &&SkippedAnalysis| {
             skip != Some(s.collection.as_str())

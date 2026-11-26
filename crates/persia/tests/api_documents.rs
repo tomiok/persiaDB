@@ -319,7 +319,7 @@ fn a_reference_the_store_lacks_is_not_found_and_logs_nothing() {
 
 /// ROADMAP 10.1.33, SPEC §9.6: a reference given to a put that names a stored blob with another size or chunk size
 /// is the caller's error (`InvalidArgument`), not damage, and logs nothing, on every put path. A read given the
-/// same reference reads by it as a stored document's, so there the mismatch stays `Corrupt`.
+/// same hand-built reference is refused the same way: the reference is the caller's input (SPEC §9.6).
 #[test]
 fn a_reference_of_another_size_or_chunk_size_is_an_invalid_argument_and_logs_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -358,9 +358,9 @@ fn a_reference_of_another_size_or_chunk_size_is_an_invalid_argument_and_logs_not
             assert!(files.get(id).unwrap().is_none(), "{id} was logged");
         }
         let err = db.get_blob(&wrong).unwrap_err();
-        assert_eq!(err.code(), ErrorCode::Corrupt, "{err}");
+        assert_eq!(err.code(), ErrorCode::InvalidArgument, "{err}");
         let err = db.get_blob_range(&wrong, 0..1).unwrap_err();
-        assert_eq!(err.code(), ErrorCode::Corrupt, "{err}");
+        assert_eq!(err.code(), ErrorCode::InvalidArgument, "{err}");
     }
     // The reference the store returned is taken.
     files

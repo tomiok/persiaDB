@@ -102,7 +102,8 @@ impl Collection {
     ///
     /// # Errors
     /// As [`put`](Self::put). A rejected document ends the batch: the documents before it are put, it and the ones
-    /// after are not. A blob reference the store does not hold rejects the whole batch before anything is logged.
+    /// after are not. A blob reference the store does not hold (`NotFound`), or holds with another size or chunk size
+    /// (`InvalidArgument`), rejects the whole batch before anything is logged.
     pub fn put_batch(&self, docs: &[Document]) -> Result<()> {
         let durability = self.durability();
         self.db.write("put documents", |db| {

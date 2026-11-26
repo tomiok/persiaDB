@@ -49,7 +49,8 @@ The question is whether GC is safe on such an open. What GC reads and writes:
    (the pack's writer lock, as `BlobDatabase::open`). `BlobReferences` is implemented for it, and `BlobDatabase::mark`
    and `BlobDatabase::gc` need only `BlobReferences` (they never needed `DocumentLog`): a `BlobDatabase` over a
    `MarkOnlyDatabase` collects, and cannot put, store a blob or commit, since those need `DocumentLog`, which it does
-   not implement.
+   not implement. Its blob store (`BlobDatabase::blobs`) is behind `DocumentLog` too: through it a blob could be
+   stored; `mark` and `gc` reach the store inside the module.
 4. **`persia gc` always opens with it** (with the built-in analyzers). With every analyzer present nothing is
    skipped and it is the writer's open, so the command's statuses and output are unchanged for such a database. A
    database whose schema names a registered analyzer is collected, unless the open's replay would flush any
