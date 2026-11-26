@@ -174,8 +174,8 @@ enum Command {
     /// memtable or retire a cut commit (SPEC §8.6). The new file is renamed over the old one, so the path names a
     /// complete database at every instant.
     /// It has the built-in analyzers only: a database whose schema names an analyzer the application registered is
-    /// compacted without analyzing that field (its WAL records stay in the WAL), unless recovery would have to flush
-    /// such a collection's WAL backlog (status 1; open it with the application first).
+    /// compacted without analyzing that field (its WAL records stay in the WAL), unless recovery would flush while such
+    /// a collection holds a WAL record (status 1; open it with the application and commit, then compact).
     /// The blob pack (`<name>.persia.blobs`) is not touched. Do not run it during a copy of the files taken with the
     /// database in use (SPEC §4.8). Read-only handles of other processes keep reading the old file until they
     /// refresh, which holds a writer's blob garbage collection back meanwhile (SPEC §9.5). Exits with status 3 on

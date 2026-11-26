@@ -18,10 +18,12 @@ use std::process::{Command, Output, Stdio};
 
 use persia::internal::documents::{Blob, BlobDatabase};
 use persia_engine::analysis::{Analyzer, AnalyzerRegistry, WhitespaceTokenizer};
-use persia_engine::db::{Database, DatabaseOptions, ReadOnlyDatabase};
+use persia_engine::db::{Database, DatabaseOptions, ReadOnlyDatabase, SearchRequest};
 use persia_engine::document::{Document, Value};
 use persia_engine::manifest::Location;
+use persia_engine::query::{DefaultFields, QueryCompiler, QueryLimits};
 use persia_engine::schema::{CollectionSchema, FieldKind, SchemaBuilder, TextOptions};
+use persia_engine::search::{Pruning, SearchPlan};
 use persia_engine::wal::Durability;
 use serde_json::Value as Json;
 
@@ -916,7 +918,7 @@ fn tags_registry() -> AnalyzerRegistry {
 /// ROADMAP 10.4.4: the command has the built-in analyzers only, and compacts a database whose schema names a
 /// registered one anyway (ADR-0068). The WAL record of that collection is not flushed with a stand-in: it stays a WAL
 /// record, and the application's open, with the analyzer, still finds both documents, by id and by the field's
-/// terms.
+/// terms (the WAL one indexed by that open's replay).
 #[test]
 fn compact_compacts_a_schema_naming_a_registered_analyzer_and_keeps_its_wal() {
     let _serial = serial();
@@ -945,6 +947,27 @@ fn compact_compacts_a_schema_naming_a_registered_analyzer_and_keeps_its_wal() {
     for id in ["n1", "n2"] {
         assert!(c.get(id).unwrap().is_some(), "{id}");
     }
+    // By the registered field's terms: `n1` from its segment, `n2` from the WAL, indexed by this open's replay with the
+    // real analyzer (a stand-in would have left it without terms).
+    let registry = tags_registry();
+    let compiler = QueryCompiler::new(c.schema(), &registry).unwrap();
+    let query = compiler
+        .compile(
+            "b",
+            &DefaultFields::all(c.schema()),
+            &QueryLimits::default(),
+        )
+        .into_query();
+    let memtable = c.memtable();
+    let plan = SearchPlan::new(&query, c.schema(), &c.search_statistics(&memtable)).unwrap();
+    let page = c
+        .views(&memtable)
+        .unwrap()
+        .search(&plan, &SearchRequest::default(), Pruning::default())
+        .unwrap();
+    let mut found: Vec<&str> = page.hits.iter().map(|h| h.document.id()).collect();
+    found.sort_unstable();
+    assert_eq!(found, ["n1", "n2"]);
     drop(db);
     let verified = persia(&["verify", path_arg(&path)]);
     assert!(verified.status.success(), "{}", stderr(&verified));

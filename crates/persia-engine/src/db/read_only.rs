@@ -948,7 +948,8 @@ fn replay<F: ContainerFile + Sync>(
     Ok(applied)
 }
 
-/// Whether a read-only open needs every `text` field's analyzer.
+/// Whether an open needs every `text` field's analyzer. A read-only open ([`ReadOnlyDatabase`], ROADMAP 6.6.8) and a
+/// [`super::CompactOnlyDatabase`]'s writer open (`Database::recover_as`, ADR-0068) may skip the missing ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Analysis {
     /// A missing one fails the open ([`DatabaseError::UnregisteredAnalyzer`]).
@@ -957,8 +958,9 @@ pub(super) enum Analysis {
     SkipUnregistered,
 }
 
-/// A `text` field whose analysis a read-only open skipped, because its registry lacks the field's analyzer
-/// ([`ReadOnlyDatabase::open_container_skipping_analysis`], ROADMAP 6.6.8).
+/// A `text` field whose analysis an open skipped, because its registry lacks the field's analyzer: a read-only open
+/// ([`ReadOnlyDatabase::open_container_skipping_analysis`], ROADMAP 6.6.8) or a [`super::CompactOnlyDatabase`]
+/// (ADR-0068, which never flushes its collection).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SkippedAnalysis {

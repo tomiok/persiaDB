@@ -43,11 +43,13 @@ Two shapes were possible:
    stand-in of `open_skipping_analysis` and is listed by `skipped_analysis()`. A built-in analyzer's version this
    build lacks still fails the open as unsupported, as it does for `verify`.
 2. **No flush of a skipped collection.** While a field's analysis is skipped, a commit that would flush a non-empty
-   memtable of its collection is refused with `DatabaseError::AnalysisSkipped` before anything is written (the flush
-   is planned, its segments built in memory, before any write). Every flush commit flushes every memtable
-   with operations (ADR-0029), so such a commit is refused whole: no partial flush. In practice the refusal comes from
-   the open's replay, when the backlog of such a collection reaches the memtable size threshold (`options.policy`,
-   64 MiB by default) or a memtable's docids run out. The open then fails. Memtables of collections without a
+   memtable of its collection is refused with `DatabaseError::AnalysisSkipped` before anything is written: it is
+   checked before the flush is planned, so before any segment is built or segment id taken. Every flush commit
+   flushes every memtable with operations (ADR-0029), so such a commit is refused whole: no partial flush. In practice
+   the refusal comes from the open's replay, when a replay-time flush is due, of any collection, while such a
+   collection holds a replayed record: a memtable reaching the size threshold (`options.policy`, 64 MiB by default;
+   for such a collection that is measured on the stand-in memtable, which holds none of the skipped field's terms)
+   or running out of docids. The open then fails. Memtables of collections without a
    skipped field flush as in any writer's open, so what such flushes committed earlier in the replay stays: a state
    from which the next open reaches the same documents, as after any writer's open that fails part-way (SPEC §8.6).
    Without one, the file is as the container's own recovery left it (its tail repair, as any writer's open).
@@ -68,12 +70,15 @@ Two shapes were possible:
 
 ## Consequences
 
-- `persia compact` compacts a database whose schemas name registered analyzers, unless the open would have to flush
-  such a collection's WAL backlog: then it fails (status 1) and says to open the database with its application,
-  which flushes it, first.
+- `persia compact` compacts a database whose schemas name registered analyzers, unless its open's replay would flush
+  (any collection) while such a collection holds a replayed record: then it fails (status 1) and says to open the
+  database with its application and commit (closing a `persia::Db` commits; an open alone may flush nothing), then
+  compact.
 - `DatabaseError` gains `AnalysisSkipped { collection, field, analyzer }` (code `Unsupported` in the embedded API: an
   analyzer this open lacks).
 - The engine's open contract gains an entry point; `Database::open` and `ReadOnlyDatabase` are unchanged. No on-disk
   format changes.
 - Rejected: replaying without flushing at the threshold, as a read-only open does. It would bound nothing (memory grows
-  with the backlog until the docid limit) and only defers the refusal to that limit.
+  with the backlog until the docid limit) and only defers the refusal to that limit. Since every flush flushes every
+  memtable (ADR-0029), skipping only the skipped collection's flushes is not possible either: it would stop every
+  collection's flushes while that collection holds a record, and leave all their backlogs unbounded.

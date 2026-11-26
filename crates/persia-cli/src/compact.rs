@@ -22,9 +22,11 @@
 //! (ROADMAP 10.4.4, ADR-0068): the writer's open, in which a `text` field whose analyzer the application registered
 //! (SPEC §6.2.2) is not analyzed. The compaction copies frames without reading them, so it needs no analyzer, and such
 //! a collection's WAL records stay in the WAL, for the application to replay with its analyzer. What the command
-//! cannot do is flush them: when its recovery would have to (a WAL backlog of such a collection larger than the
-//! default memtable), it fails with status 1 before flushing any of them (and compacts nothing); open the database
-//! with its application first, which flushes the backlog. A database whose schemas name built-in analyzers only opens
+//! cannot do is flush them: when its recovery would flush, any collection (every flush flushes every memtable), while
+//! such a collection holds a replayed record (a memtable at the default 64 MiB, the stand-in's for such a
+//! collection, or out of docids), it fails with status 1 before flushing any of them (and compacts nothing). Open the
+//! database with its application and commit (closing a `persia::Db` commits; an open alone may flush nothing), then
+//! compact. A database whose schemas name built-in analyzers only opens
 //! exactly as any writer's open.
 //!
 //! The text output is `key  value` rows. `--json` writes one object on one line, with these keys and no others:

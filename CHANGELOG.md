@@ -18,9 +18,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   commit, merge or schema change. Its WAL records of such a collection stay WAL records, which the compaction copies
   and the next writer's open indexes with the real analyzer. With every analyzer it is the writer's open.
 - `persia compact` compacts a database whose schema names an analyzer registered by its application (ROADMAP 10.4.4):
-  it opens with `CompactOnlyDatabase` and the built-in analyzers. It fails (status 1, file unchanged by the refused
-  flush) only when its recovery would have to flush such a collection's WAL backlog (over the default 64 MiB memtable);
-  open the database with its application first. Exit statuses and `--json` output are unchanged.
+  it opens with `CompactOnlyDatabase` and the built-in analyzers. It fails (status 1; the refused commit writes
+  nothing) only when its recovery would flush, any collection, while such a collection holds a replayed WAL record:
+  every flush flushes every memtable. A replay flushes when a memtable reaches the default 64 MiB (that of the
+  stand-in, for such a collection: it holds no terms of the skipped field) or runs out of docids. Open the database
+  with its application and commit (closing a `persia::Db` commits; a reopen alone may flush nothing), then compact.
+  Exit statuses and `--json` output are unchanged.
 - `persia-cli`: `persia import <path> --collection <name> [--input <file>] [--schema <file>] [--json]` and `persia
   search <path> --collection <name> (--query <text> | --request <json>) [--json]` (ROADMAP 10.4.2; SPEC §8.6), for
   quick experiments, through the embedded API. `import` reads JSON Lines (the file, or the standard input), one

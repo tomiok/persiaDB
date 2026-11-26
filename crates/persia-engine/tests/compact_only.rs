@@ -33,6 +33,7 @@ use persia_engine::db::{
     SearchRequest, SegmentIds, Snapshot,
 };
 use persia_engine::document::{Document, Value};
+use persia_engine::memtable::Memtable;
 use persia_engine::merge::{MergeOptions, MergePolicy};
 use persia_engine::query::{DefaultFields, QueryCompiler, QueryLimits};
 use persia_engine::schema::CollectionSchema;
@@ -336,7 +337,9 @@ fn a_database_without_a_wal_backlog_compacts_too() {
     assert_holds(&open_app(&fs).unwrap(), &expected, &gone, "no backlog");
 }
 
-/// A database whose `notes` memtable holds `bytes` of WAL backlog, closed: the application had a large memtable.
+/// A closed database with `notes` and `plain`, one committed note (`committed`), then a WAL backlog of `docs` documents
+/// of `collection` (`notes` or `plain`) and one more of it synced (`last`): the application had a 1 GiB memtable, so it
+/// flushed none of them.
 fn with_a_backlog(fs: &SimFs, collection: &str, docs: usize) {
     let container = Container::create_in(vfs(fs), PATH).unwrap();
     let mut db = Database::create_container(container, options(registry(), 1 << 30)).unwrap();
@@ -560,4 +563,364 @@ fn a_cut_commit_is_retired_by_its_open_without_a_flush() {
         }
     }
     assert!(cut > 0, "no fault left a cut commit");
+}
+
+/// What [`mixed_wal`] leaves live: `notes` with its committed note replaced and four WAL notes, two committed notes
+/// deleted in the WAL, and 64 `plain` documents in the WAL.
+struct Mixed {
+    notes: BTreeMap<String, String>,
+    gone: Vec<String>,
+    /// The `plain` documents in the WAL.
+    plain: usize,
+    /// The memtable size to open with: `notes`' memtable never reaches it, the `plain` backlog does, several times.
+    threshold: usize,
+}
+
+/// The `notes` operations of [`mixed_wal`]'s WAL, in order: a put (`Some`) or a delete (`None`) of an id.
+const NOTE_OPS: [(&str, Option<&str>); 7] = [
+    ("w1", Some("Walnote one")),
+    ("committed", Some("Walnote replaced")),
+    ("gone1", None),
+    ("w2", Some("Walnote two")),
+    ("w3", Some("Walnote three")),
+    ("gone2", None),
+    ("w4", Some("Walnote four")),
+];
+
+/// A memtable size `notes`' memtable stays under with [`NOTE_OPS`] (measured with the real analyzer, which indexes
+/// more than the stand-in), and how many `plain` documents make a memtable three times that size: measured, so the
+/// test does not depend on the memtable's overheads.
+fn mixed_sizes() -> (usize, usize) {
+    let full = registry().with_builtins();
+    let mut notes_memtable = Memtable::new(&notes(), &full).unwrap();
+    for (id, tags) in NOTE_OPS {
+        match tags {
+            Some(tags) => drop(notes_memtable.put(&note(id, tags)).unwrap()),
+            None => drop(notes_memtable.delete(id).unwrap()),
+        }
+    }
+    let threshold = notes_memtable.size_in_bytes() + 1;
+    let mut plain_memtable = Memtable::new(&plain(), &full).unwrap();
+    let mut docs = 0;
+    while plain_memtable.size_in_bytes() < 3 * threshold {
+        plain_memtable
+            .put(&plain_doc(&format!("p{docs:03}")))
+            .unwrap();
+        docs += 1;
+    }
+    assert!(
+        docs < 1000,
+        "{docs} plain documents: more than a search page"
+    );
+    (threshold, docs)
+}
+
+/// A closed database whose WAL, after the last commit, holds a `plain` backlog over 1 KiB, then `notes` puts, a
+/// replace and a delete in the same chunk (closed by a synced put), then more `notes` puts and a delete in a later
+/// chunk. The application had a 1 GiB memtable, so it flushed none of them.
+fn mixed_wal(fs: &SimFs) -> Mixed {
+    let (threshold, plain_docs) = mixed_sizes();
+    let container = Container::create_in(vfs(fs), PATH).unwrap();
+    let mut db = Database::create_container(container, options(registry(), 1 << 30)).unwrap();
+    db.create_collection(notes()).unwrap();
+    db.create_collection(plain()).unwrap();
+    for id in ["committed", "gone1", "gone2"] {
+        db.put("notes", &note(id, "Committed note"), Durability::Buffered)
+            .unwrap();
+    }
+    db.commit().unwrap();
+    for i in 0..plain_docs {
+        let doc = plain_doc(&format!("p{i:03}"));
+        db.put("plain", &doc, Durability::Buffered).unwrap();
+    }
+    let mut notes = BTreeMap::new();
+    let mut gone = Vec::new();
+    for (i, (id, tags)) in NOTE_OPS.into_iter().enumerate() {
+        // `w2` syncs and so closes the backlog's chunk: `w3`, `gone2` and `w4` are in a later one.
+        let durability = if id == "w2" || i + 1 == NOTE_OPS.len() {
+            Durability::Fsync
+        } else {
+            Durability::Buffered
+        };
+        if let Some(tags) = tags {
+            db.put("notes", &note(id, tags), durability).unwrap();
+            notes.insert(id.to_owned(), tags.to_owned());
+        } else {
+            db.delete("notes", id, durability).unwrap();
+            gone.push(id.to_owned());
+        }
+    }
+    drop(db);
+    Mixed {
+        notes,
+        gone,
+        plain: plain_docs,
+        threshold,
+    }
+}
+
+/// The WAL chunk frames after `log_end` of the container at `PATH`.
+fn chunks_after_commit(fs: &SimFs) -> usize {
+    let container = Container::open_in(vfs(fs), PATH, Mode::ReadOnly).unwrap();
+    let log_end = container.superblock().log_end;
+    container
+        .frames()
+        .iter()
+        .filter(|f| f.kind == FrameKind::WalChunk && f.offset >= log_end)
+        .count()
+}
+
+/// `db` holds what [`mixed_wal`] wrote: the WAL notes by id and by their `tags` terms (the real analyzer indexed
+/// them), the deleted ones gone, every `plain` document.
+fn assert_mixed(db: &Database<SimFsFile>, mixed: &Mixed, ctx: &str) {
+    let snapshot = db.snapshot();
+    let notes = snapshot.collection("notes").unwrap();
+    let tags = notes.schema().field("tags").unwrap().id();
+    for (id, text) in &mixed.notes {
+        let doc = notes
+            .get(id)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{ctx}: {id} is missing"));
+        assert_eq!(
+            doc.get(tags),
+            Some(&Value::String(text.clone())),
+            "{ctx}: {id}"
+        );
+    }
+    for id in &mixed.gone {
+        assert!(notes.get(id).unwrap().is_none(), "{ctx}: {id} came back");
+    }
+    let full = registry().with_builtins();
+    let found = search(&snapshot, "notes", &full, "walnote");
+    assert_eq!(
+        found,
+        mixed.notes.keys().cloned().collect::<Vec<_>>(),
+        "{ctx}"
+    );
+    assert!(
+        search(&snapshot, "notes", &full, "note").is_empty(),
+        "{ctx}: only deleted notes held \"note\""
+    );
+    assert_eq!(
+        search(&snapshot, "plain", &full, "plain").len(),
+        mixed.plain,
+        "{ctx}"
+    );
+}
+
+/// Review item 1: the replay flushes the `plain` backlog (no skipped field) while `notes` holds nothing yet, then
+/// replays the `notes` records after it, in that chunk and a later one, without flushing them. The open succeeds and
+/// commits (the flush); the compaction keeps the `notes` records as WAL records, which the application's open indexes
+/// with the real analyzer.
+#[test]
+fn a_plain_flush_before_the_notes_records_keeps_them_in_the_wal() {
+    let fs = SimFs::new();
+    let mixed = mixed_wal(&fs);
+    assert!(
+        chunks_after_commit(&fs) >= 2,
+        "the notes records span two chunks"
+    );
+    let seq = open_app(&fs).map(|db| db.seq()).unwrap();
+    let mut db = compact_only(&fs, options(AnalyzerRegistry::builtin(), mixed.threshold)).unwrap();
+    assert!(db.seq() > seq, "the replay flushed the plain backlog");
+    db.compact().unwrap();
+    drop(db);
+    let reopened = open_app(&fs).unwrap();
+    assert_mixed(&reopened, &mixed, "after the compaction");
+    // The `notes` records are still WAL records: nothing of `notes` was flushed with the stand-in.
+    let snapshot = reopened.snapshot();
+    let notes = snapshot.collection("notes").unwrap();
+    assert!(
+        notes.memtable().live_count() >= 4,
+        "the WAL notes are in the memtable"
+    );
+}
+
+/// A fault at each mutating call of `open` (a failed write, or one applied then reported failed), on a copy of `base`,
+/// then a crash with each loss: the application's open holds every acknowledged document (`holds`), and a second
+/// compaction-only open, with `options`, succeeds and compacts.
+fn sweep_the_open(
+    base: &SimFs,
+    options: impl Fn() -> DatabaseOptions,
+    holds: impl Fn(&Database<SimFsFile>, &str),
+) -> u64 {
+    let calls = {
+        let copy = base.crash(CrashLoss::Nothing);
+        let start = copy.mutations();
+        drop(compact_only(&copy, options()).unwrap());
+        copy.mutations() - start
+    };
+    assert!(calls > 0, "the open writes");
+    for n in 0..calls {
+        for apply_first in [false, true] {
+            let ctx = format!("call {n}, apply_first {apply_first}");
+            let copy = base.crash(CrashLoss::Nothing);
+            let at = copy.mutations() + n;
+            copy.set_fault(Some(if apply_first {
+                SimFault::ApplyThenFail(at)
+            } else {
+                SimFault::FailAt(at)
+            }));
+            let opened = compact_only(&copy, options());
+            copy.set_fault(None);
+            assert!(opened.is_err(), "{ctx}: the fault fired");
+            drop(opened);
+            for loss in [CrashLoss::All, CrashLoss::Nothing, CrashLoss::Seeded(n)] {
+                let ctx = format!("{ctx}, {loss:?}");
+                let crashed = copy.crash(loss);
+                let db = open_app(&crashed).unwrap_or_else(|e| panic!("{ctx}: {e}"));
+                holds(&db, &ctx);
+                drop(db);
+                let mut again =
+                    compact_only(&crashed, options()).unwrap_or_else(|e| panic!("{ctx}: {e}"));
+                again.compact().unwrap_or_else(|e| panic!("{ctx}: {e}"));
+                drop(again);
+                holds(&open_app(&crashed).unwrap(), &format!("{ctx}, compacted"));
+            }
+        }
+    }
+    calls
+}
+
+/// Review item 2 (b): a fault and a crash at every write of a compaction-only open whose replay flushes the `plain`
+/// backlog with `notes` WAL records after it.
+#[test]
+fn a_crash_at_any_write_of_its_open_flushing_plain_keeps_every_document() {
+    let base = SimFs::new();
+    let mixed = mixed_wal(&base);
+    let calls = sweep_the_open(
+        &base,
+        || options(AnalyzerRegistry::builtin(), mixed.threshold),
+        |db, ctx| assert_mixed(db, &mixed, ctx),
+    );
+    assert!(calls > 3, "{calls}");
+}
+
+/// A file system holding [`populated`]'s database with a cut commit (a Manifest after `log_end`): the first fault
+/// point of an application commit that leaves one, then a crash that loses nothing.
+fn with_a_cut_commit() -> (SimFs, Expected, Vec<String>) {
+    for n in 0.. {
+        let fs = SimFs::new();
+        let (expected, gone) = populated(&fs);
+        let mut db = open_app(&fs).unwrap();
+        fs.set_fault(Some(SimFault::FailAt(fs.mutations() + n)));
+        let committed = db.commit();
+        fs.set_fault(None);
+        drop(db);
+        assert!(
+            committed.is_err(),
+            "no fault point of the commit leaves a cut commit"
+        );
+        let crashed = fs.crash(CrashLoss::Nothing);
+        if has_cut_commit(&crashed) {
+            return (crashed, expected, gone);
+        }
+    }
+    panic!("the fault points of a commit ran out without a cut commit");
+}
+
+/// Review item 2 (a): a fault and a crash at every write of a compaction-only open that retires a cut commit.
+#[test]
+fn a_crash_at_any_write_of_its_retiring_open_keeps_every_document() {
+    let (base, expected, gone) = with_a_cut_commit();
+    let calls = sweep_the_open(&base, builtin, |db, ctx| {
+        assert_holds(db, &expected, &gone, ctx);
+    });
+    assert!(calls > 0, "{calls}");
+}
+
+fn notes2() -> CollectionSchema {
+    CollectionSchema::from_json_in(
+        r#"{"name": "notes2", "fields": {"tags": {"type": "text", "analyzer": "tags"}, "body": {"type": "text"}}}"#,
+        &registry(),
+    )
+    .unwrap()
+}
+
+/// A closed database with `notes` and `notes2`, both naming `tags@1`, one committed note in each, and `backlog` WAL
+/// notes in `collection` plus one in the other.
+fn two_skipped(fs: &SimFs, collection: &str, backlog: usize) {
+    let container = Container::create_in(vfs(fs), PATH).unwrap();
+    let mut db = Database::create_container(container, options(registry(), 1 << 30)).unwrap();
+    db.create_collection(notes()).unwrap();
+    db.create_collection(notes2()).unwrap();
+    for c in ["notes", "notes2"] {
+        db.put(
+            c,
+            &note("committed", "Shared committed"),
+            Durability::Buffered,
+        )
+        .unwrap();
+    }
+    db.commit().unwrap();
+    let other = if collection == "notes" {
+        "notes2"
+    } else {
+        "notes"
+    };
+    db.put(
+        other,
+        &note("single", "Shared single"),
+        Durability::Buffered,
+    )
+    .unwrap();
+    for i in 0..backlog {
+        db.put(
+            collection,
+            &note(&format!("b{i:03}"), "Shared backlog"),
+            Durability::Buffered,
+        )
+        .unwrap();
+    }
+    db.put(collection, &note("last", "Shared last"), Durability::Fsync)
+        .unwrap();
+}
+
+/// Review item 12: two collections naming the same registered analyzer. The second finds it already replaced by the
+/// stand-in (`skip_unregistered`'s `replaced` branch) and is skipped too; a flush of either is refused, naming it; and
+/// with small backlogs both compact and keep their WAL records.
+#[test]
+fn two_collections_sharing_a_skipped_analyzer_are_both_guarded() {
+    for collection in ["notes", "notes2"] {
+        let fs = SimFs::new();
+        two_skipped(&fs, collection, 64);
+        let before = fs.files();
+        let err = compact_only(&fs, options(AnalyzerRegistry::builtin(), 1024)).unwrap_err();
+        match &err {
+            DatabaseError::AnalysisSkipped {
+                collection: named,
+                field,
+                analyzer,
+            } => {
+                // The commit that would flush the backlog also holds the other collection's record: either may be named, and the
+                // first in collection order is.
+                assert_eq!(named, "notes", "{collection}: {err}");
+                assert_eq!((field.as_str(), analyzer.as_str()), ("tags", "tags@1"));
+            }
+            other => panic!("{collection}: {other:?}"),
+        }
+        assert_eq!(fs.files(), before, "{collection}: nothing was written");
+    }
+    // Small backlogs: both skipped, nothing refused, every record kept for the application.
+    let fs = SimFs::new();
+    two_skipped(&fs, "notes2", 3);
+    let mut db = compact_only(&fs, builtin()).unwrap();
+    let skipped: Vec<(&str, &str, &str)> = db
+        .skipped_analysis()
+        .iter()
+        .map(|s| (s.collection.as_str(), s.field.as_str(), s.analyzer.as_str()))
+        .collect();
+    assert_eq!(
+        skipped,
+        [("notes", "tags", "tags@1"), ("notes2", "tags", "tags@1")]
+    );
+    db.compact().unwrap();
+    drop(db);
+    let db = open_app(&fs).unwrap();
+    let full = registry().with_builtins();
+    assert_eq!(
+        search(&db.snapshot(), "notes", &full, "shared"),
+        ["committed", "single"]
+    );
+    assert_eq!(search(&db.snapshot(), "notes2", &full, "shared").len(), 5);
 }

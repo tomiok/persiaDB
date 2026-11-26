@@ -243,10 +243,11 @@ pub enum DatabaseError {
     /// A [`CompactOnlyDatabase`] skips the analysis of a `text` field of the collection (its registry lacks the
     /// field's analyzer), and a commit would have to flush that collection's unflushed writes, which a segment would
     /// then hold without the field's terms (ADR-0068). Refused before anything is written; in practice at its open,
-    /// whose replay would flush a WAL backlog over the memtable size. Open the database with a registry that has the
-    /// analyzer (its application), which flushes the backlog, then compact. Not corruption.
+    /// when its replay would flush (any collection: every flush flushes every memtable) while such a collection holds
+    /// a replayed record. Open the database with a registry that has the analyzer (its application) and commit (closing
+    /// a `persia::Db` commits): a reopen alone may flush nothing. Then compact. Not corruption.
     #[error(
-        "collection {collection:?}: its unflushed writes would have to be flushed, which needs the analyzer {analyzer} of field {field:?} that this open lacks (a compaction-only open never flushes them without it); open the database with a registry that has it first"
+        "collection {collection:?}: its unflushed writes would have to be flushed, which needs the analyzer {analyzer} of field {field:?} that this open lacks (a compaction-only open never flushes them without it); open the database with a registry that has it, commit (closing a `persia::Db` does), then compact"
     )]
     AnalysisSkipped {
         /// The collection.
@@ -1299,22 +1300,36 @@ impl<F: ContainerFile + Sync> Database<F> {
         self.commit_guarded(planned, diff, Structural::Drop(name.to_owned()))
     }
 
+    /// Refuses a flush of a memtable that indexed a field with a stand-in analyzer (a [`CompactOnlyDatabase`],
+    /// ADR-0068): such a memtable never becomes a segment. Checked before [`Self::plan_flushes`] builds any segment
+    /// or takes a segment id, and for the whole commit, since every flush flushes every memtable with operations (but
+    /// `skip`'s).
+    fn check_no_skipped_flush(&self, skip: Option<&str>) -> Result<(), DatabaseError> {
+        let flushed = |s: &&SkippedAnalysis| {
+            skip != Some(s.collection.as_str())
+                && self
+                    .collections
+                    .get(&s.collection)
+                    .is_some_and(|c| !c.memtable.is_empty())
+        };
+        match self.skipped.iter().find(flushed) {
+            Some(s) => Err(DatabaseError::AnalysisSkipped {
+                collection: s.collection.clone(),
+                field: s.field.clone(),
+                analyzer: s.analyzer.clone(),
+            }),
+            None => Ok(()),
+        }
+    }
+
     /// Plans the flush of every memtable with operations but `skip`'s: builds every segment and sidecar before
     /// anything is written, so a failure here leaves the database as it was.
     fn plan_flushes(&mut self, skip: Option<&str>) -> Result<Vec<Planned>, DatabaseError> {
+        self.check_no_skipped_flush(skip)?;
         let mut planned = Vec::new();
         for (name, c) in &self.collections {
             if c.memtable.is_empty() || skip == Some(name.as_str()) {
                 continue;
-            }
-            // A memtable that indexed a field with a stand-in never becomes a segment (ADR-0068). Refused while
-            // planning, so before anything is written, and for the whole commit: every flush flushes every memtable.
-            if let Some(s) = self.skipped.iter().find(|s| s.collection == *name) {
-                return Err(DatabaseError::AnalysisSkipped {
-                    collection: s.collection.clone(),
-                    field: s.field.clone(),
-                    analyzer: s.analyzer.clone(),
-                });
             }
             let merges = &self.merges;
             let taken = |id| {

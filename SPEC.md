@@ -384,9 +384,11 @@ the built-in analyzers only, so it opens with the **compaction-only open** (ROAD
 `CompactOnlyDatabase`): the writer's open above, except that a `text` field whose analyzer it lacks (a registered one,
 §6.2.2) is indexed with the stand-in of a read-only open that skips analysis (§8.6, one that emits no token), and
 that no commit may flush a non-empty memtable of a collection with such a field. Such a commit is refused before
-anything is written (`AnalysisSkipped`), so the open fails (status 1) when recovery would have to flush that
-collection's WAL backlog (over the default memtable, or out of docids); the application, with its analyzer, flushes
-it first. Otherwise that collection's WAL records stay WAL records, which the compaction copies (above) and the next
+anything is written (`AnalysisSkipped`), so the open fails (status 1) when its replay would flush, any collection
+(every flush flushes every memtable, §8.2), while such a collection holds a replayed record: a memtable at the
+default size (for such a collection, the stand-in's, which holds none of the skipped field's terms) or out of
+docids. The application then opens the database with its analyzer and commits (closing a `persia::Db` does; an open
+alone may flush nothing), and the command compacts after it. Otherwise that collection's WAL records stay WAL records, which the compaction copies (above) and the next
 writer's open replays and indexes with the real analyzer: nothing is lost, resurrected, or committed without its
 terms. The handle has no call that writes a document, commits, merges or changes a schema; when its registry has
 every analyzer it is exactly the writer's open.
@@ -985,7 +987,10 @@ A stored schema (§8.7) is read without a registry, and its `analyzer` is:
   `DatabaseError::UnregisteredAnalyzer` before any segment is read, for the same reason; that is not corruption
   either. The open cannot tell a registered analyzer from a newer build's built-in it lacks (`nl@1`): both are
   unregistered to it. A build from before registered analyzers reads such a schema as written by a newer build
-  (unsupported), since the name has built-in shape;
+  (unsupported), since the name has built-in shape. Two opens are the exception, for a tool that has the built-ins
+  only: a read-only open that skips analysis (`ReadOnlyDatabase::open_skipping_analysis`, ROADMAP 6.6.8, §8.6) and
+  the compaction-only open (`CompactOnlyDatabase`, §4.6, ADR-0068) index such a field with a stand-in that emits no
+  token, and the latter never commits a memtable so indexed;
 - a malformed one (`es@01`, `ES@1`): corruption.
 
 #### 6.2.3 Ranking and relaxation
@@ -2778,7 +2783,9 @@ an empty memtable would not report) it commits and applies the record again. Suc
 the records from there on may not be in a memtable yet. The records of that chunk before the flush are then replayed
 again by the next open, which is harmless (§8.2.1). Records replayed after the last such commit hold `wal_start` back
 until a later flush covers them, like records written after the open. An open that fails or crashes during these
-commits leaves a state from which the next open reaches the same documents.
+commits leaves a state from which the next open reaches the same documents. The compaction-only open (§4.6,
+ADR-0068) refuses such a flush while a collection whose analysis it skips holds a replayed record
+(`AnalysisSkipped`, before anything of that commit is written), and so fails; its other commits are these.
 
 A **read-only open** (ROADMAP 6.6.2) runs the same sequence on a container opened read-only (§4.5.1): no lock, no
 write, so it opens beside a live writer, any number at once. It cannot flush, and it does not stop at the size
