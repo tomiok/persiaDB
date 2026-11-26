@@ -9,6 +9,7 @@
 //!    pack's directory (`LeaseElsewhere`, a retargeted symbolic link included), and takes equal and newer documents.
 //! 5. A reader process killed (SIGKILL) while holding its lease leaves a stale one: the next GC removes it and sweeps.
 //! 6. A directory that refuses writes opens without a lease (`lease()` is `None`).
+//! 7. The mark-only open's GC (ROADMAP 10.4.7, ADR-0069) judges leases by its committed seq, as the writer's does.
 #![allow(
     clippy::unwrap_used,
     clippy::panic,
@@ -147,6 +148,41 @@ fn a_reader_behind_a_delete_holds_gc_back_until_it_refreshes() {
     assert_eq!(reader.get_blob_range(&kept, 0..4).unwrap(), b"kept");
 }
 
+/// ROADMAP 10.4.7, ADR-0069: the mark-only open's GC judges reader leases against its committed seq, as the writer's
+/// does: a reader at exactly that seq lets the sweep run, and keeps reading.
+#[test]
+fn a_mark_only_gc_judges_reader_leases_by_the_committed_seq() {
+    let dir = tempfile::tempdir().unwrap();
+    if !locks_judged(dir.path()) {
+        return;
+    }
+    let path = dir.path().join("app.persia");
+    let mut writer = create(&path);
+    let kept = put(&mut writer, "kept", b"kept");
+    put(&mut writer, "gone", b"swept");
+    delete(&mut writer, "gone");
+    let seq = writer.log().seq();
+    drop(writer);
+    let reader = ReadOnlyBlobDatabase::open(&path, &DatabaseOptions::default()).unwrap();
+    assert_eq!(record(&reader).manifest_seq(), Some(seq));
+
+    let db = BlobDatabase::open_mark_only(&path, DatabaseOptions::default()).unwrap();
+    assert_eq!(db.log().seq(), seq);
+    let report = db
+        .gc(&GcOptions {
+            rewrite_ratio: 0.0,
+            ..GcOptions::default()
+        })
+        .unwrap();
+    let readers = report.readers.clone().unwrap();
+    assert!(!readers.held_back && readers.current == 1, "{report:?}");
+    assert_eq!(report.sweep.blobs_deleted, 1, "{report:?}");
+    assert!(
+        matches!(report.sweep.rewrite, Some(Rewrite::Done { .. })),
+        "{report:?}"
+    );
+    assert_eq!(reader.get_blob_range(&kept, 0..4).unwrap(), b"kept");
+}
 #[test]
 fn a_refused_refresh_keeps_the_record() {
     let dir = tempfile::tempdir().unwrap();

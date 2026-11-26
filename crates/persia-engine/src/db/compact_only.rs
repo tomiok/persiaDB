@@ -96,14 +96,7 @@ impl<F: ContainerFile + Sync> CompactOnlyDatabase<F> {
         container: Container<F>,
         options: DatabaseOptions,
     ) -> Result<Self, DatabaseError> {
-        if container.mode() != Mode::ReadWrite {
-            return Err(container::Error::ReadOnly {
-                reason: container::ReadOnlyReason::OpenedReadOnly,
-            }
-            .into());
-        }
-        let db = Database::recover_as(container, options, Analysis::SkipUnregistered)?;
-        Ok(Self { db })
+        open_skipping_analysis(container, options).map(|db| Self { db })
     }
 
     /// The `text` fields whose analysis is skipped, in collection then field order: those whose analyzer the
@@ -221,4 +214,25 @@ impl<F: ContainerFile + Sync + 'static> CompactOnlyDatabase<F> {
     pub fn compact(&mut self) -> Result<Compacted, DatabaseError> {
         self.db.compact()
     }
+}
+
+/// The open of [`CompactOnlyDatabase`] and of [`MarkOnlyDatabase`](super::MarkOnlyDatabase) (ADR-0068, ADR-0069):
+/// the writer's open of a read-write `container`, with a no-token stand-in for each `text` field's analyzer that
+/// `options.registry` lacks, and the database's refusal to flush a memtable that indexed one (`AnalysisSkipped`,
+/// checked by the flush planning itself). One function, so both handles refuse exactly alike.
+///
+/// # Errors
+/// [`DatabaseError::Container`] with [`container::Error::ReadOnly`] for a container opened read-only; otherwise as
+/// [`CompactOnlyDatabase::open_container`].
+pub(super) fn open_skipping_analysis<F: ContainerFile + Sync>(
+    container: Container<F>,
+    options: DatabaseOptions,
+) -> Result<Database<F>, DatabaseError> {
+    if container.mode() != Mode::ReadWrite {
+        return Err(container::Error::ReadOnly {
+            reason: container::ReadOnlyReason::OpenedReadOnly,
+        }
+        .into());
+    }
+    Database::recover_as(container, options, Analysis::SkipUnregistered)
 }

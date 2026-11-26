@@ -28,10 +28,10 @@ use persia_blob::{BlobId, BlobStore};
 // What [`GcReport`] holds, for the CLI (`persia gc`, ROADMAP 10.4.5), which reaches `persia-blob` only through here.
 pub use persia_blob::Error as BlobError;
 pub use persia_blob::gc::Rewrite;
-use persia_engine::db::{Database, DatabaseError};
+use persia_engine::db::{Database, DatabaseError, MarkOnlyDatabase};
 
 use super::blob::MAX_BIND_BUDGET;
-use super::documents::{BlobDatabase, DocumentLog};
+use super::documents::BlobDatabase;
 use super::pins::{PinSet, PinView, Pinned};
 
 /// How long an unmarked remote object is kept after it was written, by default (SPEC §9.5).
@@ -152,7 +152,9 @@ impl From<DatabaseError> for GcError {
 }
 
 /// The document log's side of GC's mark: every blob id its documents may still name (SPEC §9.5). The engine's
-/// [`Database`] in production ([`Database::referenced_blobs`]), a wrapper in tests.
+/// [`Database`] in production ([`Database::referenced_blobs`]), its [`MarkOnlyDatabase`] for `persia gc` (ROADMAP
+/// 10.4.7, ADR-0069), a wrapper in tests. It is all [`BlobDatabase::mark`] and [`BlobDatabase::gc`] need of the log:
+/// they write no document.
 pub trait BlobReferences {
     /// [`Database::referenced_blobs`].
     ///
@@ -176,7 +178,20 @@ impl BlobReferences for Database {
     }
 }
 
-impl<S: BlobStore + ?Sized, L: DocumentLog + BlobReferences> BlobDatabase<S, L> {
+/// The mark-only open (ADR-0069): the writer's open's references, with stand-in analyzers, which the mark does not
+/// read.
+impl BlobReferences for MarkOnlyDatabase {
+    #[allow(clippy::result_large_err)] // As the trait.
+    fn referenced_blobs(&self) -> Result<HashSet<BlobId>, DatabaseError> {
+        MarkOnlyDatabase::referenced_blobs(self)
+    }
+
+    fn committed_seq(&self) -> u64 {
+        MarkOnlyDatabase::seq(self)
+    }
+}
+
+impl<S: BlobStore + ?Sized, L: BlobReferences> BlobDatabase<S, L> {
     /// GC's mark (SPEC §9.5, ROADMAP 9.5.1): the pinned ids, the blob ids the log references, then the upload ids the
     /// marked blobs' manifests name ([`Mark::add_manifest_uploads`]).
     ///
@@ -195,7 +210,7 @@ impl<S: BlobStore + ?Sized, L: DocumentLog + BlobReferences> BlobDatabase<S, L> 
     }
 }
 
-impl<S: BlobStore + Sweep + ?Sized, L: DocumentLog + BlobReferences> BlobDatabase<S, L> {
+impl<S: BlobStore + Sweep + ?Sized, L: BlobReferences> BlobDatabase<S, L> {
     /// Collects the blob store's garbage (SPEC §9.5; ROADMAP 9.5.1, 9.5.2): [`BlobDatabase::mark`], then the store's
     /// [`Sweep`] with the pin set. Remotely, an unmarked blob manifest older than [`GcOptions::grace`] is deleted,
     /// then the staged chunks of every upload no kept manifest names, aged from its newest chunk and listed again under

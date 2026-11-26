@@ -3,18 +3,22 @@
 //! here.
 //!
 //! **The open.** GC runs in the writer (SPEC §9.5), so the command opens the database read-write with its blob pack
-//! (`BlobDatabase::open`): it takes the container's writer lock and the pack's, so it fails (status 1) while another
-//! writer has the database open, and recovery runs first (SPEC §8.6: as with any writer's open, it may flush a WAL
-//! backlog larger than the default memtable, or retire a cut commit). It writes no document. A database without a
-//! pack (`<name>.persia.blobs`, created by the first blob) has nothing to collect: the report says so (`rewrite`
-//! `no_pack`, `pack.present` false), with status 0. No pack is created then, but the pack's writer lock is taken, as by
-//! any writer that opens the database with its blob store, so its lock file `<name>.persia.blobs.lock` appears (never
-//! removed, SPEC §9.3).
+//! (`BlobDatabase::open_mark_only`, the writer's open for GC only, ADR-0069): it takes the container's writer lock and
+//! the pack's, so it fails (status 1) while another writer has the database open, and recovery runs first (SPEC §8.6:
+//! as with any writer's open, it may flush a WAL backlog larger than the default memtable, or retire a cut commit). It
+//! writes no document. A database without a pack (`<name>.persia.blobs`, created by the first blob) has nothing to
+//! collect: the report says so (`rewrite` `no_pack`, `pack.present` false), with status 0. No pack is created then,
+//! but the pack's writer lock is taken, as by any writer that opens the database with its blob store, so its lock file
+//! `<name>.persia.blobs.lock` appears (never removed, SPEC §9.3).
 //!
-//! **Analyzers.** The command has the built-in analyzers only, and the writer's open needs every analyzer the schemas
-//! name, so a database whose schema names one its application registered (SPEC §6.2.2) fails that open (status 1).
-//! Such a database is collected by its application (ROADMAP 10.4.7: the compaction-only open of ADR-0068 offers no
-//! mark).
+//! **Analyzers.** The command has the built-in analyzers only, and collects a database whose schema names an analyzer
+//! its application registered (SPEC §6.2.2; ROADMAP 10.4.7, ADR-0069): as `persia compact` (ADR-0068), its open
+//! indexes such a `text` field with a stand-in that emits no token, and the mark reads no term (it lists the blob
+//! references of the stored documents and of every WAL put from `wal_start` on, so a WAL record of such a collection is
+//! marked). What the open cannot do is flush such a collection: when its recovery would flush any collection (every
+//! flush flushes every memtable) while such a collection holds a replayed record (a memtable at the default 64 MiB, the
+//! stand-in's, or out of docids), it fails with status 1 before flushing any of them, and nothing is marked or swept.
+//! Open the database with its application and commit (closing a `persia::Db` commits), then collect.
 //!
 //! **The grace period.** `--grace <N>{s,m,h,d}`, 24 h by default (SPEC §9.5), is checked by the GC's own rule
 //! (`GcOptions::validate`), which refuses one below its floor, twice the longest bind budget (2 h, SPEC §9.4): before
@@ -123,8 +127,8 @@ fn run(path: &Path, grace: Duration) -> Result<Collected> {
     }
     let pack = persia::internal::pack_path(path);
     let pack_before = pack_size(&pack)?;
-    let db =
-        BlobDatabase::open(path, DatabaseOptions::default()).map_err(|err| opening(path, err))?;
+    let db = BlobDatabase::open_mark_only(path, DatabaseOptions::default())
+        .map_err(|err| opening(path, err))?;
     let report = db
         .gc(&options)
         .with_context(|| format!("collecting the blobs of {}", path.display()))?;
@@ -156,8 +160,15 @@ fn opening(path: &Path, err: BlobDatabaseError) -> anyhow::Error {
             "{} is open by a writer; collect it once that is closed",
             path.display()
         ),
+        // The mark-only open skips a registered analyzer (ADR-0069); what it still refuses is a version of a built-in
+        // one this build lacks.
         Some(DatabaseError::UnregisteredAnalyzer { .. }) => format!(
-            "opening {} (persia gc has the built-in analyzers only: collect this database from its application)",
+            "opening {} (an analyzer version this build of persia gc lacks: collect it with a newer build)",
+            path.display()
+        ),
+        Some(DatabaseError::AnalysisSkipped { .. }) => format!(
+            "opening {} (persia gc has the built-in analyzers only and cannot flush that collection: open the \
+             database with its application and commit, then collect it)",
             path.display()
         ),
         _ => format!("opening {}", path.display()),

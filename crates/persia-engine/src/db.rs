@@ -44,9 +44,11 @@
 
 mod clock;
 mod compact_only;
+// The writer's open for the blob GC's mark only, with stand-in analyzers (ROADMAP 10.4.7, ADR-0069).
 mod compaction;
 mod exec;
 mod flush;
+mod mark_only;
 mod merging;
 mod objects;
 mod obsolete;
@@ -86,6 +88,7 @@ pub use clock::{Clock, ManualClock, SegmentIds, SystemClock};
 pub use compact_only::CompactOnlyDatabase;
 pub use compaction::{Compacted, CompactionHold, CompactionOptions, CompactionStats};
 pub use exec::{CancelToken, ExecTerms, Execution, PoolError, SearchPool, Threads};
+pub use mark_only::MarkOnlyDatabase;
 pub use merging::{MergeOutcome, MergeStats};
 pub use objects::ContainerObjects;
 use obsolete::Pin;
@@ -648,8 +651,9 @@ pub struct Database<F = File> {
     /// What the relaxed searches of the collections dropped since the open counted (ROADMAP 8.3.3), so that
     /// [`Database::relaxation_stats`] never goes down.
     relaxation_dropped: RelaxationStats,
-    /// The `text` fields whose analysis a [`CompactOnlyDatabase`]'s open skips (ADR-0068): their collections'
-    /// memtables are never flushed ([`Database::plan_flushes`]). Empty for every other open.
+    /// The `text` fields whose analysis a [`CompactOnlyDatabase`]'s or [`MarkOnlyDatabase`]'s open skips (ADR-0068,
+    /// ADR-0069): their collections' memtables are never flushed ([`Database::plan_flushes`]). Empty for every other
+    /// open.
     skipped: Vec<SkippedAnalysis>,
 }
 
@@ -794,7 +798,8 @@ impl<F: ContainerFile + Sync> Database<F> {
         self.manifest.seq()
     }
 
-    /// The `text` fields whose analysis this open skips: none but for a [`CompactOnlyDatabase`] (ADR-0068).
+    /// The `text` fields whose analysis this open skips: none but for a [`CompactOnlyDatabase`] or a
+    /// [`MarkOnlyDatabase`] (ADR-0068, ADR-0069).
     pub(crate) fn skipped_analysis(&self) -> &[SkippedAnalysis] {
         &self.skipped
     }

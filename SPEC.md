@@ -2784,8 +2784,9 @@ the records from there on may not be in a memtable yet. The records of that chun
 again by the next open, which is harmless (§8.2.1). Records replayed after the last such commit hold `wal_start` back
 until a later flush covers them, like records written after the open. An open that fails or crashes during these
 commits leaves a state from which the next open reaches the same documents. The compaction-only open (§4.6,
-ADR-0068) refuses such a flush while a collection whose analysis it skips holds a replayed record
-(`AnalysisSkipped`, before anything of that commit is written), and so fails; its other commits are these.
+ADR-0068) and the mark-only open (§9.5, ADR-0069), which share one open, refuse such a flush while a collection whose
+analysis they skip holds a replayed record (`AnalysisSkipped`, before anything of that commit is written), and so
+fail; their other commits are these.
 
 A **read-only open** (ROADMAP 6.6.2) runs the same sequence on a container opened read-only (§4.5.1): no lock, no
 write, so it opens beside a live writer, any number at once. It cannot flush, and it does not stop at the size
@@ -3319,10 +3320,18 @@ the same process that runs `put_blob`, and keeps a **pin set** with it:
   blob whose manifest was missing is not resolved, so a later pin still makes the sweep read it), and the pinned
   upload ids. GC runs only when the writer calls `gc`, never in the background, and between writes. `persia gc <path>`
   (ROADMAP 10.4.5) is such a writer: it opens the database read-write with its pack (the writer locks of both, so it
-  fails while another writer has it, and recovery runs first; built-in analyzers only, ROADMAP 10.4.7), runs one GC
-  with the default rewrite ratio and `--grace` (24 h by default; the GC refuses one below its floor), and reports the
-  mark, the sweep, the rewrite, the pack's size before and after and the reader leases (§9.3). A database without a
-  pack has nothing to collect.
+  fails while another writer has it, and recovery runs first), runs one GC with the default rewrite ratio and
+  `--grace` (24 h by default; the GC refuses one below its floor), and reports the mark, the sweep, the rewrite, the
+  pack's size before and after and the reader leases (§9.3). A database without a pack has nothing to collect. It has
+  the built-in analyzers only, so it opens with the **mark-only open** (ROADMAP 10.4.7, ADR-0069,
+  `MarkOnlyDatabase`): the compaction-only open's recovery (§4.6, §8.6, ADR-0068; one function), in which a `text`
+  field whose analyzer it lacks is indexed with a stand-in that emits no token and no commit may flush a non-empty
+  memtable of its collection (`AnalysisSkipped`, refused before anything of that commit is written, so the open fails,
+  status 1, and nothing is marked or swept). The mark reads no term: it lists the references of the stored documents
+  and of every WAL put from `wal_start` on, so a record of such a collection, which stays a WAL record, is marked as
+  in a writer's open, and the sweep and the pack rewrite need no analyzer. The handle offers the mark, the committed
+  seq and the writer proof the pack opens with, and nothing that writes a document, commits, merges, compacts or
+  changes a schema. With every analyzer it is the writer's open.
 - Sweep: unmarked blob manifests, then staged chunks of uploads no marked manifest names, each only once older than a
   grace period (default 24 h, and at least `2 * MAX_BIND_BUDGET`, §9.4; for staged chunks counted from the upload's
   newest chunk, so an idle upload stays

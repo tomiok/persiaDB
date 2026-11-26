@@ -39,6 +39,10 @@
 //!    no orphan chunk, and `deleted` counts every unreferenced manifest the pack had) or the dead bytes were below the
 //!    default ratio (nothing deleted, every manifest kept: by design, SPEC §9.3, so an unreferenced manifest survives
 //!    only such a run).
+//! 5. **A registered analyzer** (`kill_9_of_persia_gc_on_a_registered_analyzer_database_loses_no_blob`, ROADMAP
+//!    10.4.7, ADR-0069): `persia gc` opens a database whose schema names an analyzer it lacks with the mark-only open,
+//!    and is killed at each kind of point above: `verify --deep` passes, the application reads every blob, the one only
+//!    an unflushed WAL record references included, that record is still a WAL record, and a rerun completes.
 //!
 //! Skipped (with the reason printed) where locks cannot be judged (`locks_per_handle`, ADR-0054 item 13): the reader
 //! scenarios need a reader's lock to be judged.
@@ -71,9 +75,10 @@ use blob_support::{
     hash_str, live_ids, persia, pick_size, report, row, serial, verify_ok, wait_for_eof,
 };
 use persia::internal::documents::{Blob, BlobDatabase, Error, ReadOnlyBlobDatabase};
+use persia_engine::analysis::{Analyzer, AnalyzerRegistry, WhitespaceTokenizer};
 use persia_engine::db::{DatabaseError, DatabaseOptions, ReadOnlyDatabase};
-use persia_engine::document::Document;
-use persia_engine::schema::SchemaBuilder;
+use persia_engine::document::{Document, Value};
+use persia_engine::schema::{CollectionSchema, SchemaBuilder};
 use persia_engine::wal::Durability;
 use persia_storage::container::{ContainerFile, Error as ContainerError};
 use serde_json::Value as Json;
@@ -729,6 +734,169 @@ fn kill_9_of_persia_gc_keeps_every_referenced_blob_and_a_rerun_completes() {
     );
 }
 
+/// The options of an application that registers `tags@1`.
+fn tags_options() -> DatabaseOptions {
+    let mut registry = AnalyzerRegistry::builtin();
+    registry
+        .register("tags", 1, Analyzer::builder(WhitespaceTokenizer).build())
+        .unwrap();
+    DatabaseOptions {
+        registry,
+        ..DatabaseOptions::default()
+    }
+}
+
+/// A database at `<dir>/app.persia` whose collection `COLLECTION` has a `tags` field naming `tags@1`: `seg` with its
+/// blob committed in a segment, three garbage blobs (their documents deleted and committed: three quarters of the
+/// pack's chunk bytes, so a run rewrites), and `wal` with its blob logged `Fsync` and never committed, so only the WAL
+/// references it. The live documents and their `(size, content seed)`.
+fn registered_analyzer_database(dir: &Path) -> (PathBuf, Model) {
+    let path = dir.join("app.persia");
+    let options = tags_options();
+    let schema = CollectionSchema::from_json_in(
+        &format!(r#"{{"name": "{COLLECTION}", "fields": {{"tags": {{"type": "text", "analyzer": "tags"}}}}}}"#),
+        &options.registry,
+    )
+    .unwrap();
+    let tags = schema.field("tags").unwrap().id();
+    let tagged = |id: &str| Document::new(id).with(tags, Value::String("a b".into()));
+    let mut db = BlobDatabase::create(&path, options).unwrap();
+    db.log_mut().create_collection(schema.clone()).unwrap();
+    let mut model = Model::new();
+    let put = |db: &mut BlobDatabase<_>, id: &str, size: u64, cseed: u64| {
+        let bytes = content(size, cseed);
+        db.put(
+            COLLECTION,
+            &tagged(id),
+            Blob::from_reader(&bytes[..]),
+            Durability::Fsync,
+        )
+        .unwrap();
+        (id.to_owned(), (size, cseed))
+    };
+    let (id, blob) = put(&mut db, "seg", CHUNK + 1000, 1);
+    model.insert(id, blob);
+    for (n, id) in ["g1", "g2", "g3"].into_iter().enumerate() {
+        put(&mut db, id, CHUNK + 1000, 10 + n as u64);
+    }
+    db.commit().unwrap();
+    for id in ["g1", "g2", "g3"] {
+        db.log_mut()
+            .delete(COLLECTION, id, Durability::Fsync)
+            .unwrap();
+    }
+    db.commit().unwrap();
+    let (id, blob) = put(&mut db, "wal", CHUNK / 2, 2);
+    model.insert(id, blob);
+    drop(db);
+    (path, model)
+}
+
+/// `persia stats --json <path>`, which must succeed.
+fn stats_json(path: &Path) -> Json {
+    let out = persia(&["stats", arg(path), "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+/// The application's read-only open (with `tags@1`) shows exactly `model`'s documents, `wal` still a WAL record, each
+/// blob byte-identical.
+fn check_app_reads(path: &Path, model: &Model, ctx: &str) {
+    let ro = ReadOnlyBlobDatabase::open(path, &tags_options())
+        .unwrap_or_else(|e| panic!("{ctx}: read-only open: {e}"));
+    let snapshot = ro.database().snapshot();
+    let expected: BTreeSet<String> = model.keys().cloned().collect();
+    assert_eq!(live_ids(&snapshot, COLLECTION), expected, "{ctx}");
+    let c = snapshot.collection(COLLECTION).unwrap();
+    let stats = stats_json(path);
+    assert_eq!(
+        stats["collections"][0]["wal_documents"], 1,
+        "{ctx}: `wal` is no longer a WAL record: {stats}"
+    );
+    for (id, &(size, cseed)) in model {
+        let doc = c.get(id).unwrap().unwrap();
+        let blob = doc.blob_ref().unwrap();
+        let mut out = Vec::new();
+        ro.get_blob(blob)
+            .unwrap_or_else(|e| panic!("{ctx}: get_blob({id}): {e}"))
+            .read_to_end(&mut out)
+            .unwrap();
+        assert!(out == content(size, cseed), "{ctx}: {id}: other bytes");
+    }
+}
+
+/// ROADMAP 10.4.7, ADR-0069 item 5: `persia gc` on a database whose schema names a registered analyzer (the mark-only
+/// open, with stand-ins), killed (SIGKILL) at each kind of point the parent observes on the file system, with no timer.
+/// After each kill `verify --deep` passes, a pack whose inode did not change is a prefix of the pack before the run
+/// (the rewrite is never in place), the application reads every document and blob, the WAL-only one included, and that
+/// record is still a WAL record (nothing was flushed with a stand-in); a rerun completes and leaves exactly the two
+/// referenced blobs.
+#[test]
+fn kill_9_of_persia_gc_on_a_registered_analyzer_database_loses_no_blob() {
+    if child_env().is_some() {
+        return;
+    }
+    let _serial = serial();
+    let seed = base_seed(0x5eed_1047_0001);
+    let mut rng = Rng(seed);
+    let points = [
+        KillAt::Spawned,
+        KillAt::Polls(rng.range(1, 400)),
+        KillAt::TempSeen,
+        KillAt::TempBytes(rng.range(12_288, CHUNK)),
+        KillAt::Renamed,
+        KillAt::Never,
+    ];
+    let mut killed_mid_rewrite = 0;
+    for at in points {
+        let ctx = format!("seed {seed} ({at:?})");
+        let dir = KeptOnFailure::new();
+        let (path, model) = registered_analyzer_database(dir.path());
+        let pack_before = std::fs::read(pack(&path)).unwrap();
+        let inode = pack_inode(&path);
+        let ended = match run_gc_until(&path, at) {
+            Ended::Exited(out) => {
+                let done = gc_report(&out, &ctx);
+                assert_eq!(done["marked"]["blobs"], 2, "{ctx}: {done}");
+                format!("exited, rewrite {}", done["rewrite"]["outcome"])
+            }
+            Ended::Killed { temp, renamed } => {
+                killed_mid_rewrite += u64::from(temp && !renamed);
+                format!("killed (temp {temp}, renamed {renamed})")
+            }
+        };
+        eprintln!("{ctx}: {ended}");
+        let v = verify(&path, true, &ctx);
+        assert_eq!(v.referenced, 2, "{ctx}: {v:?}");
+        if pack_inode(&path) == inode {
+            let now = std::fs::read(pack(&path)).unwrap();
+            assert!(
+                pack_before.starts_with(&now),
+                "{ctx}: the pack was not replaced, yet its bytes changed"
+            );
+        } else {
+            assert_eq!(v.bound, 2, "{ctx}: replaced pack {v:?}");
+        }
+        check_app_reads(&path, &model, &ctx);
+
+        let again = gc_ok(&path, &ctx);
+        assert_eq!(again["marked"]["blobs"], 2, "{ctx}: rerun {again}");
+        assert_eq!(again["missing"], serde_json::json!([]), "{ctx}: {again}");
+        assert!(temp_files(&path).is_empty(), "{ctx}: temporary files left");
+        let after = verify(&path, true, &ctx);
+        assert_eq!((after.referenced, after.bound), (2, 2), "{ctx}: {after:?}");
+        assert_eq!(after.orphan_chunks, 0, "{ctx}: {after:?}");
+        check_app_reads(&path, &model, &ctx);
+    }
+    assert!(
+        killed_mid_rewrite > 0,
+        "seed {seed}: no kill landed inside a rewrite"
+    );
+}
 // ---------------------------------------------------------------------------------------------------------------
 // 2. Reader processes
 // ---------------------------------------------------------------------------------------------------------------

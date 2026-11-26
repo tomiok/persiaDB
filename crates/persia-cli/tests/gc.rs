@@ -1,7 +1,9 @@
 //! `persia gc` end to end (ROADMAP 10.4.5; SPEC §9.5): orphan blobs deleted and the pack rewritten smaller, referenced
 //! blobs kept and `verify --deep` clean after it, the local pack's lack of ages (no grace-young object kept), a reader
 //! lease behind the committed seq holding the sweep back, a database without a pack, dangling references reported,
-//! the `--grace` checks, the `--json` keys and the text rows, and a writer holding the database. The exit status of
+//! the `--grace` checks, the `--json` keys and the text rows, a writer holding the database, and a schema naming a
+//! registered analyzer (ROADMAP 10.4.7, ADR-0069: collected, a blob only an unflushed WAL record of such a collection
+//! references kept, and the refusal of a backlog the open would have to flush). The exit status of
 //! `gc` for a sound, missing, non-container and damaged file is in `tests/commands.rs`'s table.
 
 #![allow(
@@ -18,7 +20,7 @@ use std::process::{Command, Output};
 use persia::internal::documents::{Blob, BlobDatabase, ReadOnlyBlobDatabase};
 use persia_engine::analysis::{Analyzer, AnalyzerRegistry, WhitespaceTokenizer};
 use persia_engine::db::{Database, DatabaseOptions};
-use persia_engine::document::Document;
+use persia_engine::document::{Document, Value};
 use persia_engine::schema::{CollectionSchema, SchemaBuilder};
 use persia_engine::wal::Durability;
 use serde_json::Value as Json;
@@ -447,48 +449,192 @@ fn gc_fails_while_a_writer_holds_the_database() {
     drop(writer);
 }
 
-/// The command has the built-in analyzers only, and GC's writer open needs every analyzer the schemas name: it fails
-/// (status 1), says so, and leaves the files as they were (ROADMAP 10.4.7).
-#[test]
-fn gc_refuses_a_schema_naming_a_registered_analyzer() {
-    let _serial = serial();
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("app.persia");
+/// The registry of an application that registers `tags@1`, and its options.
+fn tags_options() -> DatabaseOptions {
     let mut registry = AnalyzerRegistry::builtin();
     registry
         .register("tags", 1, Analyzer::builder(WhitespaceTokenizer).build())
         .unwrap();
-    let schema = CollectionSchema::from_json_in(
-        r#"{"name": "notes", "fields": {"tags": {"type": "text", "analyzer": "tags"}}}"#,
-        &registry,
-    )
-    .unwrap();
-    let options = DatabaseOptions {
+    DatabaseOptions {
         registry,
         ..DatabaseOptions::default()
-    };
+    }
+}
+
+/// The collection `notes`, whose `tags` field names the registered `tags@1` (not `strict`: extra fields pad documents).
+fn tags_schema(options: &DatabaseOptions) -> CollectionSchema {
+    CollectionSchema::from_json_in(
+        r#"{"name": "notes", "strict": false, "fields": {"tags": {"type": "text", "analyzer": "tags"}}}"#,
+        &options.registry,
+    )
+    .unwrap()
+}
+
+/// A document of `notes` with tags `"a b"`.
+fn tagged(schema: &CollectionSchema, id: &str) -> Document {
+    let tags = schema.field("tags").unwrap().id();
+    Document::new(id).with(tags, Value::String("a b".into()))
+}
+
+/// The blob of document `id` of `notes`, read whole by the application (with `tags@1`) from a read-only open.
+fn app_blob(path: &Path, id: &str) -> Vec<u8> {
+    let ro = ReadOnlyBlobDatabase::open(path, &tags_options()).unwrap();
+    let snapshot = ro.database().snapshot();
+    let doc = snapshot
+        .collection("notes")
+        .unwrap()
+        .get(id)
+        .unwrap()
+        .unwrap_or_else(|| panic!("{id} is gone"));
+    let blob = doc.blob_ref().unwrap().clone();
+    ro.get_blob_range(&blob, 0..blob.size()).unwrap()
+}
+
+/// ROADMAP 10.4.7, ADR-0069: the command has the built-in analyzers only, and collects a database whose schema names a
+/// registered one anyway (the mark-only open, whose mark reads no term): the orphans go, the pack is rewritten, the
+/// referenced blob stays and reads back for the application, and `verify --deep` passes.
+#[test]
+fn gc_collects_a_schema_naming_a_registered_analyzer() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let options = tags_options();
+    let schema = tags_schema(&options);
     let mut db = BlobDatabase::create(&path, options).unwrap();
-    db.log_mut().create_collection(schema).unwrap();
+    db.log_mut().create_collection(schema.clone()).unwrap();
+    for (id, n) in [("n", 9), ("gone1", 10), ("gone2", 11)] {
+        let bytes = bytes_of(n);
+        db.put(
+            "notes",
+            &tagged(&schema, id),
+            Blob::from_reader(&bytes[..]),
+            Durability::Fsync,
+        )
+        .unwrap();
+    }
+    db.commit().unwrap();
+    for id in ["gone1", "gone2"] {
+        db.log_mut().delete("notes", id, Durability::Fsync).unwrap();
+    }
+    db.commit().unwrap();
+    drop(db);
+    let size_before = std::fs::metadata(pack(&path)).unwrap().len();
+
+    let done = gc_json(&path);
+    assert_eq!(done["marked"]["blobs"], 1, "{done}");
+    assert_eq!(done["deleted"]["blobs"], 2, "{done}");
+    assert_eq!(done["missing"], serde_json::json!([]), "{done}");
+    assert_eq!(done["rewrite"]["outcome"], "done", "{done}");
+    assert!(std::fs::metadata(pack(&path)).unwrap().len() < size_before);
+    assert_eq!(app_blob(&path, "n"), bytes_of(9));
+    let verified = persia(&["verify", "--deep", arg(&path)]);
+    assert!(verified.status.success(), "{}", stderr(&verified));
+}
+
+/// ROADMAP 10.4.7, ADR-0069: a blob referenced only by a WAL record of a collection whose analysis the open skips
+/// (never flushed: it stays in the WAL) is marked, so the sweep keeps it while it drops the orphans. The record is still
+/// a WAL record after the run, and the application reads the document and its blob.
+#[test]
+fn a_blob_only_an_unflushed_record_of_a_skipped_collection_references_survives_gc() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let options = tags_options();
+    let schema = tags_schema(&options);
+    let mut db = BlobDatabase::create(&path, options).unwrap();
+    db.log_mut().create_collection(schema.clone()).unwrap();
+    for (id, n) in [("gone1", 10), ("gone2", 11), ("gone3", 12)] {
+        let bytes = bytes_of(n);
+        db.put(
+            "notes",
+            &tagged(&schema, id),
+            Blob::from_reader(&bytes[..]),
+            Durability::Fsync,
+        )
+        .unwrap();
+    }
+    db.commit().unwrap();
+    for id in ["gone1", "gone2", "gone3"] {
+        db.log_mut().delete("notes", id, Durability::Fsync).unwrap();
+    }
+    db.commit().unwrap();
+    // Logged and synced, never committed: only the WAL references this blob.
+    let wal_bytes = bytes_of(13);
+    db.put(
+        "notes",
+        &tagged(&schema, "wal"),
+        Blob::from_reader(&wal_bytes[..]),
+        Durability::Fsync,
+    )
+    .unwrap();
+    drop(db);
+    let stats = json(&persia(&["stats", arg(&path), "--json"]));
+    assert_eq!(stats["collections"][0]["wal_documents"], 1, "{stats}");
+
+    let done = gc_json(&path);
+    assert_eq!(done["marked"]["blobs"], 1, "{done}");
+    assert_eq!(done["deleted"]["blobs"], 3, "{done}");
+    assert_eq!(done["rewrite"]["outcome"], "done", "{done}");
+    let stats = json(&persia(&["stats", arg(&path), "--json"]));
+    assert_eq!(
+        stats["collections"][0]["wal_documents"], 1,
+        "still a WAL record: {stats}"
+    );
+    assert_eq!(app_blob(&path, "wal"), wal_bytes);
+    let verified = persia(&["verify", "--deep", arg(&path)]);
+    assert!(verified.status.success(), "{}", stderr(&verified));
+}
+
+/// ROADMAP 10.4.7, the refusal (ADR-0069 item 4, ADR-0068 item 2): a WAL backlog of such a collection larger than the
+/// default memtable would have to be flushed by the open's replay, which needs the analyzer. The command fails with
+/// status 1 before it marks or sweeps anything, says why and what to do, and leaves the container and the pack as
+/// they were; once the application has flushed the backlog, it collects.
+#[test]
+fn gc_refuses_to_flush_a_backlog_that_needs_a_registered_analyzer() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let mut options = tags_options();
+    let schema = tags_schema(&options);
+    options.policy.flush.memtable_bytes = 1 << 30;
+    let mut db = BlobDatabase::create(&path, options).unwrap();
+    db.log_mut().create_collection(schema.clone()).unwrap();
     let bytes = bytes_of(9);
     db.put(
         "notes",
-        &Document::new("n"),
+        &tagged(&schema, "n"),
         Blob::from_reader(&bytes[..]),
         Durability::Fsync,
     )
     .unwrap();
     db.commit().unwrap();
+    // 18 documents of 4 MiB each (an extra field, stored and not analyzed): 72 MiB, all in the WAL.
+    let pad = Json::String("p".repeat(4 << 20));
+    for i in 0..18 {
+        let mut doc = tagged(&schema, &format!("big{i:02}"));
+        doc.insert_extra("pad", pad.clone());
+        db.log_mut()
+            .put("notes", &doc, Durability::Buffered)
+            .unwrap();
+    }
+    db.log_mut()
+        .put("notes", &Document::new("last"), Durability::Fsync)
+        .unwrap();
     drop(db);
     let before = (
         std::fs::read(&path).unwrap(),
         std::fs::read(pack(&path)).unwrap(),
     );
-    let out = persia(&["gc", arg(&path)]);
+    let out = persia(&["gc", arg(&path), "--json"]);
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(out.stdout, b"");
     let err = stderr(&out);
-    assert!(err.contains("tags@1"), "{err}");
     assert!(
-        err.contains("persia gc has the built-in analyzers only"),
+        err.contains(r#"collection "notes": its unflushed writes would have to be flushed, which needs the analyzer tags@1 of field "tags""#),
+        "{err}"
+    );
+    assert!(
+        err.contains("open the database with its application and commit"),
         "{err}"
     );
     let after = (
@@ -496,8 +642,13 @@ fn gc_refuses_a_schema_naming_a_registered_analyzer() {
         std::fs::read(pack(&path)).unwrap(),
     );
     assert!(after == before, "the files are unchanged");
-}
 
+    let mut db = Database::open(&path, tags_options()).unwrap();
+    db.commit().unwrap();
+    drop(db);
+    let done = gc_json(&path);
+    assert_eq!(done["marked"]["blobs"], 1, "{done}");
+}
 /// Review item M1: a refused grace costs no open. The database's WAL holds a backlog over the default 64 MiB memtable,
 /// which a writer's open flushes into a commit (SPEC §8.6), and its pack's lock file is gone (a lock file is never
 /// needed beforehand): `--grace 1h` exits 1 with the container and the pack byte-identical and no lock file created,

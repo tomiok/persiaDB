@@ -9,10 +9,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia gc` collects a database whose schema names an analyzer registered by its application (ROADMAP 10.4.7,
+  ADR-0069; SPEC §9.5): it opens with the new `persia_engine::db::MarkOnlyDatabase`, the compaction-only open's
+  recovery (one shared function: a no-token stand-in for each missing analyzer, and no flush of what it indexed,
+  `DatabaseError::AnalysisSkipped`), which offers `referenced_blobs` (GC's mark), `seq`, `writer_proof`,
+  `container_path` and `skipped_analysis`, and nothing that writes a document, commits, merges, compacts or changes a
+  schema. The mark reads no term, so a WAL record of such a collection (never flushed) keeps its blob. It fails (status
+  1, nothing marked or swept, the files as the refused open leaves them) only when its recovery would flush any
+  collection while such a collection holds a replayed record; open the database with its application and commit,
+  then collect. Exit statuses and `--json` output are otherwise unchanged. Underneath, `persia::internal`:
+  `BlobDatabase::open_mark_only`, `BlobReferences` for `MarkOnlyDatabase`, and `BlobDatabase::mark`/`gc` (and `log`,
+  `blobs`) no longer need a `DocumentLog`.
 - `persia gc <path> [--grace <dur>] [--json]` (ROADMAP 10.4.5; SPEC §9.5): blob garbage collection from the command
   line, through `persia::internal`'s `BlobDatabase::gc` (mark, sweep, pack rewrite at the default ratio). It opens the
   database read-write with its pack, so it fails (status 1) while another writer holds either; the built-in analyzers
-  only (a schema naming a registered one fails the open, ROADMAP 10.4.7). It reports what it marked, deleted (blobs,
+  only (a schema naming a registered one is collected with the mark-only open, ROADMAP 10.4.7, below). It reports what it marked, deleted (blobs,
   uploads, chunks) and kept (pinned, young, of unknown age, changed, unreadable), the rewrite's outcome and frame bytes,
   the pack file's size before and after, dangling references (`missing`), and the reader leases by state: a lease
   behind the committed seq (or opening, ahead, unreadable) holds the sweep back, and the report says so with status 0.
