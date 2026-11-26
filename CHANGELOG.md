@@ -492,7 +492,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `read_range` and the put and read paths use; `BlobManifest::check_ref` is unchanged, and only `verify` uses it.
 - `persia import` and `persia search` take their exit status from the embedded API's `ErrorCode` (ROADMAP 10.1.33):
   3 for `Corrupt` only, so a reference line with another `size` or `chunk_size` than its blob exits 1 (it exited 3),
-  naming its line, and a damaged blob manifest frame a put reaches still exits 3.
+  naming its line, and a damaged blob manifest frame a put reaches still exits 3. A segment's tombstone for a docid
+  the segment lacks is `Corrupt` by that code, so those two commands now exit 3 on it (they exited 1).
 - `persia`: for a plain search (`relax: false`), `SearchResponse::relaxation.effective` is now L0's text, as the response
   JSON states it, instead of `None` (ROADMAP 10.1.25). `Relaxation` has `corrected()`, `fallback()` and
   `filters_dropped()`, and `persia` re-exports `Correction` and `FallbackOrder`. **Breaking** (`persia-engine`):
