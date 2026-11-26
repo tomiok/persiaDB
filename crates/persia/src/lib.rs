@@ -72,7 +72,7 @@ pub use options::OpenOptions;
 #[doc(inline)]
 pub use persia_engine::query::{Filter, FilterValue};
 #[doc(inline)]
-pub use persia_engine::relax::{RelaxLevel, RelaxOptions};
+pub use persia_engine::relax::{Correction, FallbackOrder, RelaxLevel, RelaxOptions};
 #[doc(inline)]
 pub use persia_engine::search::{
     Explanation, FacetCounts, FacetRequest, FacetValue, FieldExplanation, Missing, Order,

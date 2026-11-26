@@ -113,8 +113,9 @@ impl MapPermit {
     /// # Safety
     /// As [`MapPermit::new`], and as [`Container::map_read_only_if_local`] for a pack: the permit maps only `file`, and
     /// the files a rewrite renames over its path, through a **read-only** handle (it never writes, truncates or remaps
-    /// over a file it changed) whose `File` Persia opened itself by path on the operating system's file system and
-    /// never hands out (no caller holds a clone through which safe code could truncate it). The pack's writer lock,
+    /// over a file it changed) whose `File` Persia opened itself, read-only, by path on the operating system's file system,
+    /// and hands out only as a read-only duplicate inside a `CommittedImage`, which only reads from it (no caller holds a
+    /// writable handle through which safe code could truncate it). The pack's writer lock,
     /// `<name>.persia.blobs.lock`, keeps a second Persia writer out of the pack (ROADMAP 9.2.15). Persia's writers
     /// never change a pack's bytes below a committed `log_end` (frames are append-only, recovery truncates only past
     /// it, a rewrite writes a new file and renames it over the path, SPEC §9.3). The residual is the caller's to

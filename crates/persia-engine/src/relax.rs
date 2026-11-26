@@ -291,6 +291,7 @@ pub(crate) struct Step {
 /// A word the fuzzy level replaced (SPEC §7.6 `"corrected"`, ROADMAP 8.2.4.3): a word no document holds, and the term
 /// of highest collection `df` within its distance, which the response searched instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Correction {
     /// The word as the user wrote it: `"Zapatilas"`.
     pub original: String,

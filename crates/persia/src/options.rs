@@ -265,7 +265,9 @@ impl OpenOptions {
     /// 10.2.4, 10.1.23): `true` maps each file that is on a local disk, `false` always reads both with ordinary reads
     /// (`pread`). By default it maps on a local disk, except on Windows, where it does not (ADR-0017, amended). A
     /// read-write `Db` maps neither, whatever this says. A mapped reader needs that no other program writes or
-    /// truncates either file while it is open.
+    /// truncates either file while it is open. On Windows, `true` also maps the blob pack, and a mapped pack may make
+    /// the writer's blob GC fail to rename its rewritten pack over it (on FAT32 or exFAT) or keep the writer from
+    /// truncating a torn pack tail, as for the container (ADR-0017 amended; ROADMAP 10.1.22, 10.1.32).
     ///
     /// ```
     /// use persia::OpenOptions;

@@ -271,6 +271,7 @@ impl ResumeToken {
 /// The blob of a document (SPEC §9.5, §9.6), for [`Collection::put_with_blob`](crate::Collection::put_with_blob):
 /// bytes to store with it, or a blob [`Db::put_blob`](crate::Db::put_blob) stored before. Bytes are stored, and
 /// durable, before the document is logged; a stored blob must be in this database's store.
+#[non_exhaustive]
 pub enum Blob<'r> {
     /// Bytes to store, from a reader ([`Blob::from_reader`]).
     Reader(Box<dyn Read + 'r>, PutBlobOptions),

@@ -288,7 +288,7 @@ impl SearchRequest {
 }
 
 /// The page a search returns (SPEC §7.5).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct SearchResponse {
     /// The page, best first (or in the request's sort).
@@ -301,6 +301,18 @@ pub struct SearchResponse {
     pub query_truncated: bool,
     /// The schema of the collection that answered, which names the response's fields in its JSON ([`Self::to_json`]).
     schema: Arc<CollectionSchema>,
+}
+
+/// Every public field; the schema it keeps to write its JSON is left out.
+impl std::fmt::Debug for SearchResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SearchResponse")
+            .field("hits", &self.hits)
+            .field("facets", &self.facets)
+            .field("relaxation", &self.relaxation)
+            .field("query_truncated", &self.query_truncated)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SearchResponse {
@@ -381,6 +393,64 @@ pub struct Relaxation {
 }
 
 impl Relaxation {
+    /// The words the fuzzy level replaced, in query order (`"corrected"`, SPEC §7.6): each required word no document
+    /// holds and the term searched instead ("did you mean"). Empty unless L4 found the hits.
+    ///
+    /// ```
+    /// use persia::SearchRequest;
+    ///
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// # let db = persia::Db::open(dir.path().join("app.persia"))?;
+    /// let shoes = db.create_collection_json(r#"{"name": "shoes", "fields": {"title": {"type": "text"}}}"#)?;
+    /// shoes.put_json(r#"{"id": "a", "title": "red sandals"}"#)?;
+    /// let response = shoes.search_json(r#"{"q": "red snadals", "relax": {"levels": ["fuzzy"]}}"#)?;
+    /// let corrected = response.relaxation.corrected();
+    /// assert_eq!((corrected[0].original.as_str(), corrected[0].corrected.as_str()), ("snadals", "sandals"));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn corrected(&self) -> &[Correction] {
+        &self.corrected
+    }
+
+    /// The order L5 `fallback` ranked the hits in (`"fallback"`, SPEC §7.6), when L5 found them.
+    ///
+    /// ```
+    /// use persia::FallbackOrder;
+    ///
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// # let db = persia::Db::open(dir.path().join("app.persia"))?;
+    /// let notes = db.create_collection_json(r#"{"name": "notes", "fields": {"body": {"type": "text"}}}"#)?;
+    /// notes.put_json(r#"{"id": "n1", "body": "hello"}"#)?;
+    /// let response = notes.search_json(r#"{"q": "purple"}"#)?;
+    /// assert_eq!(response.relaxation.fallback(), Some(FallbackOrder::Recency)); // no static rank
+    /// assert_eq!(notes.search_json(r#"{"q": "hello"}"#)?.relaxation.fallback(), None);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn fallback(&self) -> Option<FallbackOrder> {
+        self.fallback
+    }
+
+    /// Whether the last resort dropped the filters to find the hits (`"filters_dropped"`, SPEC §7.6): only in a
+    /// collection whose relaxation allows it (`filters: "last_resort"`).
+    ///
+    /// ```
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// # let db = persia::Db::open(dir.path().join("app.persia"))?;
+    /// let notes = db.create_collection_json(r#"{"name": "notes", "fields": {"body": {"type": "text"}}}"#)?;
+    /// notes.put_json(r#"{"id": "n1", "body": "hello"}"#)?;
+    /// assert!(!notes.search_json(r#"{"q": "hello"}"#)?.relaxation.filters_dropped());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn filters_dropped(&self) -> bool {
+        self.filters_dropped
+    }
+
     /// The facade's value of what the engine's cascade did, or of the `exact` a plain search states.
     fn of(r: &EngineRelaxation) -> Self {
         Self {

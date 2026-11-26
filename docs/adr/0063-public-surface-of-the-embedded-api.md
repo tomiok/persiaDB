@@ -172,4 +172,13 @@ to install, in the repo tooling that already reads JSON (`serde_json`, allowed i
    layer, ADR-0051) or `test-hooks`, which are not stable.
 5. **The gate.** The listing is committed as `crates/persia/public-api.txt`; `just public-api` regenerates it, and
    `cargo xtask public-api --check` (CI's `repo-checks` job, and `just repo-checks`) fails with the lines added and
-   removed when the surface changed without it. `cargo semver-checks` still waits for the first publish (10.5.1).
+. **Generated on Linux.** rustdoc renders the target it runs on, so the committed file is the surface on Linux
+   (x86_64): CI's `repo-checks` job runs on `ubuntu-latest`. Items behind `cfg(windows)` or another target are not in
+   it; none of `persia`'s public items is target-specific today.
+
+## Amendment (2026-11-26): `Correction` and `FallbackOrder` join item 2 (ROADMAP 10.1.25, review)
+
+`persia::Relaxation` has typed getters for what the response JSON states beside its public fields: `corrected()`
+(`&[Correction]`), `fallback()` (`Option<FallbackOrder>`) and `filters_dropped()`. The two engine types they name are
+plain values of the relaxation cascade, re-exported under `persia::` beside `RelaxLevel`; `Correction` is now
+`#[non_exhaustive]`, so its fields can grow. `persia::Blob` is `#[non_exhaustive]` too.

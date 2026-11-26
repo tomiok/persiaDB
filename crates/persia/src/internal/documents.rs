@@ -21,7 +21,7 @@ use std::sync::atomic::AtomicUsize;
 /// [`ReadOnlyBlobDatabase::with_lease`].
 pub use persia_blob::pack::lease::ReaderLease;
 use persia_blob::pack::lease::leases_dir;
-use persia_blob::pack::{ContainerFile, Vfs};
+use persia_blob::pack::{ContainerFile, RealFs, Vfs};
 use persia_blob::{BlobId, BlobRef, BlobStore, PackStore, pack_path};
 use persia_engine::db::{
     Database, DatabaseError, DatabaseOptions, MappedReads, ReadOnlyDatabase, ReadOnlyOptions,
@@ -478,22 +478,49 @@ impl<L: DocumentLog + ?Sized> Drop for LogMut<'_, L> {
     }
 }
 
-/// Removes the container `create` just made, after the pack failed to open. The caller still holds the database, and
-/// with it the writer lock (ROADMAP 10.2.7): no other open can take the lock and open the file, and no create can
-/// make a new file at the path (the name is taken until this removal), so the file removed is the one `create` made.
-/// On Unix the name goes now; an open that had the file before the removal finds it unlinked once it takes the lock,
-/// and opens the path again (`Container::open`). On Windows the
-/// container is open with delete sharing (the standard library's default), so the removal deletes it on close, and
-/// an open of a file being deleted fails until the name goes. A removal that fails is reported with the pack error: a
-/// retry would not work.
-fn remove_created_container(container: &Path, error: Error) -> Error {
-    match std::fs::remove_file(container) {
+/// Removes the container `create` just made at `container` on `vfs`, after the pack failed to open, and syncs its
+/// directory so the removal is durable: a retry, also after a crash, must not find it (SPEC §9.3).
+///
+/// The caller still holds the database, and with it the writer lock (ROADMAP 10.2.7); the removal's safety rests on
+/// that lock, held until the caller drops the database after this returns. On Unix the lock is on the container file
+/// itself: no other open can take it, and an open that had the file before the removal finds it unlinked once it
+/// takes the lock and opens the path again (`Container::open`). On Windows the lock is the `<name>.lock` file beside
+/// the container: a racing open or create stops at it (`Locked`, or `AlreadyExists` for a create) until the database
+/// drops, and by then the name is gone, whichever way the file system deletes a file that is still open (the
+/// container is open with the standard library's delete sharing). No create can make a new file at the path while
+/// this runs (the name is taken until the removal, and on Windows the lock beside it is held), so the file removed is
+/// the one `create` made. A removal or sync that fails is reported with the pack error: a retry would not work.
+fn remove_created_container<F: ContainerFile>(
+    vfs: &dyn Vfs<File = F>,
+    container: &Path,
+    error: Error,
+) -> Error {
+    let removed = match vfs.remove_file(container) {
+        // Gone already (removed by hand): its directory is synced all the same.
+        Err(cleanup) if cleanup.kind() != io::ErrorKind::NotFound => Err((
+            "remove the database created before its pack failed to open",
+            cleanup,
+        )),
+        _ => Ok(()),
+    };
+    let dir = container
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let done = removed.and_then(|()| {
+        vfs.sync_dir(dir).map_err(|cleanup| {
+            (
+                "sync the directory of the database removed after its pack failed to open",
+                cleanup,
+            )
+        })
+    });
+    match done {
         Ok(()) => error,
-        Err(cleanup) if cleanup.kind() == io::ErrorKind::NotFound => error,
-        Err(cleanup) => Error::Blob(persia_blob::Error::PackIo {
-            op: "remove the database created before its pack failed to open",
+        Err((op, cleanup)) => Error::Blob(persia_blob::Error::PackIo {
+            op,
             source: io::Error::other(format!(
-                "{error}; removing {} also failed: {cleanup}",
+                "{error}; then for {}: {op}: {cleanup}",
                 container.display()
             )),
         }),
@@ -507,13 +534,6 @@ enum CreateStage {
     PackFailed,
     /// The container was removed.
     Removed,
-}
-
-/// The pack at `pack`, opened read-write with `db`'s writer proof ([`PackStore::open_writer`]). `db` is borrowed, so a
-/// failure leaves it with the caller, its lock still held.
-fn open_writer_pack(db: &Database, pack: &Path) -> Result<PackStore, Error> {
-    let proof = db.writer_proof();
-    Ok(PackStore::open_writer(pack, &proof)?)
 }
 
 impl From<DatabaseError> for Error {
@@ -597,27 +617,8 @@ impl BlobDatabase<PackStore> {
     /// call and never returned, and a retry must not find it (SPEC §9.3). It is removed before `db` drops, while the
     /// writer lock is still held (ROADMAP 10.2.7).
     fn finish_create(db: Database, pack: &Path, container: &Path) -> Result<Self, Error> {
-        Self::finish_create_observed(db, pack, container, |_| {})
-    }
-
-    /// [`Self::finish_create`], calling `observe` while `db` still holds its lock: once the pack failed to open, and
-    /// once the container is removed. Tests race other opens there.
-    fn finish_create_observed(
-        db: Database,
-        pack: &Path,
-        container: &Path,
-        mut observe: impl FnMut(CreateStage),
-    ) -> Result<Self, Error> {
-        match open_writer_pack(&db, pack) {
-            Ok(store) => Ok(Self::with_writer_pack(db, store)),
-            Err(error) => {
-                observe(CreateStage::PackFailed);
-                let error = remove_created_container(container, error);
-                observe(CreateStage::Removed);
-                drop(db);
-                Err(error)
-            }
-        }
+        let vfs: Arc<dyn Vfs<File = File>> = Arc::new(RealFs);
+        Self::finish_create_observed(db, &vfs, pack, container, |_| {})
     }
 
     /// Opens the database in the container file at `path` read-write ([`Database::open`]) with its blob pack, as
@@ -639,16 +640,11 @@ impl BlobDatabase<PackStore> {
     /// # Errors
     /// As [`PackStore::open_writer`]: [`persia_blob::Error::PackLocked`] while another handle writes the pack.
     pub fn with_pack(db: Database, pack: impl AsRef<Path>) -> Result<Self, Error> {
-        let store = open_writer_pack(&db, pack.as_ref())?;
+        let store = {
+            let proof = db.writer_proof();
+            PackStore::open_writer(pack, &proof)?
+        };
         Ok(Self::with_writer_pack(db, store))
-    }
-
-    /// `db` with `store`, a pack opened with `db`'s writer proof.
-    fn with_writer_pack(db: Database, store: PackStore) -> Self {
-        let db_uuid = db.writer_proof().db_uuid();
-        let mut opened = Self::new(db, Blobs::new(Arc::new(store)));
-        opened.pack_db_uuid = Some(db_uuid);
-        opened
     }
 }
 
@@ -662,12 +658,46 @@ impl<F: ContainerFile + Sync + 'static> BlobDatabase<PackStore<F>, Database<F>> 
         vfs: Arc<dyn Vfs<File = F>>,
         pack: impl AsRef<Path>,
     ) -> Result<Self, Error> {
+        let store = {
+            let proof = db.writer_proof();
+            PackStore::open_writer_in(vfs, pack, &proof)?
+        };
+        Ok(Self::with_writer_pack(db, store))
+    }
+
+    /// `db`, just created at `container` on `vfs`, with its pack at `pack` ([`Self::finish_create`]), calling `observe`
+    /// while `db` still holds its lock: once the pack failed to open, and once the container is removed. Tests race
+    /// other opens there, and crash a simulated file system after it.
+    fn finish_create_observed(
+        db: Database<F>,
+        vfs: &Arc<dyn Vfs<File = F>>,
+        pack: &Path,
+        container: &Path,
+        mut observe: impl FnMut(CreateStage),
+    ) -> Result<Self, Error> {
+        // `db` is borrowed by the proof only: a failure leaves it here, its lock still held.
+        let opened = {
+            let proof = db.writer_proof();
+            PackStore::open_writer_in(Arc::clone(vfs), pack, &proof)
+        };
+        match opened {
+            Ok(store) => Ok(Self::with_writer_pack(db, store)),
+            Err(error) => {
+                observe(CreateStage::PackFailed);
+                let error = remove_created_container(&**vfs, container, error.into());
+                observe(CreateStage::Removed);
+                drop(db);
+                Err(error)
+            }
+        }
+    }
+
+    /// `db` with `store`, a pack opened with `db`'s writer proof.
+    fn with_writer_pack(db: Database<F>, store: PackStore<F>) -> Self {
         let db_uuid = db.writer_proof().db_uuid();
-        let proof = db.writer_proof();
-        let store = PackStore::open_writer_in(vfs, pack, &proof)?;
         let mut opened = Self::new(db, Blobs::new(Arc::new(store)));
         opened.pack_db_uuid = Some(db_uuid);
-        Ok(opened)
+        opened
     }
 }
 
@@ -1142,6 +1172,11 @@ mod tests {
         BlobDatabase::create(&path, DatabaseOptions::default()).unwrap();
     }
 
+    /// The operating system's file system, as `finish_create_observed` takes it.
+    fn real() -> Arc<dyn Vfs<File = File>> {
+        Arc::new(RealFs)
+    }
+
     /// A database just created at `path`, with a directory where its pack goes, so the pack open of `finish_create`
     /// fails with an I/O error.
     fn created_with_a_failing_pack(path: &Path) -> (Database, PathBuf) {
@@ -1180,7 +1215,7 @@ mod tests {
         // A handle on the file the lock is on, taken while the container is still there: its lock being taken
         // tells that the creator still holds it, also once the container's name is gone.
         let mut lock_probe = None;
-        let err = BlobDatabase::finish_create_observed(db, &pack, &path, |stage| {
+        let err = BlobDatabase::finish_create_observed(db, &real(), &pack, &path, |stage| {
             stages.push(stage);
             let probe = lock_probe.get_or_insert_with(|| writer_lock_file(&path));
             assert!(
@@ -1204,8 +1239,8 @@ mod tests {
                     let Err(Error::Database(e)) = raced else {
                         panic!("nothing is left to open: {raced:?}");
                     };
-                    // Unix: the name is gone. Windows: the lock beside the container is still taken (and the file,
-                    // deleted when the creator closes it, refuses opens meanwhile).
+                    // Unix: the name is gone. Windows: the lock beside the container is still taken, so the open stops
+                    // there, whatever the file system does with a removed file that is still open.
                     let refused = if cfg!(windows) {
                         matches!(*e, DatabaseError::Container(container::Error::Locked))
                     } else {
@@ -1241,6 +1276,62 @@ mod tests {
         }
     }
 
+    /// ROADMAP 10.2.7, SPEC §9.3: the removal of a failed create is durable. A crash right after it (every unsynced
+    /// change lost) leaves no container for a retry to find, and the retry creates the database.
+    #[test]
+    fn a_failed_creates_removal_survives_a_crash() {
+        use persia_storage::container::Container;
+        use persia_storage::container::sim::CrashLoss;
+        use persia_storage::vfs::sim::{SimFs, SimFsFile};
+
+        let fs = SimFs::new();
+        fs.create_dir(Path::new("/db")).unwrap();
+        fs.sync_dir(Path::new("/")).unwrap();
+        let vfs: Arc<dyn Vfs<File = SimFsFile>> = Arc::new(fs.clone());
+        let path = Path::new("/db/app.persia");
+        let db = Database::create_container(
+            Container::create_in(Arc::clone(&vfs), path).unwrap(),
+            DatabaseOptions::default(),
+        )
+        .unwrap();
+        // The container is durable now (create syncs its directory): only the removal's own sync can make it go.
+        assert!(fs.crash(CrashLoss::All).read(path).is_some());
+        let pack = pack_path(path);
+        fs.create_dir(&pack).unwrap(); // a directory is not a pack: the open fails
+        let err = BlobDatabase::finish_create_observed(db, &vfs, &pack, path, |_| {}).unwrap_err();
+        assert!(
+            matches!(err, Error::Blob(persia_blob::Error::PackIo { .. })),
+            "{err:?}"
+        );
+        let after = fs.crash(CrashLoss::All);
+        assert!(after.read(path).is_none(), "the removal was not synced");
+        let vfs: Arc<dyn Vfs<File = SimFsFile>> = Arc::new(after);
+        Container::create_in(vfs, path).unwrap();
+    }
+
+    /// A sync of the directory that fails after the removal is reported with the pack error, never swallowed.
+    #[test]
+    fn a_removal_whose_directory_sync_fails_is_reported() {
+        use persia_storage::vfs::sim::SimFs;
+
+        let fs = SimFs::new();
+        fs.create_dir(Path::new("/db")).unwrap();
+        let pack_error = || Error::PackExists {
+            path: PathBuf::from("/db/pack"),
+        };
+        // The directory of `/gone/app.persia` does not exist: the removal finds nothing, and the sync fails.
+        let failed = remove_created_container(&fs, Path::new("/gone/app.persia"), pack_error());
+        let Error::Blob(persia_blob::Error::PackIo { op, .. }) = &failed else {
+            panic!("{failed:?}");
+        };
+        assert_eq!(
+            *op,
+            "sync the directory of the database removed after its pack failed to open"
+        );
+        let gone = remove_created_container(&fs, Path::new("/db/app.persia"), pack_error());
+        assert!(matches!(gone, Error::PackExists { .. }), "{gone:?}");
+    }
+
     /// A removal that finds the container gone already reports the pack error alone; one that fails otherwise
     /// reports both, as an I/O error of the pack (a retry would not work).
     #[test]
@@ -1249,12 +1340,12 @@ mod tests {
         let pack_error = || Error::PackExists {
             path: dir.path().join("pack"),
         };
-        let gone = remove_created_container(&dir.path().join("gone.persia"), pack_error());
+        let gone = remove_created_container(&RealFs, &dir.path().join("gone.persia"), pack_error());
         assert!(matches!(gone, Error::PackExists { .. }), "{gone:?}");
         // A directory cannot be removed as a file.
         let stuck = dir.path().join("stuck.persia");
         std::fs::create_dir(&stuck).unwrap();
-        let failed = remove_created_container(&stuck, pack_error());
+        let failed = remove_created_container(&RealFs, &stuck, pack_error());
         let Error::Blob(persia_blob::Error::PackIo { op, source }) = &failed else {
             panic!("{failed:?}");
         };

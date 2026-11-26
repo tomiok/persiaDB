@@ -677,4 +677,47 @@ mod tests {
         assert_eq!(store.mapping_failures(), 0);
         assert_eq!(read_chunk_checked(&store, &m, 1).unwrap(), b"mapp");
     }
+
+    /// ROADMAP 10.1.23 (the `SAFETY` of `read_only_mapped.rs`): the only file handle a store `open_mapped_if_local`
+    /// opened hands out, the duplicate inside its `committed_image`, is of the read-only open: no write and no
+    /// truncation goes through it, and copying the image leaves the pack as it was.
+    #[test]
+    fn a_mapped_read_only_store_hands_out_no_handle_that_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let container = Container::create(dir.path().join("app.persia")).unwrap();
+        let path = crate::pack::pack_path(&dir.path().join("app.persia"));
+        let writer = PackStore::open_writer(&path, &container.writer_proof().unwrap()).unwrap();
+        let m = manifest_of(b"kept as it is", 8, 1);
+        writer.stage_chunk(m.upload_id(), 0, b"kept as ").unwrap();
+        writer.stage_chunk(m.upload_id(), 1, b"it is").unwrap();
+        assert_eq!(writer.bind(&m).unwrap(), BindOutcome::Bound);
+        let reader = PackStore::open_mapped_if_local(&path, container.header().db_uuid).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        // The handle `committed_image` duplicates, duplicated the same way.
+        let duplicate = {
+            let inner = reader.read();
+            inner
+                .pack
+                .as_ref()
+                .unwrap()
+                .file
+                .try_clone_handle()
+                .unwrap()
+        };
+        assert!(duplicate.write_all_at(b"x", 0).is_err(), "written through");
+        assert!(
+            duplicate.write_all_at(b"x", before.len() as u64).is_err(),
+            "appended through"
+        );
+        assert!(duplicate.set_len(0).is_err(), "truncated through");
+        let image = reader.committed_image().unwrap().unwrap();
+        let copy = File::create(dir.path().join("copy.blobs")).unwrap();
+        image.write_to(&copy).unwrap();
+        drop((image, copy));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "the pack is unchanged"
+        );
+    }
 }

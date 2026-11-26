@@ -22,8 +22,10 @@ fn map_read_only_if_local(file: &File, range: Range<u64>) -> io::Result<Option<B
     // Persia opened by path and never hands out. What Persia can rule out holds by construction: this function is
     // reached only from the `Mapper` of a `PackStore` that `PackStore::open_mapped_if_local` opened, or that the
     // `reopen` of one opened: a `PackMode::ReadOnly` handle (it never writes, truncates or creates the file, and never
-    // remaps over a file it changed), whose `File`s are opened by the store itself, by path, on the operating system's
-    // file system (`RealFs`), and never leave it. It maps only `12288..log_end` of a slot it read on that file (the
+    // remaps over a file it changed), whose `File`s are opened by the store itself, read-only, by path, on the operating
+    // system's file system (`RealFs`). They never leave the store but as a duplicate of the read-only handle inside a
+    // `CommittedImage` (`PackStore::committed_image`), which only reads from it (`write_to` reads it and writes another
+    // file): a duplicate shares the read-only open, so no write or truncation can go through it. It maps only `12288..log_end` of a slot it read on that file (the
     // `Mapper`'s `remap`), bytes Persia's writers never change again: frames are append-only, a writer's recovery
     // truncates only past the committed `log_end`, and a GC rewrite writes a new file and renames it over the path,
     // which this handle keeps reading until it is reopened (SPEC §9.3, ROADMAP 9.2.13). The pack's writer lock keeps a

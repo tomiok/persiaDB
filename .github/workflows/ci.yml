@@ -89,6 +89,10 @@ jobs:
       # The embedded API's real-process tests (ROADMAP 10.1.9, 10.2.3): the Windows writer lock, kills and shutdown.
       - run: cargo test -p persia --test db_process --no-fail-fast
       - run: cargo test -p persia-engine --test read_only_mapped --no-fail-fast
+      # A failed create removes its container under the writer lock beside it (ROADMAP 10.2.7), and a read-only Db
+      # maps its pack like its container, not by default on Windows (ROADMAP 10.1.23).
+      - run: cargo test -p persia --lib --no-fail-fast -- internal::documents::tests::
+      - run: cargo test -p persia --test read_paths --no-fail-fast
 
   repo-checks:
     runs-on: ubuntu-latest

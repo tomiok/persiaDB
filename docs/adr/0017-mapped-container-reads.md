@@ -177,7 +177,9 @@ container, the same way:
    the module decision 1 allows to map) returns a permit when `file` is on an allow-listed local disk file system
    (ADR-0021; unknown counts as not local), and `None` otherwise. Its `# Safety` contract is `MapPermit::new`'s plus
    `Container::map_read_only_if_local`'s for a pack: the permit maps only through a read-only handle whose `File`
-   Persia opened itself by path on the operating system's file system and never hands out. The pack's writer lock
+   Persia opened itself, read-only, by path on the operating system's file system, and hands out only as a read-only
+   duplicate inside a `CommittedImage` (`PackStore::committed_image`, for a backup), which only reads from it. The
+   pack's writer lock
    (`<name>.persia.blobs.lock`, ROADMAP 9.2.15) keeps a second Persia writer out, and Persia's writers never change a
    pack's bytes below a committed `log_end` (SPEC §9.3). No safe public function of `persia-storage` maps.
 2. **One audited caller.** `crates/persia-blob/src/pack/store/read_only_mapped.rs` is `persia-blob`'s one module that
@@ -186,7 +188,9 @@ container, the same way:
    opens: read-only, by path, on `RealFs`, with no way for a caller to hand in a file or a `Vfs`, which is what the
    `SAFETY` comment rests on. The map function asks for the permit at each mapping (so a pack created after the open,
    and the file a rewrite renamed over the path, are judged on their own), and a file off a local disk is read with
-   `pread`, not counted as a failed mapping.
+   `pread`, not counted as a failed mapping. So `persia-blob` has a safe public function that maps, `PackStore::open_mapped_if_local`: the
+   pack's counterpart of the engine's `ReadOnlyDatabase::open_with_options`, with the same residual (below). No safe
+   public function of `persia-storage` maps.
 3. **A rewrite is followed.** A read-only pack stays on the file it opened when a refresh finds it replaced (ROADMAP
    9.2.13); the reader's `PackStore::reopen` then opens the replacement, and a handle `open_mapped_if_local` opened
    reopens mapped the same way (the handle keeps the function that makes its map function). Every other open, and

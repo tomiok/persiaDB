@@ -20,7 +20,7 @@ pub use persia_storage::container::WriterProof;
 /// A committed state of the pack or the container, to copy ([`PackStore::committed_image`], SPEC §4.8).
 pub use persia_storage::container::CommittedImage;
 pub use persia_storage::container::ContainerFile;
-pub use persia_storage::vfs::Vfs;
+pub use persia_storage::vfs::{RealFs, Vfs};
 
 /// What the pack's file name adds to its container's: `app.persia` keeps its blobs in `app.persia.blobs` (SPEC §4).
 pub const PACK_SUFFIX: &str = ".blobs";

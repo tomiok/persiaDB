@@ -781,6 +781,68 @@ mod tests {
         );
     }
 
+    /// `Relaxation`'s getters state what the JSON states (ROADMAP 10.1.25 review): for a collection that lets the last
+    /// resort drop filters, an L5 search and one whose filters were dropped.
+    #[test]
+    fn the_relaxation_getters_match_the_json() {
+        use persia_engine::schema::{FilterRelaxation, RelaxationConfig};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("app.persia")).unwrap();
+        let schema = SchemaBuilder::new("shoes")
+            .field("title", FieldKind::Text(TextOptions::default()))
+            .field("brand", FieldKind::Keyword(KeywordOptions::default()))
+            .relaxation(RelaxationConfig::default().filters(FilterRelaxation::LastResort))
+            .build()
+            .unwrap();
+        let shoes = db.create_collection(schema).unwrap();
+        shoes
+            .put_json(r#"{"id": "a", "title": "red sandals", "brand": "nike"}"#)
+            .unwrap();
+        let mut seen = (false, false);
+        for request in [
+            r#"{"q": "purple"}"#,
+            r#"{"q": "red", "soft_filter": {"term": ["brand", "zeta"]}}"#,
+            r#"{"q": "red snadals", "relax": {"levels": ["fuzzy"]}}"#,
+        ] {
+            let response = shoes.search_json(request).unwrap();
+            let json: J = serde_json::from_str(&response.to_json().unwrap()).unwrap();
+            let r = &response.relaxation;
+            let corrected: serde_json::Map<String, J> = r
+                .corrected()
+                .iter()
+                .map(|c| (c.original.clone(), J::String(c.corrected.clone())))
+                .collect();
+            assert_eq!(
+                json["relaxation"]["corrected"],
+                J::Object(corrected),
+                "{request}"
+            );
+            assert_eq!(
+                json["relaxation"].get("fallback").and_then(J::as_str),
+                r.fallback().map(persia_engine::relax::FallbackOrder::name),
+                "{request}"
+            );
+            assert_eq!(
+                json["relaxation"]["filters_dropped"],
+                J::Bool(r.filters_dropped()),
+                "{request}"
+            );
+            let debug = format!("{response:?}");
+            assert!(
+                debug.contains("relaxation") && !debug.contains("schema"),
+                "{debug}"
+            );
+            seen.0 |= r.fallback().is_some();
+            seen.1 |= r.filters_dropped();
+        }
+        assert_eq!(
+            seen,
+            (true, true),
+            "an L5 search and one whose filters were dropped"
+        );
+    }
+
     /// Requests of the grammar's keys that change what a response holds, as the engine's test draws them.
     fn any_request() -> impl Strategy<Value = J> {
         let words = prop_oneof![
