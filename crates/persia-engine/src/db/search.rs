@@ -157,7 +157,7 @@ pub struct SearchHit {
 
 impl SearchHit {
     /// The keys of the sort that ranked it, one per sort value.
-    pub(crate) fn sort_keys(&self) -> &[SortKey] {
+    pub fn sort_keys(&self) -> &[SortKey] {
         &self.sort_keys
     }
 

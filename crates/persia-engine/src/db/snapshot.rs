@@ -96,6 +96,12 @@ impl CollectionSnapshot {
         &self.schema
     }
 
+    /// The committed schema, shared: what a value that outlives the snapshot keeps to name its fields (the embedded
+    /// API's search response, ROADMAP 10.1.25).
+    pub fn shared_schema(&self) -> Arc<CollectionSchema> {
+        Arc::clone(&self.schema)
+    }
+
     /// The collection's query compiler (SPEC §7.1.1): it analyzes user text with the analyzers the database indexes
     /// this collection's `text` fields with (its registry's, SPEC §6.2.2), so a query's terms are the ones the index
     /// holds. One per schema, shared by every snapshot of the collection until its schema changes, so the synonym

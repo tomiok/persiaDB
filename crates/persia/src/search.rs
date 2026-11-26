@@ -6,16 +6,21 @@
 //! crosses the API as an opaque token (SPEC §7.4): [`Hit::cursor`], [`SearchResponse::next_cursor`] and
 //! [`SearchRequest::after`].
 
-use persia_engine::db::{RelaxedHit, SearchHit};
+use std::sync::Arc;
+
+use persia_engine::db::{Relaxation as EngineRelaxation, RelaxedHit, SearchHit};
 use persia_engine::document::Document;
 use persia_engine::query::{DefaultFields, Filter, QueryLimits};
-use persia_engine::relax::{RelaxLevel, RelaxOptions};
+use persia_engine::relax::{Correction, FallbackOrder, RelaxLevel, RelaxOptions};
 use persia_engine::schema::CollectionSchema;
 use persia_engine::search::request::{QueryRequest, QueryResponse, QueryResults, RunOptions};
-use persia_engine::search::{Explanation, FacetCounts, FacetRequest, Sort};
+use persia_engine::search::{Explanation, FacetCounts, FacetRequest, Sort, SortKey, SortValue};
 
 use crate::collection::Collection;
 use crate::{Error, Result};
+
+// The response JSON (ROADMAP 10.1.25): `SearchResponse` is `Serialize`, and `to_json` writes it.
+mod json;
 
 /// A search request (SPEC §7.1): the user text `q`, and what narrows, orders and pages its hits. Build it with
 /// [`SearchRequest::new`] and the setters; [`Collection::search`] runs it. Field ids come from the collection's
@@ -294,6 +299,8 @@ pub struct SearchResponse {
     pub relaxation: Relaxation,
     /// Whether part of `q` was left out to stay within the query limits (SPEC §7.1.1).
     pub query_truncated: bool,
+    /// The schema of the collection that answered, which names the response's fields in its JSON ([`Self::to_json`]).
+    schema: Arc<CollectionSchema>,
 }
 
 impl SearchResponse {
@@ -335,6 +342,20 @@ pub struct Hit {
     pub explanation: Option<Explanation>,
     /// The cursor token of the page after this hit (SPEC §7.4), for [`SearchRequest::after`].
     pub cursor: String,
+    /// Its values for the sort keys, as the engine ranks them, typed by the schema in the response JSON.
+    sort: Vec<SortValue>,
+    /// The keys of the sort that ranked it, one per value.
+    sort_keys: Vec<SortKey>,
+    /// Its step and rank score, for a hit of a relaxed search (SPEC §7.6).
+    relaxed: Option<RelaxedStep>,
+}
+
+/// The step that matched a relaxed search's hit, and its rank score (SPEC §7.6): what the response JSON states beside
+/// the hit's level.
+#[derive(Debug, Clone, Copy)]
+struct RelaxedStep {
+    step: usize,
+    rank_score: f64,
 }
 
 /// What the relaxation cascade did for a response (SPEC §7.6).
@@ -351,65 +372,76 @@ pub struct Relaxation {
     pub effective: Option<String>,
     /// Whether the cascade's time budget cut it short (`"truncated"`).
     pub truncated: bool,
+    /// The words the fuzzy level replaced (`"corrected"`), in query order.
+    corrected: Vec<Correction>,
+    /// The order L5 found the hits in (`"fallback"`), when it did.
+    fallback: Option<FallbackOrder>,
+    /// Whether the last resort dropped the filters (`"filters_dropped"`).
+    filters_dropped: bool,
 }
 
 impl Relaxation {
-    fn exact(original: &str) -> Self {
+    /// The facade's value of what the engine's cascade did, or of the `exact` a plain search states.
+    fn of(r: &EngineRelaxation) -> Self {
         Self {
-            level: RelaxLevel::Exact,
-            applied: Vec::new(),
-            original: Some(original.to_owned()),
-            effective: None,
-            truncated: false,
+            level: r.level,
+            applied: r.applied.clone(),
+            original: r.original.clone(),
+            effective: r.effective.clone(),
+            truncated: r.truncated,
+            corrected: r.corrected.clone(),
+            fallback: r.fallback,
+            filters_dropped: r.filters_dropped,
         }
     }
 }
 
 fn plain_hit(hit: SearchHit) -> Hit {
+    let sort_keys = hit.sort_keys().to_vec();
     Hit {
         cursor: hit.cursor().to_token(),
         document: hit.document,
         score: hit.score,
         level: RelaxLevel::Exact,
         explanation: hit.explanation,
+        sort: hit.sort,
+        sort_keys,
+        relaxed: None,
     }
 }
 
 fn relaxed_hit(hit: RelaxedHit) -> Hit {
-    let cursor = hit.cursor().to_token();
+    let relaxed = Some(RelaxedStep {
+        step: hit.step,
+        rank_score: hit.rank_score,
+    });
     Hit {
-        cursor,
         level: hit.level,
-        score: hit.hit.score,
-        document: hit.hit.document,
-        explanation: hit.hit.explanation,
+        relaxed,
+        ..plain_hit(hit.hit)
     }
 }
 
-fn response(q: &str, response: QueryResponse) -> Result<SearchResponse> {
+/// The facade's response for `response`, a search of the collection of `schema`.
+fn response(response: QueryResponse, schema: Arc<CollectionSchema>) -> Result<SearchResponse> {
     let query_truncated = response.query_truncated;
+    // A plain search states level `exact` with L0's text (SPEC §7.6), as the engine's response JSON does.
+    let relaxation = Relaxation::of(response.relaxation());
     match response.results {
         QueryResults::Plain(results) => Ok(SearchResponse {
             hits: results.hits.into_iter().map(plain_hit).collect(),
             facets: results.facets,
-            relaxation: Relaxation::exact(q),
+            relaxation,
             query_truncated,
+            schema,
         }),
-        QueryResults::Relaxed(results) => {
-            let r = results.relaxation;
-            Ok(SearchResponse {
-                hits: results.hits.into_iter().map(relaxed_hit).collect(),
-                facets: results.facets,
-                relaxation: Relaxation {
-                    level: r.level,
-                    applied: r.applied,
-                    original: r.original,
-                    effective: r.effective,
-                    truncated: r.truncated,
-                },
-                query_truncated,
-            })
-        }
+        QueryResults::Relaxed(results) => Ok(SearchResponse {
+            hits: results.hits.into_iter().map(relaxed_hit).collect(),
+            facets: results.facets,
+            relaxation,
+            query_truncated,
+            schema,
+        }),
         // `#[non_exhaustive]`: a kind of results this build does not know.
         _ => Err(Error::new(
             crate::ErrorCode::Unsupported,
@@ -470,7 +502,7 @@ impl Collection {
         self.read(|c| {
             let lowered = request.lower(c.schema())?;
             let ran = lowered.run(c, run).map_err(Error::wrap)?;
-            response(&request.q, ran)
+            response(ran, c.shared_schema())
         })
     }
 
@@ -499,9 +531,8 @@ impl Collection {
             let limits = QueryLimits::default();
             let request =
                 QueryRequest::from_json(json, c.schema(), &limits).map_err(Error::wrap)?;
-            let q = request.q().to_owned();
             let ran = request.run(c, &RunOptions::new()).map_err(Error::wrap)?;
-            response(&q, ran)
+            response(ran, c.shared_schema())
         })
     }
 }

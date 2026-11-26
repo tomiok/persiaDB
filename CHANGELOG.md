@@ -425,6 +425,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- `persia`: the response JSON of SPEC §7.5.2 from the embedded API (ROADMAP 10.1.25, ADR-0065 amended):
+  `SearchResponse::to_json()`, and `SearchResponse` implements `serde::Serialize` with the same output, the text the
+  engine's `QueryResponse::to_json` writes for the same search. A plain search's `SearchResponse::relaxation` now has
+  `effective` set to L0's text, as the JSON states it (it was `None`). New in `persia-engine`:
+  `search::request::TypedSortValue`, `search::request::base64url_text`, `CollectionSnapshot::shared_schema`, and
+  `SearchHit::sort_keys` is public.
 - **Breaking** (`persia`, `persia-engine`): the re-exported schema types are `#[non_exhaustive]` (ROADMAP 10.1.16,
   ADR-0063 amended): `TextOptions`, `KeywordOptions`, `RankingConfig`, `RelaxationConfig` and `StaticRank` are built
   from `default()` (or `StaticRank::new`) with one setter per field (`TextOptions::default().positions(true)`,
