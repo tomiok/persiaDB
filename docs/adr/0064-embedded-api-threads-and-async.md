@@ -76,6 +76,25 @@ decisions d, e and o).
 14. **Tested without a runtime:** with a `block_on` written in the test. No runtime is a dev-dependency.
 15. ROADMAP 10.1.6 is ticked "Done as: 10.1.11" only when 10.1.11 lands. Wave 7 only keeps the handles `'static`
     and `Closed`-aware (item 8), which is what lets a pool move them.
+16. **As implemented (wave 8, 2026-11-25).** Items 11 to 14 hold as written; what they left open was settled so:
+    - Every call returns `JobFuture<T>`, one named, `Unpin` future type (not `impl Future`), so callers can store
+      it. Its job is queued when the method is called, not at the first poll: what "before its job starts" means
+      in item 13 does not depend on when the caller first polls. Polled again after `Ready`, it returns
+      `InvalidArgument`.
+    - The pool belongs to the `AsyncDb` (one per `Db`) and its `AsyncCollection`s. `open` and `close` do not run on
+      it: no pool exists before the open, and the close joins it. Each runs on a thread of its own, joined when its
+      future takes the result; a dropped `open` future lets the open finish and closes what it opened, and a dropped
+      `close` future lets the close finish.
+    - Besides the eight calls, `AsyncDb` has `open_with(OpenOptions, location)` (an open needs its options) and a
+      synchronous `collection(name)` (a lookup in the published state, which takes no lock). Collection management,
+      blobs, `refresh` and the JSON and typed variants are not async yet (ROADMAP 10.1.26).
+    - A get that has started checks its token before it reads: a get is one lookup, with no point to stop at inside.
+    - Dropping an `AsyncDb` without `close` closes the pool (later jobs `Closed`, queued ones completed with
+      `Closed`) but does not join its threads, which end after the job each runs: a destructor does not wait behind
+      a long write. The `Db` inside is then dropped as item 6 says.
+    - A job that panics resolves to `ErrorCode::Io` (an internal invariant that did not hold): `Panic` is the C
+      ABI's alone. A panic inside a write still poisons the writer (item 7).
+    - The pool size is a hidden test option (`OpenOptions::async_threads`); a public one is ROADMAP 10.1.27.
 
 ## Consequences
 

@@ -17,6 +17,8 @@ pub use store::{PackMode, PackRecovery, PackScan, PackStore};
 pub use persia_storage::container::WriterProof;
 // The file and file-system traits the generic opens name (`open_in`, `open_writer_in`), for the same callers: `persia`
 // opens a database's pack through them (ROADMAP 9.4.5).
+/// A committed state of the pack or the container, to copy ([`PackStore::committed_image`], SPEC §4.8).
+pub use persia_storage::container::CommittedImage;
 pub use persia_storage::container::ContainerFile;
 pub use persia_storage::vfs::Vfs;
 

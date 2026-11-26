@@ -251,7 +251,9 @@ pub enum Error {
     },
     /// Opening the container a reader lease belongs to failed (SPEC §9.3, ADR-0054 item 4): a file that is not a
     /// container, a damaged one, or an I/O error, classified as the container classifies it ([`Error::is_corruption`]).
-    #[error("opening the container of a reader lease failed")]
+    /// Also a failure of [`PackStore::committed_image`](crate::PackStore::committed_image) that is neither I/O nor
+    /// corruption (an argument the image refused, a bug).
+    #[error("a container operation of the pack failed")]
     Container(#[source] persia_storage::container::Error),
 }
 

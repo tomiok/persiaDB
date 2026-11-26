@@ -357,7 +357,8 @@ The `.persia.blobs` file is created by the first blob stored, so a database with
 file. A database with blobs is both files: copy them with the database closed, or with the writer
 open copy the container first and then the pack, with blob GC and compaction paused until both
 copies finish (either one rewrites a file mid-copy). Copying only the `.persia` file leaves every blob
-reference dangling (SPEC §4.8). `Db::backup` will copy both consistently (ROADMAP 10.1.8).
+reference dangling (SPEC §4.8). `Db::backup(dest)` copies both consistently with the writer open: one
+commit, every blob it references, written to new files and never replacing one (ROADMAP 10.1.8, ADR-0067).
 
 Done so far (ROADMAP 9.1, 9.4.4): the content hasher, the fixed-size chunker and the blob manifest
 codec in `persia-blob`, and the `BlobId` and `BlobRef` value types in `persia-format` (ROADMAP
@@ -555,8 +556,8 @@ The intended surface (SPEC §8, §9.6, ROADMAP 10.1):
 
 Handles are `Send` and `Sync`. Many readers share a snapshot. A second writer fails immediately.
 A `put` is visible to later searches on that database (read-your-writes, SPEC §8.2–§8.4).
-An optional `tokio` feature will offer a thin `spawn_blocking` wrapper (ROADMAP 10.1.6); the core
-API stays synchronous.
+The cargo feature `async` adds `AsyncDb` and `AsyncCollection`, whose calls return std futures that run on the
+database's own pool of threads and need no runtime (ROADMAP 10.1.11, ADR-0064); the core API stays synchronous.
 
 Embedded mode has no authentication and no config file. Knobs, once they exist, are builder options
 with defaults: memtable size, commit interval, fsync policy, merge threads, search threads, cache

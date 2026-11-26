@@ -13,6 +13,8 @@
 
 mod error;
 pub mod file;
+// A committed state copied out, and a backup written (ROADMAP 10.1.8, ADR-0067).
+mod image;
 mod mapped;
 mod path;
 mod side;
@@ -42,6 +44,7 @@ use persia_format::{Corruption, Reader, Writer};
 use crate::vfs::Vfs;
 pub use error::{Error, ErrorKind, ReadOnlyReason, Result};
 pub use file::ContainerFile;
+pub use image::{CommittedImage, write_backup_in};
 pub use mapped::MapPermit;
 pub use stream::FrameWriter;
 pub use tail::Repair;
@@ -188,6 +191,10 @@ pub struct Container<F = File> {
     /// [`release_writer_lock`] for this `F`. Stored so [`Drop`] needs no trait bound: a `Drop` impl cannot
     /// require more than the struct does, and [`Container`] is generic over any file.
     unlock_file: fn(&F),
+    /// The second handle on `file` that [`Container::committed_image`] hands out where locks belong to the process
+    /// (`!locks_per_handle`, NFS-style): closing any descriptor of the file there drops the writer lock, so that one
+    /// is opened once and closed only with this container, after the lock is released.
+    kept_handle: std::sync::Mutex<Option<std::sync::Arc<F>>>,
 }
 
 /// Proof that a [`Container`] handle holds the container's writer lock ([`Container::writer_proof`]; SPEC §9.3,
@@ -417,6 +424,7 @@ impl<F: ContainerFile> Container<F> {
             mapped: None,
             file_locked,
             unlock_file: release_writer_lock,
+            kept_handle: std::sync::Mutex::new(None),
         })
     }
 
@@ -499,6 +507,7 @@ impl<F: ContainerFile> Container<F> {
             mapped: None,
             file_locked,
             unlock_file: release_writer_lock,
+            kept_handle: std::sync::Mutex::new(None),
         };
         container.recover_tail(file_len, &mut frames, &policy)?;
         container.frames = frames;
@@ -628,6 +637,54 @@ impl<F: ContainerFile> Container<F> {
     /// The container header.
     pub fn header(&self) -> &Header {
         &self.header
+    }
+
+    /// The committed state this handle has ([`Container::superblock`]), as a [`CommittedImage`] to copy (SPEC §4.8,
+    /// ROADMAP 10.1.8): the header page as the file holds it, both slots holding that commit, and another handle on
+    /// this file ([`ContainerFile::try_clone_handle`], no lock taken) to read `12288..log_end` from. Nothing after
+    /// `log_end` is in it: a copy opens at exactly this commit. The writer may go on meanwhile: below a committed
+    /// `log_end` it never writes again (SPEC §4.7), and a compaction renames a new file over the path, which the handle
+    /// does not follow.
+    ///
+    /// Where this handle holds the writer lock on the file and locks belong to the process (`!locks_per_handle`), the
+    /// second handle is opened once and kept until this container drops, after its lock is released: closing it
+    /// earlier would release the lock (ADR-0067).
+    ///
+    /// # Errors
+    /// [`Error::Io`] if the file has no second handle ([`io::ErrorKind::Unsupported`]), or its length or header page
+    /// cannot be read; [`Error::Format`] if the file is shorter than `log_end`.
+    pub fn committed_image(&self) -> Result<CommittedImage<F>> {
+        let mut w = Writer::new();
+        let sb = self.active.superblock;
+        sb.encode(&mut w)?;
+        let clone = || {
+            self.file
+                .try_clone_handle()
+                .map(std::sync::Arc::new)
+                .map_err(Error::io("open a second handle"))
+        };
+        let file = if self.file_locked && !self.file.locks_per_handle() {
+            let mut kept = self
+                .kept_handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(file) = kept.as_ref() {
+                std::sync::Arc::clone(file)
+            } else {
+                let file = clone()?;
+                *kept = Some(std::sync::Arc::clone(&file));
+                file
+            }
+        } else {
+            clone()?
+        };
+        CommittedImage::shared(
+            file,
+            &self.header,
+            &persia_format::header::CONTAINER,
+            w.as_slice(),
+            sb.log_end,
+        )
     }
 
     /// How the container was opened.
@@ -1185,6 +1242,7 @@ fn assemble_compacted<G: ContainerFile>(
         mapped: None,
         file_locked,
         unlock_file: release_writer_lock,
+        kept_handle: std::sync::Mutex::new(None),
     };
     (container, Relocation { moved, wal_start })
 }

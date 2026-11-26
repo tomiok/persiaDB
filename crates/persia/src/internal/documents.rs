@@ -15,6 +15,7 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 /// A read-only handle's reader lease (SPEC §9.3, ROADMAP 9.2.16, ADR-0054): [`ReaderLease::take_beside`], then
 /// [`ReadOnlyBlobDatabase::with_lease`].
@@ -309,6 +310,9 @@ pub struct BlobDatabase<S: ?Sized, L = Database> {
     /// The `db_uuid` the pack was opened with, when [`BlobDatabase::with_pack`] did. [`LogMut`]'s drop checks the
     /// log still names it (debug builds).
     pack_db_uuid: Option<[u8; 16]>,
+    /// How many [`GcHold`](super::gc::GcHold)s live: while any does, [`BlobDatabase::gc`] sweeps nothing (a backup
+    /// copies the pack, ROADMAP 10.1.8).
+    pub(super) gc_holds: Arc<AtomicUsize>,
 }
 
 impl<S: BlobStore + ?Sized, L: DocumentLog> BlobDatabase<S, L> {
@@ -319,6 +323,7 @@ impl<S: BlobStore + ?Sized, L: DocumentLog> BlobDatabase<S, L> {
             held: VecDeque::new(),
             blobs,
             pack_db_uuid: None,
+            gc_holds: Arc::default(),
         }
     }
 

@@ -17,6 +17,8 @@
 //! (ADR-0052, ROADMAP 13.2.5).
 
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
 use persia_blob::gc::{GcObject, Mark, PinCheck, PinGate, Sweep, SweepOptions, SweepReport};
@@ -76,6 +78,8 @@ pub struct GcReport {
     /// the committed seq (or opening, ahead, unreadable): [`ReaderLeaseReport::held_back`]. Every commit and every
     /// compaction puts every read-only handle of another process behind until it refreshes.
     pub readers: Option<ReaderLeaseReport>,
+    /// A [`GcHold`] lived (a backup copying the pack, ROADMAP 10.1.8): nothing was marked or swept.
+    pub held_by_copy: bool,
 }
 
 /// Errors of [`BlobDatabase::mark`] and [`BlobDatabase::gc`].
@@ -162,6 +166,8 @@ impl<S: BlobStore + Sweep + ?Sized, L: DocumentLog + BlobReferences> BlobDatabas
     /// at least [`GcOptions::rewrite_ratio`] of it. Every pin check and delete is one step under the pin set's lock, so
     /// a `put_blob` or a read that starts meanwhile keeps what it pins.
     ///
+    /// While a [`GcHold`] lives ([`BlobDatabase::hold_gc`], a backup copying the pack) it marks and sweeps nothing.
+    ///
     /// Only the writer calls it, never in the background: it borrows the database shared, so it runs between writes,
     /// while `put_blob` and reads may go on in other threads (a `put_blob` into the pack waits for a rewrite). Two
     /// calls at once are safe: rewrites take the pack's writer mutex in turn, and remote deletes are idempotent.
@@ -210,6 +216,12 @@ impl<S: BlobStore + Sweep + ?Sized, L: DocumentLog + BlobReferences> BlobDatabas
         if options.rewrite_ratio.is_nan() || options.rewrite_ratio < 0.0 {
             return Err(GcError::InvalidRewriteRatio(options.rewrite_ratio));
         }
+        if self.gc_held() {
+            return Ok(GcReport {
+                held_by_copy: true,
+                ..GcReport::default()
+            });
+        }
         let mark = self.mark()?;
         // With the log frozen (this borrow), the committed seq is the mark's (SPEC §9.5, ADR-0054 item 9).
         let readers = self
@@ -224,6 +236,7 @@ impl<S: BlobStore + Sweep + ?Sized, L: DocumentLog + BlobReferences> BlobDatabas
                 missing: mark.missing,
                 sweep: SweepReport::default(),
                 readers,
+                held_by_copy: false,
             });
         }
         let sweep = SweepOptions {
@@ -241,9 +254,52 @@ impl<S: BlobStore + Sweep + ?Sized, L: DocumentLog + BlobReferences> BlobDatabas
             missing: mark.missing,
             sweep: swept,
             readers,
+            held_by_copy: false,
         })
     }
 }
+/// Holds [`BlobDatabase::gc`] back while it lives ([`BlobDatabase::hold_gc`]): a backup copying the pack takes one, so
+/// that no GC rewrites the pack (SPEC §9.3, §9.5) until the copy ends (SPEC §4.8, ROADMAP 10.1.8). Released when
+/// dropped, from any thread.
+#[derive(Debug)]
+pub struct GcHold(Arc<AtomicUsize>);
+
+impl Drop for GcHold {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl<S: ?Sized, L> BlobDatabase<S, L> {
+    /// Holds GC back until the returned hold is dropped: a [`BlobDatabase::gc`] that starts while any hold lives marks
+    /// and sweeps nothing and reports [`GcReport::held_by_copy`]. A GC already running when the hold is taken is not
+    /// stopped: take it where no GC runs (`persia`'s `Db` takes it under its writer mutex, which GC also needs).
+    ///
+    /// ```
+    /// use persia::internal::documents::BlobDatabase;
+    /// use persia::internal::gc::GcOptions;
+    /// use persia_engine::db::DatabaseOptions;
+    ///
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// let db = BlobDatabase::create(dir.path().join("app.persia"), DatabaseOptions::default())?;
+    /// let hold = db.hold_gc();
+    /// assert!(db.gc(&GcOptions::default())?.held_by_copy);
+    /// drop(hold);
+    /// assert!(!db.gc(&GcOptions::default())?.held_by_copy);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn hold_gc(&self) -> GcHold {
+        self.gc_holds.fetch_add(1, Ordering::SeqCst);
+        GcHold(Arc::clone(&self.gc_holds))
+    }
+
+    /// Whether a [`GcHold`] lives.
+    pub fn gc_held(&self) -> bool {
+        self.gc_holds.load(Ordering::SeqCst) > 0
+    }
+}
+
 const fn object(pinned: Pinned) -> GcObject {
     match pinned {
         Pinned::Upload(id) => GcObject::Upload(id),

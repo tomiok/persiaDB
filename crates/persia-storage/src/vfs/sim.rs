@@ -699,6 +699,22 @@ impl ContainerFile for SimFsFile {
     fn locks_per_handle(&self) -> bool {
         !lock(&self.state).per_process_locks
     }
+
+    /// Another handle on the same file, read-only and holding no lock: like a duplicated descriptor, it keeps reading
+    /// the file after a rename over its name (a copy of a committed state, ROADMAP 10.1.8).
+    fn try_clone_handle(&self) -> io::Result<Self> {
+        let mut state = lock(&self.state);
+        let handle = state.next_handle;
+        state.next_handle = handle.saturating_add(1);
+        Ok(Self {
+            file: self.file.clone(),
+            ino: self.ino,
+            handle,
+            writable: false,
+            state: Arc::clone(&self.state),
+            unlocked: AtomicBool::new(false),
+        })
+    }
 }
 
 impl Drop for SimFsFile {

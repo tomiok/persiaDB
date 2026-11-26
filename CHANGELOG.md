@@ -19,6 +19,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   (each hit returns its id and blob reference only) or a non-empty array of distinct stored field names (in a
   collection that is not `strict`, extra fields too). `[]`, a repeated name, another string, and a name that is not
   stored are invalid arguments; until now the key was unknown and every stored field came back.
+- `persia`: `Db::backup(dest)` (ROADMAP 10.1.8; SPEC §4.8; ADR-0067) copies a database to `dest` (a path or a
+  `file://` URL), and its blob pack, if it has one, to `<dest>.blobs`, with the writer open and not blocked for the
+  copy. A read-write database commits first, so the backup holds every write that returned before the call; the
+  copy opens at exactly that commit, with every blob its documents reference, and holds nothing written later. While
+  it copies, no compaction or blob GC replaces a file. A read-only database backs up the state it shows. The files are
+  written under temporary names, synced, and linked pack first, so `dest` never exists without its pack; a backup
+  never replaces anything (`AlreadyExists`, a dangling symbolic link included), the directory of `dest` must exist,
+  and its file system must support hard links (ROADMAP 10.1.28). A failed backup removes what it linked, container
+  first; an error does not always mean `dest` is free (SPEC §4.8). The copy's checksums are not checked on the way
+  (run `verify` on it), and a poisoned writer's backup fails with `Poisoned`.
+- `persia`: a runtime-agnostic async API behind the cargo feature `async`, which adds no dependency (ROADMAP 10.1.11,
+  ADR-0064). `AsyncDb::open`, `open_with`, `close`, `collection` and `commit`, and `AsyncCollection::put`,
+  `put_batch`, `delete`, `get`, `commit` and `search`, return a `JobFuture<T>`: a std `Future` that any executor
+  polls, no runtime named or needed. Each `AsyncDb` has its own pool of plain threads, started by its first job
+  (`min(4, cores)` threads), not shared with the maintenance thread, and joined by `close` before the database
+  closes. A job is queued when its method is called; dropping its future before it starts skips it, a write that has
+  started runs to its end (its result discarded), and a search or get that has started is cancelled. Jobs still
+  queued at `close` resolve to `ErrorCode::Closed`. `open` and `close` run on a thread of their own.
 - `persia bench` (ROADMAP 10.4.3; SPEC §16.3): a quick micro-benchmark of this build on this machine. It indexes a
   seeded synthetic corpus into a new database in a scratch directory it creates and removes (`--dir`, default the
   system temporary directory; no existing database is opened), commits, and runs a seeded mix of five kinds of query.

@@ -17,14 +17,19 @@
 //! A [`Db`] holds [`Collection`]s of [`Document`]s (put as values, as JSON with [`Collection::put_json`], or as any
 //! `serde` type with [`Collection::put_struct`]) and their blobs ([`Blob`], [`Db::put_blob`]). Reads see every write
 //! that returned; commits and merges run on the database's own thread, and [`Db::close`] joins it (ADR-0064). Every
-//! call returns [`Result`], whose [`Error`] carries a stable [`ErrorCode`] (ADR-0063). Search lands with ROADMAP
-//! 10.1.3. The engine (`persia-engine`) and the hidden `internal` layer under this crate (ADR-0051) are not stable
-//! APIs.
+//! call returns [`Result`], whose [`Error`] carries a stable [`ErrorCode`] (ADR-0063). With the cargo feature
+//! `async`, `AsyncDb` and `AsyncCollection` return futures that need no runtime (ADR-0064). The engine
+//! (`persia-engine`) and the hidden `internal` layer under this crate (ADR-0051) are not stable APIs.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 // Sizes and offsets convert with `From` or `try_from`, never a silent `as` (CLAUDE.md checked ops).
 #![cfg_attr(not(test), deny(clippy::as_conversions))]
 
+// The async API (ADR-0064 items 10 to 15): the feature `async`, which adds no dependency.
+#[cfg(feature = "async")]
+mod asynchronous;
+// `Db::backup` (ROADMAP 10.1.8, ADR-0067).
+mod backup;
 mod blob;
 mod collection;
 mod db;
@@ -45,6 +50,14 @@ mod options;
 mod search;
 mod typed;
 
+#[cfg(feature = "async")]
+pub use asynchronous::{AsyncCollection, AsyncDb, JobFuture};
+#[cfg(all(feature = "async", feature = "test-hooks"))]
+#[doc(hidden)]
+pub use asynchronous::{JobEvent, JobHook, JobKind};
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+pub use backup::{BackupHook, BackupStep};
 pub use blob::BlobReader;
 pub use collection::Collection;
 pub use db::{BlockCacheStats, Db};
