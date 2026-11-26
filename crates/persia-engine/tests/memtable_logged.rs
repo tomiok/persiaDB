@@ -51,10 +51,7 @@ fn schema() -> (CollectionSchema, Fields) {
     let schema = SchemaBuilder::new("c")
         .field(
             "body",
-            FieldKind::Text(TextOptions {
-                positions: true,
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().positions(true)),
         )
         .field("tag", FieldKind::Keyword(KeywordOptions::default()))
         .field("n", FieldKind::I64 { stored: true })

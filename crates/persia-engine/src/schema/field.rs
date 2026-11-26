@@ -8,6 +8,7 @@ pub use persia_analysis::{BUILTIN_ANALYZERS, BuiltinAnalyzer, DEFAULT_ANALYZER};
 
 /// The value types of SPEC §6.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum FieldType {
     /// Analyzed full text, scored with BM25F.
     Text,
@@ -48,6 +49,7 @@ impl fmt::Display for FieldType {
 
 /// A field's type with the options that apply to it (SPEC §6.2.2).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum FieldKind {
     /// Full text.
     Text(TextOptions),
@@ -107,6 +109,7 @@ impl FieldKind {
 
 /// Options of a `text` field (SPEC §6.2.2).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct TextOptions {
     /// The analyzer terms are produced with.
     pub analyzer: AnalyzerRef,
@@ -135,8 +138,67 @@ impl Default for TextOptions {
     }
 }
 
+// The setters of a `#[non_exhaustive]` options struct (ROADMAP 10.1.16, ADR-0063 amended): another crate cannot write
+// its struct literal, so it starts from `default()` and sets what it needs.
+impl TextOptions {
+    /// These options with `analyzer`.
+    ///
+    /// ```
+    /// use persia_engine::schema::{AnalyzerRef, FieldKind, TextOptions};
+    ///
+    /// let en = AnalyzerRef::builtin("en").ok_or("no en")?;
+    /// let title = TextOptions::default().analyzer(en.clone()).boost(3.0).positions(true);
+    /// assert_eq!((&title.analyzer, title.boost, title.positions), (&en, 3.0, true));
+    /// let body = TextOptions::default().k1(1.5).b(0.5).stored(false);
+    /// assert_eq!((body.k1, body.b, body.stored), (1.5, 0.5, false));
+    /// let _ = FieldKind::Text(title);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn analyzer(mut self, analyzer: AnalyzerRef) -> Self {
+        self.analyzer = analyzer;
+        self
+    }
+
+    /// These options with BM25F field weight `boost`.
+    #[must_use]
+    pub const fn boost(mut self, boost: f64) -> Self {
+        self.boost = boost;
+        self
+    }
+
+    /// These options with positions indexed, or not.
+    #[must_use]
+    pub const fn positions(mut self, positions: bool) -> Self {
+        self.positions = positions;
+        self
+    }
+
+    /// These options with BM25 term-frequency saturation `k1`.
+    #[must_use]
+    pub const fn k1(mut self, k1: f64) -> Self {
+        self.k1 = k1;
+        self
+    }
+
+    /// These options with BM25 length normalization `b`.
+    #[must_use]
+    pub const fn b(mut self, b: f64) -> Self {
+        self.b = b;
+        self
+    }
+
+    /// These options with the value stored (`get` returns it), or not.
+    #[must_use]
+    pub const fn stored(mut self, stored: bool) -> Self {
+        self.stored = stored;
+        self
+    }
+}
+
 /// Options of a `keyword` field (SPEC §6.2.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct KeywordOptions {
     /// Whether the field can be faceted (SPEC §7.5).
     pub facet: bool,
@@ -150,6 +212,29 @@ impl Default for KeywordOptions {
             facet: false,
             stored: true,
         }
+    }
+}
+
+impl KeywordOptions {
+    /// These options with facets on, or off.
+    ///
+    /// ```
+    /// use persia_engine::schema::KeywordOptions;
+    ///
+    /// let brand = KeywordOptions::default().facet(true).stored(false);
+    /// assert_eq!((brand.facet, brand.stored), (true, false));
+    /// ```
+    #[must_use]
+    pub const fn facet(mut self, facet: bool) -> Self {
+        self.facet = facet;
+        self
+    }
+
+    /// These options with the value stored (`get` returns it), or not.
+    #[must_use]
+    pub const fn stored(mut self, stored: bool) -> Self {
+        self.stored = stored;
+        self
     }
 }
 
@@ -221,6 +306,8 @@ impl AnalyzerRef {
     /// [`Self::parse`], also accepting an analyzer `registry` holds: `"name"` is then its highest registered version
     /// (not pinned) and `"name@version"` a registered version (pinned). A built-in name resolves only to a built-in
     /// version, whatever `registry` holds (SPEC §6.2.2).
+    // Engine detail, hidden from the public API of `persia`, which re-exports this type (ROADMAP 10.1.16, ADR-0063).
+    #[doc(hidden)]
     pub fn parse_in(text: &str, registry: &AnalyzerRegistry) -> Option<Self> {
         if let Some(builtin) = Self::parse(text) {
             return Some(builtin);

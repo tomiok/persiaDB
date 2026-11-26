@@ -56,10 +56,7 @@ fn schema() -> CollectionSchema {
     SchemaBuilder::new("a")
         .field(
             "body",
-            FieldKind::Text(TextOptions {
-                positions: true,
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().positions(true)),
         )
         .field("price", FieldKind::F64 { stored: true })
         .build()

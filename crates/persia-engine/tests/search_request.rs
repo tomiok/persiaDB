@@ -72,10 +72,7 @@ fn schema() -> CollectionSchema {
         .field("body", FieldKind::Text(TextOptions::default()))
         .field(
             "tag",
-            FieldKind::Keyword(KeywordOptions {
-                facet: true,
-                ..KeywordOptions::default()
-            }),
+            FieldKind::Keyword(KeywordOptions::default().facet(true)),
         )
         .field("n", FieldKind::I64 { stored: true })
         .field("f", FieldKind::F64 { stored: true })
@@ -1293,10 +1290,7 @@ fn a_cursor_from_another_snapshot_or_memtable_view_is_an_error() {
 /// match first, so that page would lose it.
 #[test]
 fn a_cursor_from_a_plan_with_the_other_proximity_setting_is_an_error() {
-    let text = FieldKind::Text(TextOptions {
-        positions: true,
-        ..TextOptions::default()
-    });
+    let text = FieldKind::Text(TextOptions::default().positions(true));
     let schema = SchemaBuilder::new("c").field("body", text).build().unwrap();
     let body = schema.field("body").unwrap().id();
     let mut db = database(schema);

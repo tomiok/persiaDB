@@ -246,19 +246,12 @@ fn presence_schema() -> CollectionSchema {
     SchemaBuilder::new("presence")
         .field(
             "title",
-            FieldKind::Text(TextOptions {
-                positions: true,
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().positions(true)),
         )
         // Only stopwords reach it: values, but no tokens.
         .field(
             "stops",
-            FieldKind::Text(TextOptions {
-                analyzer: en(),
-                positions: true,
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().analyzer(en()).positions(true)),
         )
         // No document has it.
         .field("never_text", FieldKind::Text(TextOptions::default()))

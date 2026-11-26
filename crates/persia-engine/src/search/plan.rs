@@ -193,7 +193,7 @@ impl SearchPlan {
     /// use persia_engine::stats::SegmentStatistics;
     /// use std::sync::Arc;
     ///
-    /// let text = FieldKind::Text(TextOptions { positions: true, ..TextOptions::default() });
+    /// let text = FieldKind::Text(TextOptions::default().positions(true));
     /// let schema = Arc::new(SchemaBuilder::new("c").field("body", text).build()?);
     /// let body = schema.field("body").map(|f| f.id()).ok_or("no field")?;
     /// let term = |t: &str| Query::Term(TermQuery { field: body, term: t.into() });

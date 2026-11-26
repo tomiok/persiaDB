@@ -139,7 +139,7 @@ impl fmt::Display for RelaxLevel {
 /// use persia_engine::schema::{RankingConfig, StaticRank};
 ///
 /// assert_eq!(FallbackOrder::of(&RankingConfig::default()), FallbackOrder::Recency);
-/// let ranking = RankingConfig { static_rank: Some(StaticRank::new("sales")) };
+/// let ranking = RankingConfig::default().static_rank(Some(StaticRank::new("sales")));
 /// assert_eq!(FallbackOrder::of(&ranking), FallbackOrder::StaticRank);
 /// assert_eq!(FallbackOrder::StaticRank.name(), "static_rank");
 /// ```

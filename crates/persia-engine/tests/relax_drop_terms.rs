@@ -37,10 +37,7 @@ fn database() -> Database<SimFile> {
         .field("title", FieldKind::Text(TextOptions::default()))
         .field(
             "body",
-            FieldKind::Text(TextOptions {
-                analyzer: AnalyzerRef::builtin("en").unwrap(),
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().analyzer(AnalyzerRef::builtin("en").unwrap())),
         )
         .field("brand", FieldKind::Keyword(KeywordOptions::default()))
         .build()

@@ -69,14 +69,14 @@ fn builder(p: &Params) -> SchemaBuilder {
     // The whitespace analyzer gives the words as they are, at positions 0, 1, 2...: the reference's tokens.
     let ws = AnalyzerRef::new("whitespace", 1).unwrap();
     let text = |(boost, k1, b)| {
-        FieldKind::Text(TextOptions {
-            analyzer: ws.clone(),
-            boost,
-            k1,
-            b,
-            positions: true,
-            ..TextOptions::default()
-        })
+        FieldKind::Text(
+            TextOptions::default()
+                .analyzer(ws.clone())
+                .boost(boost)
+                .k1(k1)
+                .b(b)
+                .positions(true),
+        )
     };
     SchemaBuilder::new("c")
         .field("title", text(p[0]))

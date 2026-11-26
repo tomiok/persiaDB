@@ -8,8 +8,8 @@
 //! use persia_engine::schema::{CollectionSchema, FieldKind, KeywordOptions, SchemaBuilder, TextOptions};
 //!
 //! let schema = SchemaBuilder::new("products")
-//!     .field("title", FieldKind::Text(TextOptions { boost: 3.0, ..TextOptions::default() }))
-//!     .field("brand", FieldKind::Keyword(KeywordOptions { facet: true, ..KeywordOptions::default() }))
+//!     .field("title", FieldKind::Text(TextOptions::default().boost(3.0)))
+//!     .field("brand", FieldKind::Keyword(KeywordOptions::default().facet(true)))
 //!     .build()?;
 //! // Ids follow the names' byte order, not the order they were added in.
 //! assert_eq!(schema.field("brand").map(|f| f.id().get()), Some(0));
@@ -160,6 +160,8 @@ impl CollectionSchema {
     ///
     /// # Errors
     /// As [`Self::from_json`].
+    // Engine detail, hidden from the public API of `persia`, which re-exports this type (ROADMAP 10.1.16, ADR-0063).
+    #[doc(hidden)]
     pub fn from_json_in(json: &str, registry: &AnalyzerRegistry) -> Result<Self, SchemaError> {
         json::from_json_in(json, registry)
     }
@@ -219,6 +221,8 @@ impl CollectionSchema {
     }
 
     /// The schema hash segments record (SPEC §6.2.5).
+    // Engine detail, hidden from the public API of `persia`, which re-exports this type (ROADMAP 10.1.16, ADR-0063).
+    #[doc(hidden)]
     pub fn hash(&self) -> SchemaHash {
         canonical::hash(&self.name, &self.fields)
     }
@@ -228,11 +232,15 @@ impl CollectionSchema {
     /// Evolution only appends fields and never changes what the hash covers (SPEC §6.2.4), so this is the hash
     /// of every earlier version: a segment indexed before fields were added verifies against the current schema
     /// and the field count it records (SPEC §6.2.5).
+    // Engine detail, hidden from the public API of `persia`, which re-exports this type (ROADMAP 10.1.16, ADR-0063).
+    #[doc(hidden)]
     pub fn hash_at(&self, field_count: usize) -> Option<SchemaHash> {
         Some(canonical::hash(&self.name, self.fields.get(..field_count)?))
     }
 
     /// The canonical encoding of the index definition that [`Self::hash`] covers (SPEC §6.2.5).
+    // Engine detail, hidden from the public API of `persia`, which re-exports this type (ROADMAP 10.1.16, ADR-0063).
+    #[doc(hidden)]
     pub fn canonical_index_definition(&self) -> Vec<u8> {
         canonical::encode(&self.name, &self.fields)
     }

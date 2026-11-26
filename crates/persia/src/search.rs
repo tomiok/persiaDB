@@ -186,7 +186,7 @@ impl SearchRequest {
     /// ```
     /// use persia::{FacetRequest, FieldKind, KeywordOptions, SchemaBuilder, SearchRequest};
     ///
-    /// let facet = KeywordOptions { facet: true, ..KeywordOptions::default() };
+    /// let facet = KeywordOptions::default().facet(true);
     /// let schema = SchemaBuilder::new("c").field("brand", FieldKind::Keyword(facet)).build()?;
     /// let brand = schema.field("brand").map(|f| f.id()).ok_or("no field")?;
     /// let request = SearchRequest::new("shoes").facets([FacetRequest::new(brand, 10, &schema)?]);

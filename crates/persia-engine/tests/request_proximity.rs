@@ -38,11 +38,9 @@ use serde_json::{Value as J, json};
 
 /// `body` with positions under `whitespace`, so a token's position is its index.
 fn schema(relaxation: RelaxationConfig) -> CollectionSchema {
-    let body = TextOptions {
-        analyzer: AnalyzerRef::new("whitespace", 1).unwrap(),
-        positions: true,
-        ..TextOptions::default()
-    };
+    let body = TextOptions::default()
+        .analyzer(AnalyzerRef::new("whitespace", 1).unwrap())
+        .positions(true);
     SchemaBuilder::new("c")
         .field("body", FieldKind::Text(body))
         .relaxation(relaxation)
@@ -281,10 +279,7 @@ fn proximity_on_a_search_that_relaxes_is_an_error_naming_the_fix() {
 
 #[test]
 fn a_collection_that_does_not_relax_takes_proximity_without_relax_false() {
-    let disabled = RelaxationConfig {
-        enabled: false,
-        ..RelaxationConfig::default()
-    };
+    let disabled = RelaxationConfig::default().enabled(false);
     let db = database(disabled);
     let snapshot = db.snapshot();
     let c = snapshot.collection("c").unwrap();

@@ -27,7 +27,7 @@ pub const MAX_FACETS: usize = 16;
 /// use persia_engine::search::FacetRequest;
 ///
 /// let schema = SchemaBuilder::new("c")
-///     .field("brand", FieldKind::Keyword(KeywordOptions { facet: true, ..KeywordOptions::default() }))
+///     .field("brand", FieldKind::Keyword(KeywordOptions::default().facet(true)))
 ///     .field("sku", FieldKind::Keyword(KeywordOptions::default()))
 ///     .build()?;
 /// let brand = schema.field("brand").map(|f| f.id()).ok_or("no field")?;

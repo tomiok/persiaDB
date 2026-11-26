@@ -40,7 +40,7 @@ impl QueryRequest {
     ///
     /// let schema = SchemaBuilder::new("shoes")
     ///     .field("title", FieldKind::Text(TextOptions::default()))
-    ///     .field("brand", FieldKind::Keyword(KeywordOptions { facet: true, ..KeywordOptions::default() }))
+    ///     .field("brand", FieldKind::Keyword(KeywordOptions::default().facet(true)))
     ///     .field("price", FieldKind::F64 { stored: true })
     ///     .build()?;
     /// let limits = QueryLimits::default();

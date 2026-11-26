@@ -34,12 +34,7 @@ impl StatisticsProvider for Stats {
 }
 
 fn bench(c: &mut Criterion) {
-    let text = |boost| {
-        FieldKind::Text(TextOptions {
-            boost,
-            ..TextOptions::default()
-        })
-    };
+    let text = |boost| FieldKind::Text(TextOptions::default().boost(boost));
     let schema = SchemaBuilder::new("bench")
         .field("title", text(3.0))
         .field("body", text(1.0))

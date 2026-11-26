@@ -130,3 +130,21 @@ depending on `persia-blob`. The owner chose a facade type over adding the two to
   options), since its `with_options` takes them; it converts to the `internal` layer's `Blob` the same way.
 
 No public signature of `persia` names a `persia-blob` type now other than `BlobRef` and `BlobId` (item 2).
+
+## Amendment (2026-11-26): `#[non_exhaustive]` and the trim of the re-exported engine types (ROADMAP 10.1.16)
+
+The Consequence "What the re-exports freeze" listed what item 4 made part of `persia`'s surface. Each item is now
+hidden, wrapped or kept, before the first publish (ROADMAP 10.5.1):
+
+| Item | Decision |
+|---|---|
+| `TextOptions`, `KeywordOptions`, `RankingConfig`, `RelaxationConfig`, `StaticRank` | **`#[non_exhaustive]`.** The public fields stay (read them, or set them on a value you have), so a field can be added; another crate cannot write a struct literal, so each gets one consuming setter per field (`TextOptions::default().boost(3.0).positions(true)`, `StaticRank::new("sales").weight(0.5)`, `RelaxationConfig::default().min_results(5)`, ...). |
+| `FieldKind`, `FieldType`, `Level`, `Fallback`, `FilterRelaxation`, `RankFn` | **`#[non_exhaustive]`**: a variant can be added; a match outside the engine needs a wildcard arm. The fields of `FieldKind`'s struct variants (`I64 { stored }`, ...) are **kept** exhaustive on purpose: they are the field's options, and a new option of those types would be a new variant holding an options struct, as `Text` and `Keyword` do. |
+| `CollectionSchema::hash`, `hash_at`, `canonical_index_definition` | **Hidden** (`#[doc(hidden)]` on the engine's methods): the schema hash segments record (SPEC §6.2.5) is format detail, and `hash` named `SchemaHash`, on no list here. The engine, its tests and the CLI still call them. |
+| `CollectionSchema::from_json_in`, `AnalyzerRef::parse_in` | **Hidden**: they take `persia_analysis::AnalyzerRegistry`, which `persia` does not export, and the facade has no way to register an analyzer yet. A registry option of `OpenOptions` would bring a facade path back. |
+| `Document::encode`, `decode`, `encoded_id` | **Hidden**: the binary encoding of SPEC §6.4.2 is the engine's; a caller has the JSON form (`Collection::get_json`, `Document::to_json`) and the typed values. |
+| `Document::extra`, `insert_extra` | **Kept**: the extra fields of a collection that is not `strict` (SPEC §6.4.1) are a user feature, and `serde_json::Value` is how they are typed. `serde_json` 1.x becomes a public dependency of `persia` (as `serde` is through `Collection::put_struct`), so a major version of `serde_json` would be a breaking change of `persia`. |
+
+"Hidden" is `#[doc(hidden)]`, as for `persia::internal` (ADR-0051): the methods stay callable, outside the documented
+surface and the public-API snapshot (ROADMAP 10.1.12), and carry no stability promise. In-repo users that need one
+keep calling it through the engine, or through `persia::internal`; none moved to a new public item.

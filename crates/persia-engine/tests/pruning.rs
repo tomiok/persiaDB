@@ -78,12 +78,12 @@ struct Fields {
 fn schema() -> (CollectionSchema, Fields) {
     let ws = AnalyzerRef::new("whitespace", 1).unwrap();
     let text = |boost| {
-        FieldKind::Text(TextOptions {
-            analyzer: ws.clone(),
-            boost,
-            positions: true,
-            ..TextOptions::default()
-        })
+        FieldKind::Text(
+            TextOptions::default()
+                .analyzer(ws.clone())
+                .boost(boost)
+                .positions(true),
+        )
     };
     let schema = SchemaBuilder::new("c")
         .field("title", text(2.0))

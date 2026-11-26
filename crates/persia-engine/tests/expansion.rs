@@ -691,10 +691,7 @@ fn put_body(db: &mut Database<SimFile>, body: FieldId, id: &str, text: &str) {
 /// The rare documents are committed first: a tie would rank them ahead of the memtable.
 #[test]
 fn a_rare_spelling_does_not_outrank_the_common_term() {
-    let (mut db, body) = open_body(TextOptions {
-        b: 0.0,
-        ..TextOptions::default()
-    });
+    let (mut db, body) = open_body(TextOptions::default().b(0.0));
     put_body(&mut db, body, "typo", "appel");
     put_body(&mut db, body, "rare-prefix", "runzqx");
     db.commit().unwrap();

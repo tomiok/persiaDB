@@ -419,6 +419,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- **Breaking** (`persia`, `persia-engine`): the re-exported schema types are `#[non_exhaustive]` (ROADMAP 10.1.16,
+  ADR-0063 amended): `TextOptions`, `KeywordOptions`, `RankingConfig`, `RelaxationConfig` and `StaticRank` are built
+  from `default()` (or `StaticRank::new`) with one setter per field (`TextOptions::default().positions(true)`,
+  `KeywordOptions::default().facet(true)`, `RelaxationConfig::default().min_results(5)`, `StaticRank::new("sales")
+  .weight(0.5)`) instead of a struct literal; their fields stay public. A match on `FieldKind`, `FieldType`, `Level`,
+  `Fallback`, `FilterRelaxation` or `RankFn` outside the engine needs a wildcard arm. `CollectionSchema::hash`,
+  `hash_at`, `canonical_index_definition` and `from_json_in`, `AnalyzerRef::parse_in` and `Document::encode`,
+  `decode` and `encoded_id` are hidden from the documentation (`#[doc(hidden)]`, engine detail with no stability
+  promise); `Document::extra` and `insert_extra` stay, and make `serde_json` a public dependency of `persia`.
 - **Breaking** (`persia`): `PutBlobOptions` is the facade's own `#[non_exhaustive]` builder (ROADMAP 10.1.15, ADR-0063
   amended): `PutBlobOptions::new().mime("text/plain").chunk_size(64 << 10)` instead of a struct literal; setters
   `mime`, `user_meta(key, value)`, `expected_id`, `expected_size`, `chunk_size(u32)`, `bind_budget` and `resume`. A

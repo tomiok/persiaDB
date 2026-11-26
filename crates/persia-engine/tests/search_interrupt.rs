@@ -82,10 +82,7 @@ fn database(per_segment: usize) -> (Database<SimFile>, Query) {
         .field("n", FieldKind::I64 { stored: false })
         .field(
             "tag",
-            FieldKind::Keyword(KeywordOptions {
-                facet: true,
-                ..KeywordOptions::default()
-            }),
+            FieldKind::Keyword(KeywordOptions::default().facet(true)),
         )
         .build()
         .unwrap();
@@ -441,10 +438,7 @@ fn unaligned() -> (Database<SimFile>, Query, Query) {
     let schema = SchemaBuilder::new("c")
         .field(
             "body",
-            FieldKind::Text(TextOptions {
-                positions: true,
-                ..TextOptions::default()
-            }),
+            FieldKind::Text(TextOptions::default().positions(true)),
         )
         .field("tag", FieldKind::Keyword(KeywordOptions::default()))
         .build()

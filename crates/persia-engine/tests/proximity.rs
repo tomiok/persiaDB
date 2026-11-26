@@ -49,11 +49,11 @@ struct Fixture {
 fn fixture(docs: &[(&str, &str, &str)]) -> Fixture {
     let ws = AnalyzerRef::new("whitespace", 1).unwrap();
     let text = |positions| {
-        FieldKind::Text(TextOptions {
-            analyzer: ws.clone(),
-            positions,
-            ..TextOptions::default()
-        })
+        FieldKind::Text(
+            TextOptions::default()
+                .analyzer(ws.clone())
+                .positions(positions),
+        )
     };
     let schema = SchemaBuilder::new("c")
         .field("body", text(true))

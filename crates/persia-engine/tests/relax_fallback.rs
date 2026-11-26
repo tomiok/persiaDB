@@ -66,16 +66,16 @@ fn ranking() -> impl Strategy<Value = Option<StaticRank>> {
     prop_oneof![
         Just(None),
         Just(Some(StaticRank::new("sales"))),
-        Just(Some(StaticRank {
-            field: "sales".into(),
-            weight: 2.0,
-            function: RankFn::Linear,
-        })),
-        Just(Some(StaticRank {
-            field: "sales".into(),
-            weight: 0.0,
-            function: RankFn::Linear,
-        })),
+        Just(Some(
+            StaticRank::new("sales")
+                .weight(2.0)
+                .function(RankFn::Linear)
+        )),
+        Just(Some(
+            StaticRank::new("sales")
+                .weight(0.0)
+                .function(RankFn::Linear)
+        )),
     ]
 }
 
@@ -97,9 +97,7 @@ fn database(
         .field("sales", FieldKind::I64 { stored: false })
         .field("tag", FieldKind::Keyword(KeywordOptions::default()));
     if let Some(rank) = rank {
-        builder = builder.ranking(RankingConfig {
-            static_rank: Some(rank.clone()),
-        });
+        builder = builder.ranking(RankingConfig::default().static_rank(Some(rank.clone())));
     }
     let schema = builder.build().unwrap();
     let field = |n: &str| schema.field(n).unwrap().id();
@@ -270,7 +268,7 @@ proptest! {
         prop_assert_eq!(&l5, &want);
         // L5's hits come last, after every earlier step's.
         prop_assert!(out.hits.iter().skip(out.hits.len() - l5.len()).all(|h| h.level == RelaxLevel::Fallback));
-        let order = FallbackOrder::of(&RankingConfig { static_rank: rank.clone() });
+        let order = FallbackOrder::of(&RankingConfig::default().static_rank(rank.clone()));
         prop_assert_eq!(out.relaxation.fallback, (!want.is_empty()).then_some(order));
         prop_assert_eq!(out.relaxation.level, RelaxLevel::Fallback);
         // The top `k` of a page of `k`, and pages by cursor, are slices of the same ranking.
