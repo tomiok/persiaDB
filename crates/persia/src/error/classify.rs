@@ -314,7 +314,9 @@ impl Classified for DatabaseError {
             Self::Sidecar { source, .. } => source.code(),
             // An analyzer this open lacks: a newer build's, or one the caller did not register (SPEC §6.2.2 cannot
             // tell them apart).
-            Self::UnregisteredAnalyzer { .. } => ErrorCode::Unsupported,
+            Self::UnregisteredAnalyzer { .. } | Self::AnalysisSkipped { .. } => {
+                ErrorCode::Unsupported
+            }
             // The file at the path is not the database this reader follows any more.
             Self::RefreshRefused { .. } => ErrorCode::Conflict,
             Self::Segment(e) => e.code(),

@@ -84,8 +84,9 @@
 //! and `container sweep` open read-write and fail with status 1 while another writer has the database. `container
 //! files` opens nothing: it lists the files beside any existing file. `inspect container` reports damage after the
 //! last commit on its rows and still exits 0 (it is a debugging aid; `verify` is the check). Besides the table: `dump
-//! documents` exits 1 for a collection the database lacks, `compact` exits 1 for a schema that names an analyzer
-//! registered by the application (it has the built-in ones only), `import` and `search` exit 1 for a collection the
+//! documents` exits 1 for a collection the database lacks, `compact` exits 1 when its recovery would have to flush a
+//! WAL backlog of a collection whose schema names an analyzer registered by the application (it has the built-in ones
+//! only; it compacts such a database otherwise, ROADMAP 10.4.4), `import` and `search` exit 1 for a collection the
 //! database lacks (`import` creates it with `--schema`) and for a schema naming a registered analyzer, `import` exits 1
 //! at the first bad line of its input (naming it, after committing the lines before it), the segment commands exit 3
 //! for a corrupt segment file and 1 for a missing one or a `--schema` that is not the segment's, and the store commands
@@ -172,6 +173,9 @@ enum Command {
     /// document of its own; as with any writer's open, recovery may flush a WAL backlog larger than the default
     /// memtable or retire a cut commit (SPEC §8.6). The new file is renamed over the old one, so the path names a
     /// complete database at every instant.
+    /// It has the built-in analyzers only: a database whose schema names an analyzer the application registered is
+    /// compacted without analyzing that field (its WAL records stay in the WAL), unless recovery would have to flush
+    /// such a collection's WAL backlog (status 1; open it with the application first).
     /// The blob pack (`<name>.persia.blobs`) is not touched. Do not run it during a copy of the files taken with the
     /// database in use (SPEC §4.8). Read-only handles of other processes keep reading the old file until they
     /// refresh, which holds a writer's blob garbage collection back meanwhile (SPEC §9.5). Exits with status 3 on

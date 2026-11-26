@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia_engine::db::CompactOnlyDatabase` (ROADMAP 10.4.4, ADR-0068; SPEC §4.6): `open(path, options)` and
+  `open_container(container, options)` run the writer's open exactly (lock, recovery, every segment checked, the whole
+  WAL replayed, a cut commit retired), except that a `text` field whose analyzer `options.registry` lacks is indexed
+  with a no-token stand-in (`skipped_analysis()` lists it) and no commit may flush a non-empty memtable of its
+  collection: such a commit fails with the new `DatabaseError::AnalysisSkipped` before anything is written (code
+  `Unsupported` in the embedded API). The handle offers `compact`, `space_usage` and `seq` only: no document write,
+  commit, merge or schema change. Its WAL records of such a collection stay WAL records, which the compaction copies
+  and the next writer's open indexes with the real analyzer. With every analyzer it is the writer's open.
+- `persia compact` compacts a database whose schema names an analyzer registered by its application (ROADMAP 10.4.4):
+  it opens with `CompactOnlyDatabase` and the built-in analyzers. It fails (status 1, file unchanged by the refused
+  flush) only when its recovery would have to flush such a collection's WAL backlog (over the default 64 MiB memtable);
+  open the database with its application first. Exit statuses and `--json` output are unchanged.
 - `persia-cli`: `persia import <path> --collection <name> [--input <file>] [--schema <file>] [--json]` and `persia
   search <path> --collection <name> (--query <text> | --request <json>) [--json]` (ROADMAP 10.4.2; SPEC §8.6), for
   quick experiments, through the embedded API. `import` reads JSON Lines (the file, or the standard input), one

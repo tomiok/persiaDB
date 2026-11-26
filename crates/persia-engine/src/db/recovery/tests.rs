@@ -258,3 +258,42 @@ mod docid_limit_model {
         }
     }
 }
+
+/// Replayed operations count as written at the open (SPEC §8.2), and only those: a collection whose memtable the
+/// replay left empty is never due, so `tick` commits nothing however long the database stays open; one whose memtable
+/// holds a replayed record is due once the commit interval has passed since the open.
+#[test]
+fn only_a_replayed_memtable_counts_as_written_at_the_open() {
+    let schema = SchemaBuilder::new("notes").build().unwrap();
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000_000));
+    let with_clock = || DatabaseOptions {
+        clock: Arc::clone(&clock) as _,
+        ..options(None)
+    };
+    let file = SimFile::new();
+    let mut db = Database::create_on(file.clone(), [9; 16], with_clock()).unwrap();
+    db.create_collection(schema).unwrap();
+    drop(db);
+
+    let mut db = Database::open_on(file.clone(), with_clock()).unwrap();
+    let seq = db.seq();
+    clock.advance(std::time::Duration::from_hours(24));
+    assert_eq!(
+        db.tick().unwrap(),
+        None,
+        "nothing was replayed: nothing is due"
+    );
+    db.put("notes", &Document::new("a"), Durability::Fsync)
+        .unwrap();
+    drop(db);
+
+    let mut db = Database::open_on(file, with_clock()).unwrap();
+    assert_eq!(db.seq(), seq);
+    assert_eq!(db.tick().unwrap(), None, "written at the open: not due yet");
+    clock.advance(std::time::Duration::from_hours(24));
+    assert_eq!(
+        db.tick().unwrap(),
+        Some(seq + 1),
+        "the replayed record is committed"
+    );
+}

@@ -1,14 +1,14 @@
-//! `persia compact` (ROADMAP 10.4.1): the container compaction of SPEC §4.6, on request.
+//! `persia compact` (ROADMAP 10.4.1, 10.4.4): the container compaction of SPEC §4.6, on request.
 //!
 //! The command opens the database read-write, as any writer does (it takes the writer lock, and recovery truncates a
 //! torn tail, SPEC §8.6), so it fails while another writer has the database open. It then runs
-//! [`Database::compact`]: the live frames are rewritten into a new file that is renamed over the container, so the
-//! path names a complete database at every instant, and a crash leaves the old file and a stale temporary file
-//! (`persia container sweep` removes it). It commits no document of its own: the new file holds the last committed
-//! snapshot, with `seq` one higher than it. That snapshot is the open's: as with any writer's open, recovery may flush
-//! a WAL backlog larger than the default memtable (64 MiB; the command cannot know the application's) into a commit, or
-//! retire a cut commit (SPEC §8.6), so `seq` may rise by more than one over the file's last commit. Otherwise the WAL
-//! records after the last commit stay in the WAL.
+//! [`Database::compact`](persia_engine::db::Database::compact): the live frames are rewritten into a new file that is
+//! renamed over the container, so the path names a complete database at every instant, and a crash leaves the old
+//! file and a stale temporary file (`persia container sweep` removes it). It commits no document of its own: the new
+//! file holds the last committed snapshot, with `seq` one higher than it. That snapshot is the open's: as with any
+//! writer's open, recovery may flush a WAL backlog larger than the default memtable (64 MiB; the command cannot know
+//! the application's) into a commit, or retire a cut commit (SPEC §8.6), so `seq` may rise by more than one over the
+//! file's last commit. Otherwise the WAL records after the last commit stay in the WAL.
 //!
 //! What the compaction leaves alone (SPEC §4.8, §9.5):
 //! - **The blob pack.** `<name>.persia.blobs` is not opened, read or rewritten. Its dead space is reclaimed by the blob
@@ -18,8 +18,14 @@
 //! - **Copies in progress.** A copy taken with the files in use must not span a compaction: do not run this while
 //!   such a backup runs.
 //!
-//! The command has the built-in analyzers only. A schema that names an analyzer registered by the application
-//! (SPEC §6.2.2) fails the read-write open (exit status 1): such a database is compacted by its application.
+//! **Registered analyzers.** The command has the built-in analyzers only, and opens with [`CompactOnlyDatabase`]
+//! (ROADMAP 10.4.4, ADR-0068): the writer's open, in which a `text` field whose analyzer the application registered
+//! (SPEC §6.2.2) is not analyzed. The compaction copies frames without reading them, so it needs no analyzer, and such
+//! a collection's WAL records stay in the WAL, for the application to replay with its analyzer. What the command
+//! cannot do is flush them: when its recovery would have to (a WAL backlog of such a collection larger than the
+//! default memtable), it fails with status 1 before flushing any of them (and compacts nothing); open the database
+//! with its application first, which flushes the backlog. A database whose schemas name built-in analyzers only opens
+//! exactly as any writer's open.
 //!
 //! The text output is `key  value` rows. `--json` writes one object on one line, with these keys and no others:
 //! `{"seq": .., "before": {"bytes": .., "live_bytes": .., "dead_bytes": ..}, "after": {..}, "reclaimed_bytes": ..}`,
@@ -29,7 +35,7 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use persia_engine::db::{Compacted, Database, DatabaseError, DatabaseOptions};
+use persia_engine::db::{CompactOnlyDatabase, Compacted, DatabaseError, DatabaseOptions};
 use persia_storage::container::{Error as ContainerError, SpaceUsage};
 use serde_json::{Value, json};
 
@@ -50,7 +56,7 @@ fn run(path: &Path) -> Result<Compacted> {
     if !path.is_file() {
         bail!("{} is not a container file", path.display());
     }
-    let mut db = match Database::open(path, DatabaseOptions::default()) {
+    let mut db = match CompactOnlyDatabase::open(path, DatabaseOptions::default()) {
         Ok(db) => db,
         Err(DatabaseError::Container(ContainerError::Locked)) => {
             bail!(
@@ -63,8 +69,9 @@ fn run(path: &Path) -> Result<Compacted> {
     db.compact().map_err(|err| failed(path, err))
 }
 
-/// The error of a failed [`Database::compact`] of `path`. When only the directory sync after the rename failed, the
-/// new file may already be what the path names: the message says what to do next.
+/// The error of a failed [`Database::compact`](persia_engine::db::Database::compact) of `path`. When only the
+/// directory sync after the rename failed, the new file may already be what the path names: the message says what to
+/// do next.
 fn failed(path: &Path, err: DatabaseError) -> anyhow::Error {
     let context = if matches!(
         err,

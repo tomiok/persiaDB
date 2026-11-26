@@ -374,13 +374,22 @@ from `wal_start` to the end of the valid frames; the rest of that end is *dead*.
 reach the dead-space ratio of the end (default 40%). Dead frames in `wal_start..log_end` (an old Manifest) count as
 live; they are few and small.
 
-**From the command line** (ROADMAP 10.4.1). `persia compact <path>` runs one compaction on request, whatever the
+**From the command line** (ROADMAP 10.4.1, 10.4.4). `persia compact <path>` runs one compaction on request, whatever the
 dead space. It opens the database read-write as any writer does, so it fails while another writer holds the lock, and
 recovery runs first (§8.6). It commits no document of its own; as with any writer's open, recovery may flush a WAL
 backlog larger than the default memtable, or retire a cut commit (§8.6), so the compacted `seq` may be more than one
 above the last commit before the command. Otherwise the WAL records after the last commit stay WAL records. It
-prints the space before and after (`--json` for one JSON object, keys in the README's command-line section). It has the built-in analyzers only, so a database
-whose schema names a registered analyzer (§6.2.2) fails that read-write open, and is compacted by its application.
+prints the space before and after (`--json` for one JSON object, keys in the README's command-line section). It has
+the built-in analyzers only, so it opens with the **compaction-only open** (ROADMAP 10.4.4, ADR-0068,
+`CompactOnlyDatabase`): the writer's open above, except that a `text` field whose analyzer it lacks (a registered one,
+§6.2.2) is indexed with the stand-in of a read-only open that skips analysis (§8.6, one that emits no token), and
+that no commit may flush a non-empty memtable of a collection with such a field. Such a commit is refused before
+anything is written (`AnalysisSkipped`), so the open fails (status 1) when recovery would have to flush that
+collection's WAL backlog (over the default memtable, or out of docids); the application, with its analyzer, flushes
+it first. Otherwise that collection's WAL records stay WAL records, which the compaction copies (above) and the next
+writer's open replays and indexes with the real analyzer: nothing is lost, resurrected, or committed without its
+terms. The handle has no call that writes a document, commits, merges or changes a schema; when its registry has
+every analyzer it is exactly the writer's open.
 It never opens the blob pack (§9.3), whose space blob GC reclaims (§9.5). `persia stats` reports whether a
 compaction is due by the default thresholds only, and says so: the application's own are not in the file. Like every compaction it puts the read-only
 handles of other processes behind until they refresh (§9.5), and it must not run during a copy taken with the files

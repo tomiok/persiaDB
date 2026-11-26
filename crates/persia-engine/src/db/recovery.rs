@@ -28,6 +28,7 @@ use persia_format::superblock::Superblock;
 use persia_storage::Storage;
 use persia_storage::container::{Container, ContainerFile, FrameRef};
 
+use super::read_only::{Analysis, skip_unregistered};
 use super::{
     Collection, ContainerObjects, Database, DatabaseError, DatabaseOptions, LiveSegment,
     Structural, check_analyzers, objects, open_source,
@@ -45,15 +46,32 @@ impl<F: ContainerFile + Sync> Database<F> {
         container: Container<F>,
         options: DatabaseOptions,
     ) -> Result<Self, DatabaseError> {
-        let options = options.with_builtins();
+        Self::recover_as(container, options, Analysis::Required)
+    }
+
+    /// [`Database::recover`]; with [`Analysis::SkipUnregistered`] (a [`super::CompactOnlyDatabase`], ADR-0068), a
+    /// `text` field whose analyzer the registry lacks gets the no-token stand-in of a read-only open, and is recorded
+    /// before the replay, so that no commit, the replay's included, flushes its collection
+    /// ([`Database::plan_flushes`]).
+    pub(super) fn recover_as(
+        container: Container<F>,
+        options: DatabaseOptions,
+        analysis: Analysis,
+    ) -> Result<Self, DatabaseError> {
+        let mut options = options.with_builtins();
         let block_cache = options.cache();
+        let mut skipped = Vec::new();
         let (manifest, collections) = load(&container, &block_cache, |name, schema| {
+            if analysis == Analysis::SkipUnregistered {
+                skip_unregistered(name, schema, &mut options.registry, &mut skipped)?;
+            }
             check_analyzers(name, schema, &options.registry)?;
             Ok(super::new_memtable(schema, &options)?)
         })?;
         let wal = WalWriter::resume(container, BTreeMap::new())
             .with_chunk_target(options.wal_chunk_target);
         let mut db = Self::assemble(wal, manifest, collections, options, block_cache);
+        db.skipped = skipped;
         db.replay()?;
         db.retire_uncommitted_manifest()?;
         // Replayed operations count as written at the open: their age is not logged (SPEC §8.2).

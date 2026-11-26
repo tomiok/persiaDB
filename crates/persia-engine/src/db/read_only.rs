@@ -950,7 +950,7 @@ fn replay<F: ContainerFile + Sync>(
 
 /// Whether a read-only open needs every `text` field's analyzer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Analysis {
+pub(super) enum Analysis {
     /// A missing one fails the open ([`DatabaseError::UnregisteredAnalyzer`]).
     Required,
     /// A missing one is replaced by one that emits no token, and the field is listed as skipped.
@@ -980,7 +980,7 @@ impl Tokenizer for NoTokens {
 /// Registers, for every `text` field of `schema` whose analyzer `registry` lacks, an analyzer that emits no token
 /// under its name and version, and lists the field in `skipped`. A built-in name cannot be registered: its versions
 /// this build lacks were refused when the manifest was decoded (SPEC §6.2.2), so that fails the open as unregistered.
-fn skip_unregistered(
+pub(super) fn skip_unregistered(
     collection: &str,
     schema: &CollectionSchema,
     registry: &mut AnalyzerRegistry,

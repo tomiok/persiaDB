@@ -492,10 +492,7 @@ fn stats_and_dump_read_a_schema_naming_a_registered_analyzer() {
 /// A closed database whose schema names an analyzer the `persia` binary does not have, with one committed document
 /// and one in the WAL.
 fn registered_analyzer_database(path: &Path) {
-    let mut registry = AnalyzerRegistry::builtin();
-    registry
-        .register("tags", 1, Analyzer::builder(WhitespaceTokenizer).build())
-        .unwrap();
+    let registry = tags_registry();
     let schema = CollectionSchema::from_json_in(
         r#"{"name": "notes", "fields": {"tags": {"type": "text", "analyzer": "tags"}}}"#,
         &registry,
@@ -907,19 +904,107 @@ fn compact_leaves_the_blob_pack_alone() {
     assert!(verified.status.success(), "{}", stderr(&verified));
 }
 
-/// The command has the built-in analyzers only, and a read-write open needs every analyzer the schemas name
-/// (SPEC §6.2.2): it fails as any other failure (status 1), and leaves the file as it was.
+/// The registry of [`registered_analyzer_database`]: the built-ins and `tags@1`.
+fn tags_registry() -> AnalyzerRegistry {
+    let mut registry = AnalyzerRegistry::builtin();
+    registry
+        .register("tags", 1, Analyzer::builder(WhitespaceTokenizer).build())
+        .unwrap();
+    registry
+}
+
+/// ROADMAP 10.4.4: the command has the built-in analyzers only, and compacts a database whose schema names a
+/// registered one anyway (ADR-0068). The WAL record of that collection is not flushed with a stand-in: it stays a WAL
+/// record, and the application's open, with the analyzer, still finds both documents, by id and by the field's
+/// terms.
 #[test]
-fn compact_refuses_a_schema_naming_a_registered_analyzer() {
+fn compact_compacts_a_schema_naming_a_registered_analyzer_and_keeps_its_wal() {
     let _serial = serial();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("app.persia");
     registered_analyzer_database(&path);
+    let before = json(&persia(&["stats", path_arg(&path), "--json"]));
+    let done = json(&persia(&["compact", path_arg(&path), "--json"]));
+    assert_eq!(done["seq"], before["seq"].as_u64().unwrap() + 1, "{done}");
+    let after = json(&persia(&["stats", path_arg(&path), "--json"]));
+    let notes = &after["collections"][0];
+    assert_eq!(notes["documents"], 2, "{after}");
+    assert_eq!(
+        notes["wal_documents"], 1,
+        "the WAL record stays one: {after}"
+    );
+    assert_eq!(after["container"]["dead_bytes"], 0, "{after}");
+
+    let options = DatabaseOptions {
+        registry: tags_registry(),
+        ..DatabaseOptions::default()
+    };
+    let db = Database::open(&path, options).unwrap();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("notes").unwrap();
+    for id in ["n1", "n2"] {
+        assert!(c.get(id).unwrap().is_some(), "{id}");
+    }
+    drop(db);
+    let verified = persia(&["verify", path_arg(&path)]);
+    assert!(verified.status.success(), "{}", stderr(&verified));
+}
+
+/// ROADMAP 10.4.4, the refusal: a WAL backlog of such a collection larger than the default memtable would have to be
+/// flushed, which needs the analyzer. The command fails (status 1), names the collection, field and analyzer, and
+/// leaves the file as it was; the application flushes the backlog, after which the command compacts.
+#[test]
+fn compact_refuses_to_flush_a_backlog_that_needs_a_registered_analyzer() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let registry = tags_registry();
+    let schema = CollectionSchema::from_json_in(
+        r#"{"name": "notes", "strict": false, "fields": {"tags": {"type": "text", "analyzer": "tags"}}}"#,
+        &registry,
+    )
+    .unwrap();
+    let tags = schema.field("tags").unwrap().id();
+    let mut options = DatabaseOptions {
+        registry,
+        ..DatabaseOptions::default()
+    };
+    options.policy.flush.memtable_bytes = 1 << 30;
+    let mut db = Database::create(&path, options).unwrap();
+    db.create_collection(schema).unwrap();
+    // 18 documents of 4 MiB each (an extra field, stored and not analyzed): 72 MiB, all in the WAL.
+    let pad = serde_json::Value::String("p".repeat(4 << 20));
+    for i in 0..18 {
+        let mut doc = Document::new(format!("big{i:02}")).with(tags, Value::String("a b".into()));
+        doc.insert_extra("pad", pad.clone());
+        db.put("notes", &doc, Durability::Buffered).unwrap();
+    }
+    db.put("notes", &Document::new("last"), Durability::Fsync)
+        .unwrap();
+    drop(db);
     let before = std::fs::read(&path).unwrap();
-    let out = persia(&["compact", path_arg(&path)]);
+    let out = persia(&["compact", path_arg(&path), "--json"]);
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
-    assert!(stderr(&out).contains("tags@1"), "{}", stderr(&out));
-    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(out.stdout, b"");
+    let err = stderr(&out);
+    assert!(
+        err.contains(r#"collection "notes": its unflushed writes would have to be flushed, which needs the analyzer tags@1 of field "tags""#),
+        "{err}"
+    );
+    assert!(
+        std::fs::read(&path).unwrap() == before,
+        "the file is unchanged"
+    );
+
+    let options = DatabaseOptions {
+        registry: tags_registry(),
+        ..DatabaseOptions::default()
+    };
+    let mut db = Database::open(&path, options).unwrap();
+    db.commit().unwrap();
+    drop(db);
+    let done = json(&persia(&["compact", path_arg(&path), "--json"]));
+    assert!(done["reclaimed_bytes"].as_u64().unwrap() > 0, "{done}");
 }
 
 /// The situations of the exit status table.

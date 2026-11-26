@@ -43,6 +43,7 @@
 //! ```
 
 mod clock;
+mod compact_only;
 mod compaction;
 mod exec;
 mod flush;
@@ -82,6 +83,7 @@ use roaring::RoaringBitmap;
 
 pub use backup::{CommittedImage, write_backup, write_backup_in};
 pub use clock::{Clock, ManualClock, SegmentIds, SystemClock};
+pub use compact_only::CompactOnlyDatabase;
 pub use compaction::{Compacted, CompactionHold, CompactionOptions, CompactionStats};
 pub use exec::{CancelToken, ExecTerms, Execution, PoolError, SearchPool, Threads};
 pub use merging::{MergeOutcome, MergeStats};
@@ -236,6 +238,22 @@ pub enum DatabaseError {
         /// The field.
         field: String,
         /// The analyzer, `name@version`.
+        analyzer: String,
+    },
+    /// A [`CompactOnlyDatabase`] skips the analysis of a `text` field of the collection (its registry lacks the
+    /// field's analyzer), and a commit would have to flush that collection's unflushed writes, which a segment would
+    /// then hold without the field's terms (ADR-0068). Refused before anything is written; in practice at its open,
+    /// whose replay would flush a WAL backlog over the memtable size. Open the database with a registry that has the
+    /// analyzer (its application), which flushes the backlog, then compact. Not corruption.
+    #[error(
+        "collection {collection:?}: its unflushed writes would have to be flushed, which needs the analyzer {analyzer} of field {field:?} that this open lacks (a compaction-only open never flushes them without it); open the database with a registry that has it first"
+    )]
+    AnalysisSkipped {
+        /// The collection.
+        collection: String,
+        /// A field whose analysis is skipped.
+        field: String,
+        /// Its analyzer, `name@version`.
         analyzer: String,
     },
     /// [`ReadOnlyDatabase::refresh`] found another database in the container (another `db_uuid`: a file put at the
@@ -629,6 +647,9 @@ pub struct Database<F = File> {
     /// What the relaxed searches of the collections dropped since the open counted (ROADMAP 8.3.3), so that
     /// [`Database::relaxation_stats`] never goes down.
     relaxation_dropped: RelaxationStats,
+    /// The `text` fields whose analysis a [`CompactOnlyDatabase`]'s open skips (ADR-0068): their collections'
+    /// memtables are never flushed ([`Database::plan_flushes`]). Empty for every other open.
+    skipped: Vec<SkippedAnalysis>,
 }
 
 impl Database<File> {
@@ -758,6 +779,7 @@ impl<F: ContainerFile + Sync> Database<F> {
             compactions: CompactionStats::default(),
             compaction_holds: Arc::default(),
             relaxation_dropped: RelaxationStats::default(),
+            skipped: Vec::new(),
         }
     }
 
@@ -769,6 +791,11 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// The `seq` of the last commit.
     pub fn seq(&self) -> u64 {
         self.manifest.seq()
+    }
+
+    /// The `text` fields whose analysis this open skips: none but for a [`CompactOnlyDatabase`] (ADR-0068).
+    pub(crate) fn skipped_analysis(&self) -> &[SkippedAnalysis] {
+        &self.skipped
     }
 
     /// The proof that this database holds its container's writer lock, with which its blob pack opens read-write
@@ -1279,6 +1306,15 @@ impl<F: ContainerFile + Sync> Database<F> {
         for (name, c) in &self.collections {
             if c.memtable.is_empty() || skip == Some(name.as_str()) {
                 continue;
+            }
+            // A memtable that indexed a field with a stand-in never becomes a segment (ADR-0068). Refused while
+            // planning, so before anything is written, and for the whole commit: every flush flushes every memtable.
+            if let Some(s) = self.skipped.iter().find(|s| s.collection == *name) {
+                return Err(DatabaseError::AnalysisSkipped {
+                    collection: s.collection.clone(),
+                    field: s.field.clone(),
+                    analyzer: s.analyzer.clone(),
+                });
             }
             let merges = &self.merges;
             let taken = |id| {
