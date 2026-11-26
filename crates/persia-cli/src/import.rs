@@ -3,8 +3,10 @@
 //!
 //! **Input.** `--input <FILE>`, or the standard input without it. One document per line, in the JSON form of SPEC
 //! §6.4.1, as `persia dump documents` writes it, so a dump imports back. A line ends at `\n` (`\r\n` too); lines that
-//! are empty or hold only spaces and tabs are skipped (and counted, so line numbers stay those of the input). A line
-//! is read in bounded memory: at most 16 MiB, the longest document JSON text (module `persia::internal::jsonl`).
+//! are empty or hold only JSON whitespace (spaces, tabs, carriage returns) are skipped (and counted, so line numbers
+//! stay those of the input). A line is read in bounded memory: at most 16 MiB, the longest document JSON text (module
+//! `persia::internal::jsonl`). An input that starts with a UTF-8 byte order mark (U+FEFF, which JSON does not allow) is
+//! refused at line 1 with a message that says so: remove the mark and import again.
 //!
 //! **The database.** It opens read-write, as any writer does, so it fails (status 1) while another writer has the
 //! database open, and recovery runs first (SPEC §8.6). The collection must exist, unless `--schema <FILE>` gives
@@ -14,12 +16,14 @@
 //! analyzers only: a schema that names a registered analyzer (SPEC §6.2.2) fails the open (status 1).
 //!
 //! **Each line** is read with the collection's schema (`Document::from_json`) and put (`Collection::put`, an upsert
-//! by id, SPEC §8.3), logged `Buffered`. The documents are committed once at the end (`Db::close`), which makes them
-//! durable. A line with the id of an earlier one replaces it.
+//! by id, SPEC §8.3), logged `Buffered`. They are committed at least once, at the end (`Db::close`), which makes them
+//! durable: the database's maintenance thread may also commit during a long import, as it does for any write (its
+//! commit policy, or a memtable reaching its size, SPEC §8.2). A line with the id of an earlier one replaces it.
 //!
 //! **A bad line stops the import.** Not UTF-8, longer than 16 MiB, not JSON, not a document of the schema, past a
 //! limit of SPEC §6.4.1, or refused by the database when it is put (its blob reference, below, or a document the
-//! memtable rejects, SPEC §8.2): the command commits the documents of the lines before it and exits with status 1, naming the line (1-based) and why. Nothing
+//! memtable rejects, SPEC §8.2): the command commits the documents of the lines before it and exits with status 1,
+//! naming the line (1-based) and why (status 3 when the put's failure is corruption, ROADMAP 10.1.33). Nothing
 //! from that line on is imported, so an import resumes from it (`tail -n +<line>`), and running it again is harmless
 //! (every put replaces the document of its id). A crash, or a kill, leaves a prefix of the lines imported (the log
 //! keeps their order, SPEC §8.2.1).
@@ -216,6 +220,12 @@ fn put_lines(collection: &Collection, input: impl BufRead, counts: &mut Counts) 
     let mut lines = Lines::new(input);
     while let Some(line) = lines.next_line()? {
         counts.lines = line.number;
+        if line.number == 1 && line.text.starts_with(BOM) {
+            bail!(
+                "line 1: the input starts with a UTF-8 byte order mark (U+FEFF), which JSON does not allow: remove it \
+                 and import again"
+            );
+        }
         if is_blank(line.text) {
             counts.blank_lines += 1;
             continue;
@@ -260,6 +270,9 @@ fn blob_not_stored(err: &persia::Error) -> Option<BlobId> {
     }
     None
 }
+
+/// The UTF-8 byte order mark, which RFC 8259 forbids at the start of JSON text (module docs: refused, not skipped).
+const BOM: char = '\u{feff}';
 
 /// A line of JSON whitespace only (RFC 8259: space, tab, carriage return; a line holds no line feed).
 fn is_blank(text: &str) -> bool {

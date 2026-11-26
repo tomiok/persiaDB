@@ -13,23 +13,26 @@
 //!
 //! **Analyzers.** The command has the built-in analyzers only, and the writer's open needs every analyzer the schemas
 //! name, so a database whose schema names one its application registered (SPEC §6.2.2) fails that open (status 1).
-//! Such a database is collected by its application (ROADMAP 10.4.7: the compaction-only open of ADR-0068 offers no mark).
+//! Such a database is collected by its application (ROADMAP 10.4.7: the compaction-only open of ADR-0068 offers no
+//! mark).
 //!
-//! **The grace period.** `--grace <N>{s,m,h,d}`, 24 h by default (SPEC §9.5), is passed to the GC, which refuses one
-//! below its floor, twice the longest bind budget (2 h, SPEC §9.4), before reading anything (status 1). It ages the
-//! objects of a remote store only: the local pack keeps no age, and the sweep drops what the mark does not keep at once
-//! (SPEC §9.3, §9.5). So the report's `young` is 0 for a local database; the grace is checked and reported all the
-//! same.
+//! **The grace period.** `--grace <N>{s,m,h,d}`, 24 h by default (SPEC §9.5), is checked by the GC's own rule
+//! (`GcOptions::validate`), which refuses one below its floor, twice the longest bind budget (2 h, SPEC §9.4): before
+//! anything is opened or read (status 1), so a refused grace leaves every file as it was. It ages the objects of a
+//! remote store only: the local pack keeps no age, and the sweep drops what the mark does not keep at once (SPEC §9.3,
+//! §9.5). So the report's `young` is 0 for a local database; the grace is checked and reported all the same.
 //!
 //! **Readers.** A read-only handle of another process holds a reader lease beside the pack (SPEC §9.3). The sweep does
-//! not run while any live lease is behind the committed seq, opening, ahead of it or unreadable (SPEC §9.5): the report
-//! then counts the leases by state and says the sweep was held back (status 0: nothing was wrong, nothing was deleted).
-//! The GC logs each such lease's path; the report has the counts only. Every commit, this command's open included when
-//! its recovery commits, puts the read-only handles of other processes behind until they refresh.
+//! not run while any live lease is behind the committed seq, opening, ahead of it or unreadable (SPEC §9.5): the
+//! report then counts the leases by state and says the sweep was held back (status 0: nothing was wrong, nothing was
+//! deleted). The GC logs each such lease's path; the report has the counts only. Every commit, this command's open
+//! included when its recovery commits, puts the read-only handles of other processes behind until they refresh.
 //!
 //! The text output is `key  value` rows. `--json` writes one object on one line, with these keys and no others:
 //! - `grace_secs`, `held_back` (the sweep did not run: a reader lease or a backup's hold), `held_by_copy`;
 //! - `pack` `{present, bytes_before, bytes_after}`: the pack file's size around the command, `null` without a pack;
+//!   `bytes_after` is also `null` when the size could not be read after a GC that succeeded (said on stderr: the
+//!   report is still written, status 0);
 //! - `marked` `{blobs, uploads}`, `missing` (the hex ids of referenced blobs the pack lacks: dangling references,
 //!   which `verify` reports and GC never creates);
 //! - `deleted` `{blobs, uploads, chunks}`;
@@ -58,9 +61,29 @@ use serde_json::{Value, json};
 struct Collected {
     grace: Duration,
     report: GcReport,
-    /// The pack file's size before the open and after the close; `None` without a pack.
+    /// The pack file's size before the open; `None` without a pack.
     pack_before: Option<u64>,
-    pack_after: Option<u64>,
+    /// Its size after the close.
+    pack_after: PackAfter,
+}
+
+/// The pack file's size after a GC that succeeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackAfter {
+    /// Read: `None` without a pack.
+    Read(Option<u64>),
+    /// It could not be read (said on stderr): the report gives it as unknown, `null`.
+    Unknown,
+}
+
+impl PackAfter {
+    /// The size the report writes: `None` without a pack, or when it is unknown.
+    fn size(self) -> Option<u64> {
+        match self {
+            Self::Read(size) => size,
+            Self::Unknown => None,
+        }
+    }
 }
 
 /// Collects the blob store of the database at `path` and writes what it did to `out`, as JSON with `json`.
@@ -85,6 +108,15 @@ fn pack_size(pack: &Path) -> Result<Option<u64>> {
 
 /// Opens the database at `path` read-write with its pack, runs the GC and closes it.
 fn run(path: &Path, grace: Duration) -> Result<Collected> {
+    let options = GcOptions {
+        grace,
+        ..GcOptions::default()
+    };
+    // Checked before anything is opened: options the GC would refuse must not cost an open, whose recovery may
+    // commit or truncate (SPEC §8.6).
+    options
+        .validate()
+        .with_context(|| format!("collecting the blobs of {}", path.display()))?;
     // A read-write open of a missing path must not be mistaken for a database to create.
     if !path.is_file() {
         bail!("{} is not a container file", path.display());
@@ -93,19 +125,23 @@ fn run(path: &Path, grace: Duration) -> Result<Collected> {
     let pack_before = pack_size(&pack)?;
     let db =
         BlobDatabase::open(path, DatabaseOptions::default()).map_err(|err| opening(path, err))?;
-    let options = GcOptions {
-        grace,
-        ..GcOptions::default()
-    };
     let report = db
         .gc(&options)
         .with_context(|| format!("collecting the blobs of {}", path.display()))?;
     drop(db);
+    // The GC is done: a size that cannot be read now is reported as unknown, not as a failed collection.
+    let pack_after = match pack_size(&pack) {
+        Ok(size) => PackAfter::Read(size),
+        Err(err) => {
+            eprintln!("persia: {err:#} (the report gives the pack's size after as unknown)");
+            PackAfter::Unknown
+        }
+    };
     Ok(Collected {
         grace,
         report,
         pack_before,
-        pack_after: pack_size(&pack)?,
+        pack_after,
     })
 }
 
@@ -202,9 +238,9 @@ fn to_json(done: &Collected) -> Value {
         "held_back": held_back(r),
         "held_by_copy": r.held_by_copy,
         "pack": {
-            "present": done.pack_before.is_some() || done.pack_after.is_some(),
+            "present": done.pack_before.is_some() || done.pack_after.size().is_some(),
             "bytes_before": done.pack_before,
-            "bytes_after": done.pack_after,
+            "bytes_after": done.pack_after.size(),
         },
         "marked": {"blobs": r.marked_blobs, "uploads": r.marked_uploads},
         "missing": missing,
@@ -265,7 +301,14 @@ fn write_text(out: &mut dyn Write, done: &Collected) -> Result<()> {
         ("grace", format!("{} s", done.grace.as_secs())),
         (
             "pack",
-            format!("{} -> {}", bytes(done.pack_before), bytes(done.pack_after)),
+            format!(
+                "{} -> {}",
+                bytes(done.pack_before),
+                match done.pack_after {
+                    PackAfter::Read(size) => bytes(size),
+                    PackAfter::Unknown => "unknown".to_owned(),
+                }
+            ),
         ),
         ("sweep", sweep),
         (
@@ -379,7 +422,7 @@ mod tests {
             grace: Duration::from_hours(2),
             report,
             pack_before: Some(9000),
-            pack_after: Some(9000),
+            pack_after: PackAfter::Read(Some(9000)),
         }
     }
 
@@ -413,6 +456,27 @@ mod tests {
              kept              0 pinned, 0 young, 0 of unknown age, 0 changed, 0 unreadable\n\
              rewrite           not run\n\
              readers           2 live: 1 current, 0 opening, 1 behind, 0 ahead, 0 unreadable; 0 stale removed\n"
+        );
+    }
+
+    /// A pack whose size could not be read after the GC: the report is still written, `bytes_after` `null`.
+    #[test]
+    fn an_unknown_size_after_is_null_and_unknown() {
+        let done = Collected {
+            pack_after: PackAfter::Unknown,
+            ..collected(GcReport::default())
+        };
+        let json = to_json(&done);
+        assert_eq!(
+            json["pack"],
+            serde_json::json!({"present": true, "bytes_before": 9000, "bytes_after": null})
+        );
+        let mut out = Vec::new();
+        write_text(&mut out, &done).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("pack              9000 bytes -> unknown\n"),
+            "{text}"
         );
     }
 
@@ -523,7 +587,7 @@ mod tests {
         assert_eq!(
             to_json(&Collected {
                 pack_before: None,
-                pack_after: None,
+                pack_after: PackAfter::Read(None),
                 ..collected(GcReport::default())
             })["pack"],
             serde_json::json!({"present": false, "bytes_before": null, "bytes_after": null})

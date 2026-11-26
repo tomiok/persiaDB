@@ -65,6 +65,40 @@ impl Default for GcOptions {
     }
 }
 
+impl GcOptions {
+    /// Checks these options as [`BlobDatabase::gc`] does before it reads anything: a caller such as `persia gc` calls
+    /// it before opening the database, so options GC would refuse never cost an open (locks, recovery).
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// use persia::internal::gc::{GcError, GcOptions};
+    ///
+    /// assert!(GcOptions::default().validate().is_ok());
+    /// let short = GcOptions { grace: Duration::from_hours(1), ..GcOptions::default() };
+    /// assert!(matches!(short.validate(), Err(GcError::GraceBelowBindBudget { .. })));
+    /// let ratio = GcOptions { rewrite_ratio: -1.0, ..GcOptions::default() };
+    /// assert!(matches!(ratio.validate(), Err(GcError::InvalidRewriteRatio(_))));
+    /// ```
+    ///
+    /// # Errors
+    /// [`GcError::GraceBelowBindBudget`] for a grace below twice [`MAX_BIND_BUDGET`]; [`GcError::InvalidRewriteRatio`]
+    /// for a negative or NaN ratio.
+    pub fn validate(&self) -> Result<(), GcError> {
+        // Twice the cap, not the cap: a `put_if_absent` started inside the budget can land after it (SPEC §9.4).
+        if self.grace < 2 * MAX_BIND_BUDGET {
+            return Err(GcError::GraceBelowBindBudget {
+                grace: self.grace,
+                floor: 2 * MAX_BIND_BUDGET,
+            });
+        }
+        if self.rewrite_ratio.is_nan() || self.rewrite_ratio < 0.0 {
+            return Err(GcError::InvalidRewriteRatio(self.rewrite_ratio));
+        }
+        Ok(())
+    }
+}
+
 /// What [`BlobDatabase::gc`] did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -210,16 +244,7 @@ impl<S: BlobStore + Sweep + ?Sized, L: DocumentLog + BlobReferences> BlobDatabas
     /// [`BlobDatabase::mark`] and the store's sweep ([`GcError::Blob`]): the sweep stops at the first error, and what
     /// it deleted before was unmarked.
     pub fn gc(&self, options: &GcOptions) -> Result<GcReport, GcError> {
-        // Twice the cap, not the cap: a `put_if_absent` started inside the budget can land after it (SPEC §9.4).
-        if options.grace < 2 * MAX_BIND_BUDGET {
-            return Err(GcError::GraceBelowBindBudget {
-                grace: options.grace,
-                floor: 2 * MAX_BIND_BUDGET,
-            });
-        }
-        if options.rewrite_ratio.is_nan() || options.rewrite_ratio < 0.0 {
-            return Err(GcError::InvalidRewriteRatio(options.rewrite_ratio));
-        }
+        options.validate()?;
         if self.gc_held() {
             return Ok(GcReport {
                 held_by_copy: true,

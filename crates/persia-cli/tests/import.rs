@@ -529,6 +529,50 @@ fn a_blob_reference_the_target_does_not_hold_stops_the_import_at_its_line() {
     assert!(verified.status.success(), "{}", stderr(&verified));
 }
 
+/// A `BlobRef` with the right `blob_id` but another `size` or `chunk_size` than the blob it names, given back to the
+/// database that holds the blob: the put refuses it (`check_ref`, SPEC §9.4), the import stops at its line and logs
+/// nothing for it. `check_ref` reports the mismatch as corruption, the only kind it has, so today the command exits
+/// with the corruption status 3, although the bad bytes are the input's: telling a caller's mismatched reference
+/// from stored damage, and the exit status that follows, is ROADMAP 10.1.33. This pins today's status.
+#[test]
+fn a_blob_reference_of_another_size_or_chunk_size_stops_the_import_at_its_line() {
+    let _serial = serial();
+    for field in ["size", "chunk_size"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.persia");
+        let dumped = with_a_blob(&path);
+        let mut doc: Json = serde_json::from_str(&dumped[0]).unwrap();
+        assert_eq!(doc["id"], "f1");
+        let n = doc["blob"][field].as_u64().unwrap();
+        doc["blob"][field] = Json::from(n + 1);
+        doc["id"] = Json::from("changed");
+        let input = input_file(dir.path(), format!("{}\n{doc}\n", dumped[1]).as_bytes());
+        let before = dump(&path, "files");
+        let out = persia(&[
+            "import",
+            arg(&path),
+            "--collection",
+            "files",
+            "--input",
+            arg(&input),
+        ]);
+        assert_eq!(out.status.code(), Some(3), "{field}: {}", stderr(&out));
+        let err = stderr(&out);
+        assert!(
+            err.contains("line 2: putting the document \"changed\""),
+            "{field}: {err}"
+        );
+        assert!(
+            err.contains("documents put before it, imported: 1;"),
+            "{field}: {err}"
+        );
+        // Line 1 replaced `f2` with itself; nothing was logged for line 2.
+        assert_eq!(dump(&path, "files"), before, "{field}");
+        let verified = persia(&["verify", arg(&path)]);
+        assert!(verified.status.success(), "{field}: {}", stderr(&verified));
+    }
+}
+
 /// A database with three notes, committed, and its writer closed.
 fn three_notes(path: &Path) {
     empty_notes(path);
@@ -751,4 +795,137 @@ fn import_and_search_refuse_a_schema_naming_a_registered_analyzer() {
         assert!(stderr(&out).contains("tags@1"), "{}", stderr(&out));
     }
     assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+/// A UTF-8 byte order mark at the start of the input is refused at line 1, saying so; nothing is imported. U+FEFF on a
+/// later line is no mark: that line is a bad document like any other.
+#[test]
+fn an_input_starting_with_a_byte_order_mark_is_refused_at_line_1() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    empty_notes(&path);
+    let input = input_file(
+        dir.path(),
+        "\u{feff}{\"id\": \"a\"}\n{\"id\": \"b\"}\n".as_bytes(),
+    );
+    let out = persia(&import_args(&path, &input));
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("line 1: the input starts with a UTF-8 byte order mark (U+FEFF)"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(ids(&path), Vec::<String>::new());
+
+    let input = input_file(
+        dir.path(),
+        "{\"id\": \"a\"}\n\u{feff}{\"id\": \"b\"}\n".as_bytes(),
+    );
+    let out = persia(&import_args(&path, &input));
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("line 2: not a document"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(ids(&path), ["a"]);
+}
+
+/// The `i`-th line of [`a_killed_import_leaves_a_prefix_of_its_lines_and_resumes`]'s input: about 200 bytes.
+fn crash_line(i: usize) -> String {
+    format!(
+        r#"{{"id": "k{i:05}", "n": {i}, "body": "line {i} of a long import: the quick brown fox jumps over the lazy dog, a seeded filler that makes each line about two hundred bytes long, {}"}}"#,
+        i % 97
+    )
+}
+
+/// A `persia import` killed (SIGKILL) during a long standard input: the database reopens with the documents of a
+/// prefix of the lines, in input order (the log keeps their order, SPEC §8.2.1), and an import of the lines from the
+/// next one on completes it. The kill is triggered by a file-system observation (the container grew by 2 MiB of WAL
+/// chunks while the input was fed), not by time.
+#[cfg(unix)]
+#[test]
+fn a_killed_import_leaves_a_prefix_of_its_lines_and_resumes() {
+    const LINES: usize = 40_000;
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    empty_notes(&path);
+    let initial = std::fs::metadata(&path).unwrap().len();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_persia"))
+        .args(["import", arg(&path), "--collection", "notes"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut fed = 0;
+    let mut triggered = false;
+    for i in 0..LINES {
+        let line = format!("{}\n", crash_line(i));
+        // The pipe holds 64 KiB: a write blocks until the import has read the lines before it.
+        if stdin.write_all(line.as_bytes()).is_err() {
+            break;
+        }
+        fed = i + 1;
+        if i % 64 == 0 && std::fs::metadata(&path).unwrap().len() > initial + (2 << 20) {
+            triggered = true;
+            break;
+        }
+    }
+    assert!(
+        triggered,
+        "the container never grew by 2 MiB while {fed} of {LINES} lines were fed"
+    );
+    child.kill().unwrap();
+    let status = child.wait().unwrap();
+    assert!(!status.success(), "killed: {status}");
+    drop(stdin);
+
+    let imported = ids(&path);
+    assert!(
+        !imported.is_empty(),
+        "the WAL chunks the file grew by hold documents"
+    );
+    assert!(
+        imported.len() <= fed,
+        "{} documents of {fed} lines fed",
+        imported.len()
+    );
+    let expected: Vec<String> = (0..imported.len()).map(|i| format!("k{i:05}")).collect();
+    assert!(
+        imported == expected,
+        "the documents are a prefix of the lines, in order"
+    );
+
+    // Resume from the next line: everything is imported, once each, in order.
+    let mut rest = String::new();
+    for i in imported.len()..LINES {
+        rest.push_str(&crash_line(i));
+        rest.push('\n');
+    }
+    let input = input_file(dir.path(), rest.as_bytes());
+    let done = json(&persia(&[
+        "import",
+        arg(&path),
+        "--collection",
+        "notes",
+        "--input",
+        arg(&input),
+        "--json",
+    ]));
+    assert_eq!(
+        done["documents"].as_u64().unwrap(),
+        u64::try_from(LINES - imported.len()).unwrap()
+    );
+    let all = ids(&path);
+    assert_eq!(all.len(), LINES);
+    assert!(
+        all.iter()
+            .enumerate()
+            .all(|(i, id)| *id == format!("k{i:05}")),
+        "every line imported once, in order"
+    );
 }

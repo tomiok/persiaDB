@@ -1081,27 +1081,60 @@ impl Drop for Reaped {
     }
 }
 
+/// Whether the process `pid` is stopped, as far as the system says: on Linux its `/proc/<pid>/stat` state is `T` (or
+/// `t`); elsewhere `None` (unknown).
+fn is_stopped(pid: u32) -> Option<bool> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // `pid (comm) state ...`: the state follows the last `)` (the command name may hold one).
+    let state = stat.rsplit_once(')')?.1.split_whitespace().next()?;
+    Some(matches!(state, "T" | "t"))
+}
+
+/// How many times [`a_writer_process_and_a_second_persia_gc_fail_while_a_stopped_persia_gc_holds_the_database`]
+/// rebuilds and retries when its `SIGSTOP` lands too late (after the rename, or after the exit).
+const STOP_ATTEMPTS: usize = 5;
+
 /// A `persia gc` stopped (`SIGSTOP`) once its rewrite's temporary file appears holds both writer locks: a writer
 /// process's open fails on the container's lock, a second `persia gc` exits 1, and no file changes meanwhile. Resumed
 /// (`SIGCONT`), the first run completes: the orphans deleted, the referenced blob intact.
+///
+/// The signal is sent by the `kill` utility (no `libc` here), so it can land after the rename, or after the exit. Such
+/// an attempt is a miss, detected (the child exited, or the temporary file is gone once it is stopped), resumed, reaped
+/// and retried on a new database, up to [`STOP_ATTEMPTS`] times; a caught attempt is checked in full.
 #[test]
 fn a_writer_process_and_a_second_persia_gc_fail_while_a_stopped_persia_gc_holds_the_database() {
     if child_env().is_some() {
         return;
     }
     let _serial = serial();
+    for attempt in 1..=STOP_ATTEMPTS {
+        if stopped_mid_rewrite(attempt) {
+            return;
+        }
+        eprintln!(
+            "attempt {attempt}: SIGSTOP landed after the rewrite; retrying on a new database"
+        );
+    }
+    panic!("no attempt in {STOP_ATTEMPTS} stopped persia gc during its rewrite");
+}
+
+/// One attempt of the stopped-`persia gc` test: `false` when the stop missed the rewrite (nothing checked), `true` once
+/// a caught attempt passed every check.
+fn stopped_mid_rewrite(attempt: usize) -> bool {
     let dir = KeptOnFailure::new();
     let path = create(dir.path());
-    // One kept blob of about 2.2 chunks and three orphans as big: a rewrite that copies megabytes and syncs them.
+    // One kept blob of about six chunks and three orphans of about three each (60% of the frames dead, so the pack is
+    // rewritten): a rewrite that copies and syncs 24 MiB, a wide window for the stop.
     let mut model = Model::new();
     {
         let mut db = BlobDatabase::open(&path, DatabaseOptions::default()).unwrap();
-        for n in 1..=4_u64 {
+        put!(db, model, "f1", 6 * CHUNK + 1, 1, Durability::Fsync);
+        for n in 2..=4_u64 {
             put!(
                 db,
                 model,
                 &format!("f{n}"),
-                2 * CHUNK + n,
+                3 * CHUNK + n,
                 n,
                 Durability::Fsync
             );
@@ -1113,12 +1146,17 @@ fn a_writer_process_and_a_second_persia_gc_fail_while_a_stopped_persia_gc_holds_
         db.commit().unwrap();
     }
     let mut gc = Reaped(Some(spawn_gc(&path)));
-    // Poll (no sleep) until the rewrite's temporary file is listed. Writing and syncing 8 MiB takes milliseconds; a
-    // poll, microseconds.
+    // Poll (no sleep) until the rewrite's temporary file is listed. A poll takes microseconds.
     loop {
         let child = gc.0.as_mut().unwrap();
         if let Some(status) = child.try_wait().unwrap() {
-            panic!("persia gc exited ({status}) before its temporary file was listed");
+            // It finished before a poll saw its temporary file: a miss, but a run that succeeded.
+            gc.0 = None;
+            assert!(
+                status.success(),
+                "attempt {attempt}: the missed persia gc failed: {status}"
+            );
+            return false;
         }
         if !temp_files(&path).is_empty() {
             break;
@@ -1126,6 +1164,32 @@ fn a_writer_process_and_a_second_persia_gc_fail_while_a_stopped_persia_gc_holds_
     }
     let pid = gc.0.as_ref().unwrap().id();
     signal(pid, "-STOP");
+    // Wait (no sleep) until the system shows it stopped, where it can tell; it may also have exited meanwhile.
+    loop {
+        if let Some(status) = gc.0.as_mut().unwrap().try_wait().unwrap() {
+            // It exited before the stop took: a miss, but a run that succeeded.
+            gc.0 = None;
+            assert!(
+                status.success(),
+                "attempt {attempt}: the missed persia gc failed: {status}"
+            );
+            return false;
+        }
+        if is_stopped(pid) != Some(false) {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    if temp_files(&path).len() != 1 {
+        // Stopped after the rename: resume it, let it finish, and try again.
+        signal(pid, "-CONT");
+        let status = gc.0.take().unwrap().wait().unwrap();
+        assert!(
+            status.success(),
+            "attempt {attempt}: the missed persia gc failed: {status}"
+        );
+        return false;
+    }
     let before = files(dir.path());
     assert_eq!(temp_files(&path).len(), 1, "the rewrite's temporary file");
 
@@ -1151,6 +1215,7 @@ fn a_writer_process_and_a_second_persia_gc_fail_while_a_stopped_persia_gc_holds_
     let v = verify(&path, true, "resumed");
     assert_eq!((v.referenced, v.bound, v.orphan_chunks), (1, 1, 0), "{v:?}");
     check_reads(&path, &model, "resumed");
+    true
 }
 
 // ---------------------------------------------------------------------------------------------------------------

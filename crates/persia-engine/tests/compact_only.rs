@@ -892,8 +892,8 @@ fn two_collections_sharing_a_skipped_analyzer_are_both_guarded() {
                 field,
                 analyzer,
             } => {
-                // The commit that would flush the backlog also holds the other collection's record: either may be named, and the
-                // first in collection order is.
+                // The commit that would flush the backlog also holds the other collection's record: either may be
+                // named, and the first in collection order is.
                 assert_eq!(named, "notes", "{collection}: {err}");
                 assert_eq!((field.as_str(), analyzer.as_str()), ("tags", "tags@1"));
             }

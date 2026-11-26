@@ -66,13 +66,18 @@ pub fn search(
         Query::Request(request) => found.search_json(request),
     }
     .with_context(|| format!("searching the collection {collection:?}"))?;
+    // Rendered first and written only once the database closed: a failed close leaves no response on stdout.
+    let mut rendered = Vec::new();
     if json {
-        writeln!(out, "{}", response.to_json()?)?;
+        writeln!(rendered, "{}", response.to_json()?)?;
     } else {
-        write_text(out, &found, &response)?;
+        write_text(&mut rendered, &found, &response)?;
     }
+    drop(found);
     db.close()
-        .with_context(|| format!("closing {}", path.display()))
+        .with_context(|| format!("closing {}", path.display()))?;
+    out.write_all(&rendered)?;
+    Ok(())
 }
 
 /// The collection `name` of `db`, or an error naming the ones there are.

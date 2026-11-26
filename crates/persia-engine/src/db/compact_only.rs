@@ -7,8 +7,8 @@
 //! of [`ReadOnlyDatabase::open_skipping_analysis`](super::ReadOnlyDatabase::open_skipping_analysis), and listed by
 //! [`CompactOnlyDatabase::skipped_analysis`]. Such a memtable must never become a segment: a commit that would flush a
 //! non-empty memtable of a collection with a skipped field fails with [`DatabaseError::AnalysisSkipped`] before
-//! anything is written. Every flush flushes every memtable, so the open fails when its replay would flush, any
-//! collection, while such a collection holds a replayed record: a memtable at the size threshold (for such a
+//! anything is written. Every flush flushes every memtable, so the open fails when its replay would flush any
+//! collection while such a collection holds a replayed record: a memtable at the size threshold (for such a
 //! collection, measured on the stand-in memtable, which holds none of the skipped field's terms) or out of docids.
 //! Otherwise those records stay WAL records, which the compaction copies and the next writer, with the analyzer,
 //! replays. After a refusal, open the database with the analyzer and commit (an open alone may flush nothing).
@@ -89,8 +89,9 @@ impl<F: ContainerFile + Sync> CompactOnlyDatabase<F> {
     /// # Errors
     /// [`DatabaseError::Container`] with [`container::Error::ReadOnly`] for a container opened read-only;
     /// [`DatabaseError::AnalysisSkipped`] when the replay would flush (any collection: every flush flushes every
-    /// memtable) while a collection with a skipped field holds a replayed record, before that commit writes anything; [`DatabaseError::UnregisteredAnalyzer`] for a version of a built-in analyzer this
-    /// build lacks; otherwise as [`Database::open_container`].
+    /// memtable) while a collection with a skipped field holds a replayed record, before that commit writes anything;
+    /// [`DatabaseError::UnregisteredAnalyzer`] for a version of a built-in analyzer this build lacks; otherwise as
+    /// [`Database::open_container`].
     pub fn open_container(
         container: Container<F>,
         options: DatabaseOptions,

@@ -91,15 +91,15 @@
 //! `gc` and `container sweep` open read-write and fail with status 1 while another writer has the database. `container
 //! files` opens nothing: it lists the files beside any existing file. `inspect container` reports damage after the
 //! last commit on its rows and still exits 0 (it is a debugging aid; `verify` is the check). Besides the table: `dump
-//! documents` exits 1 for a collection the database lacks, `compact` exits 1 when its recovery would have to flush a
-//! WAL backlog of a collection whose schema names an analyzer registered by the application (it has the built-in ones
-//! only; it compacts such a database otherwise, ROADMAP 10.4.4), `import` and `search` exit 1 for a collection the
-//! database lacks (`import` creates it with `--schema`) and for a schema naming a registered analyzer, `import` exits 1
-//! at the first bad line of its input (naming it, after committing the lines before it), `gc` exits 1 for a schema
-//! naming a registered analyzer and for a `--grace` below 2 h (2 for a malformed one) and 0 when reader leases held its
-//! sweep back (the report says so), the segment commands exit 3
-//! for a corrupt segment file and 1 for a missing one or a `--schema` that is not the segment's, and the store commands
-//! exit 1 for a root that is not a directory.
+//! documents` exits 1 for a collection the database lacks, `compact` exits 1 when its recovery would flush any
+//! collection while a collection whose schema names an analyzer registered by the application holds a replayed record
+//! (it has the built-in ones only; it compacts such a database otherwise, ROADMAP 10.4.4, ADR-0068), `import` and
+//! `search` exit 1 for a collection the database lacks (`import` creates it with `--schema`) and for a schema naming a
+//! registered analyzer, `import` exits 1 at the first bad line of its input (naming it, after committing the lines
+//! before it), `gc` exits 1 for a schema naming a registered analyzer and for a `--grace` below 2 h (2 for a malformed
+//! one) and 0 when reader leases held its sweep back (the report says so), the segment commands exit 3 for a corrupt
+//! segment file and 1 for a missing one or a `--schema` that is not the segment's, and the store commands exit 1 for a
+//! root that is not a directory.
 //!
 //! `persia bench` (ROADMAP 10.4.3, module `bench`) is a quick micro-benchmark: it indexes a seeded synthetic corpus
 //! into a new database in a scratch directory it creates and removes, then runs a seeded query mix, and reports

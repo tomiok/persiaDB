@@ -497,3 +497,65 @@ fn gc_refuses_a_schema_naming_a_registered_analyzer() {
     );
     assert!(after == before, "the files are unchanged");
 }
+
+/// Review item M1: a refused grace costs no open. The database's WAL holds a backlog over the default 64 MiB memtable,
+/// which a writer's open flushes into a commit (SPEC §8.6), and its pack's lock file is gone (a lock file is never
+/// needed beforehand): `--grace 1h` exits 1 with the container and the pack byte-identical and no lock file created,
+/// so the GC's own check (`GcOptions::validate`) ran before anything was opened.
+#[test]
+fn a_refused_grace_opens_nothing() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    with_orphans(&path);
+    std::fs::remove_file(dir.path().join("app.persia.blobs.lock")).unwrap();
+    let mut options = DatabaseOptions::default();
+    options.policy.flush.memtable_bytes = 1 << 30;
+    let mut db = Database::open(&path, options).unwrap();
+    db.create_collection(SchemaBuilder::new("pad").strict(false).build().unwrap())
+        .unwrap();
+    // 18 documents of 4 MiB each (an extra stored field): 72 MiB, all in the WAL.
+    let pad = Json::String("p".repeat(4 << 20));
+    for i in 0..18 {
+        let mut doc = Document::new(format!("big{i:02}"));
+        doc.insert_extra("pad", pad.clone());
+        db.put("pad", &doc, Durability::Buffered).unwrap();
+    }
+    db.put("pad", &Document::new("last"), Durability::Fsync)
+        .unwrap();
+    drop(db);
+    let listing = || -> BTreeSet<PathBuf> {
+        std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect()
+    };
+    let before = (
+        std::fs::read(&path).unwrap(),
+        std::fs::read(pack(&path)).unwrap(),
+        listing(),
+    );
+    let out = persia(&["gc", arg(&path), "--grace", "1h", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("twice the longest bind budget"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(out.stdout, b"");
+    let after = (
+        std::fs::read(&path).unwrap(),
+        std::fs::read(pack(&path)).unwrap(),
+        listing(),
+    );
+    assert!(after.0 == before.0, "the container is unchanged");
+    assert!(after.1 == before.1, "the pack is unchanged");
+    assert_eq!(after.2, before.2, "no lock file was created");
+    // The same database with an accepted grace: the open flushes the backlog (a commit), and the GC runs.
+    let done = gc_json(&path);
+    assert_eq!(done["deleted"]["blobs"], 3, "{done}");
+    assert!(
+        std::fs::read(&path).unwrap() != before.0,
+        "this open committed"
+    );
+}

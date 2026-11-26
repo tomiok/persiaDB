@@ -384,14 +384,14 @@ the built-in analyzers only, so it opens with the **compaction-only open** (ROAD
 `CompactOnlyDatabase`): the writer's open above, except that a `text` field whose analyzer it lacks (a registered one,
 §6.2.2) is indexed with the stand-in of a read-only open that skips analysis (§8.6, one that emits no token), and
 that no commit may flush a non-empty memtable of a collection with such a field. Such a commit is refused before
-anything is written (`AnalysisSkipped`), so the open fails (status 1) when its replay would flush, any collection
-(every flush flushes every memtable, §8.2), while such a collection holds a replayed record: a memtable at the
+anything is written (`AnalysisSkipped`), so the open fails (status 1) when its replay would flush any collection
+(every flush flushes every memtable, §8.2) while such a collection holds a replayed record: a memtable at the
 default size (for such a collection, the stand-in's, which holds none of the skipped field's terms) or out of
 docids. The application then opens the database with its analyzer and commits (closing a `persia::Db` does; an open
-alone may flush nothing), and the command compacts after it. Otherwise that collection's WAL records stay WAL records, which the compaction copies (above) and the next
-writer's open replays and indexes with the real analyzer: nothing is lost, resurrected, or committed without its
-terms. The handle has no call that writes a document, commits, merges or changes a schema; when its registry has
-every analyzer it is exactly the writer's open.
+alone may flush nothing), and the command compacts after it. Otherwise that collection's WAL records stay WAL
+records, which the compaction copies (above) and the next writer's open replays and indexes with the real
+analyzer: nothing is lost, resurrected, or committed without its terms. The handle has no call that writes a
+document, commits, merges or changes a schema; when its registry has every analyzer it is exactly the writer's open.
 It never opens the blob pack (§9.3), whose space blob GC reclaims (§9.5). `persia stats` reports whether a
 compaction is due by the default thresholds only, and says so: the application's own are not in the file. Like every compaction it puts the read-only
 handles of other processes behind until they refresh (§9.5), and it must not run during a copy taken with the files
@@ -2880,16 +2880,17 @@ writer does (it fails while another writer holds the lock, and recovery runs fir
 `--schema <file>` gives its schema (§6.2): the database is then created if no file is at the path, the collection if
 the database lacks it, and an existing collection must have exactly that schema. A line ends at `\n` (a `\r` before it
 is dropped), is at most 16 MiB (the longest document JSON text, checked in bounded memory) and valid UTF-8; empty and
-blank lines (JSON whitespace only) are skipped and still counted. Each document is put (an upsert by id, §8.3), logged
-`Buffered`, and the import commits once at its end. **The first bad line stops it**: a line that is not UTF-8, too
-long, not JSON, not a document of the schema, or that the put refuses (a blob reference, §9.6, or a memtable
-rejection). The command then commits the documents of the lines before it and fails, naming the line (1-based) and
-why: nothing from that line on is imported, so an import resumes there, and running one again is harmless. A crash
-leaves a prefix of the lines imported. `persia search <path> --collection <name> (--query <text> | --request <json>)`
-runs one search (§7.1.1 user text with every default, or a request JSON, §7.1.4) on a read-only open, without the
-lock; as any read-only handle of the embedded API, it takes a reader lease (§9.3). It prints each hit's rank, score
-and document, or with `--json` the response JSON of §7.5.2. Both have the built-in analyzers only: a schema that names
-a registered analyzer (§6.2.2) fails their open.
+blank lines (JSON whitespace only) are skipped and still counted; an input that starts with a UTF-8 byte order mark
+is refused at line 1. Each document is put (an upsert by id, §8.3), logged `Buffered`, and the import commits at
+least at its end (the maintenance thread may commit during a long import, as for any write, §8.2). **The first bad
+line stops it**: a line that is not UTF-8, too long, not JSON, not a document of the schema, or that the put refuses
+(a blob reference, §9.6, or a memtable rejection). The command then commits the documents of the lines before it
+and fails, naming the line (1-based) and why: nothing from that line on is imported, so an import resumes there, and
+running one again is harmless. A crash leaves a prefix of the lines imported. `persia search <path> --collection
+<name> (--query <text> | --request <json>)` runs one search (§7.1.1 user text with every default, or a request
+JSON, §7.1.4) on a read-only open, without the lock; as any read-only handle of the embedded API, it takes a reader
+lease (§9.3). It prints each hit's rank, score and document, or with `--json` the response JSON of §7.5.2. Both have
+the built-in analyzers only: a schema that names a registered analyzer (§6.2.2) fails their open.
 
 ### 8.7 Manifest
 A manifest is the snapshot one commit publishes (ADR-0024): the commit's `seq`, the committing writer's
