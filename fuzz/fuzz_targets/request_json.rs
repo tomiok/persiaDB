@@ -1,6 +1,6 @@
 //! Fuzz the request JSON (ROADMAP 10.1.10; SPEC §7.1, ADR-0062): no input panics `QueryRequest::from_json`, an
 //! accepted request holds only parts its own parsers accept, and running it on a small collection returns, with hits
-//! or an error, never a panic.
+//! or an error, never a panic. A response it returns is written as valid JSON (ROADMAP 10.1.13).
 #![no_main]
 
 use std::sync::{Arc, OnceLock};
@@ -15,7 +15,7 @@ use persia_engine::schema::{
     CollectionSchema, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
 };
 use persia_engine::search::request::{QueryRequest, RunOptions};
-use persia_engine::search::{MAX_FACETS, MAX_SORT_KEYS};
+use persia_engine::search::{MAX_FACETS, MAX_SORT_KEYS, Projection};
 use persia_engine::wal::Durability;
 use persia_storage::container::sim::SimFile;
 
@@ -93,6 +93,17 @@ fuzz_target!(|data: &[u8]| {
     let page = request.page();
     assert!(page.facets.len() <= MAX_FACETS);
     assert!(page.sort.keys().len() <= MAX_SORT_KEYS);
+    // A projection names only fields the schema stores (SPEC §7.5.1); the schema is `strict`, so no extra field.
+    if let Projection::Fields { fields, extra } = &page.projection {
+        assert!(extra.is_empty());
+        for field in fields {
+            let kind = collection
+                .schema()
+                .field_by_id(*field)
+                .map(|f| f.kind().stored());
+            assert_eq!(kind, Some(true));
+        }
+    }
     if let Some(cursor) = &page.search_after {
         let token = cursor.to_token();
         assert_eq!(Cursor::from_token(&token).map(|c| c.to_token()), Ok(token));
@@ -101,5 +112,14 @@ fuzz_target!(|data: &[u8]| {
     let options = RunOptions::new()
         .threads(Threads::Current)
         .budget_clock(Arc::new(ManualClock::new(0)));
-    let _ = request.run(collection, &options);
+    // A response the search returned always has its JSON (SPEC §7.5.2), and that JSON is valid.
+    if let Ok(response) = request.run(collection, &options) {
+        let json = response
+            .to_json(collection.schema())
+            .expect("a response the search returned has its JSON");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&json).is_ok(),
+            "{json}"
+        );
+    }
 });

@@ -12,12 +12,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::cursor::CursorTokenError;
+use super::fingerprint::fingerprint;
 use crate::db::{
-    CancelToken, Clock, CollectionSnapshot, Cursor, Execution, RelaxedResults, RelaxedSearchError,
-    SearchRequest, SearchResults, Threads,
+    CancelToken, Clock, CollectionSnapshot, Cursor, Execution, Relaxation, RelaxedResults,
+    RelaxedSearchError, SearchRequest, SearchResults, Threads,
 };
 use crate::query::{DefaultFields, Filter, QueryError, QueryLimits};
-use crate::relax::{RelaxError, RelaxOptions, RelaxPlan};
+use crate::relax::{RelaxError, RelaxLevel, RelaxOptions, RelaxPlan};
+use crate::schema::CollectionSchema;
 use crate::search::{
     FacetRequest, Interrupt, Projection, RequestError, SearchError, SearchPlan, Sort,
 };
@@ -148,7 +150,7 @@ impl QueryRequest {
         self
     }
 
-    /// Returns each hit's stored fields as `projection` says (SPEC §7.5.1). The request JSON has no key for it yet.
+    /// Returns each hit's stored fields as `projection` says (`projection`, SPEC §7.5.1).
     #[must_use]
     pub fn with_projection(mut self, projection: Projection) -> Self {
         self.page.projection = projection;
@@ -213,6 +215,45 @@ impl QueryRequest {
         self.proximity
     }
 
+    /// The fingerprint every hit's cursor of this request records when it runs with `limits` on a collection of
+    /// `schema` ([`crate::db::Cursor::request`], SPEC §7.4, ROADMAP 10.1.24): a hash of `q`, the fields it searches
+    /// (every `text` field with its schema boost when [`Self::fields`] is `None`), `filter`, `soft_filter` and
+    /// `limits`, the parts its ranking depends on that the cursor records nowhere else. [`Self::run`] refuses a cursor
+    /// of another fingerprint ([`RequestError::CursorRequest`]). The page, the facets, the projection and `explain` do
+    /// not count: they do not change the ranking. The filters are walked with a stack of their own, not by recursion, so
+    /// a filter of any depth (one built in code is held to `limits` only when the request runs) is hashed in time linear
+    /// in the request's size.
+    ///
+    /// ```
+    /// use persia_engine::query::QueryLimits;
+    /// use persia_engine::schema::{FieldKind, SchemaBuilder, TextOptions};
+    /// use persia_engine::search::request::QueryRequest;
+    ///
+    /// let schema = SchemaBuilder::new("c").field("title", FieldKind::Text(TextOptions::default())).build()?;
+    /// let limits = QueryLimits::default();
+    /// let red = QueryRequest::new("red");
+    /// // Another page of the same query is the same request; another query is not.
+    /// assert_eq!(red.fingerprint(&schema, &limits), red.clone().with_limit(5).fingerprint(&schema, &limits));
+    /// assert_ne!(red.fingerprint(&schema, &limits), QueryRequest::new("blue").fingerprint(&schema, &limits));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn fingerprint(&self, schema: &CollectionSchema, limits: &QueryLimits) -> u64 {
+        let fields = self
+            .fields
+            .as_ref()
+            .map_or_else(|| Cow::Owned(DefaultFields::all(schema)), Cow::Borrowed);
+        self.fingerprint_over(&fields, limits)
+    }
+
+    fn fingerprint_over(&self, fields: &DefaultFields, limits: &QueryLimits) -> u64 {
+        fingerprint(
+            &self.q,
+            fields,
+            (self.filter.as_ref(), self.soft_filter.as_ref()),
+            limits,
+        )
+    }
+
     /// Runs the request on `collection` (SPEC §7.1, ROADMAP 10.1.10): compiles `q` with the collection's analyzers
     /// ([`CollectionSnapshot::compiler`]) over the request's fields, joins `filter` and `soft_filter` to it as a
     /// request's filters join `q` ([`crate::query::Compiled::with_filter`],
@@ -224,7 +265,9 @@ impl QueryRequest {
     /// `RelaxedQuery::from(&Compiled)`, so `filter` stays hard at every level), with its steps held to the same
     /// limits. When they run L0 alone (`relax: false`, or a collection that disables the cascade), it is the plain
     /// search ([`crate::db::CollectionViews::search_with`]), planned with the proximity bonus when the request asks
-    /// for it (`SearchPlan::with_proximity`) and without it otherwise (`without_proximity`, ROADMAP 10.1.7).
+    /// for it (`SearchPlan::with_proximity`) and without it otherwise (`without_proximity`, ROADMAP 10.1.7). Either
+    /// search counts a page from the top in the collection's relaxation metrics (SPEC §7.6): the plain one as a query at
+    /// level `exact`, `empty` when L0 found no hit (ROADMAP 10.1.21).
     ///
     /// # Errors
     /// [`QueryRequestError::ProximityRelaxed`] for `proximity` on a search that relaxes;
@@ -258,15 +301,26 @@ impl QueryRequest {
             .with_soft_filter(self.soft_filter.clone());
         // The filters add their nodes, terms and a level of depth to the compiled query (SPEC §7.1.3).
         compiled.query().validate(schema, &limits)?;
+        let fingerprint = self.fingerprint_over(&fields, &limits);
         let memtable = collection.memtable();
         let views = collection.views(&memtable).map_err(RequestError::from)?;
-        let results = if relax.relaxes() {
-            QueryResults::Relaxed(views.search_relaxed(
-                &compiled,
+        // Only the plain search states L0's text through `exact`: the relaxed one states its own.
+        let (results, exact) = if relax.relaxes() {
+            let results = views.search_relaxed_for(
+                (&compiled).into(),
                 &self.page,
                 &relax,
                 &options.exec,
-            )?)
+                Some(fingerprint),
+            )?;
+            let unread = Relaxation::of(
+                (RelaxLevel::Exact, false),
+                Vec::new(),
+                None,
+                (None, Vec::new()),
+                false,
+            );
+            (QueryResults::Relaxed(results), unread)
         } else {
             let stats = collection.search_statistics(&memtable);
             let terms = options.exec.terms(&views);
@@ -276,11 +330,13 @@ impl QueryRequest {
             } else {
                 plan.without_proximity()
             };
-            QueryResults::Plain(views.search_with(&plan, &self.page, &options.exec)?)
+            let results = views.search_for(&plan, &self.page, &options.exec, Some(fingerprint))?;
+            (QueryResults::Plain(results), Relaxation::exact(&compiled))
         };
         Ok(QueryResponse {
             results,
             query_truncated: compiled.truncated,
+            exact,
         })
     }
 
@@ -378,6 +434,21 @@ pub struct QueryResponse {
     /// Whether part of `q` was left out to stay within the limits (`query_truncated`, SPEC §7.1.1); not the
     /// relaxation budget's `truncated` ([`crate::db::Relaxation::truncated`]).
     pub query_truncated: bool,
+    /// What a plain search states as its `relaxation` (SPEC §7.6): level `exact`, nothing applied, L0's text. For a relaxed
+    /// search, which states its own, an empty one that is never read.
+    pub(super) exact: Relaxation,
+}
+
+impl QueryResponse {
+    /// What the relaxation cascade did (SPEC §7.6): the relaxed search's [`RelaxedResults::relaxation`], or for the
+    /// plain search (`relax: false`) level `exact` with nothing applied, not truncated, and the text of `q` as L0 states
+    /// it (`original` as read, `effective` the clauses that compiled), as a relaxed search that stops at L0 states it.
+    pub fn relaxation(&self) -> &Relaxation {
+        match &self.results {
+            QueryResults::Relaxed(results) => &results.relaxation,
+            QueryResults::Plain(_) => &self.exact,
+        }
+    }
 }
 
 /// The results of a request, by the search that ran (SPEC §7.6).

@@ -129,7 +129,8 @@ pub struct Relaxation {
     /// [`Self::effective`] reads in its place. Empty at any other level, and for a query not compiled from `q`.
     pub corrected: Vec<Correction>,
     /// The budget (`budget_ms`) passed before the cascade finished (SPEC §7.6): the hits are those of the steps
-    /// completed before it, and `level` and `applied` describe those steps.
+    /// completed before it, and `level` and `applied` describe those steps. When they found none for the page, a plan
+    /// with L5 ran L5 past the budget (ROADMAP 8.1.33), and its step is among them.
     pub truncated: bool,
     /// The explicit flag that L5 `fallback` found the hits (`"fallback"`, SPEC §7.6, ROADMAP 8.2.5): the order it
     /// ranked them in when L5 is the hit step, `None` otherwise. Those hits are the collection's ranking of the
@@ -158,7 +159,7 @@ impl Relaxation {
     /// What a cascade that built steps through `level` (`relaxed` when that step is after L0), applying `applied`, did,
     /// for a query `compiled` from text (`None` for a programmatic one) whose hit step reads `effective` and
     /// `corrected` those words.
-    fn of(
+    pub(crate) fn of(
         (level, relaxed): (RelaxLevel, bool),
         applied: Vec<String>,
         compiled: Option<&Compiled>,
@@ -190,6 +191,18 @@ impl Relaxation {
             truncated,
             relaxed,
         }
+    }
+
+    /// What a search of L0 alone states (SPEC §7.6): level `exact`, nothing applied, not truncated, and for a query
+    /// `compiled` from text its text as L0 states it (`effective` the clauses that compiled).
+    pub(crate) fn exact(compiled: &Compiled) -> Self {
+        Self::of(
+            (RelaxLevel::Exact, false),
+            Vec::new(),
+            Some(compiled),
+            (Some(compiled.effective()), Vec::new()),
+            false,
+        )
     }
 
     /// Whether the cascade built a step after L0 that it did not skip, so the response may hold hits a strict query
@@ -243,6 +256,15 @@ impl<'a> RelaxedQuery<'a> {
     pub fn with_soft_filter(self, soft: &'a [Filter]) -> Self {
         Self { soft, ..self }
     }
+
+    /// The query, its compilation, and the filters the filter step may drop ([`soft_filters`]).
+    fn parts(self) -> (&'a Query, Option<&'a Compiled>, Vec<Filter>) {
+        (
+            self.query,
+            self.compiled,
+            soft_filters(self.compiled, self.soft),
+        )
+    }
 }
 
 impl<'a> From<&'a Query> for RelaxedQuery<'a> {
@@ -289,6 +311,19 @@ pub enum RelaxedSearchError {
     #[error(transparent)]
     Request(#[from] RequestError),
 }
+
+/// What L5 `fallback` past the budget searches (ROADMAP 8.1.33, 8.1.34): the query, its compilation and soft filters and
+/// the search's statistics; where the page starts, how many hits it needs, whether it counts facets, and whether the
+/// budget truncated the page and how many hits its steps found.
+type PastBudget<'a, 'q> = (
+    (
+        &'q Query,
+        Option<&'q Compiled>,
+        &'a [Filter],
+        &'a SearchStatistics<'a>,
+    ),
+    (Start, Reach<'a>, bool, (bool, usize)),
+);
 
 /// A step to search: its query, the earlier steps it excludes, and whether it is L5's, which ranks its own hits.
 #[derive(Clone, Copy)]
@@ -572,6 +607,8 @@ struct Start {
     hit: Option<usize>,
     /// The settings of the plan, which every hit's cursor records (ROADMAP 8.3.1).
     relax: Option<RelaxSettings>,
+    /// The cursor's step is L5's (ROADMAP 8.1.34): the cascade runs L5 at `step`, whatever level it would build there.
+    fallback: bool,
 }
 
 impl Start {
@@ -586,12 +623,14 @@ impl Start {
                 last: None,
                 hit: None,
                 relax,
+                fallback: false,
             };
         };
         let at = cursor.relaxed.unwrap_or(StepCursor {
             step: 0,
             last: 0,
             hit: 0,
+            fallback: false,
         });
         // A plan of L0 alone stops at L0 whatever a hand-built cursor says of its cascade.
         let (last, hit) = if relax.is_some() {
@@ -604,6 +643,7 @@ impl Start {
             last: Some(last),
             hit: Some(hit),
             relax,
+            fallback: relax.is_some() && at.fallback,
         }
     }
 
@@ -617,9 +657,25 @@ impl Start {
         }
     }
 
+    /// After a cursor of L5's step, whether a step `i` of `level` is that step and not L5's: no other level takes it, L5
+    /// runs there (ROADMAP 8.1.34).
+    fn yields(self, i: usize, level: RelaxLevel) -> bool {
+        self.fallback && i == self.step && level != RelaxLevel::Fallback
+    }
+
     /// Whether the cascade builds step `i`, with `found` hits found before it, of a level that `fills` the page or not
-    /// (the filter step only reaches `min_results`, ADR-0047), `need` from [`Self::need`].
-    fn builds(self, i: usize, found: usize, fills: bool, reach: Reach<'_>) -> bool {
+    /// (the filter step only reaches `min_results`, ADR-0047), `need` from [`Self::need`]. After a cursor of L5's step,
+    /// no other `level` builds that step: L5 runs there (ROADMAP 8.1.34).
+    fn builds(
+        self,
+        i: usize,
+        found: usize,
+        (fills, level): (bool, RelaxLevel),
+        reach: Reach<'_>,
+    ) -> bool {
+        if self.yields(i, level) {
+            return false;
+        }
         let Reach {
             relax,
             min_results,
@@ -707,6 +763,7 @@ impl CollectionViews<'_> {
     /// As [`Self::search_with`]; [`RequestError::CursorStep`] for a cursor whose step is after its last, or from a step
     /// after L0 when `relax` does not relax; [`RequestError::CursorRelax`] for a cursor from a search with other
     /// relaxation settings ([`RelaxPlan::settings`]);
+    /// [`RequestError::CursorRequest`] for a cursor from a request's search ([`Cursor::request`]);
     /// [`RelaxedSearchError::Plan`] when a step cannot be planned, or a level cannot read the statistics it builds its steps
     /// from (L2 reads its terms' `df`, L4 walks the term dictionaries of the words it corrects).
     pub fn search_relaxed<'q>(
@@ -716,19 +773,27 @@ impl CollectionViews<'_> {
         relax: &RelaxPlan,
         exec: &Execution,
     ) -> Result<RelaxedResults, RelaxedSearchError> {
-        let RelaxedQuery {
-            query,
-            compiled,
-            soft,
-        } = query.into();
-        let soft = soft_filters(compiled, soft);
+        self.search_relaxed_for(query.into(), request, relax, exec, None)
+    }
+
+    /// [`Self::search_relaxed`] for the request of `fingerprint` (`None` for none, ROADMAP 10.1.24): a cursor must
+    /// have it, and every hit's cursor records it.
+    pub(crate) fn search_relaxed_for(
+        &self,
+        query: RelaxedQuery<'_>,
+        request: &SearchRequest,
+        relax: &RelaxPlan,
+        exec: &Execution,
+        fingerprint: Option<u64>,
+    ) -> Result<RelaxedResults, RelaxedSearchError> {
+        let (query, compiled, soft) = query.parts();
         // Every step is planned as `SearchPlan::with_terms` plans by default: without proximity (SPEC §7.4).
-        let window = self.check_request(request, false, relax.settings())?;
+        let window = self.check_request(request, false, relax.settings(), fingerprint)?;
         let collection = self.collection();
         let stats = collection.search_statistics(self.memtable());
         let start = Start::of(request.search_after.as_ref(), relax);
         let reach = Reach::new(relax, start, window);
-        let builds = |i: usize, found: usize, fills: bool| start.builds(i, found, fills, reach);
+        let builds = |i, found, at| start.builds(i, found, at, reach);
         let limits = step_limits(relax, compiled);
         // Counts a page of this query kept (ROADMAP 8.1.11): read, and no step is searched only to count it.
         let (key, cached) = self.kept_facets(request, relax, (query, compiled, &soft), limits);
@@ -746,9 +811,13 @@ impl CollectionViews<'_> {
             let fills = planned.transform.fills();
             // A page holding every hit builds every step of the levels that fill (SPEC §7.5, ROADMAP 8.1.9): with `fill`
             // and facets, a page counts those past its own too, only to count them.
-            let counts_past = counting && relax.fill() && fills;
+            let counts_past = counting && relax.fill() && fills && !start.fallback;
             // Checked before a level builds its steps: one the cascade does not reach builds nothing.
-            let page = builds(built.ran.len(), found, fills);
+            // A level that would build L5's step after its cursor is passed over, unbuilt (ROADMAP 8.1.34).
+            if start.yields(built.ran.len(), planned.level) {
+                continue;
+            }
+            let page = builds(built.ran.len(), found, (fills, planned.level));
             if !page && !counts_past {
                 break;
             }
@@ -770,7 +839,7 @@ impl CollectionViews<'_> {
             built.begin_level();
             for (step, label, text, alternatives) in steps {
                 let i = built.ran.len();
-                let page = builds(i, found, fills);
+                let page = builds(i, found, (fills, planned.level));
                 if !page && !counts_past {
                     break 'levels;
                 }
@@ -822,20 +891,26 @@ impl CollectionViews<'_> {
                 }
             }
         }
-        let facets = Facets {
-            key: key.filter(|_| start.last.is_none() && !passed.page && !passed.counts),
-            cached,
-        };
+        // A page the budget left empty, or a cursor of L5's step, gets L5's hits (SPEC §7.6 "Budget", ADR-0066).
+        let rescue = (query, compiled, &soft[..], &stats);
+        let at = (start, reach, counting, (passed.page, found));
+        self.fallback_past_budget((rescue, at), &mut built, (request, relax), exec)?;
+        let facets = Facets::of(key, cached, start, passed);
         let hit = built.hit_level();
-        let out = self.respond(built, start, request, exec, (compiled, passed.page, facets))?;
-        self.count(request, &out, hit);
-        Ok(out)
+        let page = (compiled, passed.page, facets, fingerprint);
+        let out = self.respond(built, start, request, exec, page)?;
+        Ok(self.count(request, out, hit))
     }
 
     /// Counts a query in its collection's [`RelaxationStats`] (ROADMAP 8.3.3), unless the request continues one from a
     /// cursor, and states what a relaxed search did as one `tracing` debug event. `hit` is the level of the last step
-    /// that found a hit on the page (from the top, without a cursor), `None` when none did.
-    fn count(&self, request: &SearchRequest, out: &RelaxedResults, hit: Option<RelaxLevel>) {
+    /// that found a hit on the page (from the top, without a cursor), `None` when none did. Returns `out`.
+    fn count(
+        &self,
+        request: &SearchRequest,
+        out: RelaxedResults,
+        hit: Option<RelaxLevel>,
+    ) -> RelaxedResults {
         let r = &out.relaxation;
         let relaxed = r.level != RelaxLevel::Exact;
         if request.search_after.is_none() {
@@ -851,19 +926,98 @@ impl CollectionViews<'_> {
                 "relaxed search"
             );
         }
+        out
+    }
+
+    /// L5 `fallback` past the budget (SPEC §7.6 "Budget", ROADMAP 8.1.33, ADR-0066): when the budget passed before the
+    /// page found a hit, a plan with L5 still runs it, bounded by the request's own deadline and cancellation (an error,
+    /// as at any step) and not by the budget, so the page is not empty: pillar 3. The steps the budget skipped stay
+    /// skipped and the page stays truncated. Nothing runs when L5 was already built (searched, or skipped for the
+    /// limits: its result is the page's), or when the plan has no L5 (`fallback: "none"`). On a cursor's page (ROADMAP
+    /// 8.1.34) a cursor of L5's step runs L5 at that step after the cursor (the cascade built only the steps before it),
+    /// whether or not the budget passed; after another level's cursor, L5 runs only once that step was rebuilt and
+    /// searched, never at it (it would read that level's cursor in its own order).
+    fn fallback_past_budget<'q>(
+        &self,
+        rescue: PastBudget<'_, 'q>,
+        built: &mut Built<'q, '_>,
+        (request, relax): (&SearchRequest, &RelaxPlan),
+        exec: &Execution,
+    ) -> Result<(), RelaxedSearchError> {
+        let ((query, compiled, soft, stats), (start, reach, counting, (truncated, found))) = rescue;
+        let Some(planned) = relax
+            .planned()
+            .iter()
+            .find(|p| p.level == RelaxLevel::Fallback)
+        else {
+            return Ok(());
+        };
+        let at = built.ran.len();
+        // The cursor's own step is L5's: L5 runs there and pages on from the cursor (ROADMAP 8.1.34).
+        let own = start.fallback && at == start.step;
+        // A page the budget left empty, after the cursor's step (rebuilt and searched): L5 from its top. At the
+        // cursor's step of another level, L5 would read that level's cursor in its own order, so it does not run.
+        let empty = truncated && found <= request.offset && found < reach.need && at > start.step;
+        if !(own || empty) || built.ran.iter().any(|r| r.level == RelaxLevel::Fallback) {
+            return Ok(());
+        }
+        let expands = |field: FieldId| self.expands(field);
+        let input = LevelInput::new(query, compiled, stats)
+            .expanding(&expands)
+            .dropping(built.drops_terms())
+            .softening(soft);
+        // No budget: only the request's deadline and cancellation stop it.
+        let Some(steps) = self.budgeted_level(planned, None, input, exec, None)? else {
+            return Ok(());
+        };
+        built.begin_level();
+        let mut found = found;
+        for (step, label, text, alternatives) in steps {
+            let i = built.ran.len();
+            let Held { step, label, cut } = built.fit(query, step, label, alternatives.as_ref())?;
+            let Some(step) = step else {
+                built.skip(planned.level, label, true);
+                continue;
+            };
+            let wanted = reach.need.saturating_sub(found);
+            let part = part(request, i == start.step, wanted, counting);
+            let search = StepSearch {
+                step: &step,
+                earlier: &built.earlier,
+                fallback: true,
+            };
+            let searched = self.search_step(search, stats, &part, exec)?;
+            found = found.saturating_add(searched.collected.ranked.len());
+            let covers = Covers::of(relax, planned, cut);
+            built.push(
+                planned.level,
+                step,
+                label,
+                text,
+                Some(searched),
+                (covers, true),
+            );
+        }
+        Ok(())
     }
 
     /// The response of the cascade `built` from `start`: its page of `request` and what it did, for a query
     /// `compiled` from text (or not) and `truncated` by the budget (or not). Its facets are those `facets` read, else
     /// those its steps counted, which the snapshot keeps for later pages when `facets` has a key: a page from the top
-    /// that counted every step it builds, without the budget passing (ROADMAP 8.1.11).
+    /// that counted every step it builds, without the budget passing (ROADMAP 8.1.11). Every hit's cursor records the
+    /// request `fingerprint` (ROADMAP 10.1.24).
     fn respond(
         &self,
         built: Built<'_, '_>,
         start: Start,
         request: &SearchRequest,
         exec: &Execution,
-        (compiled, truncated, kept): (Option<&Compiled>, bool, Facets<'_>),
+        (compiled, truncated, kept, fingerprint): (
+            Option<&Compiled>,
+            bool,
+            Facets<'_>,
+            Option<u64>,
+        ),
     ) -> Result<RelaxedResults, RelaxedSearchError> {
         let level = built.last_level();
         let Finished {
@@ -873,7 +1027,10 @@ impl CollectionViews<'_> {
             at,
             hit_level,
         } = built.finish(start);
-        let (hits, counted) = self.relaxed_page(ran, &applied, request, at, exec)?;
+        let (mut hits, counted) = self.relaxed_page(ran, &applied, request, at, exec)?;
+        for hit in &mut hits {
+            hit.hit.request = fingerprint;
+        }
         let facets = match kept {
             Facets {
                 cached: Some(cached),
@@ -1122,12 +1279,7 @@ impl CollectionViews<'_> {
                 plan.proximity(),
             )?;
             // Step 0 of a cascade that stopped at L0 is what a cursor without a step means.
-            let PageSteps {
-                last,
-                hit: found,
-                relax,
-                ..
-            } = at;
+            let (last, found, relax) = (at.last, at.hit, at.relax);
             let relaxed = (step, last) != (0, 0);
             hits.extend(page.into_iter().map(|mut hit| {
                 // Every hit's step found a hit, so the hit step is at least its own.
@@ -1135,6 +1287,7 @@ impl CollectionViews<'_> {
                     step,
                     last,
                     hit: found.max(step),
+                    fallback: level == RelaxLevel::Fallback,
                 });
                 hit.relax = relax;
                 RelaxedHit {
@@ -1174,6 +1327,20 @@ struct PageSteps {
 struct Facets<'a> {
     key: Option<facet_cache::KeyRef<'a>>,
     cached: Option<Vec<FacetCounts>>,
+}
+
+impl<'a> Facets<'a> {
+    /// The counts `cached`, and `key` when the page's counts are to be kept: a page from the top (`start`) whose
+    /// budget `passed` in no step.
+    fn of(
+        key: Option<facet_cache::KeyRef<'a>>,
+        cached: Option<Vec<FacetCounts>>,
+        start: Start,
+        passed: Passed,
+    ) -> Self {
+        let key = key.filter(|_| start.last.is_none() && !passed.page && !passed.counts);
+        Self { key, cached }
+    }
 }
 
 /// Where the budget passed (SPEC §7.6): in a step of the page, which truncates it, or in a step searched only to count

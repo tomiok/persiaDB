@@ -4,7 +4,10 @@
 //! Requests are written by programs, so nothing is guessed: an unknown key, a repeated key at any depth, `null` for a
 //! key and a value of another shape than the key's are errors that name the key. Only the text of `q` never fails
 //! (SPEC §7.1.1). Each key's value is read by the parser of its own section: `filter` and `soft_filter` by the filter
-//! DSL, `relax` as a query's `relax` (SPEC §7.6), `fields` as the default fields, `search_after` as a cursor token.
+//! DSL, `relax` as a query's `relax` (SPEC §7.6), `fields` as the default fields, `search_after` as a cursor token,
+//! `projection` as the fields a hit returns (SPEC §7.5.1).
+
+use std::collections::BTreeSet;
 
 use serde_json::{Map, Value as J};
 
@@ -15,7 +18,8 @@ use crate::query::{DefaultFields, Filter, MAX_SHOWN, QueryError, QueryLimits, sh
 use crate::relax::RelaxOptions;
 use crate::schema::{CollectionSchema, Field};
 use crate::search::{
-    DEFAULT_FACET_SIZE, FacetRequest, MAX_FACETS, Missing, Order, RequestError, Sort, SortKey,
+    DEFAULT_FACET_SIZE, FacetRequest, MAX_FACETS, Missing, Order, Projection, RequestError, Sort,
+    SortKey,
 };
 
 /// The longest request JSON [`QueryRequest::from_json`] reads, in bytes (SPEC §7.1): the bound of a filter's JSON
@@ -25,13 +29,14 @@ pub const MAX_REQUEST_JSON_LEN: usize = crate::query::MAX_FILTER_JSON_LEN;
 impl QueryRequest {
     /// Parses the request JSON (SPEC §7.1) for a collection of `schema`, holding its filters to `limits` (SPEC
     /// §7.1.3). The keys are `q`, `fields`, `filter`, `soft_filter`, `sort`, `limit`, `offset`, `search_after`,
-    /// `facets`, `relax`, `explain` and `proximity`, each optional: a key left out has [`QueryRequest::default`]'s
-    /// value.
+    /// `facets`, `relax`, `explain`, `proximity` and `projection`, each optional: a key left out has
+    /// [`QueryRequest::default`]'s value.
     ///
     /// ```
     /// use persia_engine::query::QueryLimits;
     /// use persia_engine::schema::{FieldKind, KeywordOptions, SchemaBuilder, TextOptions};
     /// use persia_engine::search::request::{QueryRequest, QueryRequestError};
+    /// use persia_engine::search::Projection;
     ///
     /// let schema = SchemaBuilder::new("shoes")
     ///     .field("title", FieldKind::Text(TextOptions::default()))
@@ -49,12 +54,15 @@ impl QueryRequest {
     ///         "limit": 10,
     ///         "facets": ["brand", {"field": "brand", "size": 3}],
     ///         "relax": {"min_results": 5},
-    ///         "explain": true
+    ///         "explain": true,
+    ///         "projection": ["price"]
     ///     }"#,
     ///     &schema,
     ///     &limits,
     /// )?;
     /// assert_eq!((request.q(), request.page().limit, request.relax().min_results), ("zapatillas rojas", 10, Some(5)));
+    /// // Each hit returns its `price` alone (and its id and blob reference).
+    /// assert_eq!(request.page().projection, Projection::fields(["price"], &schema)?);
     /// // Written by programs, read strictly: an unknown key is an error, not ignored.
     /// let unknown = QueryRequest::from_json(r#"{"query": "shoes"}"#, &schema, &limits);
     /// assert!(matches!(unknown, Err(QueryRequestError::Json(_))));
@@ -67,7 +75,8 @@ impl QueryRequest {
     /// [`QueryRequestError::Query`] for `fields`, a filter or a sort or facet field that does not fit the schema or
     /// the limits; [`QueryRequestError::Relax`] for a `relax` that is not its form or breaks a rule;
     /// [`QueryRequestError::Cursor`] for a `search_after` that is not a cursor token;
-    /// [`QueryRequestError::Request`] for a sort or a facet the schema does not allow, or too many of them.
+    /// [`QueryRequestError::Request`] for a sort or a facet the schema does not allow, or too many of them, and for a
+    /// `projection` name that is not a stored field (or, in a `strict` collection, not a field at all).
     pub fn from_json(
         json: &str,
         schema: &CollectionSchema,
@@ -114,6 +123,7 @@ impl QueryRequest {
                 "relax" => request.relax = RelaxOptions::from_value(value)?,
                 "explain" => request.page.explain = boolean(&key, &value)?,
                 "proximity" => request.proximity = boolean(&key, &value)?,
+                "projection" => request.page.projection = projection(&value, schema)?,
                 _ => return Err(shape(format!("unknown key {}", shown_key(&key)))),
             }
         }
@@ -328,4 +338,34 @@ fn shown(value: &J) -> String {
 /// filter keys are named the same way ([`crate::query::shown_name`]).
 fn shown_key(key: &str) -> String {
     shown_name(key)
+}
+
+/// `projection` (SPEC §7.1.4, §7.5.1, ADR-0065): `"all"` (every stored and extra field), `"none"` (the id and the blob
+/// reference only), or a non-empty array of distinct names, each a stored field of the schema or, in a collection that
+/// is not `strict`, an extra field ([`Projection::fields`]).
+fn projection(value: &J, schema: &CollectionSchema) -> Result<Projection, QueryRequestError> {
+    let expected = "\"all\", \"none\" or a non-empty array of field names";
+    match value {
+        J::String(s) if s == "all" => Ok(Projection::All),
+        J::String(s) if s == "none" => Ok(Projection::None),
+        // Nothing is guessed (SPEC §7.1.4): `[]` would read as "none" to some and as "all" to others.
+        J::Array(names) if names.is_empty() => Err(shape(format!(
+            "`projection` takes {expected}: [] names no field, write \"none\""
+        ))),
+        J::Array(_) => {
+            let names = strings("projection", value)?;
+            let mut seen = BTreeSet::new();
+            if let Some(name) = names.iter().find(|n| !seen.insert(n.as_str())) {
+                return Err(shape(format!(
+                    "`projection` names {} twice",
+                    shown_key(name)
+                )));
+            }
+            Ok(Projection::fields(&names, schema)?)
+        }
+        other => Err(shape(format!(
+            "`projection` takes {expected}, found {}",
+            shown(other)
+        ))),
+    }
 }

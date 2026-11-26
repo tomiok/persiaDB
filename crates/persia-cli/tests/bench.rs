@@ -175,7 +175,14 @@ fn bench_json_has_its_documented_shape() {
     for kind in kinds {
         assert_eq!(
             keys(kind),
-            set(&["kind", "count", "hits", "truncated", "latency_nanos"])
+            set(&[
+                "kind",
+                "count",
+                "hits",
+                "empty",
+                "truncated",
+                "latency_nanos"
+            ])
         );
         let latency = &kind["latency_nanos"];
         assert_eq!(keys(latency), set(&["p50", "p90", "p99", "max"]));
@@ -275,6 +282,7 @@ fn bench_text_says_first_that_its_numbers_are_local_guidance() {
             "kind",
             "count",
             "hits",
+            "empty",
             "truncated",
             "p50",
             "p90",
@@ -410,5 +418,5 @@ fn bench_without_queries_reports_the_indexing_alone() {
         "0",
     ]));
     let last: Vec<&str> = text.lines().last().unwrap().split_whitespace().collect();
-    assert_eq!(last, ["typo", "0", "0", "0", "-", "-", "-", "-"]);
+    assert_eq!(last, ["typo", "0", "0", "0", "0", "-", "-", "-", "-"]);
 }

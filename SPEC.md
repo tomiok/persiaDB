@@ -1323,7 +1323,8 @@ returned as it is, and copied as bytes, never re-validated.
   "facets": ["brand"],                    // or {"field": "brand", "size": 5}
   "relax": { "min_results": 1 },          // overrides collection default
   "explain": false,
-  "proximity": false                      // true scores the proximity bonus (§7.2); needs "relax": false
+  "proximity": false,                     // true scores the proximity bonus (§7.2); needs "relax": false
+  "projection": "all"                     // or "none", or ["title", "price"]: the stored fields a hit returns (§7.5.1)
 }
 ```
 Programmatic query AST (term, combined, phrase, prefix, fuzzy, bool must/should/must_not, filter, boost,
@@ -1539,11 +1540,14 @@ never fails (§7.1.1).
 | `relax` | `false`, `true` or an object (§7.6) | the collection's settings |
 | `explain` | `true` or `false` (§7.7) | `false` |
 | `proximity` | `true` or `false` (§7.2) | `false` |
+| `projection` | `"all"`, `"none"`, or a non-empty array of distinct names, each a stored field or, in a collection that is not `strict`, an extra field (§7.5.1) | `"all"` |
 
 Each value is read by the rules of its own section. A `sort` key object takes `field`, `order` and `missing`, or
 `score` alone with an object of `order` (§7.4); a facet object takes `field` and `size` (default 10); any other key in
-either is an error. There is no key for the projection of §7.5.1 yet (ROADMAP 10.1.20): a request built in code sets
-it, and a parsed one returns every stored field. The 1 MiB bound is that of a filter's JSON (§7.1.2), which the
+either is an error. `projection` (ROADMAP 10.1.20, ADR-0065) is `"all"` (every stored and extra field), `"none"` (the
+id and the blob reference only) or a list of names; `[]` is an error, since it names no field (write `"none"`), and
+so are a repeated name, another string, and a name §7.5.1 refuses (an invalid argument that names it).
+The 1 MiB bound is that of a filter's JSON (§7.1.2), which the
 request holds: inside a request, the request's bound is the one that applies to `filter`, `soft_filter` and `relax`
 (§7.6's 64 KiB is for a `relax` read on its own). A `filter` and a `soft_filter` are each held to §7.1.3's limits
 when parsed. When the request runs, the compiled `q` joined to both (§7.1.1) is held to them again, since the filters
@@ -1558,8 +1562,9 @@ collection's as `relax` overrides them (§7.6). When they relax, the relaxed sea
 query (so its text is stated in `original` and `effective`, and `filter` is hard at every level) and its steps held
 to the same limits. When they run L0 alone (`relax: false`, a collection that disables the cascade, or a plan with no
 level, no fallback and no filter step), the plain search runs: its hits have no level or rank score, an explained
-one has no `relaxed` node (§7.7), and the search is not counted in the relaxation metrics (§7.6, ROADMAP 10.1.21). A
-response states such a search as `level: "exact"` with nothing applied (§7.6; the response JSON is ROADMAP 10.1.13).
+one has no `relaxed` node (§7.7), and its page from the top counts in the relaxation metrics as a query at level
+`exact` (§7.6, ROADMAP 10.1.21). A
+response states such a search as `level: "exact"` with nothing applied (§7.6; the response JSON is §7.5.2).
 `proximity` (ROADMAP 10.1.7, ADR-0036) plans the plain search with the proximity bonus of §7.2 when `true`
 (`SearchPlan::with_proximity`) and without it when `false` or left out (`SearchPlan::without_proximity`). The
 relaxed search plans every step without the bonus (§7.2), so `"proximity": true` on a request whose settings
@@ -1780,18 +1785,26 @@ also records its hit's step, its cascade's last step and its hit step (§7.6). I
 (§7.2): a page under a plan with the other setting is an error, since the bonus changes the scores and so the order.
 It records the relaxation settings of its search too, none for a plain search or one of L0 alone, and a page under
 other settings is an error (§7.6, ROADMAP 8.3.1).
-The cursor does not record the query, its fields and filters, or the limits (ROADMAP 10.1.24), so paging is exact
-only when they are unchanged between pages. A request sets `proximity` (§7.1.4), and a caller building its own
+A cursor from a request (§7.1.4) also records the *request fingerprint* (ROADMAP 10.1.24): XXH3-64 of a canonical
+encoding of its `q` (as written), the fields it searches (when `fields` is left out, every `text` field with its
+boost), `filter`, `soft_filter` and the limits of §7.1.3, the parts its ranking depends on that the cursor records
+nowhere else. A page of a request whose fingerprint differs is an error (an invalid argument), checked after the
+checks above, so a cursor of another view, sort or setting is reported as that. The page (`limit`, `offset`), the
+facets, the projection and `explain` do not count, as they do not change the ranking. A search run without a request
+(the engine's own `search` and relaxed search) records none, so its cursors and a request's do not page each other. The
+encoding is ADR-0062's (item 11, amended); `q` is hashed as written, not as analyzed.
+A request sets `proximity` (§7.1.4), and a caller building its own
 `SearchPlan` sets it on the plan; the relaxed search always plans without it, so a cursor from a proximity-on search
 pages only a plain search asked with `"proximity": true`.
 
 In JSON a cursor is a *cursor token* (ROADMAP 10.1.10, ADR-0062): a request's `search_after` takes one, and a response
 gives each hit's cursor as one (ROADMAP 10.1.13). A token is opaque text: base64url without padding (RFC 4648 §5) of a
 binary encoding of the cursor that starts with a version byte and ends with the CRC-32C of every byte before it.
-Version 1, integers little-endian, `varint` as §4.1:
+Version 2, integers little-endian, `varint` as §4.1:
 ```
-u8      version = 1
-u8      flags: 1 proximity, 2 has step, 4 has relaxation settings, 8 the location is the memtable; other bits 0
+u8      version = 2
+u8      flags: 1 proximity, 2 has step, 4 has relaxation settings, 8 the location is the memtable, 16 has a request
+        fingerprint, 32 the step is L5 `fallback`'s (only with "has step"); other bits 0
 u64     snapshot seq
 u64     memtable view version
 varint  collection name length, then its UTF-8 bytes
@@ -1804,8 +1817,12 @@ varint  number of sort keys (at most 16), then each: u8 bits, 1 a field (else th
 varint  step, varint last step, varint hit step                              (only with "has step")
 varint  level bits (bit i: level Li), varint min_results, u8 1 fill | 2 filters last_resort
                                                                              (only with "has relaxation settings")
+u64     request fingerprint                                                  (only with "has a request fingerprint")
 u32     CRC-32C of every byte above
 ```
+Version 1 (ROADMAP 10.1.10) had neither the flag 16 nor the fingerprint; version 2 refuses it as any version it does not
+read (an invalid argument): there is no compatibility promise before 1.0, and its page could not be checked against
+its request.
 Nothing stores a token, so it is not an on-disk format (§15) and has no fixture directory. Clients hold tokens
 between requests, though, and a token outlives the process that made it while its snapshot and memtable view are
 still the ones searched, so the version byte is its compatibility rule: any change to the layout, or to what a field
@@ -1855,6 +1872,9 @@ counts its cut matches, as every page cuts it alike. A page with `fill` and face
 hits, the remaining steps of the levels that fill, and searches each only to count it: those steps collect no hit, are
 not listed in `applied` or `level`, and are not the cascade's last step a hit's cursor records. They are excluded from
 the later steps and held to the limits as any step. A page the budget truncates (§7.6) counts the steps it completed.
+After a cursor of L5's step (§7.6 "Budget", ROADMAP 8.1.34), a `fill` page with facets builds no step past its own
+only to count it, and still counts as a page holding every hit: L5 matches every document the filters keep that no
+earlier step matched, so the steps through L5 count each such document once, whichever steps came before it.
 When the budget passes in a step a page searches only to count it, the page is not truncated (its hits, `level` and
 `applied` are whole, §7.6), but its facets count only the steps searched before that one: they are partial, and the
 response does not say so (ROADMAP 8.1.31). The counts are kept once per query (ROADMAP 8.1.11): a collection's
@@ -1871,7 +1891,51 @@ publish.
 A hit returns its location, score, sort values (§7.4: its cursor) and document: the id, the blob reference when it has
 one (§9.1), and its stored fields (§6.4.2) after the projection. The projection is every stored and extra field
 (default), none, or a list of names: a field of the schema with `stored: true`, or in a collection that is not
-`strict` an extra field; another name is an error. A document lacking a projected field returns without it.
+`strict` an extra field; another name is an error. A document lacking a projected field returns without it. In a
+request's JSON it is the key `projection` (§7.1.4).
+
+#### 7.5.2 Response JSON
+A response is one JSON object (ROADMAP 10.1.13, ADR-0065), written by the engine beside the request JSON it answers
+(§7.1.4), so the embedded API, its bindings and the server write the same text. Its keys come in this order, and so do
+the keys of each object in it; a value that is absent is left out, never `null`:
+```jsonc
+{"hits": [{"document": {"id": "a", "title": "red shoes", "price": 80.5},   // §6.4.1's output form, projected (§7.5.1)
+           "score": 1.25,
+           "sort": [1.25, 80.5],                 // one per sort key (§7.4); null for a document without a value
+           "cursor": "AgAD...",                  // the cursor token of the page after this hit (§7.4)
+           "explanation": {"relaxed": {...}},    // only with "explain": true (§7.7)
+           "level": "exact", "step": 0, "rank_score": 1.25}],   // a relaxed search's hits only (§7.6)
+ "facets": [{"field": "brand", "values": [{"value": "nike", "count": 3}]}],   // request order (§7.5)
+ "relaxation": {"level": "exact", "applied": [], "original": "red shoes", "effective": "red shoes",
+                "corrected": {}, "truncated": false, "filters_dropped": false},   // §7.6
+ "query_truncated": false}               // §7.1.1
+```
+- `document` is the hit's document in the output form of §6.4.1: `id`, then `blob` when it has a blob reference
+  (§9.1), then its projected fields in name order.
+- Every number is a plain finite JSON number (§7.2: a score is never `Infinity` or `NaN`), written in the shortest form
+  that reads back as the same `f64`; counts, steps and positions are integers.
+- A sort value is typed by its key: the score and an `f64` field as numbers, an `i64` as an integer, a `datetime` as
+  §6.4.1's output text, a `bool` as `true` or `false`, a `keyword` as below, and `null` when the document has no value.
+- A *keyword value* (a keyword sort value, a facet value, an explained term) is a JSON string when its bytes are UTF-8,
+  and otherwise the object `{"base64url": "<text>"}`, its bytes as the cursor token's base64url without padding
+  (§7.4). Documents write their keywords as strings, so the object form is for values the index holds as bytes.
+- `relaxation` has `level`, `applied`, `original` and `effective` when the query was compiled from `q`, `corrected`
+  (an object from each word the fuzzy level replaced to the term it searched, in query order; a word the query repeats
+  is named once, as its corrections are the same), `truncated`, `fallback` when L5 found the hits, and
+  `filters_dropped` (§7.6). A plain search (`relax: false`, §7.1.4) states `level: "exact"`, `applied: []`,
+  `truncated: false`, `filters_dropped: false`, and its text as L0 states it (`original` as read, `effective` the
+  clauses that compiled), as a relaxed search that stops at L0 does; its hits have no `level`, `step` or
+  `rank_score`.
+- An explanation node (§7.7) is an object of one key naming its kind, whose value holds its parts: `word` (`score`,
+  `idf`, `k1`, `tf`, `fields`: each `field` by name, `term` as a keyword value, `tf`, `norm`, `length` except for a
+  `keyword` field, `factor`, `contribution`), `phrase` (`score`, `field`, `terms`, `idf`, `k1`, `freq`, `norm`,
+  `length`, `factor`, `tf`), `bool` (`score`, `must`, `proximity` when it has one: `score` and `pairs`, each `first`,
+  `weight`, `field` and `distance` when a field holds both words, `closeness`, `score`; then `should`), `boost`
+  (`score`, `boost`, `query`), `constant_score` (`score`, `query`), `match_all` (`score`), `static_rank` (`score`,
+  `value` when the document has one) and `relaxed` (`level`, `step`, `applied` except at L0, `score`, `explanation`).
+
+Writing a response fails only on a broken invariant (a field id of another schema, a value of another type than its
+field, a number that is not finite): it is reported, not written as JSON a reader would take for a value.
 
 ### 7.6 Zero-results avoidance (default on)
 If the number of hits `< relax.min_results` (default **1**), the engine runs the **relaxation cascade**,
@@ -2169,7 +2233,8 @@ so a client can tell the hits are the collection's ranking, not matches of the w
 the hits still missing, so without `fill` it runs only when the earlier steps found fewer than `min_results`, and
 with `fill` it fills the rest of the page below their hits. The request's deadline,
 cancellation and the budget apply as in any step: L5 is built only when the cascade reaches it, checked before it
-is searched and at its reads (§7.3), and dropped whole when the budget passes during it.
+is searched and at its reads (§7.3), and dropped whole when the budget passes during it, then run again past the
+budget when the page would otherwise be empty ("Budget", below).
 
 L6 `filters` (ROADMAP 8.2.6, ADR-0047). Only `filters: "last_resort"` (the request's, else the collection's) plans it,
 as the plan's last level: after L5, or after the last word level when `fallback` is `"none"`, or right after L0 when
@@ -2290,12 +2355,32 @@ truncated before any hit. With `fill`, those past the page's own come after its 
 them leaves the page whole and not truncated, and its facets partial (§7.5). Once a page from the top counted every
 one of them, later pages read the counts and search only their own steps. A cascade whose page's steps end before the
 budget passes is not truncated.
+When the budget passed in a step of the page and the page would otherwise be empty (the steps
+completed found no more hits than its `offset`, and the cascade still wants hits), a plan with L5 still runs L5
+`fallback` past the budget (ROADMAP 8.1.33, ADR-0066), as its own step after the steps completed, bounded by the
+request's deadline and cancellation (errors, as at any step) and not by the budget, so the page is not empty (pillar
+3). The steps the budget skipped stay skipped (L6 too), the page stays `truncated: true`, and `level`, `applied` and
+`fallback` state L5 as for any page whose hit step it is. Without L5 (`fallback: "none"`), or when L5 was already
+built (searched, or skipped for the limits), the empty truncated page is the answer; a budget that passed inside L5
+dropped it whole, so it runs again, whole. On a cursor's page (ROADMAP 8.1.34) L5 never takes the cursor's step from another level:
+a cursor records whether its step is L5's (§7.4), and the page after an L5 hit builds the steps before the cursor's,
+then L5 at the cursor's step whatever level the cascade would build there, searched after the cursor and past the
+budget, so it continues the cursor's ranking exactly, the page L5 filled past the budget included. After a cursor of
+another level's step, L5 runs past the budget only once the cursor's step was rebuilt and searched (then from its top);
+when the budget passes before that, the page is the empty truncated page, as L5 would otherwise read that level's
+cursor in its own order.
 
 Metrics (ROADMAP 8.3.3). Each collection counts its relaxed searches since the database was opened, in counters its
 snapshots share (atomic, so a search on any thread counts without a lock; nothing is stored, a reopened database
 counts from 0). A *query* is a relaxed search that returned a response and was given no cursor: a cursor's page
 continues a query counted on its first page and counts nowhere, while a page by `offset` runs the cascade from the
-top and counts as a query. A plain search (no cascade) counts nowhere, so neither does a request whose settings run L0 alone, which runs the plain search (§7.1.4): its zero-result queries are not in `empty` (ROADMAP 10.1.21). Per query: `queries` counts it; `relaxed` counts
+top and counts as a query.
+A request whose settings run L0 alone runs the plain search (§7.1.4) and counts as a query too (ROADMAP 10.1.21,
+ADR-0065), by the same rules at level `exact`: never `relaxed`, in `empty` when L0 found no hit from the top (a page by
+`offset` or of `limit` 0 included: it searches for one hit at least), else at level `exact`; a cursor's page counts
+nowhere. It is still the plain search, so its proximity bonus and its explanations (no `relaxed` node, §7.7) do not
+change. The engine's own plain search, run without a request, counts nowhere.
+Per query: `queries` counts it; `relaxed` counts
 it when the response's `level` is not `exact` (a step after L0 was built and not skipped); `empty` counts it when no
 step of its cascade found a hit, L0 included (the zero-result queries, after whatever relaxation ran, `relax: false`
 included); otherwise the level of its hit step (above) counts it, once. So the per-level counts are the level
@@ -2334,8 +2419,8 @@ includes `:cut` when the step was cut, and is absent at L0, which applies nothin
 bit for bit. Every level has one: L0's around its query's tree, L1 to L4 around their step's query, and L5 around its
 `static_rank`; L6 `filters` around its query's tree (`applied` `"filters"`). Nodes under the root never have one. A plain search's hits have none either, while a relaxed search
 with `relax: false` wraps its L0 hits as step 0: the two rank alike (§7.6), but their explanations differ by this
-node. The JSON below is illustrative. The node is one object key, and the JSON of the tree inside it is defined
-with the request and response JSON (ROADMAP 10.1, 11.x):
+node. The JSON below is illustrative. The node is one object key, and the JSON of the tree inside it is §7.5.2's
+(ROADMAP 10.1.13):
 ```jsonc
 "explanation": { "relaxed": { "level": "fuzzy", "step": 4, "applied": "fuzzy", "score": 1.25,
                               "explanation": { /* the step's tree, as above */ } } }

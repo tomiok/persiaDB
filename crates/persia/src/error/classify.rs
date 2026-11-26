@@ -485,6 +485,7 @@ impl Classified for RequestError {
             | Self::CursorView { .. }
             | Self::CursorProximity { .. }
             | Self::CursorRelax { .. }
+            | Self::CursorRequest { .. }
             | Self::CursorStep { .. }
             | Self::FacetField { .. }
             | Self::Projection { .. } => ErrorCode::InvalidArgument,

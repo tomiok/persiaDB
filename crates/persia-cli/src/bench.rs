@@ -36,7 +36,7 @@
 //!   "indexing": {"nanos": .., "docs_per_second": .. or null, "commit_nanos": ..},
 //!   "query_mix": {"fingerprint": 16 hex digits},
 //!   "query_kinds": [ in rotation order
-//!     {"kind": "term", "count": .., "hits": .., "truncated": .., "latency_nanos": {"p50": .., "p90": .., "p99": .., "max": ..} or null}
+//!     {"kind": "term", "count": .., "hits": .., "empty": .., "truncated": .., "latency_nanos": {"p50": .., "p90": .., "p99": .., "max": ..} or null}
 //!   ]
 //! }
 //! ```
@@ -135,6 +135,8 @@ struct KindReport {
     /// Hits returned, over the kind's queries (at most 20 each): the same for the same seed and sizes while
     /// `truncated` is zero.
     hits: u64,
+    /// The kind's queries that returned no hit (SPEC §7.6: never zero results by default).
+    empty: u64,
     /// The kind's queries whose page the relaxation budget truncated (SPEC §7.6 `truncated`).
     truncated: u64,
     latency: Option<Percentiles>,
@@ -268,6 +270,7 @@ fn search(
             sample.latencies.push(nanos);
             let found = u64::try_from(results.hits.len()).unwrap_or(u64::MAX);
             sample.hits = sample.hits.saturating_add(found);
+            sample.empty = sample.empty.saturating_add(u64::from(found == 0));
             sample.truncated = sample
                 .truncated
                 .saturating_add(u64::from(results.relaxation.truncated));
@@ -282,6 +285,7 @@ struct Sample {
     kind: QueryKind,
     latencies: Vec<u64>,
     hits: u64,
+    empty: u64,
     truncated: u64,
 }
 
@@ -291,6 +295,7 @@ impl Sample {
             kind,
             latencies: Vec::new(),
             hits: 0,
+            empty: 0,
             truncated: 0,
         }
     }
@@ -300,6 +305,7 @@ impl Sample {
             kind: self.kind,
             count: u64::try_from(self.latencies.len()).unwrap_or(u64::MAX),
             hits: self.hits,
+            empty: self.empty,
             truncated: self.truncated,
             latency: Percentiles::of(&self.latencies),
         }
@@ -444,8 +450,8 @@ impl Report {
         }
         writeln!(
             out,
-            "\n{:<8} {:>8} {:>10} {:>10} {:>12} {:>12} {:>12} {:>12}",
-            "kind", "count", "hits", "truncated", "p50", "p90", "p99", "max"
+            "\n{:<8} {:>8} {:>10} {:>8} {:>10} {:>12} {:>12} {:>12} {:>12}",
+            "kind", "count", "hits", "empty", "truncated", "p50", "p90", "p99", "max"
         )?;
         for kind in &self.kinds {
             let cell = |pick: fn(&Percentiles) -> u64| {
@@ -455,10 +461,11 @@ impl Report {
             };
             writeln!(
                 out,
-                "{:<8} {:>8} {:>10} {:>10} {:>12} {:>12} {:>12} {:>12}",
+                "{:<8} {:>8} {:>10} {:>8} {:>10} {:>12} {:>12} {:>12} {:>12}",
                 kind.kind.name(),
                 kind.count,
                 kind.hits,
+                kind.empty,
                 kind.truncated,
                 cell(|l| l.p50),
                 cell(|l| l.p90),
@@ -476,6 +483,7 @@ impl KindReport {
             "kind": self.kind.name(),
             "count": self.count,
             "hits": self.hits,
+            "empty": self.empty,
             "truncated": self.truncated,
             "latency_nanos": self.latency.map(|l| json!({"p50": l.p50, "p90": l.p90, "p99": l.p99, "max": l.max})),
         })
@@ -539,6 +547,7 @@ mod tests {
                     kind: QueryKind::Term,
                     count: 4,
                     hits: 61,
+                    empty: 1,
                     truncated: 3,
                     latency: Some(Percentiles {
                         p50: 12_345,
@@ -551,6 +560,7 @@ mod tests {
                     kind: QueryKind::Typo,
                     count: 0,
                     hits: 0,
+                    empty: 0,
                     truncated: 0,
                     latency: None,
                 },
@@ -568,9 +578,9 @@ mod tests {
                 r#"{{"build":"{build}","corpus":{{"container_bytes":123456,"fingerprint":"{corpus}"}},"docs":3000,"#,
                 r#""indexing":{{"commit_nanos":20250000,"docs_per_second":2000,"nanos":1500000000}},"#,
                 r#""notice":"{notice}","queries":7,"#,
-                r#""query_kinds":[{{"count":4,"hits":61,"kind":"term","#,
+                r#""query_kinds":[{{"count":4,"empty":1,"hits":61,"kind":"term","#,
                 r#""latency_nanos":{{"max":2000000000,"p50":12345,"p90":999,"p99":1500000}},"truncated":3}},"#,
-                r#"{{"count":0,"hits":0,"kind":"typo","latency_nanos":null,"truncated":0}}],"#,
+                r#"{{"count":0,"empty":0,"hits":0,"kind":"typo","latency_nanos":null,"truncated":0}}],"#,
                 r#""query_mix":{{"fingerprint":"{mix}"}},"seed":42}}"#,
             ),
             corpus = report.corpus.hex(),
@@ -596,9 +606,9 @@ indexing          2000 docs/s (1.500 s)
 commit            20.250 ms
 queries           7, fingerprint {}
 
-kind        count       hits  truncated          p50          p90          p99          max
-term            4         61          3    12.345 µs       999 ns     1.500 ms      2.000 s
-typo            0          0          0            -            -            -            -
+kind        count       hits    empty  truncated          p50          p90          p99          max
+term            4         61        1          3    12.345 µs       999 ns     1.500 ms      2.000 s
+typo            0          0        0          0            -            -            -            -
 ",
             build(),
             report.corpus.hex(),
@@ -770,8 +780,8 @@ typo            0          0          0            -            -            -  
     }
 
     /// A relaxation budget that has always run out by the next read: the `typo` queries, which find their word only
-    /// through relaxation, are counted as truncated (each at most once), and the hits of a truncated page are the
-    /// ones it found before it stopped.
+    /// through relaxation, are counted as truncated (each at most once). A truncated page that found nothing before the
+    /// budget passed is filled by L5 `fallback` past it (ROADMAP 8.1.33), so every query of the kind still has a hit.
     #[test]
     fn a_page_the_budget_truncated_is_counted_per_kind() {
         let base = tempfile::tempdir().unwrap();
@@ -786,7 +796,12 @@ typo            0          0          0            -            -            -  
         let typo = |r: &Report| r.kinds.iter().find(|k| k.kind == QueryKind::Typo).cloned();
         let (typo, calm_typo) = (typo(&report).unwrap(), typo(&calm).unwrap());
         assert!(typo.truncated > 0, "{report:?}");
-        assert!(typo.hits < calm_typo.hits, "{typo:?} {calm_typo:?}");
+        // Every query has a hit, truncated or not: pillar 3.
+        assert_eq!(
+            (typo.empty, calm_typo.empty),
+            (0, 0),
+            "{typo:?} {calm_typo:?}"
+        );
         assert_eq!(
             (report.corpus, report.query_mix),
             (calm.corpus, calm.query_mix)
