@@ -419,6 +419,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- **Breaking** (`persia`): `PutBlobOptions` is the facade's own `#[non_exhaustive]` builder (ROADMAP 10.1.15, ADR-0063
+  amended): `PutBlobOptions::new().mime("text/plain").chunk_size(64 << 10)` instead of a struct literal; setters
+  `mime`, `user_meta(key, value)`, `expected_id`, `expected_size`, `chunk_size(u32)`, `bind_budget` and `resume`. A
+  chunk size outside 64 KiB..=64 MiB is `InvalidArgument` when the blob is stored. `persia::Blob` is the facade's own
+  enum, with the same variants and constructors. New: `persia::ResumeToken` (`new(upload_id, chunk_size)`,
+  `upload_id()`, `chunk_size()`) and `Error::resume_token()`, which returns it for an interrupted upload. No
+  `persia-blob` type is needed to set any option.
 - **Breaking** (`persia-engine`): cursor tokens are version 2 (ROADMAP 10.1.24, 8.1.34; SPEC §7.4; ADR-0062 item 11,
   amended), and version 1 tokens are refused as an invalid argument (pre-1.0: request the first page again). A token
   records a fingerprint of its request's `q`, fields, filters and query limits (`Cursor::request`, a new public field,

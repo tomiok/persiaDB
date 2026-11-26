@@ -58,12 +58,10 @@ pub use asynchronous::{JobEvent, JobHook, JobKind};
 #[cfg(feature = "test-hooks")]
 #[doc(hidden)]
 pub use backup::{BackupHook, BackupStep};
-pub use blob::BlobReader;
+pub use blob::{Blob, BlobReader, PutBlobOptions, ResumeToken};
 pub use collection::Collection;
 pub use db::{BlockCacheStats, Db};
 pub use error::{Error, ErrorCode, Result};
-pub use internal::blob::PutBlobOptions;
-pub use internal::documents::Blob;
 #[cfg(feature = "test-hooks")]
 #[doc(hidden)]
 pub use options::DetachedSlot;

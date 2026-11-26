@@ -3342,6 +3342,10 @@ it logs or commits a document (it does not depend on `persia-blob`); the public 
 `put_blob(reader, &PutBlobOptions { mime, user_meta, expected_id, expected_size, chunk_size, bind_budget, resume }) -> BlobRef`,
 `get_blob(blob_ref) -> Stream`, `get_blob_range(blob_ref, range)` (by reference: a read checks the manifest against it,
 `check_ref`, and a stream reads by that manifest, looked up once), `delete` via document delete + GC.
+In the embedded API, `persia::PutBlobOptions` is a builder of those seven options (`PutBlobOptions::new().mime(..)
+.chunk_size(..)`; ROADMAP 10.1.15, ADR-0063 amended), checked when the blob is stored, and the token is a
+`persia::ResumeToken` (its `upload_id` and `chunk_size`), which `persia::Error::resume_token()` returns for an
+interrupted upload.
 `expected_id` (optional) is checked against the computed id when the reader ends; a mismatch is
 `BlobIdMismatch { expected, actual }` (a caller error, not corruption) and binds nothing (ADR-0034). Over gRPC it is
 `expected_blob_id` (32 bytes) in the first message of the `PutBlob` stream; over HTTP the `Repr-Digest:

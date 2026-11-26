@@ -42,27 +42,29 @@ pub const DEFAULT_BIND_BUDGET: Duration = Duration::from_secs(60);
 /// those chunks while that write is still in flight. `gc` (ROADMAP 9.5.2, #108) rejects a shorter grace.
 pub const MAX_BIND_BUDGET: Duration = Duration::from_hours(1);
 
-/// What a blob is stored with beside its bytes (SPEC §9.1, §9.6): for [`Db::put_blob`](crate::Db::put_blob) and
-/// [`Blob::with_options`](crate::Blob::with_options). Start from `PutBlobOptions::default()` and set the fields you
-/// need.
+/// What a blob is stored with beside its bytes (SPEC §9.1, §9.6), as [`Blobs::put_blob`] takes it: the facade's own
+/// [`crate::PutBlobOptions`] converts to it (ROADMAP 10.1.15). Start from `PutBlobOptions::default()` and set the
+/// fields you need.
 ///
 /// ```
-/// use persia::PutBlobOptions;
+/// use std::sync::Arc;
+/// use persia::internal::blob::{Blobs, PutBlobOptions};
+/// use persia_blob::MemoryBlobStore;
 ///
-/// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
-/// # let dir = tempfile::tempdir()?;
-/// # let db = persia::Db::open(dir.path().join("app.persia"))?;
+/// let blobs = Blobs::new(Arc::new(MemoryBlobStore::new()));
 /// let options = PutBlobOptions {
 ///     mime: "image/png".into(),
 ///     expected_size: Some(4),
 ///     ..PutBlobOptions::default()
 /// };
-/// let blob = db.put_blob(&b"\x89PNG"[..], &options)?;
+/// let (blob, _pins) = blobs.put_blob(&b"\x89PNG"[..], &options)?;
 /// assert_eq!((blob.mime(), blob.size()), ("image/png", 4));
 /// // Five bytes where four were promised: refused, nothing stored.
-/// let err = db.put_blob(&b"\x89PNG!"[..], &options).unwrap_err();
-/// assert_eq!(err.code(), persia::ErrorCode::InvalidArgument);
-/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// assert!(matches!(
+///     blobs.put_blob(&b"\x89PNG!"[..], &options),
+///     Err(persia_blob::Error::BlobSizeMismatch { .. })
+/// ));
+/// # Ok::<(), persia_blob::Error>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PutBlobOptions {

@@ -409,7 +409,7 @@ fn a_poisoned_writer_cannot_back_up() {
 /// lock: `Db::backup`'s steps, run on a `SimFs` (a `Db` opens real files only), leave both writer locks held.
 #[test]
 fn with_per_process_locks_a_backup_keeps_both_writer_locks() {
-    use persia::internal::documents::BlobDatabase;
+    use persia::internal::documents::{Blob as StoreBlob, BlobDatabase};
     use persia_blob::{PackStore, pack_path};
     use persia_engine::db::{Database, write_backup_in};
     use persia_engine::wal::Durability;
@@ -436,7 +436,7 @@ fn with_per_process_locks_a_backup_keeps_both_writer_locks() {
     db.put(
         "files",
         &Document::new("a"),
-        Blob::from_reader(&bytes(3000, 1)[..]),
+        StoreBlob::from_reader(&bytes(3000, 1)[..]),
         Durability::Fsync,
     )
     .unwrap();

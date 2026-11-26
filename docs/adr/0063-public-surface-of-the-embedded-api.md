@@ -110,3 +110,23 @@ would freeze the engine's shape. The owner decided the surface on 2026-11-23 (wa
   public surface; the conversions are crate-private functions instead.
 - **Wrapper types for `Document` and `CollectionSchema`.** A parallel value model to keep in step with the engine's,
   for types that are already plain data with a documented JSON form (SPEC §6.2, §6.4.1).
+
+## Amendment (2026-11-26): the facade's own blob options (ROADMAP 10.1.15)
+
+`PutBlobOptions` was the `internal` layer's struct, re-exported, whose public fields named two `persia-blob` types
+that are on no list here (`ChunkSize`, `ResumeToken`): a caller could not set `chunk_size` or `resume` without
+depending on `persia-blob`. The owner chose a facade type over adding the two to item 2:
+
+- `persia::PutBlobOptions` is the facade's own `#[non_exhaustive]` struct with private fields: `new()` (also
+  `Default`) and one consuming setter per option, `mime`, `user_meta(key, value)` (adds one entry), `expected_id`,
+  `expected_size`, `chunk_size(u32)` (bytes), `bind_budget(Duration)` and `resume(ResumeToken)`. It converts to the
+  blob layer's options inside the facade, when the blob is stored; a chunk size outside 64 KiB..=64 MiB is then
+  `INVALID_ARGUMENT`, and the blob layer checks the rest as before.
+- `persia::ResumeToken` is the facade's value of SPEC §9.4's token, the upload id (`u128`) and the chunk size
+  (`u32`): `new(upload_id, chunk_size)`, `upload_id()`, `chunk_size()`, so a caller can keep it across a restart.
+  `Error::resume_token()` finds it behind an interrupted upload's error (a downcast of the source chain, never its
+  text). This narrows the first Consequence above: the resume token is no longer reachable only through `source()`.
+- `persia::Blob` is the facade's own enum too (the same variants, `Reader`, `Path` and `Stored`, holding the facade's
+  options), since its `with_options` takes them; it converts to the `internal` layer's `Blob` the same way.
+
+No public signature of `persia` names a `persia-blob` type now other than `BlobRef` and `BlobId` (item 2).

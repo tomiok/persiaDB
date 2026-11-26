@@ -317,6 +317,39 @@ impl Error {
     pub fn message(&self) -> &str {
         &self.message
     }
+
+    /// The token that resumes the upload this error interrupted (SPEC §9.4), for [`PutBlobOptions::resume`]: a
+    /// [`Db::put_blob`](crate::Db::put_blob) that failed once its upload attempted a chunk write, or while resuming,
+    /// returns one; every other error, `None`. Only a remote blob store's uploads resume; the local pack's never do.
+    ///
+    /// [`PutBlobOptions::resume`]: crate::PutBlobOptions::resume
+    ///
+    /// ```
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// # let db = persia::Db::open(dir.path().join("app.persia"))?;
+    /// let tiny = persia::PutBlobOptions::new().chunk_size(1);
+    /// assert_eq!(db.put_blob(&b"x"[..], &tiny).unwrap_err().resume_token(), None);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn resume_token(&self) -> Option<crate::ResumeToken> {
+        let mut next = std::error::Error::source(self);
+        while let Some(error) = next {
+            // The blob layer's error, or the documents layer's around it (transparent: its `source` skips it).
+            let blob = error.downcast_ref::<persia_blob::Error>().or_else(|| {
+                match error.downcast_ref::<crate::internal::documents::Error>() {
+                    Some(crate::internal::documents::Error::Blob(blob)) => Some(blob),
+                    _ => None,
+                }
+            });
+            if let Some(persia_blob::Error::UploadInterrupted { token, .. }) = blob {
+                return Some(crate::ResumeToken::from_store(*token));
+            }
+            next = error.source();
+        }
+        None
+    }
 }
 
 impl fmt::Display for Error {
@@ -346,6 +379,30 @@ impl std::error::Error for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The token of an interrupted upload is found under the layers that wrap it, and only there.
+    #[test]
+    fn an_interrupted_upload_gives_its_resume_token() {
+        let token = persia_blob::ResumeToken {
+            upload_id: persia_blob::UploadId::new(9),
+            chunk_size: persia_blob::ChunkSize::DEFAULT,
+        };
+        let interrupted = || persia_blob::Error::UploadInterrupted {
+            token,
+            source: Box::new(persia_blob::Error::ResumeUnsupported),
+        };
+        let expected = Some(crate::ResumeToken::new(9, 4 << 20));
+        assert_eq!(Error::wrap(interrupted()).resume_token(), expected);
+        let wrapped = Error::wrap(crate::internal::documents::Error::Blob(interrupted()));
+        assert_eq!(wrapped.resume_token(), expected);
+        let nested = Error::with_source(ErrorCode::Io, "outer", Error::wrap(interrupted()));
+        assert_eq!(nested.resume_token(), expected);
+        assert_eq!(
+            Error::wrap(persia_blob::Error::ResumeUnsupported).resume_token(),
+            None
+        );
+        assert_eq!(Error::closed().resume_token(), None);
+    }
 
     /// The code after `code` in the table, `None` first and last. The match is exhaustive: a new, renamed or removed
     /// variant does not compile until this chain, and with it the snapshot below, is edited.

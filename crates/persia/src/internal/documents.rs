@@ -149,9 +149,29 @@ pub enum Error {
     NoContainerPath,
 }
 
-/// The blob of a document (SPEC §9.5, §9.6), for [`Collection::put_with_blob`](crate::Collection::put_with_blob):
-/// bytes to store with it, or a blob [`Db::put_blob`](crate::Db::put_blob) stored before. Bytes are stored, and
-/// durable, before the document is logged; a stored blob must be in this database's store.
+/// The blob of a document (SPEC §9.5, §9.6) as [`BlobDatabase::put`] takes it: bytes to store with it, or a blob
+/// stored before. The facade's [`crate::Blob`] converts to it (ROADMAP 10.1.15). Bytes are stored, and durable, before
+/// the document is logged; a stored blob must be in this database's store.
+///
+/// ```
+/// use persia::internal::blob::PutBlobOptions;
+/// use persia::internal::documents::{Blob, BlobDatabase};
+/// use persia_engine::db::DatabaseOptions;
+/// use persia_engine::document::Document;
+/// use persia_engine::schema::SchemaBuilder;
+/// use persia_engine::wal::Durability;
+///
+/// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+/// # let dir = tempfile::tempdir()?;
+/// let mut db = BlobDatabase::create(dir.path().join("app.persia"), DatabaseOptions::default())?;
+/// db.log_mut().create_collection(SchemaBuilder::new("files").build()?)?;
+/// let text = PutBlobOptions { mime: "text/plain".into(), ..PutBlobOptions::default() };
+/// let blob = Blob::from_reader(&b"hi"[..]).with_options(text);
+/// let stored = db.put("files", &Document::new("a"), blob, Durability::Fsync)?;
+/// assert_eq!((stored.mime(), db.get_blob_range(&stored, 0..2)?), ("text/plain", b"hi".to_vec()));
+/// db.put("files", &Document::new("b"), Blob::Stored(stored), Durability::Fsync)?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub enum Blob<'r> {
     /// Bytes to store, from a reader ([`Blob::from_reader`]).
     Reader(Box<dyn Read + 'r>, PutBlobOptions),
@@ -163,56 +183,17 @@ pub enum Blob<'r> {
 
 impl<'r> Blob<'r> {
     /// The bytes `reader` yields, with the default [`PutBlobOptions`].
-    ///
-    /// ```
-    /// use persia::{Blob, Document};
-    ///
-    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
-    /// # let dir = tempfile::tempdir()?;
-    /// # let db = persia::Db::open(dir.path().join("app.persia"))?;
-    /// let files = db.create_collection_json(r#"{"name": "files", "fields": {}}"#)?;
-    /// let blob = files.put_with_blob(&Document::new("hello"), Blob::from_reader(&b"hello"[..]))?;
-    /// assert_eq!((blob.size(), blob.mime()), (5, "application/octet-stream"));
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
     pub fn from_reader(reader: impl Read + 'r) -> Self {
         Self::Reader(Box::new(reader), PutBlobOptions::default())
     }
 
     /// The bytes of the file at `path`, with the default [`PutBlobOptions`]. The file is opened when the blob is
-    /// stored; a missing one is `NotFound`, and nothing is logged.
-    ///
-    /// ```
-    /// use persia::{Blob, Document};
-    ///
-    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
-    /// # let dir = tempfile::tempdir()?;
-    /// # let db = persia::Db::open(dir.path().join("app.persia"))?;
-    /// let path = dir.path().join("report.txt");
-    /// std::fs::write(&path, "quarterly numbers")?;
-    /// let files = db.create_collection_json(r#"{"name": "files", "fields": {}}"#)?;
-    /// let blob = files.put_with_blob(&Document::new("report"), Blob::from_path(&path))?;
-    /// assert_eq!(db.get_blob_range(&blob, 0..9)?, b"quarterly");
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
+    /// stored; a missing one is an [`Error::Open`], and nothing is logged.
     pub fn from_path(path: impl Into<PathBuf>) -> Self {
         Self::Path(path.into(), PutBlobOptions::default())
     }
 
     /// `options` instead of the defaults; no effect on [`Blob::Stored`], whose blob keeps what it was stored with.
-    ///
-    /// ```
-    /// use persia::{Blob, Document, PutBlobOptions};
-    ///
-    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
-    /// # let dir = tempfile::tempdir()?;
-    /// # let db = persia::Db::open(dir.path().join("app.persia"))?;
-    /// let files = db.create_collection_json(r#"{"name": "files", "fields": {}}"#)?;
-    /// let text = PutBlobOptions { mime: "text/plain".into(), ..PutBlobOptions::default() };
-    /// let blob = files.put_with_blob(&Document::new("a"), Blob::from_reader(&b"hi"[..]).with_options(text))?;
-    /// assert_eq!(blob.mime(), "text/plain");
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
     #[must_use]
     pub fn with_options(self, options: PutBlobOptions) -> Self {
         match self {

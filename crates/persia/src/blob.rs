@@ -9,10 +9,14 @@ use std::sync::Arc;
 use persia_blob::BlobRef;
 
 use crate::db::{Db, Inner};
-use crate::internal::blob::PutBlobOptions;
-use crate::internal::documents::{Blob, Error as DocumentsError};
+use crate::internal::documents::{Blob as StoreBlob, Error as DocumentsError};
 use crate::internal::pins::Pins;
 use crate::{Error, ErrorCode, Result};
+
+// The facade's blob options and blob of a document (ROADMAP 10.1.15).
+mod put;
+
+pub use put::{Blob, PutBlobOptions, ResumeToken};
 
 /// How many bytes a [`BlobReader`] reads at a time.
 const WINDOW: u64 = 4 << 20;
@@ -22,14 +26,15 @@ impl Inner {
     /// it until the returned pins drop.
     pub(crate) fn store_blob(&self, blob: Blob<'_>) -> Result<(BlobRef, Pins)> {
         self.check_writable("store a blob")?;
+        let blob = blob.into_store()?;
         self.with_blobs(|blobs| {
             let stored = match blob {
-                Blob::Reader(reader, options) => blobs.put_blob(reader, &options),
-                Blob::Path(path, options) => match File::open(&path) {
+                StoreBlob::Reader(reader, options) => blobs.put_blob(reader, &options),
+                StoreBlob::Path(path, options) => match File::open(&path) {
                     Ok(file) => blobs.put_blob(file, &options),
                     Err(source) => return Err(Error::wrap(DocumentsError::Open { path, source })),
                 },
-                Blob::Stored(blob_ref) => {
+                StoreBlob::Stored(blob_ref) => {
                     return match blobs.pin_contained(&blob_ref).map_err(Error::wrap)? {
                         Some(pins) => Ok((blob_ref, pins)),
                         None => Err(not_stored(&blob_ref)),
@@ -62,7 +67,7 @@ impl Db {
     /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
     /// # let dir = tempfile::tempdir()?;
     /// let db = persia::Db::open(dir.path().join("app.persia"))?;
-    /// let options = PutBlobOptions { mime: "text/plain".into(), ..PutBlobOptions::default() };
+    /// let options = PutBlobOptions::new().mime("text/plain");
     /// let blob = db.put_blob(&b"hello, blobs"[..], &options)?;
     /// assert_eq!((blob.size(), blob.mime()), (12, "text/plain"));
     /// # Ok::<(), Box<dyn std::error::Error>>(())

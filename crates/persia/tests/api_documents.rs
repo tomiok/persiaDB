@@ -321,16 +321,10 @@ fn a_reference_the_store_lacks_is_not_found_and_logs_nothing() {
 fn blob_options_are_checked() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(dir.path().join("app.persia")).unwrap();
-    let bad_mime = PutBlobOptions {
-        mime: String::new(),
-        ..PutBlobOptions::default()
-    };
+    let bad_mime = PutBlobOptions::new().mime("");
     let err = db.put_blob(&b"x"[..], &bad_mime).unwrap_err();
     assert_eq!(err.code(), ErrorCode::InvalidArgument, "{err}");
-    let wrong_size = PutBlobOptions {
-        expected_size: Some(2),
-        ..PutBlobOptions::default()
-    };
+    let wrong_size = PutBlobOptions::new().expected_size(2);
     let err = db.put_blob(&b"xyz"[..], &wrong_size).unwrap_err();
     assert_eq!(err.code(), ErrorCode::InvalidArgument, "{err}");
     let blob = db

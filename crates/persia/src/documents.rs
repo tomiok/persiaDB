@@ -4,9 +4,10 @@ use persia_blob::BlobRef;
 use persia_engine::document::Document;
 use persia_engine::wal::Durability;
 
+use crate::Blob;
 use crate::collection::Collection;
 use crate::db::Db;
-use crate::internal::documents::Blob;
+use crate::internal::documents::Blob as StoreBlob;
 use crate::{Error, Result};
 
 impl Collection {
@@ -167,8 +168,13 @@ impl Collection {
             }
         };
         self.db.write("put a document", |db| {
-            db.put(&self.name, doc, Blob::Stored(blob_ref.clone()), durability)
-                .map_err(Error::wrap)
+            db.put(
+                &self.name,
+                doc,
+                StoreBlob::Stored(blob_ref.clone()),
+                durability,
+            )
+            .map_err(Error::wrap)
         })?;
         Ok(blob_ref)
     }
