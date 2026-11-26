@@ -121,6 +121,9 @@ struct Inner<F: ContainerFile> {
     staged: HashMap<(UploadId, u32), Staged>,
     /// Set by [`PackStore::enable_mapped_reads`].
     mapper: Option<Mapper<F>>,
+    /// What maps a handle [`PackStore::reopen`] opens: set by [`PackStore::open_mapped_if_local`], so a reader that
+    /// follows a rewrite maps the new file as it mapped the old one (ROADMAP 10.1.23).
+    remap_on_reopen: Option<fn() -> MapFn<F>>,
 }
 
 /// Why a handle stopped writing (SPEC §4.5).
@@ -305,6 +308,7 @@ impl<F: ContainerFile + 'static> PackStore<F> {
                 pack,
                 staged: HashMap::new(),
                 mapper: None,
+                remap_on_reopen: None,
             }),
             _lock: held,
         })
@@ -1059,6 +1063,8 @@ fn write_slot<F: ContainerFile>(
 }
 
 mod mapped;
+// The read-only pack's mapping on a local disk: this crate's one audited `unsafe` call (ROADMAP 10.1.23, ADR-0017).
+mod read_only_mapped;
 mod recover;
 mod refresh;
 
@@ -1083,5 +1089,5 @@ mod lock;
 mod leases;
 // -- end wiring --
 
-use mapped::Mapper;
+use mapped::{MapFn, Mapper};
 use recover::{check_scan, longest_frame, read_prefix, recover, scan_committed};

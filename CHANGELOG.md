@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia`: a read-only `Db` reads its blob pack as it reads its container (ROADMAP 10.1.23; SPEC §4.7; ADR-0017
+  amended): through a memory mapping on a local disk by default (not on Windows), mapped again as the writer binds,
+  and over the new file after a GC rewrite; `OpenOptions::mapped_reads` now chooses for both files (`false` reads
+  both with `pread`). A read-write `Db` never maps its pack. Underneath: `persia_blob::PackStore::open_mapped_if_local`,
+  the `unsafe` `persia_storage::container::MapPermit::read_only_if_local`, and
+  `persia_engine::db::ReadOnlyOptions::mapped_reads_choice`.
 - `persia_engine::search::request::QueryResponse::to_json` writes a search response as the response JSON of SPEC §7.5.2
   (ROADMAP 10.1.13, ADR-0065): each hit's projected document, score, typed sort values, cursor token and, for a
   relaxed search, its level, step and rank score; the facets; `relaxation` as SPEC §7.6 lists it (a `relax: false`

@@ -120,3 +120,139 @@ fn a_read_write_db_reads_its_flushed_segments_through_its_cache() {
         "{before:?} -> {after:?}"
     );
 }
+
+/// Whether the file system under `dir` lets the writer judge a reader lease by its lock (ADR-0054 item 13); where it
+/// does not, every lease holds GC back and no rewrite happens while a reader is open.
+fn locks_judged(dir: &Path) -> bool {
+    let probe = dir.join("locks-probe");
+    let file = std::fs::File::create(&probe).unwrap();
+    let judged = persia_blob::pack::ContainerFile::locks_per_handle(&file);
+    drop(file);
+    std::fs::remove_file(&probe).unwrap();
+    if !judged {
+        eprintln!(
+            "skipped: locks cannot be judged on the file system under {}",
+            dir.display()
+        );
+    }
+    judged
+}
+
+/// ROADMAP 10.1.23: a read-only `Db` reads its blob pack as it reads its container. On a local disk it maps the pack
+/// by default (not on Windows, as for the container), also a pack the writer creates after the open, and it maps the
+/// new file a GC rewrite renamed over the pack once a refresh reopens it; `mapped_reads(false)` reads both files with
+/// `pread`; the writer's pack never maps.
+#[test]
+#[allow(clippy::too_many_lines)] // one scenario, followed step by step
+fn a_read_only_db_maps_its_pack_like_its_container_and_follows_a_rewrite() {
+    use persia::internal::documents::{Blob, BlobDatabase};
+    use persia::internal::gc::GcOptions;
+    use persia_engine::db::DatabaseOptions;
+    use persia_engine::schema::SchemaBuilder;
+    use persia_engine::wal::Durability;
+
+    let dir = tempfile::tempdir().unwrap();
+    if !locks_judged(dir.path()) {
+        return;
+    }
+    let path = dir.path().join("app.persia");
+    let mut writer = BlobDatabase::create(&path, DatabaseOptions::default()).unwrap();
+    writer
+        .log_mut()
+        .create_collection(SchemaBuilder::new("c").build().unwrap())
+        .unwrap();
+    writer.commit().unwrap();
+    let local = writer.log().container().is_on_local_disk().unwrap();
+    let by_default = local && !cfg!(windows);
+
+    let reader = OpenOptions::new().read_only(true).open(&path).unwrap();
+    let plain = OpenOptions::new()
+        .read_only(true)
+        .mapped_reads(false)
+        .open(&path)
+        .unwrap();
+    assert!(!reader.is_pack_mapped().unwrap(), "no pack yet");
+
+    let put = |db: &mut BlobDatabase<_>, id: &str, bytes: &'static [u8]| {
+        let blob = db
+            .put(
+                "c",
+                &Document::new(id),
+                Blob::from_reader(bytes),
+                Durability::Fsync,
+            )
+            .unwrap();
+        db.commit().unwrap();
+        blob
+    };
+    put(&mut writer, "gone", b"swept by the rewrite");
+    let kept = put(&mut writer, "kept", b"kept across the rewrite");
+    assert!(
+        writer.blobs().store().mapped_range().is_none(),
+        "the writer's pack never maps"
+    );
+    for db in [&reader, &plain] {
+        db.refresh().unwrap();
+        assert_eq!(db.get_blob_range(&kept, 0..4).unwrap(), b"kept");
+    }
+    assert_eq!(
+        reader.is_pack_mapped().unwrap(),
+        by_default,
+        "the pack created since"
+    );
+    assert!(!plain.is_pack_mapped().unwrap(), "pread for the pack too");
+    assert!(!plain.is_mapped().unwrap(), "and for the container");
+
+    // A rewrite renames a new file over the pack; the readers follow it at their next refresh.
+    writer
+        .log_mut()
+        .delete("c", "gone", Durability::Fsync)
+        .unwrap();
+    writer.release_durable();
+    writer.commit().unwrap();
+    for db in [&reader, &plain] {
+        db.refresh().unwrap(); // past the delete: the leases no longer hold the GC back
+    }
+    let before = std::fs::read(persia_blob::pack_path(&path)).unwrap();
+    let report = writer
+        .gc(&GcOptions {
+            rewrite_ratio: 0.0,
+            ..GcOptions::default()
+        })
+        .unwrap();
+    assert!(report.sweep.rewrite.is_some(), "{report:?}");
+    assert_ne!(
+        std::fs::read(persia_blob::pack_path(&path)).unwrap(),
+        before
+    );
+    for db in [&reader, &plain] {
+        db.refresh().unwrap();
+        assert_eq!(
+            db.get_blob_range(&kept, 0..23).unwrap(),
+            b"kept across the rewrite"
+        );
+    }
+    assert_eq!(
+        reader.is_pack_mapped().unwrap(),
+        by_default,
+        "the rewritten pack"
+    );
+    assert!(!plain.is_pack_mapped().unwrap());
+
+    let asked = OpenOptions::new()
+        .read_only(true)
+        .mapped_reads(true)
+        .open(&path)
+        .unwrap();
+    assert_eq!(
+        asked.is_pack_mapped().unwrap(),
+        local,
+        "asked for, also on Windows"
+    );
+    drop((reader, plain, asked, writer));
+    let rw = OpenOptions::new().mapped_reads(true).open(&path).unwrap();
+    assert!(
+        !rw.is_pack_mapped().unwrap(),
+        "a read-write Db never maps its pack"
+    );
+}

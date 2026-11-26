@@ -462,6 +462,14 @@ and so does the reader itself for segments an incremental refresh reuses: a long
 mappings of the file at once, one per container its live segments were opened from.
 A mapping that fails at an open or a refresh is not an error of either: the handle reads with ordinary reads, and a
 warning is logged.
+The blob pack beside a read-only database (§9.3) is read the same way (ROADMAP 10.1.23, ADR-0017 amended 2026-11-26):
+the embedded API's read-only open takes the container's `MappedReads` for the pack too, so `OpenOptions::mapped_reads`
+chooses for both files. With `IfLocal` it opens the pack with `PackStore::open_mapped_if_local`, which maps
+`12288..log_end` of the pack's committed slot when the pack file is on a local disk (`MapPermit::read_only_if_local`,
+an `unsafe fn` of `persia-storage`, called from one audited module of `persia-blob`, `pack/store/read_only_mapped.rs`),
+maps again at each refresh that finds new frames or a pack created since the open, and maps the new file when a
+refresh reopens a pack a GC rewrite replaced. The residual is the container's, for the pack file. The writer's pack
+never maps by default.
 
 Mapping anything else (a read-write container, or a file the caller vouches for) is an `unsafe` call
 (`enable_mapped_reads`, ADR-0017): the embedder states that nothing outside Persia writes, truncates or hole-punches

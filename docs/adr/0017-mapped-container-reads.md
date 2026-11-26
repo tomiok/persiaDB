@@ -166,3 +166,40 @@ Consequences of the amendment:
 - The residual of item 2 is reachable from the engine's safe `ReadOnlyDatabase::open_with_options` (decision n), not
   from any safe function of `persia-storage`. It is stated in SPEC §4.7, in `MappedReads::IfLocal`'s documentation
   and in the `SAFETY` comment of `db/read_only/mapped.rs`, and is the reason the option to turn mapping off exists.
+
+## Amendment (2026-11-26): the read-only blob pack maps like its container (ROADMAP 10.1.23)
+
+The amendment above left the blob pack on `pread` for read-only databases: `PackStore::enable_mapped_reads` takes a
+`MapPermit`, which only the `unsafe` `MapPermit::new` makes, and `persia` forbids `unsafe`. The pack now follows its
+container, the same way:
+
+1. **An `unsafe` storage entry.** `MapPermit::read_only_if_local(file)` (in `persia_storage::container::mapped`,
+   the module decision 1 allows to map) returns a permit when `file` is on an allow-listed local disk file system
+   (ADR-0021; unknown counts as not local), and `None` otherwise. Its `# Safety` contract is `MapPermit::new`'s plus
+   `Container::map_read_only_if_local`'s for a pack: the permit maps only through a read-only handle whose `File`
+   Persia opened itself by path on the operating system's file system and never hands out. The pack's writer lock
+   (`<name>.persia.blobs.lock`, ROADMAP 9.2.15) keeps a second Persia writer out, and Persia's writers never change a
+   pack's bytes below a committed `log_end` (SPEC §9.3). No safe public function of `persia-storage` maps.
+2. **One audited caller.** `crates/persia-blob/src/pack/store/read_only_mapped.rs` is `persia-blob`'s one module that
+   allows `unsafe_code` (listed in `UNSAFE_ALLOWED`); the crate root moves from `forbid` to `deny`, as the engine's did
+   for item 1 of the amendment above. It makes the map function of the handles that `PackStore::open_mapped_if_local`
+   opens: read-only, by path, on `RealFs`, with no way for a caller to hand in a file or a `Vfs`, which is what the
+   `SAFETY` comment rests on. The map function asks for the permit at each mapping (so a pack created after the open,
+   and the file a rewrite renamed over the path, are judged on their own), and a file off a local disk is read with
+   `pread`, not counted as a failed mapping.
+3. **A rewrite is followed.** A read-only pack stays on the file it opened when a refresh finds it replaced (ROADMAP
+   9.2.13); the reader's `PackStore::reopen` then opens the replacement, and a handle `open_mapped_if_local` opened
+   reopens mapped the same way (the handle keeps the function that makes its map function). Every other open, and
+   every other reopen, starts with mapped reads off, as before.
+4. **One setting for both files.** The embedded API's read-only open (`ReadOnlyBlobDatabase::open_with_options`)
+   reads the container's `MappedReads` from its `ReadOnlyOptions` (`mapped_reads_choice`) and opens the pack with
+   `open_mapped_if_local` for `IfLocal`, with `PackStore::open` otherwise. So `OpenOptions::mapped_reads(false)`
+   forces `pread` for both files, `true` maps both on a local disk, and the default is the container's: `IfLocal`,
+   except on Windows, where it is `Never` for both (the Windows consequence above holds for the pack: a reader's
+   mapping keeps the writer's next open from truncating a torn tail of the pack, ADR-0049 Consequences). A read-write
+   `Db` never maps its pack.
+
+The residual is the container's, for the pack file: another program, or a handle of the file this process opens on
+its own, writing or truncating the pack while it is mapped, and a slot damaged later. It is stated in SPEC §4.7, in
+`PackStore::open_mapped_if_local`'s documentation and in the `SAFETY` comment of `read_only_mapped.rs`, and
+`mapped_reads(false)` is the way out.

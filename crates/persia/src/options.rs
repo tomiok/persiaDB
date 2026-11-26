@@ -261,10 +261,11 @@ impl OpenOptions {
         self
     }
 
-    /// Whether a read-only open reads its container through a memory mapping (SPEC §4.7, ROADMAP 10.2.4): `true` maps
-    /// it when it is on a local disk, `false` always reads with ordinary reads (`pread`). By default it maps on a
-    /// local disk, except on Windows, where it does not (ADR-0017, amended). A read-write `Db` never maps, whatever
-    /// this says. A mapped reader needs that no other program writes or truncates the file while it is open.
+    /// Whether a read-only open reads its container and its blob pack through memory mappings (SPEC §4.7, ROADMAP
+    /// 10.2.4, 10.1.23): `true` maps each file that is on a local disk, `false` always reads both with ordinary reads
+    /// (`pread`). By default it maps on a local disk, except on Windows, where it does not (ADR-0017, amended). A
+    /// read-write `Db` maps neither, whatever this says. A mapped reader needs that no other program writes or
+    /// truncates either file while it is open.
     ///
     /// ```
     /// use persia::OpenOptions;

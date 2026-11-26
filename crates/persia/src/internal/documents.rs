@@ -24,7 +24,7 @@ use persia_blob::pack::lease::leases_dir;
 use persia_blob::pack::{ContainerFile, Vfs};
 use persia_blob::{BlobId, BlobRef, BlobStore, PackStore, pack_path};
 use persia_engine::db::{
-    Database, DatabaseError, DatabaseOptions, ReadOnlyDatabase, ReadOnlyOptions,
+    Database, DatabaseError, DatabaseOptions, MappedReads, ReadOnlyDatabase, ReadOnlyOptions,
 };
 use persia_engine::document::Document;
 use persia_engine::wal::{Durability, WalMark};
@@ -731,7 +731,9 @@ impl ReadOnlyBlobDatabase<File> {
 
     /// [`ReadOnlyBlobDatabase::open`] with the documents opened by [`ReadOnlyDatabase::open_with_options`]: `options`
     /// choose the registry, the block cache and whether the container is mapped (SPEC §4.7, §10.6). The embedded API's
-    /// read-only `Db` opens with this.
+    /// read-only `Db` opens with this. The pack follows the container's choice ([`ReadOnlyOptions::mapped_reads_choice`],
+    /// ROADMAP 10.1.23): with [`MappedReads::IfLocal`] it is opened with [`PackStore::open_mapped_if_local`], and it
+    /// keeps that mapping across the reopen of a refresh that finds it rewritten; otherwise it reads with `pread`.
     ///
     /// # Errors
     /// As [`ReadOnlyBlobDatabase::open`].
@@ -741,11 +743,16 @@ impl ReadOnlyBlobDatabase<File> {
     ) -> Result<Self, Error> {
         let path = path.as_ref();
         let lease = ReaderLease::take_beside(path).map_err(lease_error)?;
-        Self::with_lease(
-            lease,
-            ReadOnlyDatabase::open_with_options(path, options)?,
-            path,
-        )
+        let db = ReadOnlyDatabase::open_with_options(path, options)?;
+        let pack = pack_beside(db.container().path(), path);
+        let mapped = matches!(options.mapped_reads_choice(), MappedReads::IfLocal);
+        Self::leased(lease, db, &pack, |pack, db_uuid| {
+            if mapped {
+                PackStore::open_mapped_if_local(pack, db_uuid)
+            } else {
+                PackStore::open(pack, db_uuid)
+            }
+        })
     }
 
     /// `db`, opened read-only from the container at `path`, with a reader lease taken now and its pack opened

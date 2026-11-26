@@ -93,6 +93,38 @@ impl MapPermit {
         let map = unsafe { MmapFile::map(file, range)? };
         Ok(ByteSource::from_mmap(map))
     }
+
+    /// The permit of a read-only blob pack's mapping (SPEC §4.7, §9.3; ROADMAP 10.1.23; ADR-0017 amended), if `file`
+    /// is on a local disk file system (ADR-0021; a file system that cannot be queried counts as not local): the
+    /// pack's counterpart of [`Container::map_read_only_if_local`]. `None` leaves the pack reading with `pread`, as off
+    /// the local file systems a failed page read would end the process.
+    ///
+    /// ```
+    /// use persia_storage::container::MapPermit;
+    ///
+    /// # let dir = tempfile::tempdir()?;
+    /// let file = std::fs::File::create(dir.path().join("p.blobs"))?;
+    /// // SAFETY: nothing maps this file through the permit here.
+    /// let permit = unsafe { MapPermit::read_only_if_local(&file) };
+    /// # let _ = permit;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Safety
+    /// As [`MapPermit::new`], and as [`Container::map_read_only_if_local`] for a pack: the permit maps only `file`, and
+    /// the files a rewrite renames over its path, through a **read-only** handle (it never writes, truncates or remaps
+    /// over a file it changed) whose `File` Persia opened itself by path on the operating system's file system and
+    /// never hands out (no caller holds a clone through which safe code could truncate it). The pack's writer lock,
+    /// `<name>.persia.blobs.lock`, keeps a second Persia writer out of the pack (ROADMAP 9.2.15). Persia's writers
+    /// never change a pack's bytes below a committed `log_end` (frames are append-only, recovery truncates only past
+    /// it, a rewrite writes a new file and renames it over the path, SPEC §9.3). The residual is the caller's to
+    /// accept, as for the container: another program, or a handle of the file this process opens on its own, that
+    /// writes or truncates the pack while it is mapped, and a slot damaged after the handle read it.
+    pub unsafe fn read_only_if_local(file: &File) -> Option<Self> {
+        crate::sys::is_local_disk(file)
+            .unwrap_or(false)
+            .then_some(Self(()))
+    }
 }
 
 impl Container<File> {

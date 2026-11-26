@@ -345,6 +345,15 @@ impl Db {
                 .ok_or_else(Error::closed),
         }
     }
+
+    /// Test hook: whether the database reads its blob pack through a memory mapping (SPEC §4.7, ROADMAP 10.1.23);
+    /// `false` while it has no pack file.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn is_pack_mapped(&self) -> Result<bool> {
+        self.inner
+            .with_blobs(|blobs| Ok(blobs.store().mapped_range().is_some()))
+    }
 }
 
 /// How a database's block cache is used ([`Db::block_cache_stats`]): counts since the open, and what it holds now.
