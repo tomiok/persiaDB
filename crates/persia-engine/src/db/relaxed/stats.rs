@@ -39,7 +39,9 @@ const fn index(level: RelaxLevel) -> usize {
 ///
 /// A *query* is a relaxed search (`CollectionViews::search_relaxed`) that returned a response and was not given a
 /// cursor: a cursor's page continues a query counted on its first page, so it counts nowhere. A page by `offset` runs
-/// the cascade from the top as its first page does, and counts as a query.
+/// the cascade from the top as its first page does, and counts as a query. A request whose settings run L0 alone
+/// (`relax: false`) runs the plain search and counts as a query too, at level `exact` (ROADMAP 10.1.21): `empty` when L0
+/// found no hit. The engine's own plain search, run without a request, counts nowhere.
 ///
 /// Each count is its own atomic counter, added to and read one at a time: a snapshot read while a search is in
 /// flight may hold some of that query's counts and not the others (in any order). So the per-level counts add up to

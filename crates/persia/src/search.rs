@@ -168,8 +168,8 @@ impl SearchRequest {
     }
 
     /// The page after the hit whose cursor token this is ([`Hit::cursor`], [`SearchResponse::next_cursor`]; SPEC
-    /// §7.4). A token that was cut, changed, written by another version, or taken from a search with another sort is
-    /// refused when the request runs ([`ErrorCode::InvalidArgument`](crate::ErrorCode::InvalidArgument)).
+    /// §7.4). A token that was cut, changed, written by another version, or taken from a search with another sort or
+    /// another `q`, fields, filters or limits (ROADMAP 10.1.24) is refused when the request runs ([`ErrorCode::InvalidArgument`](crate::ErrorCode::InvalidArgument)).
     ///
     /// ```
     /// let request = persia::SearchRequest::new("shoes").after("token-from-a-previous-page");
@@ -455,8 +455,8 @@ impl Collection {
     }
 
     /// [`search`](Self::search) of the request JSON `json` (SPEC §7.1, ADR-0062): `q`, `fields`, `filter`,
-    /// `soft_filter`, `sort`, `limit`, `offset`, `search_after` (a cursor token), `facets`, `relax`, `explain` and
-    /// `proximity`, read strictly.
+    /// `soft_filter`, `sort`, `limit`, `offset`, `search_after` (a cursor token), `facets`, `relax`, `explain`,
+    /// `proximity` and `projection`, read strictly.
     ///
     /// ```
     /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem

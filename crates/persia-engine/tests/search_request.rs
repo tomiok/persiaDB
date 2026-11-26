@@ -795,6 +795,7 @@ fn bad_requests_are_errors() {
             relaxed: None,
             proximity: false,
             relax: None,
+            request: None,
         })
     };
     let by_tag = sorted([SortKey::field(f.tag, Order::Asc)]);
@@ -1092,6 +1093,7 @@ fn a_cursor_from_a_segment_no_view_has_is_refused() {
             relaxed: None,
             proximity: false,
             relax: None,
+            request: None,
         }),
         ..base.clone()
     };

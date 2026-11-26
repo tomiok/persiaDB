@@ -539,17 +539,19 @@ impl Clock for Ticking {
 #[test]
 fn a_budget_passing_inside_l5_drops_it_whole() {
     let db = database(true);
-    let budget = |ms| {
+    let budget_of = |ms, min_results| {
         RelaxPlan::new(
             &RelaxationConfig::default(),
             &RelaxOptions {
                 levels: Some(Levels::Custom(Vec::new())),
                 budget_ms: Some(ms),
+                min_results: Some(min_results),
                 ..RelaxOptions::default()
             },
         )
         .unwrap()
     };
+    let budget = |ms| budget_of(ms, 1);
     let ticking = || {
         exec().budget_clock(Arc::new(Ticking {
             now: Mutex::new(Instant::now()),
@@ -557,14 +559,22 @@ fn a_budget_passing_inside_l5_drops_it_whole() {
         }))
     };
     // Reads after L0: the budget's start (t), before the level (t + 4), before the step (t + 8, within 10), then
-    // inside L5 (t + 12, past it): the step is dropped, and nothing else was found.
-    let query = compile(&db, "nosuch");
-    let out = search_with(&db, &query, &budget(10), &request(10), &ticking()).unwrap();
+    // inside L5 (t + 12, past it): the step is dropped, and the page keeps L0's one hit (`q` is `i`'s word).
+    let one = compile(&db, "q");
+    let out = search_with(&db, &one, &budget_of(10, 5), &request(10), &ticking()).unwrap();
     assert!(out.relaxation.truncated);
     assert_eq!(out.relaxation.level, RelaxLevel::Exact);
     assert_eq!(out.relaxation.applied, Vec::<String>::new());
-    assert_eq!(ids(&out), Vec::<&str>::new());
+    assert_eq!(ids(&out), ["i"]);
     assert_eq!(out.relaxation.fallback, None);
+    // A page it would leave empty runs L5 again past the budget, whole (ROADMAP 8.1.33, ADR-0066), and stays truncated.
+    let query = compile(&db, "nosuch");
+    let out = search_with(&db, &query, &budget(10), &request(10), &ticking()).unwrap();
+    assert!(out.relaxation.truncated);
+    assert_eq!(out.relaxation.level, RelaxLevel::Fallback);
+    assert_eq!(out.relaxation.applied, ["fallback"]);
+    assert_eq!(ids(&out), RANKED);
+    assert_eq!(out.relaxation.fallback, Some(FallbackOrder::StaticRank));
     // With time to spare, L5 runs whole.
     let out = search_with(&db, &query, &budget(60_000), &request(10), &ticking()).unwrap();
     assert!(!out.relaxation.truncated);

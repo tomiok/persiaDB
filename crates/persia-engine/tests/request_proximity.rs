@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use persia_engine::db::{
-    CollectionSnapshot, Database, DatabaseOptions, Execution, ManualClock, SearchResults,
+    CollectionSnapshot, Cursor, Database, DatabaseOptions, Execution, ManualClock, SearchResults,
     SegmentIds, Threads,
 };
 use persia_engine::document::{Document, Value};
@@ -135,6 +135,40 @@ fn by_hand(c: &CollectionSnapshot, request: &QueryRequest, proximity: bool) -> S
     views.search_with(&plan, request.page(), &exec).unwrap()
 }
 
+/// `ran` (by the request) is `engine`'s page, hit by hit, beside the request fingerprint each of its cursors records
+/// (ROADMAP 10.1.24): the engine's own search runs without a request, so its cursors record none.
+fn assert_same(ran: &SearchResults, engine: &SearchResults) {
+    assert_eq!(ran.hits.len(), engine.hits.len());
+    assert_eq!(ran.facets, engine.facets);
+    for (a, b) in ran.hits.iter().zip(&engine.hits) {
+        assert_eq!(
+            (
+                a.location,
+                a.score.to_bits(),
+                &a.sort,
+                &a.document,
+                &a.explanation
+            ),
+            (
+                b.location,
+                b.score.to_bits(),
+                &b.sort,
+                &b.document,
+                &b.explanation
+            )
+        );
+        let (mine, theirs) = (a.cursor(), b.cursor());
+        assert!(mine.request.is_some() && theirs.request.is_none());
+        assert_eq!(
+            Cursor {
+                request: None,
+                ..mine
+            },
+            theirs
+        );
+    }
+}
+
 #[test]
 fn true_plans_the_bonus_and_false_or_absent_plans_without_it() {
     let db = database(RelaxationConfig::default());
@@ -146,11 +180,11 @@ fn true_plans_the_bonus_and_false_or_absent_plans_without_it() {
 
     let with = plain(run(c, &on).unwrap());
     assert_eq!(ids(&with), BY_PROXIMITY);
-    assert_eq!(with, by_hand(c, &parse(c, &on).unwrap(), true));
+    assert_same(&with, &by_hand(c, &parse(c, &on).unwrap(), true));
     // The bonus is in the score, and in the explanation's root: a `bool` with a proximity node.
     let without = plain(run(c, &off).unwrap());
     assert_eq!(ids(&without), BY_LOCATION);
-    assert_eq!(without, by_hand(c, &parse(c, &off).unwrap(), false));
+    assert_same(&without, &by_hand(c, &parse(c, &off).unwrap(), false));
     let score =
         |r: &SearchResults, id: &str| r.hits.iter().find(|h| h.document.id() == id).unwrap().score;
     assert!(score(&with, "first") > score(&without, "first"));
