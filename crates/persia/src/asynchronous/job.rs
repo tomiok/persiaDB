@@ -239,6 +239,16 @@ impl<T> Future for JobFuture<T> {
     }
 }
 
+/// `Unpin` for every `T` (ADR-0064 item 16), as the compiler derived it from the fields before: `T` is held only
+/// behind the `Arc`, never pinned, and `poll` moves the result out through `Pin::get_mut`. Stated here so the
+/// public-API snapshot reads it without the private slot type (ROADMAP 10.1.36, ADR-0064's 2026-11-27 amendment).
+///
+/// ```
+/// fn unpin<F: Unpin>() {}
+/// unpin::<persia::JobFuture<std::marker::PhantomPinned>>();
+/// ```
+impl<T> Unpin for JobFuture<T> {}
+
 impl<T> Drop for JobFuture<T> {
     fn drop(&mut self) {
         if !self.taken {

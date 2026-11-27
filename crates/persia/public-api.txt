@@ -614,9 +614,9 @@ impl<T> !core::panic::unwind_safe::RefUnwindSafe for persia::JobFuture<T>
 impl<T> !core::panic::unwind_safe::UnwindSafe for persia::JobFuture<T>
 impl<T> core::fmt::Debug for persia::JobFuture<T>
 impl<T> core::future::future::Future for persia::JobFuture<T>
-impl<T> core::marker::Send for persia::JobFuture<T> where alloc::rcs::arc::Arc<Slot<T>>: core::marker::Send
-impl<T> core::marker::Sync for persia::JobFuture<T> where alloc::rcs::arc::Arc<Slot<T>>: core::marker::Sync
-impl<T> core::marker::Unpin for persia::JobFuture<T> where alloc::rcs::arc::Arc<Slot<T>>: core::marker::Unpin
+impl<T> core::marker::Send for persia::JobFuture<T> where T: core::marker::Send
+impl<T> core::marker::Sync for persia::JobFuture<T> where T: core::marker::Send
+impl<T> core::marker::Unpin for persia::JobFuture<T>
 impl<T> core::ops::drop::Drop for persia::JobFuture<T>
 pub const fn persia::BlobId::as_bytes(&self) -> &[u8; 32]
 pub const fn persia::BlobId::from_bytes(bytes: [u8; 32]) -> Self

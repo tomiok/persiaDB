@@ -524,6 +524,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `soft_filter` dropped by the last-resort step. Their Rust samples are whole programs that `cargo test` runs as
   doctests of `persia` (`crates/persia/src/guides.rs`), so a sample that stops compiling fails CI. The L6
   descriptions of the feature reference, getting-started, fuzzy-search and faceted-search pages say the same.
+- `persia::JobFuture<T>`'s auto traits are documented in public terms (ROADMAP 10.1.36, ADR-0064 amended), with no
+  change of when they hold: `Send` and `Sync` exactly when `T: Send`, `Unpin` for every `T` (now an explicit impl),
+  never `UnwindSafe`. The public-API snapshot no longer names the private slot type in their bounds, and
+  `cargo xtask public-api` fails on a synthesized auto-trait impl whose bounds name a private type it has no stated
+  bounds for.
 - **Breaking** (`persia-engine`): `persia_engine::search::request::TypedSortValue::Datetime` holds the value's
   microseconds (`i64`) instead of its text (ROADMAP 10.1.30, ADR-0065 amended); `persia_engine::document::datetime_text`
   gives the text SPEC §6.4.1 writes. The response JSON is unchanged.
