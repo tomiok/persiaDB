@@ -30,7 +30,7 @@
 </p>
 
 <!-- BEGIN GENERATED progress:summary by `cargo xtask progress`. Do not edit by hand. -->
-**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **464 of 618** MVP leaves done (75%), 0 in progress (last snapshot 2026-11-27). Post-MVP work is 0 of 228 and sits outside that percentage.
+**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **465 of 618** MVP leaves done (75%), 0 in progress (last snapshot 2026-11-27). Post-MVP work is 0 of 228 and sits outside that percentage.
 <!-- END GENERATED progress:summary -->
 
 On `main` today, the [`persia`](./crates/persia/src/lib.rs) crate opens a single-file database, stores documents and blobs, and runs a ranked search (BM25F, filters, sorts, facets, cursors) that relaxes by default when a query finds too few hits. Writes go through a checksummed WAL with crash recovery, and commits, merges, and compaction run on the database's own thread. Nothing is published yet, and format 1.0 is unstable until the v1.0 release ([SPEC §15](./SPEC.md#15-versioning-and-compatibility)); the internals are in [`SPEC.md`](./SPEC.md).
@@ -301,7 +301,7 @@ MVP (M0–M15) is the v1.0 release. The live graph, the burn-up, and the ready-n
 | **M7** Query engine & ranking | ✅ done | 51/51 |
 | **M8** Zero-results avoidance | ✅ done | 55/55 |
 | **M9** Blob store | ✅ done | 44/44 |
-| **M10** Embedded API | 🔨 in progress | 33/45 |
+| **M10** Embedded API | 🔨 in progress | 34/45 |
 | **M11** Server | ⏳ blocked | 0/24 |
 | **M12** Cloud storage backends | ⏳ blocked | 0/29 |
 | **M13** Distribution & Kubernetes | ⏳ blocked | 0/33 |
