@@ -11,7 +11,7 @@ head:
 ---
 
 > **Status: pre-alpha.** %%PRE_ALPHA%%
-> `persia::Db::open` and `search` elsewhere on this site are illustrative, from
+> The embedded API (`persia::Db::open`, `Collection::search`) runs as a Git dependency; the design contract is
 > [SPEC.md](https://github.com/tomiok/persiaDB/blob/main/SPEC.md).
 > Counts below are read from [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) when the site is built:
 > %%PROGRESS_SUMMARY%%. That file is the live counter.
@@ -19,9 +19,9 @@ head:
 
 An **embedded search database** is a search library that runs in the same process as the application. You link it in. Queries are function calls in that process. There is no search daemon to install, and no separate server process that has to be up before a query can run.
 
-Some embedded libraries keep the index in one file, the way SQLite does. Others keep a directory of segment files. Persia DB's design is the single-file kind. A local database is `<name>.persia`, plus an optional `<name>.persia.blobs` pack ([SPEC §4](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#4-local-file-container), [§9](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#9-blobs)). [Blob storage](/guide/blobs/) is that pack. The planned call is `Db::open("app.persia")`, with no config file for the library ([SPEC §14](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#14-configuration)). That call is not in the crate.
+Some embedded libraries keep the index in one file, the way SQLite does. Others keep a directory of segment files. Persia DB's design is the single-file kind. A local database is `<name>.persia`, plus an optional `<name>.persia.blobs` pack ([SPEC §4](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#4-local-file-container), [§9](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#9-blobs)). [Blob storage](/guide/blobs/) is that pack. The call is `Db::open("app.persia")`, with no config file for the library ([SPEC §14](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#14-configuration)).
 
-**Embedded full-text search in Rust** is that in-process shape, as a Rust crate. [Tantivy](https://github.com/quickwit-oss/tantivy) is a released library of that kind, and its index is a directory. Persia DB is a pre-alpha project aimed at one file, an engine written in this repository, and the same segment bytes in object storage. The design line is "SQLite for search": open a file, index documents, and get ranked results that, by default, never come back empty ([SPEC §1](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#1-goals-and-non-goals)). The repository has no `persia::Db` search API yet (M10); the engine library code can search. How that empty-page rule is designed, and which query pieces exist, is [Typo-tolerant search](/guide/typo-tolerant-search/).
+**Embedded full-text search in Rust** is that in-process shape, as a Rust crate. [Tantivy](https://github.com/quickwit-oss/tantivy) is a released library of that kind, and its index is a directory. Persia DB is a pre-alpha project aimed at one file, an engine written in this repository, and the same segment bytes in object storage. The design line is "SQLite for search": open a file, index documents, and get ranked results that, by default, never come back empty ([SPEC §1](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#1-goals-and-non-goals)). `Collection::search` runs that search in the `persia` crate. How that empty-page rule is designed, and which levels run, is [Typo-tolerant search](/guide/typo-tolerant-search/).
 
 A search server is a different way to run search. You start it as its own process, send documents and queries over the network, and operate that service. [Meilisearch](https://www.meilisearch.com/docs) and [Elasticsearch](https://www.elastic.co/elasticsearch) are servers. [SQLite FTS5](https://sqlite.org/fts5.html) and [Tantivy](https://github.com/quickwit-oss/tantivy) are libraries. Where Persia DB sits next to SQLite FTS5, Tantivy, and Meilisearch is the [comparison](/guide/comparison/). That page is not a benchmark.
 
@@ -40,7 +40,7 @@ A search server fits when many applications share one index, when callers should
 
 The Persia DB design is the library, with a server only as a later option. The planned gRPC and HTTP server embeds the same engine as the library ([SPEC §3](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#3-architecture-overview), [§12](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#12-server-and-api)). That server is milestone M11. `persia-server` is a placeholder binary that exits with "not implemented (M11)". See [Server, cloud, and Kubernetes](/guide/server/).
 
-For a search feature in production today, use an engine that already answers queries. The [comparison](/guide/comparison/) says which established tool fits which job. Persia DB has no `persia::Db` search API yet (M10); the engine library code can search.
+For a search feature in production today, use a released engine. The [comparison](/guide/comparison/) says which established tool fits which job. Persia DB's embedded API works, but it is pre-alpha: unpublished, with an unstable format and no compatibility promise.
 
 ## How the Persia DB design approaches it
 
@@ -48,41 +48,37 @@ The design contract is [SPEC.md](https://github.com/tomiok/persiaDB/blob/main/SP
 
 | Design choice | Specified in | In the repository |
 |---|---|---|
-| In-process library. No daemon and no config file for the embedded API. Options are builders, with defaults. | [SPEC §14](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#14-configuration) | Planned (M10). The `persia` crate exports no `Db` and no `Collection`. |
-| One local file, `<name>.persia`, plus an optional `<name>.persia.blobs` pack for client bytes such as PDF or images. | SPEC §4, §9 | The container format and the single-file container (open, append, commit, recover, compact) are implemented (M1, M2). %%M5_CELL%% %%DURABILITY_CELL%% %%BLOB_CELL%% `BlobId` and `BlobRef` exist as types in `persia-format`. |
+| In-process library. No daemon and no config file for the embedded API. Options are builders, with defaults. | [SPEC §14](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#14-configuration) | The `persia` crate: `Db::open`, `OpenOptions` (builders with defaults), `Collection`, and `Collection::search`. |
+| One local file, `<name>.persia`, plus an optional `<name>.persia.blobs` pack for client bytes such as PDF or images. | SPEC §4, §9 | The container format and the single-file container (open, append, commit, recover, compact) are implemented (M1, M2). %%M5_CELL%% %%DURABILITY_CELL%% %%BLOB_CELL%% `Db::put_blob` and `Collection::put_with_blob` store files. |
 | The engine is written in this repository: analysis, BM25F, filters, facets, and query execution. | SPEC §6, §7. [ADR-0001](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0001-own-engine-and-allowed-dependencies.md) forbids depending on Tantivy, Lucene, or SQLite. | %%ENGINE_SHORT%% |
 | A query with too few hits is relaxed step by step (synonyms, dropped terms, prefix, a fuzzy step, then a fallback). The response names the step. On by default. | [SPEC §7.6](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#76-zero-results-avoidance-default-on) | %%RELAXATION_CELL%% See [Typo-tolerant search](/guide/typo-tolerant-search/). |
 | Segments are immutable. The same segment bytes live in a local file or in S3, GCS, or Azure Blob. Query nodes are stateless. | SPEC §3, §5, §10, §11 | A segment writer and reader exist (M5). Memory and local-file storage exist (M2). Object-storage backends and Kubernetes are planned (M12, M13). |
 | A power loss leaves the previous commit or the new one. | [SPEC §4.5](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#45-commit-protocol-local), §8 | %%WRITE_PATH_NOW%% |
 | Optional gRPC and HTTP server. Embedded mode has no authentication. | SPEC §12, §14 | Planned (M11). |
-| Embedded Go, TypeScript, and Python bindings open the same file in-process. Rust and Go network clients talk to the server. | SPEC §13, [ADR-0018](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0018-embedded-sdk-bindings.md) | Design only, scheduled for v1.0 (ROADMAP 14.6), after the `persia` facade (M10). No Go module and no npm package. Rust and Go network clients are 14.2 and 14.3, compatibility is 14.4, and the TypeScript network client is 14.5, after M11 and M13. |
+| Embedded Go, TypeScript, and Python bindings open the same file in-process. Rust and Go network clients talk to the server. | SPEC §13, [ADR-0018](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0018-embedded-sdk-bindings.md) | Design only, scheduled for v1.0 (ROADMAP 14.6), over the `persia` facade. No Go module and no npm package. Rust and Go network clients are 14.2 and 14.3, compatibility is 14.4, and the TypeScript network client is 14.5, after M11 and M13. |
 
 %%M10_BLOCKED%% The on-disk format stays unstable until `v1.0` (M15, [SPEC §15](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#15-versioning-and-compatibility)). The crates are unpublished (`publish = false`, version 0.0.0). There is no crates.io release.
 
-[SPEC §16.2](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#16-quality-requirements) lists latency and throughput figures and labels them as targets, not promises. This project does not publish search benchmarks. There is no `Db::search`. %%MATCHING_CELL%% A search call on the database handle is not. How a hit is scored is [BM25F ranking](/guide/ranking/). Facets, sort, cursors, deadlines, and explain are [Faceted search](/guide/faceted-search/).
+[SPEC §16.2](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#16-quality-requirements) lists latency and throughput figures and labels them as targets, not promises. This project does not publish search benchmarks. %%MATCHING_CELL%% How a hit is scored is [BM25F ranking](/guide/ranking/). Facets, sort, cursors, deadlines, and explain are [Faceted search](/guide/faceted-search/).
 
 Out of scope for v1 ([SPEC §1.2](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#12-non-goals-v1)): text extraction, OCR, and transcription (clients supply text; blob bytes stay opaque); vector or semantic search; SQL, joins, multi-document transactions, and cross-collection queries; more than one writer on a shard; encryption at rest inside the file.
 
 ## What the code can do today
 
-[PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) is the live counter: %%PROGRESS_SUMMARY%%. Milestone states are on the [roadmap](/roadmap/) page, generated from that file. %%LIBRARY_NOW%% Building one segment is not `persia::Db::open`.
+[PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) is the live counter: %%PROGRESS_SUMMARY%%. Milestone states are on the [roadmap](/roadmap/) page, generated from that file. %%LIBRARY_NOW%%
 
-A git dependency can use:
+A Git dependency on the `persia` crate opens a file with `Db::open`, creates collections, puts documents (`Collection::put_json`, `put`, `put_struct`), searches them (`Collection::search`, `search_json`), and stores files with them (`Collection::put_with_blob`). [Getting started](/guide/getting-started/) is that walkthrough, and the [embedded API](/guide/embedded-api/) page is the surface. The engine crates under it are library code and not stable APIs.
 
-- `persia-format`, which encodes and decodes on-disk bytes: integer codecs, checksums, `None` and `Zstd` block compression, block framing, the container header, the superblock, and frames.
-- `persia-storage`, which implements the `Storage` trait, a memory backend, a local-file backend, and the single-file container.
-- %%ENGINE_SHORT%%
-
-The `persia` command lists and removes temporary and quarantine files next to a container or a local store (`persia container files`, `persia container sweep`, `persia store files`, `persia store sweep`). It can also inspect and dump one segment file (`persia inspect segment`, `persia dump segment`, with `--verify` on inspect). It does not import documents or search. There is no `persia::Db::open`. The intended API, marked as illustrative, is the [embedded API](/guide/embedded-api/) page. The file layout is [File format and storage](/guide/file-format/).
+The `persia` command works on the same files: `persia import` loads JSON Lines into a collection, `persia search` runs a request, `persia verify` checks a database read-only, `persia gc` collects unreferenced blobs, and `persia compact`, `persia stats`, `persia inspect`, `persia dump`, and `persia container files` and `sweep` maintain and print them. The file layout is [File format and storage](/guide/file-format/).
 
 ## Read next
 
-- [Typo-tolerant search](/guide/typo-tolerant-search/) — query relaxation, BM25F, and filters: design versus what the engine implements.
-- [Fuzzy search and did-you-mean](/guide/fuzzy-search/) — L4 edit distance, the correction, and the L5 fallback. Library code. There is no `persia::Db` search.
+- [Typo-tolerant search](/guide/typo-tolerant-search/) — query relaxation, BM25F, and filters.
+- [Fuzzy search and did-you-mean](/guide/fuzzy-search/) — L4 edit distance, the correction, and the L5 fallback.
 - [Synonym and prefix search](/guide/synonym-and-prefix-search/) — L1 synonym groups and L3 prefix expansion.
 - [BM25F ranking](/guide/ranking/) — field weights, collection statistics, static rank, score-led pruning, and proximity off by default.
 - [Filtered full-text search](/guide/filtered-search/) — term, range, and exists beside a text query. Filters restrict hits and leave the BM25F score unchanged.
-- [Faceted search](/guide/faceted-search/) — facets, sort, cursor pages, deadlines, and explain on a collection snapshot.
+- [Faceted search](/guide/faceted-search/) — facets, sort, cursor pages, deadlines, and explain.
 - [Comparison](/guide/comparison/) — Persia DB next to SQLite FTS5, Tantivy, and Meilisearch. Not a benchmark.
 - [FAQ](/guide/faq/) — short answers on status, the file format, crash safety, SDKs, and the license.
 - [How it works](/architecture/) — crate layers, the write path, and the query path.

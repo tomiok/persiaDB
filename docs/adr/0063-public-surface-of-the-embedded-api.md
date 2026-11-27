@@ -234,3 +234,70 @@ one filter fail with two codes and contradict item 8, so it is `LIMIT`.) The mes
 (`filter_json: ...`). Tests: `crates/persia/tests/filter_json.rs` (seeded cases: the response JSON of a filter given
 to the setter equals the one of the same filter inside a request JSON, or both fail with one code; one test per
 limit; refused text; the later setter kept; a cursor of one form pages the other).
+
+## Amendment (2026-11-27): the website guides are checked against the public surface, outside `persia` (ROADMAP 10.1.34, 10.1.41, 10.1.42, 10.1.43)
+
+ROADMAP 10.1.34 made the Rust samples of two website guides doctests of `persia` (`crates/persia/src/guides.rs`,
+`#[doc = include_str!("../../../website/...")]`). A crate's directory is all `cargo package` ships, so those paths
+would have failed the first publish of `persia`; its unit test of the C ABI table (`docs/sdk/c-abi.md`) read outside
+the crate too.
+
+1. **A crate that is never published holds the checks: `crates/persia-docs`** (`publish = false` written in its
+   manifest, not inherited, so it stays when `persia`'s is flipped). Its library is empty but for a
+   `#[cfg(doctest)] mod guides;`, one item per page whose doc is the page; its `tests/c_abi_codes.rs` checks the C ABI
+   table against `ErrorCode::ALL` (`persia`'s own unit test still pins `ALL` to the append-only snapshot). It has
+   `persia` as its one internal dependency, a dev-dependency, with the features a user relies on (the default and
+   `async`, item 4 of the snapshot amendment), and `tempfile` for the pages' temporary directories. `ALLOWED` in
+   `xtask/src/check_deps.rs` lists it with `persia`; the no-async walk (`EMBEDDED` in
+   `xtask/src/check_deps/no_async.rs`) includes it, since a runtime among its dev-dependencies would be one a sample
+   could use. Not an xtask step: xtask may depend only on `persia-format`, and rustdoc compiling the samples against
+   the real crate is the check.
+2. **Which `persia` the samples see.** A doctest gets an `--extern` for each dependency of the crate under test:
+   here its dev-dependencies `persia` and `tempfile` (the pages' temporary directories), so `persia_engine::...`
+   does not resolve. Built alone (`cargo test -p persia-docs`),
+   `persia` has the default and `async` features, and `persia::internal` (private without `internal`) does not
+   compile. Inside `cargo test --workspace` cargo's resolver unifies features across every package the invocation
+   builds: `persia-cli` turns `internal` on and `persia`'s own tests `test-hooks`, so the one `persia` the doctests
+   link has `persia::internal` public (checked: a sample calling `persia::internal::pack_path` fails the scoped run
+   with E0603 and passes the workspace run). So CI's test job (and `just test`) runs `cargo test -p persia-docs`
+   after `cargo test --workspace`, which still runs the doctests too. A `#[doc(hidden)]` item compiles in both, so
+   the repo check of 3 also refuses names in the samples.
+3. **Repo checks** (`xtask/src/repo_checks/guides.rs`). `persia_includes_nothing_outside_its_directory`: no
+   `include_str!`, `include_bytes!` or `include!` (any of its three delimiters) and no `#[path = "..."]` module
+   attribute in a `.rs` file under `crates/persia/` names a path outside that directory, resolved against the naming file's directory and normalized lexically; an argument that is not a plain
+   string literal is refused, as it cannot be resolved. `guide_samples_are_doctests_of_the_public_api`: the module is
+   wired, every page it lists exists and has a Rust sample, and no sample names `persia_engine`, `persia::internal`,
+   `QueryLimits` or `Filter::from_json`.
+4. **Which blocks are samples: the ones rustdoc runs** (ROADMAP 10.1.43). The check reads a fence as rustdoc does
+   (`doctest` in `xtask/src/repo_checks/guides.rs`, a port of rustdoc 1.99's info-string tokenizer and of
+   `LangString::parse`'s Rust rule on stable): Rust when the info string has no word, or has `rust`, or a rustdoc
+   attribute (`no_run`, `ignore`, `ignore-*`, `should_panic`, `compile_fail`, `test_harness`, `standalone_crate`)
+   before any other word; an `edition*` word sets the edition and makes nothing Rust (`edition2021,json` is not a
+   doctest); `{.class}` and `{key=value}` attributes are no words; never when the tokenizer
+   fails. A table of 67 info strings with what this toolchain's rustdoc did with each (`rustdoc --test --test-args
+   --list`) is its unit test. One finding: an Expressive Code title outside braces (`rust title="src/main.rs"`)
+   stops rustdoc's tokenizer at the `=`, and rustdoc then runs no doctest of the block (it only warns), so a page
+   cannot use that form for a sample. Pages are found only from `#[doc = include_str!("...")]` lines outside
+   comments.
+5. **No guide names an item the snapshot lacks** (ROADMAP 10.1.41). `guides_name_only_the_public_api`
+   (`xtask/src/repo_checks/guide_api.rs`) reads every page under `website/src/content/docs/guide/`, and by every rule but the sample one the site's
+   other pages (`website/src/content/docs/*.md(x)`), against
+   `crates/persia/public-api.txt`: a `persia::` path (`use` groups expanded) must be the path of a `pub` line of the
+   snapshot, or a standard trait's method (`default`, `from_str`, `clone`, `from`, `to_string`) of a type the snapshot
+   lists that `impl` for; a path whose first segment is a type `persia` exports (`Collection::search`,
+   `Filter::from_json`), in prose or code, is read as `persia::` plus that path; no lower crate (`persia_engine`,
+   `persia_blob`, `persia_format`, `persia_storage`, `persia_analysis`) is named, and no word of code (an inline span
+   or a fenced line) is one of the never-public engine types of item 3 or those guides had called (`CollectionViews`,
+   `QueryLimits`, `RelaxPlan`, `QueryCompiler`, `SimFile`, ...). A block the site shows as Rust must be on a page
+   `guides.rs` runs, and on such a page every block rustdoc reads as Rust must run. Pages that describe the engine on
+   purpose (the architecture, the file format, ranking internals) mark each such part between
+   `<!-- engine-internals -->` and `<!-- /engine-internals -->` (MDX: `{/* engine-internals */}` and
+   `{/* /engine-internals */}`), whose first line says in prose that it names engine internals. Inside those parts only the
+   engine-crate and engine-type word rules and the paths by type name are skipped: a `persia::` path is still
+   checked against the snapshot, except `persia::internal` and the paths under it (the hidden layer, named there as
+   an internal); an unclosed, nested or unannounced part fails. Paths may start with `::` and have blanks around
+   `::`, and inline code is every backtick span and `<code>` element. The status sentences
+   `website/src/status.mjs` puts into pages (`%%TOKEN%%`) are checked by `website/src/status.test.mjs`, which reads
+   the same snapshot for the calls it names. A method named on a value (`page.next_cursor()`) and a renamed import
+   (`use persia as p; p::internal`) are not resolved: the check does not type the text, and rustdoc compiling the
+   samples (run alone, `cargo test -p persia-docs`) refuses those that name nothing public.

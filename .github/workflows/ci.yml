@@ -38,6 +38,15 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # persia's lib with its default features and with `async` alone, the sets a user of the crate builds, and with
+      # `internal` alone, the set persia-cli and the fuzz targets build (ROADMAP 10.1.40): `--all-features` turns on
+      # `internal`, which makes `persia::internal` public, so an item only the CLI reaches is unused without it and
+      # that line does not show it; and it turns on `async` and `test-hooks` beside `internal`. `--lib` only: the
+      # tests' dev-dependency on persia itself adds `test-hooks` (and with it `internal`), so `--all-targets` would
+      # lint the same lib again.
+      - run: cargo clippy -p persia --lib -- -D warnings
+      - run: cargo clippy -p persia --lib --features async -- -D warnings
+      - run: cargo clippy -p persia --lib --features internal -- -D warnings
       # fuzz/ is its own workspace (ROADMAP 1.11.1); it builds on stable, only running it needs the nightly.
       - run: cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
       - run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
@@ -62,6 +71,10 @@ jobs:
       # Fast suite only (< 2 min, CLAUDE.md); `--features slow` runs nightly (ROADMAP 0.2.3.1).
       # Feature-gated code still compiles in the lint job's `clippy --all-features`.
       - run: cargo test --workspace
+      # The guide doctests and docs/ checks again, alone (ROADMAP 10.1.42): `--workspace` unifies persia's features
+      # across every member it builds (persia-cli's `internal`), so only this run links the doctests to the `persia` a
+      # user gets, where `persia::internal` does not compile (crates/persia-docs/src/guides.rs).
+      - run: cargo test -p persia-docs
       # ADR-0025: a dependency or toolchain change that moves a built-in analyzer's output must fail its PR, not a
       # nightly run after the merge. Seconds in release (only persia-analysis is built).
       - name: Analyzer fingerprints

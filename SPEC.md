@@ -1675,6 +1675,11 @@ edit-distance weight of §7.1, which orders hits within a step. Across a relaxat
 edits, or match words as typed rather than by completion, rank first because they are earlier steps of the cascade,
 not because they score higher.
 
+> **Note (2026-11-27).** The engine does not add the static rank contribution to a hit of a query with words yet:
+> such a hit's score is the clause sum (with the proximity bonus above when the request asks for it), and the static
+> rank scores only L5 `fallback` hits (§7.6). Whether the total below holds for every hit, or this section changes
+> to match the code, is ROADMAP 10.1.45.
+
 Total = Σ_t score + static_rank contribution (§6.2.3). `N`, `df`, `avglen` are **collection-level**, summed across live segments
 (and across shards when `global_stats: true`, SPEC §11.5). They are summed from each segment's stored statistics
 (§5.1, term `df`, field statistics), which count the segment's deleted documents too until a merge drops them

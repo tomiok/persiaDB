@@ -19,7 +19,7 @@ import ArchitectureDiagram from '../../../components/ArchitectureDiagram.astro';
 The picture below is the intended layering in [SPEC §3](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#3-architecture-overview).
 `persia-format`, `persia-storage`, `persia-engine`, and `persia-analysis` contain library code.
 %%ENGINE_SHORT%%
-`persia` exports no `Db`. `persia-server` is a placeholder binary that exits with "not implemented (M11)". `persia-proto` is module docs only. %%BLOB_NOW%%
+`persia` is the embedded API an application calls: `Db`, `Collection`, and `Collection::search`. `persia-server` is a placeholder binary that exits with "not implemented (M11)". `persia-proto` is module docs only. %%BLOB_NOW%%
 [`docs/architecture.md`](https://github.com/tomiok/persiaDB/blob/main/docs/architecture.md) is the contributor map (crate graph, write path, query
 path) and stays the place for that detail.
 
@@ -44,14 +44,22 @@ Three rules shape the rest of the design:
 | `persia-analysis` | Tokenizers, normalizers, stemmers, analyzers. | Done (M4). The query compiler runs them. This crate does not search. |
 | `persia-engine` | Schema, segments, WAL, commit, merge, query, BM25F, relaxation. | %%ENGINE_SHORT%% |
 | `persia-blob` | Content-addressed chunks, dedup, garbage collection. | %%BLOB_CELL%% |
-| `persia` | The embedded API: `Db` and `Collection`. | No `Db` (M10). Blobs with documents are `persia::internal`. |
+| `persia` | The embedded API: `Db`, `Collection`, `SearchRequest`, blobs, `ErrorCode`; `AsyncDb` with the `async` feature. | %%STATE_M10%% The one crate an application depends on. |
 | `persia-proto` | `persia.proto` and committed generated code. | Module docs only (M11) |
 | `persia-server` | gRPC and HTTP. Roles: writer, reader, router. | Placeholder: exits with "not implemented" (M11, M13) |
-| `persia-cli` | Sweep temporary and quarantine files. `inspect segment` and `dump segment` read one segment (`--verify` checks it). `verify`, `stats`, `dump documents`, and `compact` work on a whole database; `bench` is a local micro-benchmark. Import and search are later. | Sweep, inspect, dump, `verify`, `stats`, `compact`, and `bench` exist. Import and search are M10 (10.4.2). |
+| `persia-cli` | The `persia` command: `import` and `search` through the facade, `gc` of blobs, `verify`, `stats`, `compact`, `inspect` and `dump` of a container, a segment, or a collection's documents, sweeps of temporary and quarantine files, and a local `bench`. | In the tree (ROADMAP 10.4, ADR-0020). |
 
 Dependencies point downward only (`persia-format` at the bottom). `cargo xtask check-deps` enforces
-the graph. `BlobDatabase::put` stores the blob, then logs the document, so the engine stores a
+the graph. `Collection::put_with_blob` stores the blob, then logs the document, so the engine stores a
 `BlobRef` and never the file bytes (SPEC §9.5). [Blob storage](/guide/blobs/) is that path.
+
+{/* engine-internals */}
+Under the facade, these are engine internals, not API to call: a read-write `Db` holds the hidden layer's
+`BlobDatabase` (`persia::internal::documents`, ADR-0051), which pairs the engine's `Database` (`persia_engine::db`)
+with the blob pack's `PackStore`; a read-only `Db` holds a `ReadOnlyBlobDatabase`. A search takes a `Snapshot` of
+the engine and runs there. These types change without notice; [ADR-0063](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0063-public-surface-of-the-embedded-api.md)
+keeps them out of every public signature.
+{/* /engine-internals */}
 
 On a query, the design is: analyze the text, search each segment and the memtable, merge
 the per-segment top-k, and if there are too few hits run the relaxation cascade. The response

@@ -651,6 +651,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "persia-docs"
+version = "0.0.0"
+dependencies = [
+ "persia",
+ "tempfile",
+]
+
+[[package]]
 name = "persia-engine"
 version = "0.0.0"
 dependencies = [

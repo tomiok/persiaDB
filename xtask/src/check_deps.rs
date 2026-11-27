@@ -44,6 +44,9 @@ const ALLOWED: &[(&str, &[&str])] = &[
         "persia-cli",
         &["persia", "persia-storage", "persia-engine", "persia-format"],
     ),
+    // Never published (ROADMAP 10.1.42): doctests of the website guides and checks of docs/ against `persia`'s public
+    // API, as a dev-dependency only.
+    ("persia-docs", &["persia"]),
     (TESTUTIL, &[]),
     (XTASK, &["persia-format"]),
 ];

@@ -17,12 +17,19 @@ fmt:
 lint:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets --all-features -- -D warnings
+    # persia's lib with the feature sets a user, the CLI and the fuzz targets build; see the lint job in
+    # .github/workflows/ci.yml (ROADMAP 10.1.40)
+    cargo clippy -p persia --lib -- -D warnings
+    cargo clippy -p persia --lib --features async -- -D warnings
+    cargo clippy -p persia --lib --features internal -- -D warnings
     cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
     cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
 
 # Unit + property tests (fast suite)
 test:
     cargo test --workspace
+    # The guide doctests with persia's public features only; see the test job in .github/workflows/ci.yml
+    cargo test -p persia-docs
 
 # Extended property tests (what nightly CI runs)
 test-slow:
