@@ -482,6 +482,30 @@ fn stated_bounds_are_looked_up_by_type_and_trait() {
     assert!(stated_bounds(&table, "fix::Other<T>", "Send").is_err());
 }
 
+/// A stated entry for a type of the rendered crate that no impl used is stale and fails the rendering; entries of
+/// other crates are left alone.
+#[test]
+fn a_stated_bounds_entry_no_impl_uses_is_an_error() {
+    use super::render::stated_bounds_all_used;
+    use std::collections::BTreeSet;
+    let table = [
+        ("fix::Gen<T>", "Send", "T: core::marker::Send"),
+        ("fix::Gen<T>", "Sync", "T: core::marker::Send"),
+        ("other::Gen<T>", "Send", "T: core::marker::Send"),
+    ];
+    let pair = |ty: &str, t: &str| (ty.to_owned(), t.to_owned());
+    let both: BTreeSet<_> = [pair("fix::Gen<T>", "Send"), pair("fix::Gen<T>", "Sync")].into();
+    assert!(stated_bounds_all_used(&table, "fix", &both).is_ok());
+    let send: BTreeSet<_> = [pair("fix::Gen<T>", "Send")].into();
+    let err = stated_bounds_all_used(&table, "fix", &send)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("`Sync` bounds of `fix::Gen<T>`"), "{err}");
+    // `fix_extra::` is another crate, not a path under `fix`.
+    assert!(stated_bounds_all_used(&table, "fix_extra", &BTreeSet::new()).is_ok());
+    assert!(stated_bounds_all_used(&table, "other", &BTreeSet::new()).is_err());
+}
+
 #[test]
 fn the_command_takes_check_or_nothing() {
     assert!(!super::check_mode(&[]).unwrap());

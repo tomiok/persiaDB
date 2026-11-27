@@ -322,11 +322,12 @@ fn code_of(c: &Collection, filter: &str) -> ErrorCode {
         .search(&SearchRequest::new("red").soft_filter_json(filter))
         .unwrap_err()
         .code();
-    let inside = c.search_json(&format!(r#"{{"q": "red", "filter": {filter}}}"#));
-    // Text that is not JSON cannot be embedded in a request JSON: only the two setters are compared then.
-    if let Err(e) = inside {
-        assert_eq!(e.code(), alone, "{filter}");
-    }
+    // Text that is not JSON makes the request JSON malformed, which is `InvalidArgument` too.
+    let inside = c
+        .search_json(&format!(r#"{{"q": "red", "filter": {filter}}}"#))
+        .unwrap_err()
+        .code();
+    assert_eq!(inside, alone, "{filter}");
     assert_eq!(soft, alone, "{filter}");
     alone
 }

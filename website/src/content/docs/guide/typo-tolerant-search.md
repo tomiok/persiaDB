@@ -154,7 +154,8 @@ A level runs only when the cascade reaches it, so a query that already has `min_
   "original": "zapatilas rojs",
   "effective": "zapatillas rojas",
   "corrected": {"zapatilas": "zapatillas", "rojs": "rojas"},
-  "truncated": false
+  "truncated": false,
+  "filters_dropped": false
 }
 ```
 

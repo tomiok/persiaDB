@@ -729,7 +729,7 @@ impl Collection {
     /// [`ErrorCode::Corrupt`](crate::ErrorCode::Corrupt) if a segment is damaged;
     /// [`ErrorCode::Closed`](crate::ErrorCode::Closed).
     pub fn search(&self, request: &SearchRequest) -> Result<SearchResponse> {
-        self.search_with(request, &RunOptions::new())
+        self.search_with(request, RunOptions::new())
     }
 
     /// [`search`](Self::search) that stops with [`ErrorCode::Cancelled`](crate::ErrorCode::Cancelled) once `token`
@@ -744,16 +744,15 @@ impl Collection {
             Some(token) => RunOptions::new().cancel(token),
             None => RunOptions::new(),
         };
-        self.search_with(request, &run)
+        self.search_with(request, run)
     }
 
     /// [`search`](Self::search) run as `run` says.
-    fn search_with(&self, request: &SearchRequest, run: &RunOptions) -> Result<SearchResponse> {
+    fn search_with(&self, request: &SearchRequest, run: RunOptions) -> Result<SearchResponse> {
+        let run = run.limits(query_limits());
         self.read(|c| {
             let lowered = request.lower(c.schema())?;
-            let ran = lowered
-                .run(c, &run.clone().limits(query_limits()))
-                .map_err(Error::wrap)?;
+            let ran = lowered.run(c, &run).map_err(Error::wrap)?;
             response(ran, c.shared_schema())
         })
     }
@@ -779,7 +778,7 @@ impl Collection {
     /// [`ErrorCode::InvalidArgument`](crate::ErrorCode::InvalidArgument) for text that is not a request (malformed,
     /// an unknown or repeated key, a value of another shape); then as [`search`](Self::search).
     pub fn search_json(&self, json: &str) -> Result<SearchResponse> {
-        self.search_json_with(json, &RunOptions::new())
+        self.search_json_with(json, RunOptions::new())
     }
 
     /// [`search_json`](Self::search_json) that stops with [`ErrorCode::Cancelled`](crate::ErrorCode::Cancelled) once
@@ -794,18 +793,17 @@ impl Collection {
             Some(token) => RunOptions::new().cancel(token),
             None => RunOptions::new(),
         };
-        self.search_json_with(json, &run)
+        self.search_json_with(json, run)
     }
 
     /// [`search_json`](Self::search_json) run as `run` says.
-    fn search_json_with(&self, json: &str, run: &RunOptions) -> Result<SearchResponse> {
+    fn search_json_with(&self, json: &str, run: RunOptions) -> Result<SearchResponse> {
+        let limits = query_limits();
+        let run = run.limits(limits);
         self.read(|c| {
-            let limits = query_limits();
             let request =
                 QueryRequest::from_json(json, c.schema(), &limits).map_err(Error::wrap)?;
-            let ran = request
-                .run(c, &run.clone().limits(limits))
-                .map_err(Error::wrap)?;
+            let ran = request.run(c, &run).map_err(Error::wrap)?;
             response(ran, c.shared_schema())
         })
     }
