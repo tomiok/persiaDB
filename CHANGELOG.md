@@ -14,8 +14,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `I64`, `F64`, `Datetime` in microseconds, `Bool`, `Keyword` bytes, `Missing`), and for a relaxed search's hit its
   cascade step and rank score (`None` for a plain search). Each states what `SearchResponse::to_json` writes for the
   hit: the `"sort"` array, and `"step"`, `"rank_score"` and `"level"` only for a relaxed search's hits. Underneath,
-  `persia_engine::document::datetime_text` formats a `datetime` as SPEC §6.4.1 writes it, and the engine's
-  `TypedSortValue::Datetime` holds the microseconds (it held the text).
+  `persia_engine::document::datetime_text` formats a `datetime` as SPEC §6.4.1 writes it, and the engine's new
+  `TypedSortValue::of_owned` types a sort value it takes (a keyword's bytes move); see Changed for `Datetime`.
 - `persia::blob_ref(blob_id, size, mime, chunk_size, user_meta) -> persia::Result<BlobRef>` (ROADMAP 10.1.29,
   ADR-0063 amended; SPEC §9.6): builds a blob reference from its fields (one a program kept outside the database),
   checking the value rules of SPEC §9.1; a rule that does not hold is `InvalidArgument`. A put checks the reference
@@ -493,12 +493,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- **Breaking** (`persia-engine`): `persia_engine::search::request::TypedSortValue::Datetime` holds the value's
+  microseconds (`i64`) instead of its text (ROADMAP 10.1.30, ADR-0065 amended); `persia_engine::document::datetime_text`
+  gives the text SPEC §6.4.1 writes. The response JSON is unchanged.
+- A sorted search fails with the corruption of the column (`ReadError::Section` of `Columns` at the hit's docid;
+  `ErrorCode::Corrupt` in `persia`) when it reaches a column key no document can hold: a `bool` other than 0 or 1, a
+  `datetime` out of range, an `f64` that is NaN, infinite or `-0.0` (SPEC §5.2.1 amended; review of ROADMAP
+  10.1.29–10.1.31). Before, only `verify` found such a key: a search returned it as a hit's sort value and in its
+  cursor, and writing the response JSON failed for some of them (`Io` in `persia`).
 - `SearchResponse::to_json` and `Document::to_json` write a document's JSON form once (ROADMAP 10.1.31, ADR-0065
   amended): the engine's new `persia_engine::document::DocumentJson`, a `serde::Serialize` view checked against the
   schema, is the one writer of SPEC §6.4.1's form, and the response JSON serializes it in place instead of writing a
-  hit's document, parsing it back and writing it again. The text is unchanged, byte for byte. On a page of 20 hits of
-  about 64 KiB each (`cargo bench -p persia --bench response_json`), `SearchResponse::to_json` took 1.06 ms instead of
-  3.77 ms, and `Document::to_json` of one such document 50.9 µs instead of 83.5 µs.
+  hit's document, parsing it back and writing it again. The text is unchanged, byte for byte (also checked against the
+  former hand-written writer, kept as a test reference). On a page of 20 hits of about 64 KiB each (`cargo bench -p
+  persia --bench response_json`; the bench was written first and run on the code before the change, then after it),
+  `SearchResponse::to_json` took 1.06 ms instead of 3.77 ms, and `Document::to_json` of one such document 50.9 µs
+  instead of 83.5 µs (criterion medians, one run each on one machine).
 - **Breaking** (`persia`): the engine and format detail left on the re-exported types is hidden from the
   documentation (`#[doc(hidden)]`, no stability promise; ROADMAP 10.1.29, ADR-0063 amended): `BlobRef::new` (whose
   error is `persia_format`'s; build a reference with `persia::blob_ref`), `BlobRef::encode`, `decode`, `encoded_len`,

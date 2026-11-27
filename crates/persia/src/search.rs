@@ -552,10 +552,12 @@ impl Relaxation {
 }
 
 /// The facade's hit of `hit`, a hit of a search of the collection of `schema`: its sort values typed by their keys.
-fn plain_hit(hit: SearchHit, schema: &CollectionSchema) -> Result<Hit> {
-    let sort = SortValue::of_hit(&hit, schema)?;
+fn plain_hit(mut hit: SearchHit, schema: &CollectionSchema) -> Result<Hit> {
+    // The cursor copies the engine's values: take it before they move into the typed ones.
+    let cursor = hit.cursor().to_token();
+    let sort = SortValue::take_from(&mut hit, schema)?;
     Ok(Hit {
-        cursor: hit.cursor().to_token(),
+        cursor,
         document: hit.document,
         score: hit.score,
         level: RelaxLevel::Exact,

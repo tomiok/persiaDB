@@ -153,14 +153,40 @@ pub enum TypedSortValue {
 }
 
 impl TypedSortValue {
-    /// `value`, a hit's value for the sort key `key`, typed by `key`'s field in `schema`.
+    /// `value`, a hit's value for the sort key `key`, typed by `key`'s field in `schema`. As [`Self::of_owned`], for a
+    /// value the caller keeps (a keyword's bytes are copied).
+    ///
+    /// # Errors
+    /// As [`Self::of_owned`].
+    pub fn of(
+        key: SortKey,
+        value: &SortValue,
+        schema: &CollectionSchema,
+    ) -> Result<Self, ResponseJsonError> {
+        Self::of_owned(key, value.clone(), schema)
+    }
+
+    /// `value`, a hit's value for the sort key `key`, typed by `key`'s field in `schema`, taking it: a keyword's
+    /// bytes move into [`Self::Keyword`] without a copy (the embedded API types each hit's values this way).
+    ///
+    /// ```
+    /// use persia_engine::schema::{FieldKind, KeywordOptions, SchemaBuilder};
+    /// use persia_engine::search::request::TypedSortValue;
+    /// use persia_engine::search::{Order, SortKey, SortValue};
+    ///
+    /// let schema = SchemaBuilder::new("c").field("brand", FieldKind::Keyword(KeywordOptions::default())).build()?;
+    /// let brand = SortKey::field(schema.field("brand").ok_or("no field")?.id(), Order::Asc);
+    /// let typed = TypedSortValue::of_owned(brand, SortValue::Keyword(b"acme".to_vec()), &schema)?;
+    /// assert_eq!(typed, TypedSortValue::Keyword(b"acme".to_vec()));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     ///
     /// # Errors
     /// [`ResponseJsonError::UnknownField`] for a key on a field `schema` does not have;
     /// [`ResponseJsonError::SortValue`] for a value of another type than its key's field, or a datetime out of range.
-    pub fn of(
+    pub fn of_owned(
         key: SortKey,
-        value: &SortValue,
+        value: SortValue,
         schema: &CollectionSchema,
     ) -> Result<Self, ResponseJsonError> {
         let field_type = match key {
@@ -174,11 +200,11 @@ impl TypedSortValue {
         };
         Ok(match (field_type, value) {
             (_, SortValue::Missing) => Self::Missing,
-            (None, SortValue::Score(score)) => Self::Number(*score),
-            (Some(FieldType::I64), SortValue::Key(key)) => Self::Integer(key_to_i64(*key)),
-            (Some(FieldType::F64), SortValue::Key(key)) => Self::Number(key_to_f64(*key)),
+            (None, SortValue::Score(score)) => Self::Number(score),
+            (Some(FieldType::I64), SortValue::Key(key)) => Self::Integer(key_to_i64(key)),
+            (Some(FieldType::F64), SortValue::Key(key)) => Self::Number(key_to_f64(key)),
             (Some(FieldType::Datetime), SortValue::Key(key)) => {
-                let micros = key_to_i64(*key);
+                let micros = key_to_i64(key);
                 if !(MIN_DATETIME..=MAX_DATETIME).contains(&micros) {
                     return Err(ResponseJsonError::SortValue);
                 }
@@ -186,7 +212,7 @@ impl TypedSortValue {
             }
             (Some(FieldType::Bool), SortValue::Key(0)) => Self::Bool(false),
             (Some(FieldType::Bool), SortValue::Key(1)) => Self::Bool(true),
-            (Some(FieldType::Keyword), SortValue::Keyword(bytes)) => Self::Keyword(bytes.clone()),
+            (Some(FieldType::Keyword), SortValue::Keyword(bytes)) => Self::Keyword(bytes),
             _ => return Err(ResponseJsonError::SortValue),
         })
     }

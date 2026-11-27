@@ -752,6 +752,9 @@ bit pattern round-trips exactly. Writers never key `-0.0`, NaN or an infinity in
 decodes to one is corruption. A reader that decodes one value at a time need not check it; a check of the whole segment
 (every column read in full, as `persia inspect segment --verify` does) must report it. A document without a value
 holds an unspecified key (§5.3.5), which is not checked.
+*Amendment (2026-11-27, review of ROADMAP 10.1.29–10.1.31):* a sorted search checks each key it states as a hit's sort
+value (§7.4, the value its cursor holds): a key no document can hold (a `bool` other than 0 or 1, and the keys above) is
+the corruption of the column at the hit's docid, never a value of the response.
 
 ### 5.3 Sections (per segment)
 | Section | `section_kind` | Per | Framed | Content | Encoding |
@@ -1298,6 +1301,9 @@ A document is an `id`, an optional `blob` reference (§9.1) and a value per fiel
   16 MiB, and so is the binary encoding (§6.4.2) of the whole document.
 - **Output.** `get` writes an object with `id`, then `blob` if present, then the fields and extra fields in
   ascending byte order of their names; values in the forms above.
+  *Amendment (2026-11-27, ROADMAP 10.1.31):* the `blob` object's keys come in byte order, `blob_id`, `chunk_size`,
+  `mime`, `size`, then `user_meta` when it is not empty (its keys in byte order too), as the output has always
+  written them; the engine's one writer of this form is `persia_engine::document::DocumentJson`.
 - **Typed values** (ROADMAP 10.1.4). The embedded API's `put_struct(&value)` is exactly `put` of the document this
   JSON form reads from `serde_json`'s text of the value, and `get_struct` / `to_struct` read the output above with
   `serde_json`: these rules are the only mapping between a Rust type and a document.

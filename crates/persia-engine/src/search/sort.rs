@@ -9,6 +9,9 @@ use core::cmp::Ordering;
 
 use super::request::RequestError;
 use super::{Hit, Interrupt, Matcher, Ticks, Watch};
+use persia_format::for_codec::{key_to_f64, key_to_i64};
+
+use crate::document::{MAX_DATETIME, MIN_DATETIME};
 use crate::schema::{CollectionSchema, FieldId, FieldType};
 use crate::segment::{KeyBlock, ReadError, SectionKind, SegmentCorruption};
 use crate::view::{KeyReader, KeywordReader, SearchView};
@@ -88,8 +91,17 @@ impl SortKey {
 enum Kind {
     Score,
     /// An `i64`, `f64`, `datetime` or `bool` column: its keys.
-    Column,
+    Column(Column),
     Keyword,
+}
+
+/// The type of a column a key reads, which bounds the keys a document can hold in it (SPEC §5.2.1, §6.4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Column {
+    I64,
+    F64,
+    Datetime,
+    Bool,
 }
 
 /// A hit's value for one sort key (SPEC §7.4): what it ranks by, and what a cursor holds.
@@ -175,10 +187,10 @@ impl Sort {
                         })?;
                         match f.field_type() {
                             FieldType::Keyword => Kind::Keyword,
-                            FieldType::I64
-                            | FieldType::F64
-                            | FieldType::Datetime
-                            | FieldType::Bool => Kind::Column,
+                            FieldType::I64 => Kind::Column(Column::I64),
+                            FieldType::F64 => Kind::Column(Column::F64),
+                            FieldType::Datetime => Kind::Column(Column::Datetime),
+                            FieldType::Bool => Kind::Column(Column::Bool),
                             FieldType::Text | FieldType::Stored => {
                                 return Err(RequestError::SortField {
                                     field,
@@ -243,7 +255,7 @@ impl Sort {
                 (Kind::Score, SortValue::Score(s)) if !s.is_nan()
             ) || matches!(
                 (kind, v),
-                (Kind::Column, SortValue::Key(_) | SortValue::Missing)
+                (Kind::Column(_), SortValue::Key(_) | SortValue::Missing)
                     | (Kind::Keyword, SortValue::Keyword(_) | SortValue::Missing)
             )
         });
@@ -521,7 +533,7 @@ fn lead_column(sort: &Sort) -> Option<Order> {
                 missing: Missing::Last,
                 ..
             },
-            Kind::Column,
+            Kind::Column(_),
         )) => Some(order),
         _ => None,
     }
@@ -558,7 +570,7 @@ fn readers<'v, V: SearchView>(
         .iter()
         .map(|&(key, kind)| {
             Ok(match (key, kind) {
-                (SortKey::Field { field, .. }, Kind::Column) => Reader::Keys(view.keys(field)?),
+                (SortKey::Field { field, .. }, Kind::Column(_)) => Reader::Keys(view.keys(field)?),
                 (SortKey::Field { field, .. }, Kind::Keyword) => {
                     Reader::Keywords(view.keywords(field)?)
                 }
@@ -663,7 +675,7 @@ fn finish<K, W: KeywordReader>(
     let mut hits = Vec::with_capacity(entries.len());
     for entry in entries {
         let mut values = Vec::with_capacity(usize::from(entry.len));
-        for ((local, reader), &(key, _)) in entry.locals().iter().zip(readers).zip(&sort.keys) {
+        for ((local, reader), &key) in entry.locals().iter().zip(readers).zip(&sort.keys) {
             values.push(to_sort_value(*local, reader, key, entry.docid)?);
         }
         hits.push(SortedHit {
@@ -689,9 +701,9 @@ pub(crate) fn sort_values<V: SearchView>(
 ) -> Result<Vec<SortValue>, RequestError> {
     let mut readers = readers(sort, view)?;
     let mut values = Vec::with_capacity(sort.keys.len());
-    for (&(key, _), reader) in sort.keys.iter().zip(readers.iter_mut()) {
+    for (&(key, kind), reader) in sort.keys.iter().zip(readers.iter_mut()) {
         let local = local(reader, key, docid, score + 0.0)?;
-        values.push(to_sort_value(local, reader, key, docid)?);
+        values.push(to_sort_value(local, reader, (key, kind), docid)?);
     }
     Ok(values)
 }
@@ -706,22 +718,49 @@ fn keyword_bytes<W: KeywordReader>(
     words.value(ord).ok_or_else(|| past_dictionary(key, docid))
 }
 
-/// `local` as a sort value. A keyword ordinal with no bytes is [`ReadError::Section`], not an empty keyword.
+/// `local` as a sort value, for the sort key `key` of kind `kind`. A keyword ordinal with no bytes, and a column key
+/// no document can hold ([`column_key`]), are [`ReadError::Section`]: the column is damaged, and its value is never
+/// stated as a hit's.
 fn to_sort_value<K, W: KeywordReader>(
     local: Local,
     reader: &Reader<K, W>,
-    key: SortKey,
+    (key, kind): (SortKey, Kind),
     docid: u32,
 ) -> Result<SortValue, RequestError> {
-    Ok(match (local, reader) {
-        (Local::Missing, _) => SortValue::Missing,
-        (Local::Score(score), Reader::Score) => SortValue::Score(score),
-        (Local::Num(ord), Reader::Keywords(words)) => {
+    Ok(match (local, reader, kind) {
+        (Local::Missing, _, _) => SortValue::Missing,
+        (Local::Score(score), Reader::Score, _) => SortValue::Score(score),
+        (Local::Num(ord), Reader::Keywords(words), _) => {
             SortValue::Keyword(keyword_bytes(words, ord, key, docid)?.to_vec())
         }
-        (Local::Num(value), Reader::Keys(_)) => SortValue::Key(value),
-        (Local::Score(_) | Local::Num(_), _) => return Err(RequestError::MismatchedSortValue),
+        (Local::Num(value), Reader::Keys(_), Kind::Column(column)) => {
+            SortValue::Key(column_key(column, value, key, docid)?)
+        }
+        (Local::Score(_) | Local::Num(_), _, _) => return Err(RequestError::MismatchedSortValue),
     })
+}
+
+/// `value`, a key of a column of type `column`, when a document can hold it (SPEC §5.2.1, §6.4.1, as `verify` checks
+/// a segment's columns): `0` or `1` for a `bool`, a `datetime` in its range, a finite `f64` other than `-0.0`, any
+/// `i64`. Another is corruption at `docid`'s key, never a value a hit or a cursor states.
+fn column_key(column: Column, value: u64, key: SortKey, docid: u32) -> Result<u64, ReadError> {
+    let what = match column {
+        Column::I64 => return Ok(value),
+        Column::Bool if value <= 1 => return Ok(value),
+        Column::Bool => "a bool column key other than 0 or 1",
+        Column::Datetime if (MIN_DATETIME..=MAX_DATETIME).contains(&key_to_i64(value)) => {
+            return Ok(value);
+        }
+        Column::Datetime => "a datetime column key out of range",
+        Column::F64 => {
+            let v = key_to_f64(value);
+            if v.is_finite() && !(v == 0.0 && v.is_sign_negative()) {
+                return Ok(value);
+            }
+            "an f64 column key that is not a finite number other than -0.0"
+        }
+    };
+    Err(column_corruption(key, docid, what))
 }
 
 /// How a view's values rank against a cursor's: `Greater` after it.
@@ -888,6 +927,11 @@ impl Heap {
 
 /// A keyword ord of `docid` with no value in its view's dictionary: corruption, never an empty value ranked.
 fn past_dictionary(key: SortKey, docid: u32) -> ReadError {
+    column_corruption(key, docid, "a keyword ord past its dictionary")
+}
+
+/// The corruption `what` of the column `key` reads, at `docid`.
+fn column_corruption(key: SortKey, docid: u32, what: &'static str) -> ReadError {
     let field = match key {
         SortKey::Field { field, .. } => field.get(),
         SortKey::Score { .. } => 0,
@@ -896,9 +940,7 @@ fn past_dictionary(key: SortKey, docid: u32) -> ReadError {
         kind: SectionKind::Columns,
         field,
         position: u64::from(docid),
-        reason: SegmentCorruption::Invalid {
-            what: "a keyword ord past its dictionary",
-        },
+        reason: SegmentCorruption::Invalid { what },
     }
 }
 
@@ -1081,7 +1123,7 @@ mod tests {
         let err = to_sort_value(
             Local::Num(0),
             &Reader::<(), NoBytes>::Keywords(NoBytes),
-            key,
+            (key, Kind::Keyword),
             4,
         )
         .unwrap_err();
@@ -1103,7 +1145,7 @@ mod tests {
             to_sort_value(
                 Local::Num(0),
                 &Reader::<(), Bytes>::Keywords(Bytes(b"m")),
-                key,
+                (key, Kind::Keyword),
                 4
             )
             .unwrap(),
@@ -1118,5 +1160,93 @@ mod tests {
         let err = compare_to_cursor(&sort, &[Local::Num(0)], &[SortValue::Key(1)], &readers, 0)
             .unwrap_err();
         assert!(matches!(err, RequestError::MismatchedSortValue));
+    }
+
+    /// ROADMAP 10.1.31 review: a column key no document can hold is corruption of the column at the hit's docid,
+    /// before a hit or a cursor states it (SPEC §5.2.1, §6.4.1); every key a document can hold passes, at the bounds.
+    #[test]
+    fn a_column_key_no_document_can_hold_is_corruption() {
+        use persia_format::for_codec::{f64_to_key, i64_to_key};
+
+        let key = SortKey::field(FieldId::new(3), Order::Asc);
+        let refused = [
+            (Column::Bool, 2, "a bool column key other than 0 or 1"),
+            (
+                Column::Bool,
+                u64::MAX,
+                "a bool column key other than 0 or 1",
+            ),
+            (
+                Column::Datetime,
+                i64_to_key(MAX_DATETIME + 1),
+                "a datetime column key out of range",
+            ),
+            (
+                Column::Datetime,
+                i64_to_key(MIN_DATETIME - 1),
+                "a datetime column key out of range",
+            ),
+            (
+                Column::F64,
+                f64_to_key(f64::NAN),
+                "an f64 column key that is not a finite number other than -0.0",
+            ),
+            (
+                Column::F64,
+                f64_to_key(f64::INFINITY),
+                "an f64 column key that is not a finite number other than -0.0",
+            ),
+            (
+                Column::F64,
+                f64_to_key(f64::NEG_INFINITY),
+                "an f64 column key that is not a finite number other than -0.0",
+            ),
+            (
+                Column::F64,
+                f64_to_key(-0.0),
+                "an f64 column key that is not a finite number other than -0.0",
+            ),
+        ];
+        for (column, value, expected) in refused {
+            let err = to_sort_value(
+                Local::Num(value),
+                &Reader::<(), NoBytes>::Keys(()),
+                (key, Kind::Column(column)),
+                9,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    RequestError::Read(ReadError::Section {
+                        kind: SectionKind::Columns,
+                        field: 3,
+                        position: 9,
+                        reason: SegmentCorruption::Invalid { what },
+                    }) if what == expected
+                ),
+                "{column:?} {value:#x}: {err:?}"
+            );
+        }
+        let held = [
+            (Column::Bool, 0),
+            (Column::Bool, 1),
+            (Column::Datetime, i64_to_key(MAX_DATETIME)),
+            (Column::Datetime, i64_to_key(MIN_DATETIME)),
+            (Column::F64, f64_to_key(0.0)),
+            (Column::F64, f64_to_key(f64::MAX)),
+            (Column::F64, f64_to_key(-f64::MAX)),
+            (Column::I64, 0),
+            (Column::I64, u64::MAX),
+        ];
+        for (column, value) in held {
+            let got = to_sort_value(
+                Local::Num(value),
+                &Reader::<(), NoBytes>::Keys(()),
+                (key, Kind::Column(column)),
+                9,
+            );
+            assert_eq!(got.unwrap(), SortValue::Key(value), "{column:?} {value:#x}");
+        }
     }
 }
