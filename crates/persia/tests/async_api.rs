@@ -1,6 +1,6 @@
 //! The async API (ROADMAP 10.1.11; ADR-0064 items 11 to 14): `AsyncDb` and `AsyncCollection` on the database's own
-//! pool, and what dropping a future does to its job, driven by a `block_on` written here (no runtime is a
-//! dev-dependency, ROADMAP 0.6.11).
+//! pool, and what dropping a future does to its job, driven by a `block_on` written in the tests' support (no runtime
+//! is a dev-dependency, ROADMAP 0.6.11).
 //!
 //! Jobs are held where they start by the pool's test hook (`OpenOptions::async_hook`), on a pool of one thread
 //! (`OpenOptions::async_threads`), so which job is queued and which runs is decided by the test, not by timing. No
@@ -9,11 +9,9 @@
 #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)] // Tests: inputs are fixed.
 
 use std::future::Future;
-use std::path::Path;
 use std::pin::pin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, Wake, Waker};
 
 use persia::{
@@ -21,120 +19,10 @@ use persia::{
     SearchRequest,
 };
 
-/// Wakes the thread that polls.
-struct Unpark(std::thread::Thread);
+#[path = "support/asyncs.rs"]
+mod asyncs;
 
-impl Wake for Unpark {
-    fn wake(self: Arc<Self>) {
-        self.0.unpark();
-    }
-}
-
-/// Drives `future` on this thread, parking it while the future is pending.
-fn block_on<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
-    let mut cx = Context::from_waker(&waker);
-    let mut future = pin!(future);
-    loop {
-        match future.as_mut().poll(&mut cx) {
-            Poll::Ready(output) => return output,
-            Poll::Pending => std::thread::park(),
-        }
-    }
-}
-
-/// Watches the pool's jobs: every event goes to `events`, and the next job to start after [`Probe::hold_next`] waits
-/// on the pool thread until [`Probe::release`].
-struct Probe {
-    events: Receiver<JobEvent>,
-    hold: Arc<AtomicBool>,
-    release: Sender<()>,
-}
-
-impl Probe {
-    /// The probe and the options that install it, on a pool of one thread.
-    fn new() -> (Self, OpenOptions) {
-        let (send, events) = channel();
-        let (release, released) = channel::<()>();
-        let hold = Arc::new(AtomicBool::new(false));
-        let holding = Arc::clone(&hold);
-        let send = Mutex::new(send);
-        let released = Mutex::new(released);
-        let hook = move |event: &JobEvent| {
-            send.lock().unwrap().send(event.clone()).unwrap();
-            if matches!(event, JobEvent::Started { .. }) && holding.swap(false, Ordering::SeqCst) {
-                released.lock().unwrap().recv().unwrap();
-            }
-        };
-        let options = OpenOptions::new()
-            .async_threads(1)
-            .async_hook(Arc::new(hook));
-        (
-            Self {
-                events,
-                hold,
-                release,
-            },
-            options,
-        )
-    }
-
-    /// The next job to start waits for [`Probe::release`].
-    fn hold_next(&self) {
-        self.hold.store(true, Ordering::SeqCst);
-    }
-
-    fn release(&self) {
-        self.release.send(()).unwrap();
-    }
-
-    /// The next event of a job on the pool (the open's own events are skipped: see [`Probe::next_any`]).
-    fn next(&self) -> JobEvent {
-        loop {
-            let event = self.next_any();
-            if !matches!(
-                event,
-                JobEvent::Started {
-                    kind: JobKind::Open,
-                    ..
-                } | JobEvent::Finished {
-                    kind: JobKind::Open,
-                    ..
-                }
-            ) {
-                return event;
-            }
-        }
-    }
-
-    fn next_any(&self) -> JobEvent {
-        self.events.recv().unwrap()
-    }
-}
-
-/// A database at `path` with the collection `notes` (a `text` field `body`) and the document `seed`, closed again.
-fn seeded(path: &Path) {
-    let db = Db::open(path).unwrap();
-    let notes = db
-        .create_collection_json(r#"{"name": "notes", "fields": {"body": {"type": "text"}}}"#)
-        .unwrap();
-    notes
-        .put_json(r#"{"id": "seed", "body": "quick brown fox"}"#)
-        .unwrap();
-    db.close().unwrap();
-}
-
-fn open(path: &Path, options: OpenOptions) -> (AsyncDb, AsyncCollection) {
-    let db = block_on(AsyncDb::open_with(options, path)).unwrap();
-    let notes = db.collection("notes").unwrap();
-    (db, notes)
-}
-
-/// The ids the collection holds, read through a plain `Db` after the async one closed.
-fn has(path: &Path, id: &str) -> bool {
-    let db = OpenOptions::new().read_only(true).open(path).unwrap();
-    db.collection("notes").unwrap().get(id).unwrap().is_some()
-}
+use asyncs::{Probe, Unpark, block_on, has, open, seeded};
 
 #[test]
 fn every_call_runs_on_the_pool() {

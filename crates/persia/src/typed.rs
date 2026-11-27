@@ -42,14 +42,7 @@ impl Collection {
     /// `Serialize` impl that fails), or its JSON is not a valid document of the schema; then as
     /// [`put`](Self::put).
     pub fn put_struct<T: Serialize + ?Sized>(&self, value: &T) -> Result<()> {
-        let json = serde_json::to_string(value).map_err(|source| {
-            Error::with_source(
-                ErrorCode::InvalidArgument,
-                "the value cannot be written as JSON",
-                source,
-            )
-        })?;
-        self.put_json(&json)
+        self.put_json(&to_json(value)?)
     }
 
     /// The document with id `id` as a `T`, read from its JSON output (SPEC §6.4.1). `None` if the collection has
@@ -108,6 +101,17 @@ impl Collection {
         let json = self.read(|c| doc.to_json(c.schema()).map_err(Error::wrap))?;
         from_json(&json)
     }
+}
+
+/// `value` as `serde_json` writes it: what `put_struct` puts (also the async one, ROADMAP 10.1.26).
+pub(crate) fn to_json<T: Serialize + ?Sized>(value: &T) -> Result<String> {
+    serde_json::to_string(value).map_err(|source| {
+        Error::with_source(
+            ErrorCode::InvalidArgument,
+            "the value cannot be written as JSON",
+            source,
+        )
+    })
 }
 
 fn from_json<T: DeserializeOwned>(json: &str) -> Result<T> {

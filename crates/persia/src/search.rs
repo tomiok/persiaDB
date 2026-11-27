@@ -692,11 +692,31 @@ impl Collection {
     /// [`ErrorCode::InvalidArgument`](crate::ErrorCode::InvalidArgument) for text that is not a request (malformed,
     /// an unknown or repeated key, a value of another shape); then as [`search`](Self::search).
     pub fn search_json(&self, json: &str) -> Result<SearchResponse> {
+        self.search_json_with(json, &RunOptions::new())
+    }
+
+    /// [`search_json`](Self::search_json) that stops with [`ErrorCode::Cancelled`](crate::ErrorCode::Cancelled) once
+    /// `token` is cancelled (the async API's `search_json`, ADR-0064 item 13).
+    #[cfg(feature = "async")]
+    pub(crate) fn search_json_cancellable(
+        &self,
+        json: &str,
+        token: Option<persia_engine::db::CancelToken>,
+    ) -> Result<SearchResponse> {
+        let run = match token {
+            Some(token) => RunOptions::new().cancel(token),
+            None => RunOptions::new(),
+        };
+        self.search_json_with(json, &run)
+    }
+
+    /// [`search_json`](Self::search_json) run as `run` says.
+    fn search_json_with(&self, json: &str, run: &RunOptions) -> Result<SearchResponse> {
         self.read(|c| {
             let limits = QueryLimits::default();
             let request =
                 QueryRequest::from_json(json, c.schema(), &limits).map_err(Error::wrap)?;
-            let ran = request.run(c, &RunOptions::new()).map_err(Error::wrap)?;
+            let ran = request.run(c, run).map_err(Error::wrap)?;
             response(ran, c.shared_schema())
         })
     }

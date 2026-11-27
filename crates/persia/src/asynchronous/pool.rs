@@ -35,13 +35,36 @@ pub enum JobKind {
     Search,
     /// `AsyncDb::open`, on its own thread.
     Open,
+    /// `AsyncDb::create_collection`, `AsyncDb::create_collection_json`.
+    CreateCollection,
+    /// `AsyncDb::drop_collection`.
+    DropCollection,
+    /// `AsyncDb::refresh`.
+    Refresh,
+    /// `AsyncDb::backup`.
+    Backup,
+    /// `AsyncDb::put_blob`.
+    PutBlob,
+    /// `AsyncDb::get_blob_range`.
+    GetBlobRange,
+    /// `AsyncCollection::put_with_blob`.
+    PutWithBlob,
+    /// `AsyncCollection::put_json`, `AsyncCollection::put_struct` (the value's JSON).
+    PutJson,
+    /// `AsyncCollection::get_json`, `AsyncCollection::get_struct`.
+    GetJson,
+    /// `AsyncCollection::search_json`.
+    SearchJson,
 }
 
 impl JobKind {
     /// Whether a started job of this kind is cancelled when its future is dropped (a read) rather than run to its
     /// end (a write).
     const fn is_read(self) -> bool {
-        matches!(self, Self::Get | Self::Search)
+        matches!(
+            self,
+            Self::Get | Self::Search | Self::GetJson | Self::SearchJson | Self::GetBlobRange
+        )
     }
 }
 

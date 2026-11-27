@@ -156,3 +156,74 @@ decided:
 5. **No Go, TypeScript or C form yet.** The embedded bindings of ADR-0018 do not expose the async API (their calls
    are synchronous, and each language has its own way to run them off its event loop), so the option has no form
    there; it gets one with them if they ever expose async.
+
+## Amendment (2026-11-27): the rest of the embedded API as async (ROADMAP 10.1.26)
+
+Item 16 left collection management, blobs, `refresh`, `backup` and the JSON and typed variants without an async form,
+so an async program created its collections through a `Db` first. The owner decided which get one. Every new call
+runs on the same pool as item 11's (item 12), returns a `JobFuture<T>`, is queued when it is called, and follows item
+13: a future dropped before its job starts skips it and leaves nothing; a job still queued at `close` completes with
+`Closed`. What dropping the future of a job that has started does is per call, below. Arguments are owned, since the
+job runs on another thread.
+
+| Call | Form | Dropping the future once the job has started |
+|---|---|---|
+| `AsyncDb::create_collection(CollectionSchema)` | async, resolves to an `AsyncCollection` | runs to its end (created and committed) |
+| `AsyncDb::create_collection_json(impl Into<String>)` | async; the JSON is read on the pool | runs to its end |
+| `AsyncDb::collection_names()` | synchronous on `AsyncDb`: a lookup in the published state, which takes no lock, as `AsyncDb::collection` | (no job) |
+| `AsyncDb::drop_collection(impl Into<String>)` | async | runs to its end (dropped and committed) |
+| `AsyncDb::put_blob<R: Read + Send + 'static>(R, PutBlobOptions)` | async, owned reader | runs to its end (the blob is stored whole) |
+| `Db::get_blob` | not offered | |
+| `AsyncDb::get_blob_range(BlobRef, Range<u64>)` | async, a read | token set; checked before the read |
+| `AsyncCollection::put_with_blob<R: Read + Send + 'static>(Document, R, PutBlobOptions)` | async, owned reader | runs to its end (blob stored, document put) |
+| `AsyncDb::refresh()` | async | runs to its end (the new state, or the old one on an error) |
+| `AsyncDb::backup(impl AsRef<Path>)` | async | runs to its end (the backup is complete, or cleaned up on an error) |
+| `AsyncCollection::put_json(impl Into<String>)` | async; the JSON is read on the pool | runs to its end |
+| `AsyncCollection::get_json(impl Into<String>)` | async, a read | token set; checked before the read |
+| `AsyncCollection::put_struct<T: Serialize + ?Sized>(&T)` | async; the value is written as JSON on the caller's thread, then put as `put_json` | runs to its end |
+| `AsyncCollection::get_struct<T: DeserializeOwned + Send + 'static>(impl Into<String>)` | async, a read; the `T` is built on the pool | token set; checked before the read |
+| `AsyncCollection::search_json(impl Into<String>)` | async, a read | token set; the search stops soon after (SPEC §7.3) |
+
+Why:
+
+1. **Uploads take an owned reader.** A blob upload streams from a reader, and a job on a pool thread cannot borrow
+   the caller's: the reader is moved into the job, so it is `Read + Send + 'static` (a `File`, a `Cursor` over owned
+   bytes, a `&'static [u8]`, a channel's reader). `Blob<'r>` holds a `Box<dyn Read + 'r>` that need not be `Send`, so
+   the async `put_with_blob` takes the reader and its `PutBlobOptions` instead of a `Blob`; making `Blob`'s reader
+   `Send` would refuse a synchronous caller's non-`Send` reader. Bytes in a file are passed as the opened `File`; a
+   blob already stored is put by giving the document its reference (`Document::set_blob_ref`) and calling `put`. The
+   reader must not call back into the database, as for the synchronous form; on a pool of one thread such a call
+   waits behind the upload for ever.
+2. **An upload that has started is not cancelled.** Stopping it halfway would leave staged chunks waiting for a resume
+   or a GC (ADR-0034), and the bytes the reader yielded would be lost to the caller. So it runs to its end, as a write
+   does (item 13): the blob is durable and whole; a `put_blob` whose result is discarded leaves a blob no document
+   references, which a later blob GC collects, exactly as a synchronous `put_blob` whose reference is dropped.
+   `put_with_blob` stores the blob and puts the document. Cooperative cancellation of an upload is not offered: it
+   would need a way for the blob store to stop between chunks and drop what it staged, which it does not have.
+3. **No async `get_blob`.** It returns a `BlobReader`, whose reads are I/O on the caller's thread: an async form would
+   resolve to a handle that then blocks the caller's executor on every read. An async program reads a blob by ranges
+   with `get_blob_range`, each a job on the pool. (Between two range reads a blob that no document references can be
+   collected; a `BlobReader` pins it. A program that streams a whole blob from async code can move a synchronous
+   `Db`'s `BlobReader` to a thread of its own.) `get_blob` does not write into a caller's writer, so there is no
+   borrowed writer to decide about.
+4. **Typed values.** `put_struct` writes the value as JSON on the caller's thread when it is called, so it borrows the
+   value only for the call and needs no `Send + 'static` bound on `T`; a value that cannot be written is refused at
+   once with `InvalidArgument`, and nothing is queued. The JSON is read against the schema on the pool, as
+   `put_json` does. `get_struct` builds its `T` on the pool, so `T: DeserializeOwned + Send + 'static`.
+5. **`backup` runs to its end.** A backup is a copy of two files (SPEC §4.8) with no point to stop at that would leave
+   nothing: `write_backup` has no cancellation, and its clean-up runs only on an error. So a dropped future does not
+   stop a long copy; the backup ends complete at `dest`, or is cleaned up as on any error. A caller that wants no
+   backup drops the future before the job starts, or removes `dest` after.
+6. **`refresh`** reopens and swaps in one state under its lock: no halfway state, so it runs to its end.
+7. **`collection_names` stays synchronous**, as `collection` does (item 16): a lookup in the published state, which
+   takes no lock and does no I/O, so a job would only add a thread hop.
+8. **Reads** (`get_json`, `get_struct`, `get_blob_range`, `search_json`) run under a token, as `get` and `search` do:
+   a dropped future sets it; a lookup checks it before it reads (it has no point to stop at inside), and
+   `search_json` passes it to the search, which stops soon after.
+9. **Tested** in `crates/persia/tests/async_calls.rs` through the test `block_on`, on a pool of one thread held by the
+   test hook: each call against its synchronous result and its job kind; each dropped before it starts (skipped,
+   nothing left: no collection, document, blob or backup file); each change dropped after it starts (it ran whole);
+   each read dropped after it starts (its token set, `Cancelled`); jobs queued at `close` (`Closed`); every owned
+   reader dropped once its job is gone; and every test closes and reopens the file.
+10. **No Go, TypeScript or C form yet.** The embedded bindings of ADR-0018 do not expose the async API, so these
+    calls have no form there.
