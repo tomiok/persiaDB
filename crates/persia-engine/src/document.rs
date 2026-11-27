@@ -33,6 +33,7 @@ use crate::schema::{CollectionSchema, FieldId, NameProblem};
 
 pub use codec::{DecodeError, DocumentCorruption};
 pub use datetime::{MAX_DATETIME, MIN_DATETIME};
+pub use json::DocumentJson;
 
 /// A `datetime` value, microseconds since the Unix epoch (UTC), in the output form of SPEC §6.4.1: RFC 3339 in UTC,
 /// `YYYY-MM-DDTHH:MM:SSZ`, with `.ffffff` when the microseconds are not zero. `None` outside
@@ -282,7 +283,8 @@ impl Document {
         json::from_json(json, schema)
     }
 
-    /// The document as JSON (SPEC §6.4.1, "Output").
+    /// The document as JSON (SPEC §6.4.1, "Output"): `serde_json`'s text of its [`DocumentJson`], the one writer of a
+    /// document's JSON form.
     ///
     /// # Errors
     /// [`DocumentError::UnknownFieldId`] if a field is not in `schema`, [`DocumentError::WrongType`] if a value

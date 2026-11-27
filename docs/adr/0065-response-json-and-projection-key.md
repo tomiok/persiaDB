@@ -143,3 +143,28 @@ public getters, each documented with what `SearchResponse::to_json` writes for t
    every hit, for a table of requests (plain and relaxed, every sort type, missing sort values, L5, an empty page)
    and 64 seeded random requests; the 10.1.25 differential tests (facade JSON against the engine's, byte for byte)
    are unchanged.
+
+## Amendment (2026-11-27): one writer of a document's JSON form (ROADMAP 10.1.31)
+
+Item 2 of the 2026-11-26 amendment carried a hit's document into the facade's JSON as a value: the facade rendered it
+with `Document::to_json` and parsed the text back into a `serde_json` map, so every document of a page was written,
+read and written again. The engine now has one writer of the JSON form of SPEC §6.4.1, a `serde::Serialize` view:
+
+1. **`persia_engine::document::DocumentJson`**: `DocumentJson::new(&document, &schema)` checks the document against its
+   schema (the errors `Document::to_json` reports, unchanged) and borrows its values; its `Serialize` impl writes the
+   object with `id`, then `blob` when there is one (its keys in byte order: `blob_id`, `chunk_size`, `mime`, `size`,
+   `user_meta` when not empty), then the field and extra field names in ascending byte order. Serializing it cannot
+   fail on the document's account: every check is in `new`. Values are borrowed, not cloned into a `serde_json::Value`
+   first, as the hand-written writer did.
+2. **Both writers use it.** `Document::to_json` is `serde_json::to_string` of the view, and the facade's response JSON
+   (`crates/persia/src/search/json.rs`) serializes the view in place as a hit's `document`; the engine's
+   `QueryResponse::to_json` embeds `Document::to_json`'s text as before. The text is unchanged, byte for byte: the
+   golden documents and responses, and the 10.1.25 differential tests (the facade's JSON against the engine's), pass
+   untouched; a property checks that the view's text is `to_json`'s, alone and inside another value, in that key
+   order.
+3. **Measured** (`cargo bench -p persia --bench response_json`, a page of 20 hits of about 64 KiB each, and one such
+   document): `SearchResponse::to_json` 3.77 ms before, 1.06 ms after; `Document::to_json` 83.5 µs before, 50.9 µs
+   after (criterion medians on the development machine, one run each).
+
+The `DocumentJson` type is the engine's, not on ADR-0063's allow-list: `persia` uses it inside, and its public
+surface (the snapshot) is unchanged.

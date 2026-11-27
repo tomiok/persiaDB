@@ -5,7 +5,8 @@ use std::fmt;
 
 use persia_format::{BlobId, BlobRef};
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
-use serde::{Deserialize, Deserializer};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Number, Value as J};
 
 use super::validate::{expected, json_values, out_of_range};
@@ -176,77 +177,177 @@ fn blob_from_json(value: J) -> Result<BlobRef, DocumentError> {
     .map_err(|e| DocumentError::Blob(e.to_string()))
 }
 
-fn blob_to_json(blob: &BlobRef) -> J {
-    let mut map = Map::new();
-    map.insert("blob_id".to_owned(), J::String(blob.blob_id().to_string()));
-    map.insert("size".to_owned(), J::from(blob.size()));
-    map.insert("mime".to_owned(), J::String(blob.mime().to_owned()));
-    map.insert("chunk_size".to_owned(), J::from(blob.chunk_size()));
-    if !blob.user_meta().is_empty() {
-        let meta = blob
-            .user_meta()
-            .iter()
-            .map(|(k, v)| (k.clone(), J::String(v.clone())));
-        map.insert("user_meta".to_owned(), J::Object(meta.collect()));
+/// A document's JSON form (SPEC §6.4.1, "Output") as a [`serde::Serialize`] value: an object with `id`, then `blob`
+/// when the document has a blob reference, then its fields and extra fields in ascending byte order of their names,
+/// each value in its field type's JSON form. Made by [`DocumentJson::new`], which checks the document against its
+/// schema, so serializing it cannot fail on the document's account. [`Document::to_json`] is
+/// `serde_json::to_string` of it, and a writer that embeds a document in a larger value (the response JSON, SPEC
+/// §7.5.2) serializes it in place, without writing the text and reading it back.
+///
+/// ```
+/// use persia_engine::document::{Document, DocumentJson, Value};
+/// use persia_engine::schema::{FieldKind, SchemaBuilder};
+///
+/// let schema = SchemaBuilder::new("c").field("n", FieldKind::I64 { stored: true }).build()?;
+/// let n = schema.field("n").ok_or("no field")?.id();
+/// let doc = Document::new("a").with(n, Value::I64(7));
+/// let view = DocumentJson::new(&doc, &schema)?;
+/// // Serialized in place, inside another value (a `serde_json::Value` would sort its keys: `id` first is kept here).
+/// let embedded = serde_json::to_string(&[&view])?;
+/// assert_eq!(embedded, r#"[{"id":"a","n":7}]"#);
+/// assert_eq!(serde_json::to_string(&view)?, doc.to_json(&schema)?);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Debug, Clone)]
+pub struct DocumentJson<'a> {
+    id: &'a str,
+    blob: Option<&'a BlobRef>,
+    /// The fields and extra fields by name, in ascending byte order.
+    entries: Vec<(&'a str, Entry<'a>)>,
+}
+
+/// One value of a [`DocumentJson`], checked against its field.
+#[derive(Debug, Clone)]
+enum Entry<'a> {
+    String(&'a str),
+    Strings(&'a [String]),
+    I64(i64),
+    /// Finite.
+    F64(f64),
+    Bool(bool),
+    /// Already in the output form: formatting checked the range.
+    Datetime(String),
+    /// A `stored` or extra value: not `null`, nested at most [`super::MAX_STORED_DEPTH`] levels.
+    Json(&'a J),
+}
+
+impl<'a> DocumentJson<'a> {
+    /// The JSON form of `document`, a document of the collection of `schema`.
+    ///
+    /// # Errors
+    /// As [`Document::to_json`]: [`DocumentError::UnknownFieldId`] if a field is not in `schema`,
+    /// [`DocumentError::WrongType`] if a value does not have its field's type, [`DocumentError::OutOfRange`] for a
+    /// non-finite float or a datetime out of range, [`DocumentError::TooDeep`] for a stored value nested too deep,
+    /// [`DocumentError::NullStored`] for a `null` stored or extra value, [`DocumentError::FieldName`] for an extra
+    /// field whose name breaks the field name rule, [`DocumentError::ExtraIsSchemaField`] for an extra field next to a
+    /// value of the schema field of that name.
+    pub fn new(
+        document: &'a Document,
+        schema: &'a CollectionSchema,
+    ) -> Result<Self, DocumentError> {
+        let mut entries = Vec::with_capacity(document.fields.len() + document.extra.len());
+        for (id, value) in &document.fields {
+            let field = schema
+                .field_by_id(*id)
+                .ok_or(DocumentError::UnknownFieldId { id: *id })?;
+            entries.push((field.name(), entry(field, value)?));
+        }
+        for (name, value) in &document.extra {
+            if schema
+                .field(name)
+                .and_then(|f| document.get(f.id()))
+                .is_some()
+            {
+                return Err(DocumentError::ExtraIsSchemaField { name: name.clone() });
+            }
+            if let Some(problem) = field_name_problem(name) {
+                return Err(DocumentError::FieldName {
+                    name: name.clone(),
+                    problem,
+                });
+            }
+            entries.push((name.as_str(), Entry::Json(stored_json(name, value)?)));
+        }
+        entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        Ok(Self {
+            id: &document.id,
+            blob: document.blob_ref.as_ref(),
+            entries,
+        })
     }
-    J::Object(map)
+}
+
+/// The keys come in the order of SPEC §6.4.1 whatever the serializer's map type.
+impl Serialize for DocumentJson<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let len = 1 + usize::from(self.blob.is_some()) + self.entries.len();
+        let mut out = s.serialize_map(Some(len))?;
+        out.serialize_entry("id", self.id)?;
+        if let Some(blob) = self.blob {
+            out.serialize_entry("blob", &BlobJson(blob))?;
+        }
+        for (name, value) in &self.entries {
+            out.serialize_entry(name, value)?;
+        }
+        out.end()
+    }
+}
+
+impl Serialize for Entry<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::String(text) => s.serialize_str(text),
+            Self::Strings(list) => list.serialize(s),
+            Self::I64(v) => s.serialize_i64(*v),
+            Self::F64(v) => s.serialize_f64(*v),
+            Self::Bool(v) => s.serialize_bool(*v),
+            Self::Datetime(text) => s.serialize_str(text),
+            Self::Json(value) => value.serialize(s),
+        }
+    }
+}
+
+/// `{ "blob_id", "chunk_size", "mime", "size", "user_meta"? }` (SPEC §9.1): its keys in byte order, as a JSON object
+/// with sorted keys has always written them here.
+struct BlobJson<'a>(&'a BlobRef);
+
+impl Serialize for BlobJson<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let blob = self.0;
+        let meta = !blob.user_meta().is_empty();
+        let mut out = s.serialize_map(Some(4 + usize::from(meta)))?;
+        out.serialize_entry("blob_id", &BlobIdText(blob.blob_id()))?;
+        out.serialize_entry("chunk_size", &blob.chunk_size())?;
+        out.serialize_entry("mime", blob.mime())?;
+        out.serialize_entry("size", &blob.size())?;
+        if meta {
+            out.serialize_entry("user_meta", blob.user_meta())?;
+        }
+        out.end()
+    }
+}
+
+/// A blob id as its text form (64 lowercase hex characters).
+struct BlobIdText(BlobId);
+
+impl Serialize for BlobIdText {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(&self.0)
+    }
 }
 
 pub(super) fn to_json(doc: &Document, schema: &CollectionSchema) -> Result<String, DocumentError> {
-    let mut entries: Vec<(&str, J)> = Vec::with_capacity(doc.fields.len() + doc.extra.len());
-    for (id, value) in &doc.fields {
-        let field = schema
-            .field_by_id(*id)
-            .ok_or(DocumentError::UnknownFieldId { id: *id })?;
-        entries.push((field.name(), value_to_json(field, value)?));
-    }
-    for (name, value) in &doc.extra {
-        if schema.field(name).and_then(|f| doc.get(f.id())).is_some() {
-            return Err(DocumentError::ExtraIsSchemaField { name: name.clone() });
-        }
-        if let Some(problem) = field_name_problem(name) {
-            return Err(DocumentError::FieldName {
-                name: name.clone(),
-                problem,
-            });
-        }
-        entries.push((name, stored_json(name, value)?.clone()));
-    }
-    entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
-    // Written by hand: the order (id, blob, then names) must not depend on serde_json's map type.
-    let mut out = String::from("{\"id\":");
-    out.push_str(&J::String(doc.id.clone()).to_string());
-    if let Some(blob) = &doc.blob_ref {
-        out.push_str(",\"blob\":");
-        out.push_str(&blob_to_json(blob).to_string());
-    }
-    for (name, value) in entries {
-        out.push(',');
-        out.push_str(&J::String(name.to_owned()).to_string());
-        out.push(':');
-        out.push_str(&value.to_string());
-    }
-    out.push('}');
-    Ok(out)
+    let view = DocumentJson::new(doc, schema)?;
+    // The view was checked: only a broken serializer could fail here, and that is reported, not hidden.
+    serde_json::to_string(&view)
+        .map_err(|e| DocumentError::Json(format!("writing the document: {e}")))
 }
 
-fn value_to_json(field: &Field, value: &Value) -> Result<J, DocumentError> {
+/// `value`, a value of `field`, as a JSON form [`DocumentJson`] writes.
+fn entry<'a>(field: &Field, value: &'a Value) -> Result<Entry<'a>, DocumentError> {
     let name = field.name();
     let field_type = field.field_type();
     Ok(match (field_type, value) {
-        (FieldType::Text | FieldType::Keyword, Value::String(s)) => J::String(s.clone()),
-        (FieldType::Text | FieldType::Keyword, Value::Strings(list)) => {
-            J::Array(list.iter().cloned().map(J::String).collect())
-        }
-        (FieldType::I64, Value::I64(v)) => J::from(*v),
-        (FieldType::F64, Value::F64(v)) => Number::from_f64(*v)
-            .map(J::Number)
-            .ok_or_else(|| out_of_range(name, v, "finite numbers"))?,
-        (FieldType::Bool, Value::Bool(v)) => J::Bool(*v),
-        (FieldType::Datetime, Value::Datetime(v)) => {
-            J::String(datetime::format(*v).ok_or_else(|| out_of_range(name, v, datetime::RANGE))?)
-        }
-        (FieldType::Stored, Value::Json(v)) => stored_json(name, v)?.clone(),
+        (FieldType::Text | FieldType::Keyword, Value::String(s)) => Entry::String(s),
+        (FieldType::Text | FieldType::Keyword, Value::Strings(list)) => Entry::Strings(list),
+        (FieldType::I64, Value::I64(v)) => Entry::I64(*v),
+        (FieldType::F64, Value::F64(v)) if v.is_finite() => Entry::F64(*v),
+        (FieldType::F64, Value::F64(v)) => return Err(out_of_range(name, v, "finite numbers")),
+        (FieldType::Bool, Value::Bool(v)) => Entry::Bool(*v),
+        (FieldType::Datetime, Value::Datetime(v)) => Entry::Datetime(
+            datetime::format(*v).ok_or_else(|| out_of_range(name, v, datetime::RANGE))?,
+        ),
+        (FieldType::Stored, Value::Json(v)) => Entry::Json(stored_json(name, v)?),
         _ => {
             return Err(DocumentError::WrongType {
                 field: name.to_owned(),

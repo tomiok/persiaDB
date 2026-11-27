@@ -493,6 +493,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- `SearchResponse::to_json` and `Document::to_json` write a document's JSON form once (ROADMAP 10.1.31, ADR-0065
+  amended): the engine's new `persia_engine::document::DocumentJson`, a `serde::Serialize` view checked against the
+  schema, is the one writer of SPEC §6.4.1's form, and the response JSON serializes it in place instead of writing a
+  hit's document, parsing it back and writing it again. The text is unchanged, byte for byte. On a page of 20 hits of
+  about 64 KiB each (`cargo bench -p persia --bench response_json`), `SearchResponse::to_json` took 1.06 ms instead of
+  3.77 ms, and `Document::to_json` of one such document 50.9 µs instead of 83.5 µs.
 - **Breaking** (`persia`): the engine and format detail left on the re-exported types is hidden from the
   documentation (`#[doc(hidden)]`, no stability promise; ROADMAP 10.1.29, ADR-0063 amended): `BlobRef::new` (whose
   error is `persia_format`'s; build a reference with `persia::blob_ref`), `BlobRef::encode`, `decode`, `encoded_len`,

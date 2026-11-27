@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use persia_engine::document::{
-    DecodeError, Document, DocumentCorruption, DocumentError, FieldSet, MAX_DATETIME,
+    DecodeError, Document, DocumentCorruption, DocumentError, DocumentJson, FieldSet, MAX_DATETIME,
     MAX_DOCUMENT_FIELDS, MAX_DOCUMENT_JSON_LEN, MAX_DOCUMENT_VALUES, MAX_ID_LEN, MAX_KEYWORD_LEN,
     MAX_STORED_DEPTH, MIN_DATETIME, Value,
 };
@@ -1167,5 +1167,75 @@ proptest! {
     #[test]
     fn arbitrary_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..256)) {
         let _ = Document::decode(&bytes, &all_types(false));
+    }
+}
+
+/// The top-level keys of the JSON object `text`, in the order the text has them.
+fn keys_in_order(text: &str) -> Vec<String> {
+    struct Keys(Vec<String>);
+    impl<'de> serde::Deserialize<'de> for Keys {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct V;
+            impl<'de> serde::de::Visitor<'de> for V {
+                type Value = Keys;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("an object")
+                }
+                fn visit_map<A: serde::de::MapAccess<'de>>(
+                    self,
+                    mut map: A,
+                ) -> Result<Keys, A::Error> {
+                    let mut keys = Vec::new();
+                    while let Some(key) = map.next_key::<String>()? {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        keys.push(key);
+                    }
+                    Ok(Keys(keys))
+                }
+            }
+            d.deserialize_map(V)
+        }
+    }
+    serde_json::from_str::<Keys>(text).unwrap().0
+}
+
+proptest! {
+    /// ROADMAP 10.1.31, SPEC §6.4.1: `DocumentJson` is the one writer of a document's JSON form. Serialized alone it
+    /// is `Document::to_json`'s text, and serialized inside another value it is that text in place; its keys are `id`,
+    /// then `blob` when the document has one, then the field and extra field names in ascending byte order.
+    #[test]
+    fn the_json_view_is_the_documents_json_form_in_place((schema, doc) in schema_and_doc()) {
+        let view = DocumentJson::new(&doc, &schema).unwrap();
+        let text = doc.to_json(&schema).unwrap();
+        prop_assert_eq!(&serde_json::to_string(&view).unwrap(), &text);
+        prop_assert_eq!(serde_json::to_string(&(1, &view)).unwrap(), format!("[1,{text}]"));
+        let mut names: Vec<String> = doc
+            .fields()
+            .map(|(id, _)| schema.field_by_id(id).unwrap().name().to_owned())
+            .chain(doc.extra().keys().cloned())
+            .collect();
+        names.sort_unstable();
+        let mut expected = vec!["id".to_owned()];
+        if doc.blob_ref().is_some() {
+            expected.push("blob".to_owned());
+        }
+        expected.extend(names);
+        prop_assert_eq!(keys_in_order(&text), expected);
+    }
+
+    /// A document `DocumentJson::new` refuses is refused by `Document::to_json` with the same error.
+    #[test]
+    fn the_json_view_refuses_what_to_json_refuses((schema, doc) in schema_and_doc_with_field(), pick in any::<prop::sample::Index>()) {
+        let field = &schema.fields()[pick.index(schema.fields().len())];
+        let mut bad = doc.clone();
+        let wrong = match field.field_type() {
+            FieldType::F64 => Value::F64(f64::NAN),
+            FieldType::Datetime => Value::Datetime(MAX_DATETIME + 1),
+            FieldType::I64 => Value::Bool(true),
+            _ => Value::I64(1),
+        };
+        bad.insert(field.id(), wrong);
+        let err = DocumentJson::new(&bad, &schema).unwrap_err();
+        prop_assert_eq!(bad.to_json(&schema).unwrap_err(), err);
     }
 }
