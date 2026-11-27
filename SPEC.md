@@ -3449,7 +3449,9 @@ it logs or commits a document (it does not depend on `persia-blob`); the public 
 In the embedded API, `persia::PutBlobOptions` is a builder of those seven options (`PutBlobOptions::new().mime(..)
 .chunk_size(..)`; ROADMAP 10.1.15, ADR-0063 amended), checked when the blob is stored, and the token is a
 `persia::ResumeToken` (its `upload_id` and `chunk_size`), which `persia::Error::resume_token()` returns for an
-interrupted upload.
+interrupted upload. A reference a program kept outside the database is built again with `persia::blob_ref(blob_id,
+size, mime, chunk_size, user_meta)`, which checks the value rules of §9.1 (`InvalidArgument` otherwise; ROADMAP
+10.1.29, ADR-0063 amended); a put checks it against the store as any reference it is given (below).
 `expected_id` (optional) is checked against the computed id when the reader ends; a mismatch is
 `BlobIdMismatch { expected, actual }` (a caller error, not corruption) and binds nothing (ADR-0034). Over gRPC it is
 `expected_blob_id` (32 bytes) in the first message of the `PutBlob` stream; over HTTP the `Repr-Digest:
@@ -3489,7 +3491,8 @@ database anyway (written below the public API, or by copying only the container,
 input; a stored reference that disagrees with its manifest is damage. A `BlobRef` given to `put(doc, blob)`, to
 `get_blob` or to `get_blob_range` whose `blob_id` this store has bound, but whose `size` or `chunk_size` is not the
 bound manifest's, is refused (a put logs nothing, as for a reference it does not find). It is the caller's error,
-not corruption (`BlobRef::new` is public, and the same `blob_id` can hold another chunk size in another database):
+not corruption (a caller builds any reference, with `persia::blob_ref`, and the same `blob_id` can hold another chunk
+size in another database):
 `BlobManifest::check_given_ref` reports `persia_blob::Error::BlobRefMismatch { blob_id, field, given, stored }` (the
 first of the size and the chunk size that differs), `ErrorCode::InvalidArgument` in the embedded API, and `persia
 import` exits 1 at its line (§8.6). The call site decides, never an error's text: `check_ref`, which reports the

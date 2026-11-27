@@ -174,24 +174,8 @@ pub enum BlobRefDefect {
 
 /// A document's reference to a blob: `{ blob_id, size, mime, chunk_size, user_meta? }` (SPEC §9.1).
 ///
-/// Every `BlobRef` satisfies the value rules of SPEC §9.1 (checked by [`BlobRef::new`] and [`BlobRef::decode`]).
-/// An empty `user_meta` is the same value as an absent one.
-///
-/// ```
-/// use std::collections::BTreeMap;
-/// use persia_format::{BlobId, BlobRef, Reader, Writer};
-///
-/// let id = BlobId::from_bytes([7; 32]);
-/// let meta = BTreeMap::from([("filename".to_owned(), "cat.jpg".to_owned())]);
-/// let blob = BlobRef::new(id, 10 << 20, "image/jpeg", 4 << 20, meta)?;
-/// assert_eq!(blob.chunk_count(), 3);
-///
-/// let mut w = Writer::new();
-/// blob.encode(&mut w);
-/// assert_eq!(w.len(), blob.encoded_len());
-/// assert_eq!(BlobRef::decode(&mut Reader::new(w.as_slice()))?, blob);
-/// # Ok::<(), Box<dyn std::error::Error>>(())
-/// ```
+/// Every `BlobRef` satisfies the value rules of SPEC §9.1: they are checked when one is built and when one is
+/// decoded. An empty `user_meta` is the same value as an absent one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BlobRef {
     blob_id: BlobId,
@@ -203,6 +187,8 @@ pub struct BlobRef {
 
 impl BlobRef {
     /// The encoding version this build writes and reads.
+    // Encoding detail, hidden from the public API of `persia`, which re-exports this type (ROADMAP 10.1.29, ADR-0063).
+    #[doc(hidden)]
     pub const VERSION: u8 = 1;
     /// Largest valid `chunk_size`: 64 MiB.
     pub const MAX_CHUNK_SIZE: u32 = 64 << 20;
@@ -215,12 +201,33 @@ impl BlobRef {
     /// Largest `user_meta` value length in bytes.
     pub const MAX_META_VALUE_LEN: usize = 1024;
     /// Largest encoding of any valid `BlobRef`, in bytes.
+    // Encoding detail, hidden from the public API of `persia`, which re-exports this type (ROADMAP 10.1.29, ADR-0063).
+    #[doc(hidden)]
     pub const MAX_ENCODED_LEN: usize = 37_295;
 
     /// A reference to the blob `blob_id` of `size` bytes stored in chunks of `chunk_size`.
     ///
+    /// ```
+    /// use std::collections::BTreeMap;
+    /// use persia_format::{BlobId, BlobRef, Reader, Writer};
+    ///
+    /// let id = BlobId::from_bytes([7; 32]);
+    /// let meta = BTreeMap::from([("filename".to_owned(), "cat.jpg".to_owned())]);
+    /// let blob = BlobRef::new(id, 10 << 20, "image/jpeg", 4 << 20, meta)?;
+    /// assert_eq!(blob.chunk_count(), 3);
+    ///
+    /// let mut w = Writer::new();
+    /// blob.encode(&mut w);
+    /// assert_eq!(w.len(), blob.encoded_len());
+    /// assert_eq!(BlobRef::decode(&mut Reader::new(w.as_slice()))?, blob);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
     /// # Errors
     /// [`EncodeError::InvalidBlobRef`] if a value rule of SPEC §9.1 does not hold.
+    // Hidden from the public API of `persia`, which re-exports this type: its error is this crate's, and the facade
+    // builds a reference with `persia::blob_ref` (ROADMAP 10.1.29, ADR-0063).
+    #[doc(hidden)]
     pub fn new(
         blob_id: BlobId,
         size: u64,
@@ -279,6 +286,8 @@ impl BlobRef {
     }
 
     /// Bytes [`BlobRef::encode`] appends, at most [`BlobRef::MAX_ENCODED_LEN`].
+    // Encoding detail, hidden from the public API of `persia`, which re-exports this type (ROADMAP 10.1.29, ADR-0063).
+    #[doc(hidden)]
     pub fn encoded_len(&self) -> usize {
         // Every term is bounded by the value rules, so no sum can saturate.
         let meta = self.user_meta.iter().fold(0_usize, |acc, (k, v)| {
@@ -296,6 +305,8 @@ impl BlobRef {
     }
 
     /// Appends the encoding of SPEC §9.1.
+    // Encoding detail, hidden from the public API of `persia`, which re-exports this type (ROADMAP 10.1.29, ADR-0063).
+    #[doc(hidden)]
     pub fn encode(&self, w: &mut Writer) {
         w.write_u8(Self::VERSION);
         w.write_bytes(self.blob_id.as_bytes());
@@ -319,6 +330,8 @@ impl BlobRef {
     /// - [`Error::Unsupported`] with [`Unsupported::BlobRefVersion`] for a `version` above [`BlobRef::VERSION`];
     /// - [`Error::Corrupt`] for `version` 0, input that ends early, a non-canonical varint, or a value rule that
     ///   does not hold ([`Corruption::InvalidBlobRef`] at the offending field or byte).
+    // Encoding detail, hidden from the public API of `persia`, which re-exports this type (ROADMAP 10.1.29, ADR-0063).
+    #[doc(hidden)]
     pub fn decode(r: &mut Reader<'_>) -> Result<Self> {
         let mut c = r.clone();
         let blob_ref = Self::decode_fields(&mut c)?;

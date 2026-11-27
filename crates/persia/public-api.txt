@@ -651,12 +651,10 @@ pub const fn persia::Value::kind(&self) -> &'static str
 pub const persia::BlobId::HEX_LEN: usize
 pub const persia::BlobId::LEN: usize
 pub const persia::BlobRef::MAX_CHUNK_SIZE: u32
-pub const persia::BlobRef::MAX_ENCODED_LEN: usize
 pub const persia::BlobRef::MAX_META_ENTRIES: usize
 pub const persia::BlobRef::MAX_META_KEY_LEN: usize
 pub const persia::BlobRef::MAX_META_VALUE_LEN: usize
 pub const persia::BlobRef::MAX_MIME_LEN: usize
-pub const persia::BlobRef::VERSION: u8
 pub const persia::ErrorCode::ALL: &'static [Self]
 pub const persia::Level::ALL: [Self; 4]
 pub const persia::RelaxOptions::MAX_JSON_LEN: usize
@@ -779,11 +777,7 @@ pub fn persia::Blob::from_reader(reader: impl alloc::io::read::Read + 'r) -> Sel
 pub fn persia::Blob::with_options(self, options: persia::PutBlobOptions) -> Self
 pub fn persia::BlobReader::blob_ref(&self) -> &persia::BlobRef
 pub fn persia::BlobRef::chunk_count(&self) -> u32
-pub fn persia::BlobRef::decode(r: &mut persia_format::reader::Reader<'_>) -> persia_format::error::Result<Self>
-pub fn persia::BlobRef::encode(&self, w: &mut persia_format::writer::Writer)
-pub fn persia::BlobRef::encoded_len(&self) -> usize
 pub fn persia::BlobRef::mime(&self) -> &str
-pub fn persia::BlobRef::new(blob_id: persia::BlobId, size: u64, mime: impl core::convert::Into<alloc::string::String>, chunk_size: u32, user_meta: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>) -> persia_format::error::Result<Self, persia_format::error::EncodeError>
 pub fn persia::Collection::commit(&self) -> persia::Result<()>
 pub fn persia::Collection::delete(&self, id: &str) -> persia::Result<()>
 pub fn persia::Collection::durability(&self) -> persia::Durability
@@ -857,8 +851,6 @@ pub fn persia::Field::field_type(&self) -> persia::FieldType
 pub fn persia::Field::id(&self) -> persia::FieldId
 pub fn persia::Field::kind(&self) -> &persia::FieldKind
 pub fn persia::Field::name(&self) -> &str
-pub fn persia::Filter::from_json(json: &str, schema: &persia::CollectionSchema, limits: &persia_engine::query::limits::QueryLimits) -> core::result::Result<Self, persia_engine::query::QueryError>
-pub fn persia::Filter::validate(&self, schema: &persia::CollectionSchema, limits: &persia_engine::query::limits::QueryLimits) -> core::result::Result<(), persia_engine::query::QueryError>
 pub fn persia::Levels::resolve(&self) -> &[persia::Level]
 pub fn persia::OpenOptions::block_cache_bytes(self, bytes: u64) -> Self
 pub fn persia::OpenOptions::commit_interval(self, interval: core::time::Duration) -> Self
@@ -914,6 +906,7 @@ pub fn persia::Sort::new(keys: impl core::iter::traits::collect::IntoIterator<It
 pub fn persia::Sort::score() -> Self
 pub fn persia::StaticRank::new(field: impl core::convert::Into<alloc::string::String>) -> Self
 pub fn persia::TextOptions::analyzer(self, analyzer: persia::AnalyzerRef) -> Self
+pub fn persia::blob_ref(blob_id: persia::BlobId, size: u64, mime: impl core::convert::Into<alloc::string::String>, chunk_size: u32, user_meta: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>) -> persia::Result<persia::BlobRef>
 pub struct persia::AnalyzerRef
 pub struct persia::AsyncCollection
 pub struct persia::AsyncDb

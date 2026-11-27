@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia::blob_ref(blob_id, size, mime, chunk_size, user_meta) -> persia::Result<BlobRef>` (ROADMAP 10.1.29,
+  ADR-0063 amended; SPEC §9.6): builds a blob reference from its fields (one a program kept outside the database),
+  checking the value rules of SPEC §9.1; a rule that does not hold is `InvalidArgument`. A put checks the reference
+  against the store as before (`NotFound`, or `InvalidArgument` for another size or chunk size).
 - `persia gc` collects a database whose schema names an analyzer registered by its application (ROADMAP 10.4.7,
   ADR-0069; SPEC §9.5): it opens with the new `persia_engine::db::MarkOnlyDatabase`, the compaction-only open's
   recovery (one shared function: a no-token stand-in for each missing analyzer, and no flush of what it indexed,
@@ -482,6 +486,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- **Breaking** (`persia`): the engine and format detail left on the re-exported types is hidden from the
+  documentation (`#[doc(hidden)]`, no stability promise; ROADMAP 10.1.29, ADR-0063 amended): `BlobRef::new` (whose
+  error is `persia_format`'s; build a reference with `persia::blob_ref`), `BlobRef::encode`, `decode`, `encoded_len`,
+  `VERSION` and `MAX_ENCODED_LEN` (the binary encoding of SPEC §9.1), and `Filter::from_json` and `Filter::validate`,
+  which take the engine's `QueryLimits` (a search checks its filters; `Collection::search_json` reads them from JSON).
+  No public signature of `persia` names a `persia_format` type now.
 - `persia gc` and `persia compact` on a database whose schema names an analyzer registered by its application
   (ROADMAP 10.4.8; SPEC §8.6, ADR-0068 and ADR-0069 amendments) now exit 1 whenever the WAL from `wal_start` still
   holds a record of such a collection (a *pending record*: left by an application that crashed or dropped its handle

@@ -58,7 +58,7 @@ pub use asynchronous::{JobEvent, JobHook, JobKind};
 #[cfg(feature = "test-hooks")]
 #[doc(hidden)]
 pub use backup::{BackupHook, BackupStep};
-pub use blob::{Blob, BlobReader, PutBlobOptions, ResumeToken};
+pub use blob::{Blob, BlobReader, PutBlobOptions, ResumeToken, blob_ref};
 pub use collection::Collection;
 pub use db::{BlockCacheStats, Db};
 pub use error::{Error, ErrorCode, Result};
