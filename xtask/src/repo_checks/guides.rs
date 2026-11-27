@@ -24,11 +24,11 @@
 
 use std::path::{Component, Path, PathBuf};
 
-fn root() -> PathBuf {
+pub(super) fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
-fn read(rel: &str) -> String {
+pub(super) fn read(rel: &str) -> String {
     std::fs::read_to_string(root().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
 }
 
@@ -209,7 +209,7 @@ fn includes_resolve_against_their_file() {
 
 /// The pages `guides.rs` runs: the path of each item doc `#[doc = include_str!("<path>")]`, one per line, outside
 /// comments (a commented-out or `///`-quoted include names no page).
-fn pages(guides_rs: &str) -> Vec<&str> {
+pub(super) fn pages(guides_rs: &str) -> Vec<&str> {
     let mut depth = 0usize;
     let mut found = Vec::new();
     for line in guides_rs.lines() {
@@ -400,18 +400,18 @@ impl<'a> Tokenizer<'a> {
 /// How rustdoc treats a fenced block, from its info string (`LangString::parse` in rustdoc 1.99, stable: no
 /// `custom` classes, no error-code check, no per-target ignores).
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-struct Doctest {
+pub(super) struct Doctest {
     /// rustdoc collects it as a doctest: compiled unless `ignore`, run unless `no_run` or `compile_fail`.
-    rust: bool,
+    pub(super) rust: bool,
     /// Collected and run: `rust` and none of `ignore`, `ignore-*`, `no_run`, `compile_fail`.
-    runs: bool,
+    pub(super) runs: bool,
 }
 
 /// rustdoc's reading of a fence's info string: Rust when it has no word (empty, or only `{...}` attributes), or
 /// when a `rust` word, or a rustdoc attribute word seen before any other word (`no_run`, `ignore`, `ignore-*`,
 /// `should_panic`, `compile_fail`, `test_harness`, `standalone_crate`, `edition*`), is among its words; never when
 /// the tokenizer fails. `rust2021` and the like are neutral (rustdoc warns), `E0425` is another word on stable.
-fn doctest(info: &str) -> Doctest {
+pub(super) fn doctest(info: &str) -> Doctest {
     let Some(tags) = info_tags(info) else {
         return Doctest {
             rust: false,
@@ -452,19 +452,19 @@ fn doctest(info: &str) -> Doctest {
 
 /// A fenced block of a Markdown page.
 #[derive(Debug, PartialEq, Eq)]
-struct Fence<'a> {
+pub(super) struct Fence<'a> {
     /// Its info string, trimmed.
-    info: &'a str,
+    pub(super) info: &'a str,
     /// The line number of its opening fence.
-    at: usize,
+    pub(super) at: usize,
     /// Its lines, with their numbers.
-    lines: Vec<(usize, &'a str)>,
+    pub(super) lines: Vec<(usize, &'a str)>,
 }
 
 /// The fenced blocks of a Markdown page. A fence is three or more backticks or tildes, at any indentation (list
 /// items indent theirs); it closes with at least as many of the same character and nothing else on the line, and a
 /// backtick fence's info string holds no backtick, as the Markdown spec has it.
-fn fences(text: &str) -> Vec<Fence<'_>> {
+pub(super) fn fences(text: &str) -> Vec<Fence<'_>> {
     let mut blocks = Vec::new();
     // The open fence's character and length, and its block so far.
     let mut open: Option<(char, usize, Fence<'_>)> = None;

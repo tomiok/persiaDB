@@ -127,6 +127,10 @@ const GC_LEAVES = ['9.5.1', '9.5.2'];
 
 const CALLS = ['open', 'create_collection', 'put', 'put_batch', 'delete', 'commit'];
 
+/** The embedded API calls the status sentences name, in this order, when the public-API snapshot lists them. */
+const FACADE_DB = ['open', 'create_collection', 'collection', 'put_blob', 'get_blob', 'commit', 'backup', 'close'];
+const FACADE_COLLECTION = ['put', 'put_json', 'put_struct', 'get', 'delete', 'search', 'search_json'];
+
 /**
  * @typedef {Object} StatusInput
  * @property {Progress} progress
@@ -141,7 +145,9 @@ const CALLS = ['open', 'create_collection', 'put', 'put_batch', 'delete', 'commi
  * @property {boolean} hasPutBlob
  * @property {boolean} hasGetBlob
  * @property {boolean} hasQuery
- * @property {boolean} hasSearch A search on the database handle (persia::Db or Database), the SPEC call.
+ * @property {boolean} hasSearch A search on the embedded API (persia::Collection::search) or the engine database handle.
+ * @property {string[]} [dbCalls] The persia::Db calls of FACADE_DB the public-API snapshot lists.
+ * @property {string[]} [collectionCalls] The persia::Collection calls of FACADE_COLLECTION the snapshot lists.
  * @property {boolean} hasCollectionSearch The engine's CollectionViews::search, over a collection snapshot.
  * @property {boolean} hasRelaxSearch CollectionViews::search_relaxed, the cascade orchestrator.
  * @property {boolean} hasDropTerms L2 wired to its transform (not the pending stub).
@@ -690,9 +696,10 @@ export function buildStatus(ctx) {
 			? 'S3, GCS, and Azure are implemented.'
 			: `${startedPhrase(m12, 'S3, GCS, and Azure', true)}.`;
 	const blobSentence = blob.now;
-	const persia = ctx.persiaExports
-		? 'The persia crate exports a public API.'
-		: 'The public persia crate exports no Db and no Collection.';
+	// With the embedded API in the tree (ROADMAP 10.1.41), the sentences name its calls, not the engine's.
+	const facade = ctx.persiaExports && ctx.hasSearch;
+	const facadeSentence = 'The persia crate is the embedded API: persia::Db and persia::Collection.';
+	const persia = ctx.persiaExports ? facadeSentence : 'The public persia crate exports no Db and no Collection.';
 	const unpublished = ctx.published ? '' : ` The crates are unpublished (publish = false, version ${ctx.version}).`;
 	const libraryNow = seal(
 		`persia-format implements the on-disk codecs (${countState(m1)}). persia-storage implements the Storage trait, memory and local-file backends, and the single-file container (${countState(m2)}). ${cloud} ${engineShort} persia-analysis implements tokenizers and the built-in analyzers ${englishList(ctx.analyzers)} (${countState(m4)}). It does not search. ${blobSentence} ${persia}${unpublished}`,
@@ -705,7 +712,7 @@ export function buildStatus(ctx) {
 		ctx.dbFns.has('put') &&
 		ctx.dbFns.has('commit');
 	const openSentence = replayReady
-		? 'Database::open reloads the committed manifest, checks it against the superblock, and replays the WAL.'
+		? 'Opening a database reloads the committed manifest, checks it against the superblock, and replays the WAL.'
 		: '';
 	const mentionOpen = m6.state === 'in progress' || m6.state === 'done' || m6.done > 0;
 	const openGap = !mentionOpen
@@ -754,19 +761,24 @@ export function buildStatus(ctx) {
 		internalBlob.length > 0
 			? ` ${englishList(internalBlob)} ${internalBlob.length === 1 ? 'lives' : 'live'} in persia::internal.`
 			: '';
+	const dbCalls = ctx.dbCalls ?? [];
+	const collectionCalls = ctx.collectionCalls ?? [];
 	const engineCalls = seal(
-		`${hasSentence}${getSentence}${absentSentence} Those SPEC names are not the public embedded API.${internalBlobSentence}`,
+		facade
+			? `The embedded API is persia::Db (${englishList(dbCalls)}) and persia::Collection (${englishList(collectionCalls)}). The engine below it is not a public API.`
+			: `${hasSentence}${getSentence}${absentSentence} Those SPEC names are not the public embedded API.${internalBlobSentence}`,
 	);
 
 	const noPublicApi = seal(
 		ctx.persiaExports
-			? 'The persia crate exports a public API.'
+			? facadeSentence
 			: `The public persia crate exports no Db and no Collection.${m7.state === 'done' || ctx.hasSearch ? '' : collectionSearch ? ' A search runs only through persia-engine (CollectionViews::search).' : ' Nothing runs a search.'}${unpublished}`,
 	);
 
 	const canWrite = ctx.dbFns.has('put') && ctx.dbFns.has('delete') && ctx.dbFns.has('commit');
-	const queryClause =
-		m7.state === 'done' || ctx.hasSearch
+	const queryClause = facade
+		? 'Collection::search runs a ranked search.'
+		: m7.state === 'done' || ctx.hasSearch
 			? 'A search call is in the tree.'
 			: collectionSearch
 				? 'persia-engine runs a ranked search over a collection snapshot: BM25F, filters, sorts, facets, and pages.'
@@ -776,7 +788,7 @@ export function buildStatus(ctx) {
 					? 'Query code is in the tree. Nothing runs a search.'
 					: 'Nothing runs a search.';
 	const preAlpha = seal(
-		`Persia DB is pre-alpha. ${ctx.persiaExports ? 'The persia crate exports a public API.' : 'The public persia crate has no Db::open.'} ${canWrite ? 'persia-engine can put, delete, and commit a document.' : 'The engine does not yet put documents.'} ${queryClause}`,
+		`Persia DB is pre-alpha. ${ctx.persiaExports ? facadeSentence : 'The public persia crate has no Db::open.'} ${facade ? 'A Collection can put, delete, and commit a document.' : canWrite ? 'persia-engine can put, delete, and commit a document.' : 'The engine does not yet put documents.'} ${queryClause}`,
 	);
 
 	const blocking = ['M6', 'M7', 'M8', 'M9']
@@ -790,7 +802,9 @@ export function buildStatus(ctx) {
 				: `The first release a caller is supposed to use is v0.1 (M10). That milestone is blocked on ${englishList(blocking.map((ms) => `${ms.id} (${ms.state === 'in progress' ? 'in progress' : 'not started'})`))}.`,
 	);
 
-	const segmentSearch = collectionSearch
+	const segmentSearch = facade
+		? 'Segments are searched through Collection::search.'
+		: collectionSearch
 		? 'Segments are searched through CollectionViews::search.'
 		: matching
 			? 'A segment view can be matched. There is no search call.'
@@ -855,7 +869,9 @@ export function buildStatus(ctx) {
 	if (explainState === 'done') requestBits.push('explain');
 	const featuresLead = seal(
 		`${
-			searches
+			facade
+				? 'Ranked full-text search, filters, sorts, and facets run through Collection::search.'
+				: searches
 				? collectionSearch && !ctx.hasSearch
 					? 'Ranked full-text search, filters, sorts, and facets run as library code in persia-engine, over a collection snapshot.'
 					: 'A search call is in the tree.'
@@ -865,14 +881,18 @@ export function buildStatus(ctx) {
 		} ${ctx.persiaExports ? '' : 'There is no Db to open yet (M10).'} ${relax.lead} The write path is ${isState(m6)}.`,
 	);
 	const queryCell = seal(
-		collectionSearch
+		facade
+			? `${capitalize(isState(m7))}: the query syntax, the filter DSL, and BM25F scoring return ranked hits through Collection::search.`
+			: collectionSearch
 			? `Library code (${countState(m7)}): the compiler, the filter DSL, and the scorer return ranked hits through CollectionViews::search.`
 			: bm25 && queryModel
 				? `Compiler, filter DSL, and scorer are library code (${countState(m7)}). They do not return hits.`
 				: `${capitalize(isState(m7))}.`,
 	);
 	const matchingCell = seal(
-		collectionSearch
+		facade
+			? `${capitalize(isState(m7))}: ${englishList(requestBits)}, through Collection::search.`
+			: collectionSearch
 			? `Library code (${countState(m7)}): ${englishList(requestBits)}, through CollectionViews::search.`
 			: matching
 				? `Matching over one view is library code (${countState(m7)}). Sorts, cursor pages, and facets are not done.`
@@ -884,7 +904,7 @@ export function buildStatus(ctx) {
 	);
 	const openCell = seal(
 		ctx.persiaExports
-			? 'The persia crate exports a public API.'
+			? `${capitalize(isState(m10))}. Db::open and OpenOptions::open open a database file.`
 			: `${capitalize(isState(m10))}. ${collectionSearch && ctx.dbFns.has('open') ? 'Below it, persia_engine::db::Database opens a file and CollectionViews::search searches it.' : ''}`,
 	);
 
@@ -984,6 +1004,9 @@ function readInput() {
 	const searchRs = read('crates/persia-engine/src/db/search.rs');
 	const explainRs = read('crates/persia-engine/src/search/explain.rs');
 	const persiaLib = read('crates/persia/src/lib.rs');
+	// The embedded API as rustdoc sees it (ROADMAP 10.1.12): the committed public-API snapshot.
+	const facade = read('crates/persia/public-api.txt');
+	const facadeFn = (path) => new RegExp(`^pub (?:const )?fn persia::${path}[(<]`, 'm').test(facade);
 	const persiaBlob = read('crates/persia/src/internal/blob.rs');
 	const blobLib = read('crates/persia-blob/src/lib.rs');
 	const modules = publicModules(engineLib).filter((name) => name.length > 0);
@@ -998,14 +1021,16 @@ function readInput() {
 		dbFns,
 		snapshotFns: exportedFns(snapshotRs),
 		// `pub mod internal` is doc(hidden). It is not the embedded API (M10).
-		persiaExports: visibleExports(persiaLib),
+		persiaExports: visibleExports(persiaLib) && /^pub struct persia::Db$/m.test(facade),
+		dbCalls: FACADE_DB.filter((name) => facadeFn(`Db::${name}`)),
+		collectionCalls: FACADE_COLLECTION.filter((name) => facadeFn(`Collection::${name}`)),
 		blobExports: exports(blobLib),
-		hasOpenOptions: /pub struct OpenOptions\b/.test(persiaLib) || /pub struct OpenOptions\b/.test(dbRs),
-		hasPutStruct: dbFns.has('put_struct') || /pub fn put_struct\b/.test(persiaLib),
-		hasPutBlob: dbFns.has('put_blob') || /pub fn put_blob\b/.test(persiaLib) || /pub fn put_blob\b/.test(persiaBlob),
-		hasGetBlob: dbFns.has('get_blob') || /pub fn get_blob\b/.test(persiaLib) || /pub fn get_blob\b/.test(persiaBlob),
+		hasOpenOptions: /^pub struct persia::OpenOptions$/m.test(facade) || /pub struct OpenOptions\b/.test(dbRs),
+		hasPutStruct: facadeFn('Collection::put_struct') || dbFns.has('put_struct') || /pub fn put_struct\b/.test(persiaLib),
+		hasPutBlob: facadeFn('Db::put_blob') || dbFns.has('put_blob') || /pub fn put_blob\b/.test(persiaLib) || /pub fn put_blob\b/.test(persiaBlob),
+		hasGetBlob: facadeFn('Db::get_blob') || dbFns.has('get_blob') || /pub fn get_blob\b/.test(persiaLib) || /pub fn get_blob\b/.test(persiaBlob),
 		hasQuery: modules.includes('query'),
-		hasSearch: dbFns.has('search') || /pub fn search\b/.test(persiaLib),
+		hasSearch: facadeFn('Collection::search') || dbFns.has('search') || /pub fn search\b/.test(persiaLib),
 		hasCollectionSearch: ['crates/persia-engine/src/db/search.rs', 'crates/persia-engine/src/db/views.rs'].some((rel) =>
 			implHasMethod(read(rel), 'CollectionViews', 'search'),
 		),

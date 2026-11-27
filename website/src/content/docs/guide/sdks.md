@@ -15,8 +15,8 @@ head:
 ---
 
 **Planned. Not implemented.** There is no Go module, no npm package, and no Python package. The Rust API these bindings
-will wrap does not exist either: [`persia`](https://github.com/tomiok/persiaDB/blob/main/crates/persia/src/lib.rs#L1-L4)
-exports no types. Nothing on this page opens a database.
+will wrap is the [`persia`](https://github.com/tomiok/persiaDB/blob/main/crates/persia/src/lib.rs) crate (`Db`, `Collection`,
+`Collection::search`). Nothing on this page opens a database from Go, TypeScript, or Python.
 
 This page is the short version. The design is
 [ADR-0018](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0018-embedded-sdk-bindings.md)
@@ -29,9 +29,9 @@ SPEC §13 names both, and they are easy to mix up.
 
 | | Embedded bindings | Network clients |
 |---|---|---|
-| Who calls them | A Go, TypeScript, or Python program that wants a file, the way Rust will call `Db::open` | A program talking to `persia-server` |
+| Who calls them | A Go, TypeScript, or Python program that wants a file, the way Rust calls `Db::open` | A program talking to `persia-server` |
 | Paths | `sdk/persia`, `sdk/node`, `sdk/python` (none of these directories exist) | `sdk/rust` (`persia-client`), `sdk/go` (`persia-go`) |
-| Milestone | 14.6 (v1.0), after the `persia` facade (M10). Design: ADR-0018. The same leaves stay listed under M16 and are checked when 14.6 is done. 16.4.1 and 16.6 stay v1.1. | Rust and Go are 14.2 and 14.3, compatibility is 14.4, and the TypeScript network client is 14.5, after the server (M11) and sharding (M13) |
+| Milestone | 14.6 (v1.0), over the `persia` facade (M10). Design: ADR-0018. The same leaves stay listed under M16 and are checked when 14.6 is done. 16.4.1 and 16.6 stay v1.1. | Rust and Go are 14.2 and 14.3, compatibility is 14.4, and the TypeScript network client is 14.5, after the server (M11) and sharding (M13) |
 | Status | Design only | Not started |
 
 The network clients are described on [Server, cloud, and Kubernetes](/guide/server/).
@@ -89,14 +89,15 @@ database before commit (SPEC §8.2). Commit is the durable manifest. A second wr
 Search is BM25F (SPEC §7.2). A query that does not match is specified to relax — synonyms, dropped terms, prefix,
 edit distance, then a fallback — and the response says what changed (SPEC §7.6). %%RELAXATION_CELL%%
 [Synonym and prefix search](/guide/synonym-and-prefix-search/) is the L1 and L3 steps.
-M10 depends on M8, so the first core release that the bindings can wrap already includes it. The
-bindings do not implement it themselves. Empty hits are still a successful response when relaxation is
+The `persia` crate already runs that cascade (`Collection::search`), so the bindings wrap it and do
+not implement it themselves. Empty hits are still a successful response when relaxation is
 off or the budget runs out. Facets, sort, and cursors on the engine are [Faceted search](/guide/faceted-search/).
 
 Go methods take `context.Context` and return `error` values with `errors.Is` sentinels. TypeScript
 methods return promises and throw `PersiaError` with a `code`; `get` of a missing id returns `null`.
-The engine search accepts a deadline and a cancellation token (`Execution`). These planned bindings do not
-wire `context.Context` or `AbortSignal` to that token. The cascade budget is `relax.budget_ms` on the query,
+The engine reads a search deadline and a cancellation token (SPEC §7.3). The `persia` facade does not take a
+deadline yet; an async search (`AsyncCollection::search`) dropped before it ends is cancelled. These planned bindings
+do not wire `context.Context` or `AbortSignal` to a cancellation. The cascade budget is `relax.budget_ms` on the query,
 separate from the search deadline. [Faceted search](/guide/faceted-search/) is that split.
 
 Pagination is a page per call (`limit` / `offset`, or a `search_after` cursor, SPEC §7.4). There is no
@@ -110,8 +111,8 @@ A fault on a mapped page kills the process (ADR-0010). Mapped reads are opt-in a
 
 ## What has to exist first
 
-The bindings are blocked on the Rust API (ROADMAP 10.1): `Db::open`, collections, put, delete, get,
-commit, search, a stable error type. %%M10_BLOCKED%% Blobs in the SDK wait on the same work, plus the upload-staging
+The bindings wrap the Rust API (ROADMAP 10.1): `Db::open`, collections, put, delete, get,
+commit, search, and a stable error type (`ErrorCode`, whose numbers are the C ABI's codes). %%M10_BLOCKED%% Blobs in the SDK wait on the same work, plus the upload-staging
 decision (SPEC §18.8). Opening `s3://` waits on cloud backends (M12). The WASM package waits on a
 storage backend nobody has designed.
 

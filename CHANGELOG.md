@@ -518,6 +518,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- Docs site: the other guides are rewritten against the embedded API (ROADMAP 10.1.41): getting started, blob
+  storage, durability, the embedded API, code, faceted, fuzzy, synonym and prefix search, ranking, text analysis,
+  features, FAQ, comparison, embedded search, SDKs, for agents, architecture and file format no longer call the
+  `persia::Db` facade planned or illustrative, nor present engine types (`Database`, `CollectionViews`, `RelaxPlan`,
+  `QueryLimits`, `persia::internal`) as calls. Every Rust sample is a whole program that `cargo test` runs
+  (`crates/persia-docs/src/guides.rs`), and a repo check fails when a guide names a `persia` item the public-API
+  snapshot (`crates/persia/public-api.txt`) lacks or an engine type outside a part marked as engine internals. The
+  site's status sentences name `Collection::search` and the facade's calls instead of the engine's.
 - Docs site: the guides "Filtered full-text search" and "Typo-tolerant search" are rewritten against the embedded
   API (ROADMAP 10.1.34): search through `Collection::search` and `search_json`, filters by
   `SearchRequest::filter_json` or a typed `Filter` (no `Filter::from_json`), hard and soft filters, and only the

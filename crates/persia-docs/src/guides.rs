@@ -17,12 +17,54 @@
 //!
 //! The pages are Markdown for the website (Starlight, Expressive Code), which shows every line of a block, so their
 //! samples are whole programs (a `fn main`) with no hidden `# ` lines; the other blocks are tagged (`json`, `text`),
-//! which rustdoc does not run. A guide whose samples are not checked here is listed nowhere else: add a page to this
-//! module when its samples are meant to compile.
+//! which rustdoc does not run. Every sample runs (no `ignore`, `no_run` or `compile_fail`) and opens its database in a
+//! temporary directory (`tempfile::tempdir()`), so a run leaves nothing behind and can repeat. A guide page with a
+//! block the site shows as Rust must be listed here, and no page may name an item `crates/persia/public-api.txt`
+//! lacks: `guides_name_only_the_public_api` in `xtask/src/repo_checks/guide_api.rs` (ROADMAP 10.1.41).
+
+/// `website/src/content/docs/guide/blobs.md`.
+#[doc = include_str!("../../../website/src/content/docs/guide/blobs.md")]
+pub struct Blobs;
+
+/// `website/src/content/docs/guide/code.md`.
+#[doc = include_str!("../../../website/src/content/docs/guide/code.md")]
+pub struct Code;
+
+/// `website/src/content/docs/guide/durability.md`.
+#[doc = include_str!("../../../website/src/content/docs/guide/durability.md")]
+pub struct Durability;
+
+/// `website/src/content/docs/guide/embedded-api.md`.
+#[doc = include_str!("../../../website/src/content/docs/guide/embedded-api.md")]
+pub struct EmbeddedApi;
+
+/// `website/src/content/docs/guide/faceted-search.md`.
+#[doc = include_str!("../../../website/src/content/docs/guide/faceted-search.md")]
+pub struct FacetedSearch;
 
 /// `website/src/content/docs/guide/filtered-search.md`.
 #[doc = include_str!("../../../website/src/content/docs/guide/filtered-search.md")]
 pub struct FilteredSearch;
+
+/// `website/src/content/docs/guide/fuzzy-search.md`.
+#[doc = include_str!("../../../website/src/content/docs/guide/fuzzy-search.md")]
+pub struct FuzzySearch;
+
+/// `website/src/content/docs/guide/getting-started.md`.
+#[doc = include_str!("../../../website/src/content/docs/guide/getting-started.md")]
+pub struct GettingStarted;
+
+/// `website/src/content/docs/guide/ranking.md`.
+#[doc = include_str!("../../../website/src/content/docs/guide/ranking.md")]
+pub struct Ranking;
+
+/// `website/src/content/docs/guide/synonym-and-prefix-search.md`.
+#[doc = include_str!("../../../website/src/content/docs/guide/synonym-and-prefix-search.md")]
+pub struct SynonymAndPrefixSearch;
+
+/// `website/src/content/docs/guide/text-analysis.md`.
+#[doc = include_str!("../../../website/src/content/docs/guide/text-analysis.md")]
+pub struct TextAnalysis;
 
 /// `website/src/content/docs/guide/typo-tolerant-search.md`.
 #[doc = include_str!("../../../website/src/content/docs/guide/typo-tolerant-search.md")]

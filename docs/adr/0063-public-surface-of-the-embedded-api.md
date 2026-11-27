@@ -235,7 +235,7 @@ one filter fail with two codes and contradict item 8, so it is `LIMIT`.) The mes
 to the setter equals the one of the same filter inside a request JSON, or both fail with one code; one test per
 limit; refused text; the later setter kept; a cursor of one form pages the other).
 
-## Amendment (2026-11-27): the website guides are checked against the public surface, outside `persia` (ROADMAP 10.1.34, 10.1.42, 10.1.43)
+## Amendment (2026-11-27): the website guides are checked against the public surface, outside `persia` (ROADMAP 10.1.34, 10.1.41, 10.1.42, 10.1.43)
 
 ROADMAP 10.1.34 made the Rust samples of two website guides doctests of `persia` (`crates/persia/src/guides.rs`,
 `#[doc = include_str!("../../../website/...")]`). A crate's directory is all `cargo package` ships, so those paths
@@ -277,3 +277,20 @@ the crate too.
    stops rustdoc's tokenizer at the `=`, and rustdoc then runs no doctest of the block (it only warns), so a page
    cannot use that form for a sample. Pages are found only from `#[doc = include_str!("...")]` lines outside
    comments.
+5. **No guide names an item the snapshot lacks** (ROADMAP 10.1.41). `guides_name_only_the_public_api`
+   (`xtask/src/repo_checks/guide_api.rs`) reads every page under `website/src/content/docs/guide/` against
+   `crates/persia/public-api.txt`: a `persia::` path (`use` groups expanded) must be the path of a `pub` line of the
+   snapshot, or a standard trait's method (`default`, `from_str`, `clone`, `from`, `to_string`) of a type the snapshot
+   lists that `impl` for; a path whose first segment is a type `persia` exports (`Collection::search`,
+   `Filter::from_json`), in prose or code, is read as `persia::` plus that path; no lower crate (`persia_engine`,
+   `persia_blob`, `persia_format`, `persia_storage`, `persia_analysis`) is named, and no word of code (an inline span
+   or a fenced line) is one of the never-public engine types of item 3 or those guides had called (`CollectionViews`,
+   `QueryLimits`, `RelaxPlan`, `QueryCompiler`, `SimFile`, ...). A block the site shows as Rust must be on a page
+   `guides.rs` runs, and on such a page every block rustdoc reads as Rust must run. Pages that describe the engine on
+   purpose (the architecture, the file format, ranking internals) mark each such part between
+   `<!-- engine-internals -->` and `<!-- /engine-internals -->` (MDX: `{/* engine-internals */}` and
+   `{/* /engine-internals */}`), whose first line says in prose that it names engine internals; the name rules skip
+   those parts and nothing else, and an unclosed, nested or unannounced part fails. The status sentences
+   `website/src/status.mjs` puts into pages (`%%TOKEN%%`) are checked by `website/src/status.test.mjs`, which reads
+   the same snapshot for the calls it names. A method named on a value (`page.next_cursor()`) is not resolved: the
+   check does not type the samples, and rustdoc compiling them covers those.

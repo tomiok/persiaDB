@@ -4,6 +4,8 @@
 //! website guides and the include paths of `persia`'s sources (`repo_checks/guides.rs`).
 
 #[cfg(test)]
+mod guide_api;
+#[cfg(test)]
 mod guides;
 
 #[cfg(test)]

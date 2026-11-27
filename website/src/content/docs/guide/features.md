@@ -15,8 +15,7 @@ head:
 ---
 
 %%FEATURES_LEAD%%
-Schema, analyzers, the container commit, segment bytes, and part of the write path also exist as library code.
-%%NO_PUBLIC_API%%
+What is built, an application calls through the `persia` crate: `Db::open`, a `Collection`, and `Collection::search` (or `search_json`). [Getting started](/guide/getting-started/) is the walkthrough.
 
 | Capability | Status | Defined in |
 |---|---|---|
@@ -24,8 +23,8 @@ Schema, analyzers, the container commit, segment bytes, and part of the write pa
 | Query AST, user-text compiler, filter DSL, limits, BM25F | %%QUERY_CELL%% | SPEC §7.1, §7.2 |
 | Matching, filters, column sort, paging, facets | %%MATCHING_CELL%% | SPEC §7.3–§7.5 |
 | Zero-results relaxation | %%RELAXATION_CELL%% | SPEC §7.6 |
-| Schema and documents | Done as library code (M3). Not the `Db` API. | SPEC §6 |
-| Analyzers (`standard`, `keyword`, `whitespace`, `en`, `es`, `pt`, `fr`, `de`, `it`) | Done as library code (M4). The query compiler runs them when it compiles user text. [Text analysis](/guide/text-analysis/). | SPEC §6.3 |
+| Schema and documents | Done (M3): `Db::create_collection`, `Db::create_collection_json`, `Collection::put_json`, `Collection::get`. | SPEC §6 |
+| Analyzers (`standard`, `keyword`, `whitespace`, `en`, `es`, `pt`, `fr`, `de`, `it`) | Done (M4). A search analyzes its user text with each field's analyzer. [Text analysis](/guide/text-analysis/). | SPEC §6.3 |
 | Segment writer and reader | %%M5_CELL%% | SPEC §5 |
 | Crash-safe commit and recovery | %%DURABILITY_CELL%% | SPEC §4.5, §8.6 |
 | Blob storage | %%STATE_M9%% | SPEC §9 |
@@ -47,22 +46,21 @@ are separate from the text and are not relaxed unless you opt in.
 Ranking is BM25F (SPEC §7.2): each field has a weight, `k1`, and `b`, and a collection may set a
 static rank (for example `log1p` of a sales field). Collection statistics (`N`, document frequency,
 average field length) are summed across live segments. Scores must match the reference model
-within a documented epsilon (SPEC §7.2). `TermScorer` and `persia-engine/tests/reference` do that
-for one term (ROADMAP 7.3.4). Ranked hits over one segment or memtable view are library code
-(ROADMAP 7.4.1–7.4.4), and so is a collection search (`CollectionViews::search`). A search call on the database handle is not (M10). The formula, the bounds, proximity, and where the static rank is applied are
+within a documented epsilon (SPEC §7.2); the engine's tests check that against a naive reference
+(ROADMAP 7.3.4). `Collection::search` runs the ranked search over the collection's snapshot. The formula, the bounds, proximity, and where the static rank is applied are
 [BM25F ranking](/guide/ranking/). Filters, facets, sort, cursor pages, deadlines, and explain are
 [Faceted search](/guide/faceted-search/). The longer account of typos and relaxation is
 [Typo-tolerant search](/guide/typo-tolerant-search/).
 
-Over one view — a segment, or the memtable — `SearchPlan` collects the top k by score, then docid,
-with block-max WAND by default (`MaxScore` is the other strategy) (ROADMAP 7.4.1–7.4.4, SPEC §7.3).
+Over one view — a segment, or the memtable — the engine collects the top k by score, then docid,
+with block-max WAND by default (MaxScore is the other strategy) (ROADMAP 7.4.1–7.4.4, SPEC §7.3).
 Pruning does not change the hits: pruned and exhaustive top k are the same documents, scores bit for bit.
 A segment view drops tombstoned documents in the postings iterator, before a document is scored or
 offered to the collector, so a deleted document cannot raise the top-k threshold. Block bounds may
-still cover deleted documents; that only prunes less (SPEC §7.3). Also library code: filter bitmaps
+still cover deleted documents; that only prunes less (SPEC §7.3). Also in the search: filter bitmaps
 (ROADMAP 7.4.5), the memtable hiding every older segment copy of an id (ROADMAP 7.4.6), searching
 segments in parallel (ROADMAP 7.6.1), sort by a column and a `search_after` cursor (ROADMAP 7.5.1,
-7.5.2), facets (ROADMAP 7.5.3), and `explain: true` (ROADMAP 7.7.1), all through `CollectionViews::search`. Highlighting is post-v1.
+7.5.2), facets (ROADMAP 7.5.3), and `explain: true` (ROADMAP 7.7.1), all through `Collection::search`. Highlighting is post-v1.
 
 ## Zero-results relaxation
 
@@ -114,7 +112,7 @@ or analyzer is rejected and needs a new collection version (reindex). Unknown JS
 rejected when `strict` is true, and kept as stored-only fields when it is false (SPEC §6.4).
 Documents are submitted as JSON, or as typed structs in the SDKs, and stored as CBOR.
 
-The schema sketch in SPEC §6.2, illustrative:
+The schema of SPEC §6.2, as `Db::create_collection_json` takes it:
 
 ```json
 {
@@ -138,15 +136,15 @@ lowercase), `keyword`, `whitespace`, and language analyzers `en`, `es`, `pt`, `f
 (stopwords, a Snowball-style stemmer, accent folding). Positions, used for phrases, are opt-in per field
 (SPEC §18.4). The analyzer's name and version are stored in the schema so a later change is visible.
 
-Those pipelines live in `persia-analysis` (M4). That crate analyzes text. What each built-in emits, and how the query compiler uses it, is [Text analysis](/guide/text-analysis/). Ranked search runs in `persia-engine`.
+A `text` field names its analyzer in the schema. What each built-in emits, and how a search analyzes its user text, is [Text analysis](/guide/text-analysis/).
 
 ## Durability
 
-Writes are `put` (upsert by id), `delete`, batches, `get`, and `commit`, plus an auto-commit policy
-(SPEC §8.1). The intended path (SPEC §8.2):
+Writes are `Collection::put` (upsert by id), `delete`, `put_batch`, `get`, and `commit`, plus an auto-commit policy
+(SPEC §8.1). The path (SPEC §8.2):
 
-1. The operation is appended to the WAL. Durability of a call is `Buffered`, `Fsync`, or `Async`.
-   The default at commit is `Fsync`.
+1. The operation is appended to the WAL. Durability of a call is `Durability::Buffered`, `Fsync`, or `Async`
+   (`OpenOptions::durability`, `Collection::with_durability`). The default is `Fsync`.
 2. The operation is applied to the memtable and becomes searchable.
 3. When the memtable crosses a size or idle threshold (defaults 64 MiB and 10 seconds), it is flushed
    to a new immutable segment.
@@ -176,7 +174,7 @@ Write order is deliberate: the blob is durable first, then the document that ref
 logged (SPEC §9.5). A crash in between leaves an orphan. Garbage collection keeps anything a live
 snapshot, the WAL, or a pin still references. Remote orphans wait out a grace period (default 24
 hours). The local pack is rewritten with no grace period once enough of it is unreferenced.
-`persia verify` fails if a referenced blob is missing. `put_blob` resumes a remote upload from a `ResumeToken`.
+`persia verify` fails if a referenced blob is missing. `Db::put_blob` stores a file and `Collection::put_with_blob` a file with its document; `PutBlobOptions::resume` takes a `ResumeToken` for a remote upload.
 
-%%BLOB_NOW%% `BlobId` and `BlobRef` live in `persia-format` (ROADMAP 1.10.1): limits and binary encoding are in SPEC §9.1 and ADR-0011.
+%%BLOB_NOW%% `BlobId` and `BlobRef` are re-exported under `persia::`: their limits and binary encoding are in SPEC §9.1 and ADR-0011.
 [Blob storage](/guide/blobs/) is the pack file, the remote layout, resume, reader leases, and garbage collection.

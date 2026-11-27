@@ -38,124 +38,85 @@ function walk(dir) {
 	return files;
 }
 
-test('the live tree matches the write path that is actually checked in', () => {
-	const m5 = progress.milestones.find((ms) => ms.id === 'M5');
-	const m6 = progress.milestones.find((ms) => ms.id === 'M6');
-	const m7 = progress.milestones.find((ms) => ms.id === 'M7');
-	assert.equal(m5?.state, 'done');
-	assert.equal(m6?.state, 'in progress');
-	assert.equal(m7?.state, 'done');
-	assert.equal(m7?.done, m7?.leaves);
+test('the live tree names the embedded API, not the engine', () => {
+	for (const id of ['M5', 'M6', 'M7', 'M8', 'M9']) {
+		assert.equal(progress.milestones.find((ms) => ms.id === id)?.state, 'done', id);
+	}
 	assert.equal(status.walReady, true);
 	for (const text of [status.engineShort, status.engineNow, status.libraryNow]) {
 		assert.match(text, /WAL with chunks, group commit, and replay/);
-		assert.equal(text.includes('query path is in progress'), false);
+		assert.match(text, /segment merging/);
 		assert.equal(text.includes('Nothing searches'), false);
-		assert.equal(text.includes('There is no query engine'), false);
-		assert.equal(text.includes('No WAL'), false);
-		assert.equal(text.includes('no memtable'), false);
-		assert.equal(text.includes('M5 in progress'), false);
 		assert.equal(text.includes('"'), false);
 	}
-	assert.match(status.preAlpha, /A search call is in the tree/);
-	assert.equal(status.preAlpha.includes('Nothing runs a search'), false);
-	assert.match(status.preAlpha, /can put, delete, and commit/);
-	assert.equal(status.preAlpha.includes('"'), false);
-	assert.match(status.engineShort, /tombstone sidecars/);
-	assert.match(status.engineShort, /segment merging/);
-	assert.equal(status.engineShort.includes('filter DSL'), false);
+	// ROADMAP 10.1.41: the facade's calls, from crates/persia/public-api.txt.
 	assert.match(
-		status.engineShort,
-		/Relaxation is in progress \(M8, \d+\/\d+\): every cascade level builds a query/,
+		status.engineCalls,
+		/^The embedded API is persia::Db \(open, create_collection, collection, put_blob, get_blob, commit, backup, and close\) and persia::Collection \(put, put_json, put_struct, get, delete, search, and search_json\)\./,
 	);
-	assert.equal(status.engineShort.includes('synonyms are not built'), false);
-	assert.equal(status.engineShort.includes('prefix are not built'), false);
-	assert.equal(status.engineShort.includes('are not built'), false);
-	assert.match(status.libraryNow, /local pack file/);
-	assert.match(status.libraryNow, /remote key layout/);
-	assert.match(status.libraryNow, /garbage collection/);
-	assert.equal(status.libraryNow.includes('exports no API'), false);
-	assert.equal(status.libraryNow.includes('are not written'), false);
-	assert.equal(status.libraryNow.includes('exports a public API'), false);
-	assert.match(status.relaxationNow, /Every cascade level builds a query/);
-	assert.match(status.relaxationNow, /L4 fuzzy reports a correction when that step found the hits/);
-	assert.match(status.relaxationNow, /L5 fallback flags its order/);
-	assert.match(status.relaxationNow, /typo tiers rank fewer edits first/);
-	assert.match(status.relaxationNow, /relax options can set fill/);
-	assert.match(status.relaxationNow, /last_resort adds one filter step/);
-	assert.match(status.relaxationNow, /an explained hit names its step/);
-	assert.match(status.relaxationNow, /Not every M8 leaf is done/);
-	assert.equal(status.relaxationNow.includes('A typo is not corrected'), false);
-	assert.equal(status.relaxationNow.includes('Levels after exact do not build a query'), false);
-	assert.equal(status.relaxationNow.includes('A one-term typo still returns no hits'), false);
-	assert.equal(status.relaxationNow.includes('are not built'), false);
-	assert.match(status.blobNow, /local pack file/);
-	assert.match(status.blobNow, /remote key layout/);
-	assert.match(status.blobNow, /document ordering/);
-	assert.match(status.blobNow, /garbage collection/);
-	assert.match(status.blobNow, /put_blob and get_blob live in persia::internal/);
-	assert.match(status.blobNow, /The public Db facade is milestone M10/);
-	assert.equal(status.blobNow.includes('are not written'), false);
-	assert.match(status.queryPathNow, /filters, sorts, cursor pages, facets, deadlines, and explain/);
-	assert.equal(status.engineShort.includes('Open and recovery orchestration is only partly done'), false);
-	assert.match(status.engineNow, /Public modules: .*wal/);
-	assert.equal(status.engineModules.split(', ').includes('query'), true);
-	assert.equal(status.engineModules.split(', ').includes('score'), true);
-	assert.equal(status.engineModules.split(', ').includes('stats'), true);
-	assert.match(status.engineCalls, /Database has open, create_collection, put, put_batch, delete, and commit/);
-	assert.match(status.engineCalls, /no persia::Db/);
-	assert.match(status.engineCalls, /put_blob and get_blob live in persia::internal/);
-	assert.equal(status.engineCalls.includes('no put_blob'), false);
-	assert.equal(status.engineCalls.includes('no get_blob'), false);
-	assert.match(status.engineCalls, /CollectionViews::search runs a ranked search over a collection snapshot/);
-	assert.match(status.engineCalls, /no search on the database handle/);
-	assert.match(status.writePathNow, /replays the WAL/);
-	assert.equal(status.writePathNow.includes('A collection snapshot can be searched as library code'), false);
-	assert.match(status.writePathNow, /Open and recovery orchestration is done/);
-	assert.match(status.noPublicApi, /exports no Db and no Collection/);
-	assert.equal(status.noPublicApi.includes('A search runs only through persia-engine'), false);
-	assert.match(status.noPublicApi, /unpublished/);
-	assert.match(status.m10Blocked, /M6 \(in progress\)/);
-	assert.equal(status.m10Blocked.includes('M7'), false);
-	assert.match(status.m5Cell, /Done \(M5,/);
-	assert.match(status.m5Cell, /Segments are searched through CollectionViews::search/);
-	assert.match(status.pillarEngine, /WAL, commit, and segment merging/);
-	assert.match(status.pillarEngine, /Scoring and query execution are done/);
-	assert.equal(status.pillarEngine.includes('no search call on the database handle'), false);
-	assert.match(status.tokens['%%FEATURES_LEAD%%'], /run as library code in persia-engine/);
-	assert.match(status.tokens['%%FEATURES_LEAD%%'], /every cascade level builds a query\./);
-	assert.equal(status.tokens['%%FEATURES_LEAD%%'].includes('a typo is not corrected'), false);
-	assert.equal(status.tokens['%%FEATURES_LEAD%%'].includes('Not every cascade level'), false);
-	assert.match(status.tokens['%%QUERY_CELL%%'], /return ranked hits through CollectionViews::search/);
+	assert.match(status.libraryNow, /The persia crate is the embedded API: persia::Db and persia::Collection\./);
+	assert.match(status.preAlpha, /Collection::search runs a ranked search/);
+	assert.match(status.writePathNow, /Opening a database reloads the committed manifest/);
+	assert.match(status.tokens['%%QUERY_CELL%%'], /return ranked hits through Collection::search/);
 	assert.match(
 		status.tokens['%%MATCHING_CELL%%'],
-		/filters, sorts, cursor pages, facets, deadlines, and explain, through CollectionViews::search/,
+		/filters, sorts, cursor pages, facets, deadlines, and explain, through Collection::search/,
 	);
-	assert.match(status.tokens['%%RELAXATION_CELL%%'], /Every cascade level builds a query/);
-	assert.match(status.tokens['%%RELAXATION_CELL%%'], /L4 fuzzy reports a correction when that step found the hits/);
-	assert.match(status.tokens['%%RELAXATION_CELL%%'], /last_resort adds one filter step/);
-	assert.match(status.tokens['%%RELAXATION_CELL%%'], /Not every M8 leaf is done/);
-	assert.equal(status.tokens['%%RELAXATION_CELL%%'].includes('are not built'), false);
-	assert.equal(status.tokens['%%RELAXATION_CELL%%'].includes('A typo is not corrected'), false);
-	assert.match(status.tokens['%%RELAXATION_NOW%%'], /Every cascade level builds a query/);
-	assert.match(status.tokens['%%RELAXATION_NOW%%'], /Not every M8 leaf is done/);
-	assert.match(status.tokens['%%BLOB_CELL%%'], /local pack file/);
-	assert.match(status.tokens['%%BLOB_CELL%%'], /garbage collection/);
-	assert.equal(status.tokens['%%BLOB_CELL%%'].includes('not written'), false);
-	assert.match(status.tokens['%%STATE_M8%%'], /^In progress \(M8, \d+\/\d+\)\.$/);
-	assert.match(status.tokens['%%OPEN_CELL%%'], /Database opens a file and CollectionViews::search searches it/);
-	assert.match(status.tokens['%%STATE_M9%%'], /^In progress \(M9, \d+\/\d+\)\.$/);
+	assert.match(status.tokens['%%FEATURES_LEAD%%'], /run through Collection::search/);
+	assert.match(status.tokens['%%OPEN_CELL%%'], /Db::open and OpenOptions::open open a database file/);
+	assert.match(status.m5Cell, /Segments are searched through Collection::search/);
+	assert.match(status.tokens['%%RELAXATION_CELL%%'], /^Done \(M8, \d+\/\d+\)\./);
+	assert.match(status.tokens['%%BLOB_CELL%%'], /^The blob store is done \(M9, \d+\/\d+\)\.$/);
 	assert.match(status.tokens['%%STATE_M1%%'], /^Done \(M1, \d+\/\d+\)\.$/);
-	assert.equal(status.pillarEngine.includes('Scoring and query execution do not.'), false);
-	assert.equal(status.pillarCorrectness.includes('no document write path'), false);
+	assert.match(status.pillarEngine, /Scoring and query execution are done/);
 	assert.match(status.pillarCloud, /Object storage has not been started \(M12\)/);
-	assert.equal(status.writePathLead, 'Local write path, partly in the tree');
+	for (const [name, text] of Object.entries(status.tokens)) {
+		for (const engine of ENGINE_NAMES) {
+			assert.equal(text.includes(engine), false, `${name} names ${engine}`);
+		}
+	}
+});
+
+/**
+ * Engine items a guide must not present as API (ROADMAP 10.1.41; the same list as ENGINE_ONLY and ENGINE_CRATES in
+ * xtask/src/repo_checks/guide_api.rs, which reads the pages but not the sentences these tokens expand to).
+ */
+const ENGINE_NAMES = [
+	'persia_engine',
+	'persia_blob',
+	'persia::internal',
+	'CollectionViews',
+	'CollectionSnapshot',
+	'RelaxPlan',
+	'QueryCompiler',
+	'QueryLimits',
+	'SearchPlan',
+	'Database::',
+	'BlobDatabase',
+];
+
+test('the status sentences on the guide pages name no engine item', () => {
+	const guides = path.join(docsDir, 'guide');
+	for (const name of readdirSync(guides)) {
+		const raw = readFileSync(path.join(guides, name), 'utf8');
+		for (const token of statusTokenNames().filter((token) => raw.includes(token))) {
+			const text = status.tokens[token];
+			for (const engine of ENGINE_NAMES) {
+				assert.equal(text.includes(engine), false, `guide/${name}: ${token} names ${engine}`);
+			}
+		}
+	}
 });
 
 test('an unchecked pack leaf still says the pack file is not written', () => {
 	const live = parseRoadmapLeaves(readFileSync(path.join(root, 'ROADMAP.md'), 'utf8'));
 	live.set('9.2.1', false);
 	const input = currentInput(live);
+	const progressCopy = structuredClone(input.progress);
+	const m9 = progressCopy.milestones.find((ms) => ms.id === 'M9');
+	if (!m9) throw new Error('missing M9');
+	m9.state = 'in progress';
+	input.progress = progressCopy;
 	input.blobExports = true;
 	const next = buildStatus(input);
 	assert.match(
@@ -371,7 +332,10 @@ test('docs pages do not keep the stale inventory, and tokens expand', () => {
 	}
 	const faq = substituteStatusText(readFileSync(path.join(docsDir, 'guide/faq.md'), 'utf8'));
 	assert.match(faq, /WAL with chunks, group commit, and replay/);
-	assert.match(faq, /every cascade level builds a query/);
+	// The cascade is done (M8): the FAQ states the finished milestone, not the in-progress "every cascade level builds a
+	// query" sentence of before.
+	assert.match(faq, /Done \(M8, \d+\/\d+\)\. L4 fuzzy reports a correction/);
+	assert.match(faq, /The embedded API is persia::Db/);
 	assert.match(faq, /BM25F scorer/);
 	assert.equal(faq.includes('There is no query engine'), false);
 	const code = substituteStatusText(readFileSync(path.join(docsDir, 'guide/code.md'), 'utf8'));

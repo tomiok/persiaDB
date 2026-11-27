@@ -34,13 +34,14 @@ persia = { git = "https://github.com/tomiok/persiaDB" }
 
 ## Open a database, index, and search
 
-This is the [README quickstart](https://github.com/tomiok/persiaDB#quickstart):
+This is the [README quickstart](https://github.com/tomiok/persiaDB#quickstart), with the database in a temporary directory (the `tempfile` crate) instead of `app.persia` in the working directory; any path works:
 
 ```rust
 use persia::{Db, SearchRequest};
 
-fn main() -> persia::Result<()> {
-    let db = Db::open("app.persia")?; // creates app.persia if it is missing
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let db = Db::open(dir.path().join("app.persia"))?; // creates app.persia if it is missing
     let notes = db.create_collection_json(
         r#"{"name": "notes", "fields": {"body": {"type": "text"}}}"#,
     )?;
@@ -60,11 +61,12 @@ fn main() -> persia::Result<()> {
     println!("{:?} {:?}", page.relaxation.level, page.relaxation.corrected());
     // Fuzzy [Correction { original: "helo", corrected: "hello" }]
 
-    db.close()
+    db.close()?;
+    Ok(())
 }
 ```
 
-`Db::open` creates the file and any missing parent directories, and opens an existing database without replacing it (SPEC §8.1). No daemon and no configuration file are involved. A second run of this program fails at `create_collection_json` with `ErrorCode::AlreadyExists`: use `db.collection("notes")` on an existing database, or delete `app.persia` first.
+`Db::open` creates the file and any missing parent directories, and opens an existing database without replacing it (SPEC §8.1). No daemon and no configuration file are involved. With a fixed path, as in the README, a second run fails at `create_collection_json` with `ErrorCode::AlreadyExists`: use `db.collection("notes")` on an existing database, or delete `app.persia` first.
 
 `OpenOptions` sets how a database opens: `read_only`, `create_if_missing`, `durability` (`Fsync` by default), `memtable_bytes`, `block_cache_bytes`, and more. `Db::open` accepts a path or a `file://` URL. `s3://`, `gs://`, and `az://` return `ErrorCode::Unsupported` in this build: object storage is planned (M12).
 
@@ -106,8 +108,28 @@ Large payloads go into the blob pack beside the file (`<name>.persia.blobs`): `D
 `Collection::search` takes a `SearchRequest`: `SearchRequest::new(q)` and the builders `fields`, `filter`, `soft_filter`, `sort`, `limit`, `offset`, `after` (a cursor), `facets`, `explain`, `relax`, and `proximity`. `Collection::search_json` takes the same request as JSON (SPEC §7.1):
 
 ```rust
-let page = notes.search_json(r#"{"q": "helo", "limit": 5, "relax": false}"#)?;
-assert!(page.hits.is_empty()); // relaxation is off, and nothing is spelled "helo"
+use persia::Db;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let db = Db::open(dir.path().join("app.persia"))?;
+    let notes = db.create_collection_json(
+        r#"{"name": "notes", "fields": {"body": {"type": "text"}}}"#,
+    )?;
+    notes.put_json(r#"{"id": "n1", "body": "Hello, world"}"#)?;
+
+    // Relaxation off: nothing is spelled "helo", so the page is empty.
+    let page = notes.search_json(r#"{"q": "helo", "limit": 5, "relax": false}"#)?;
+    assert!(page.hits.is_empty());
+
+    // Relaxation on (the default): the typo still finds n1.
+    let page = notes.search_json(r#"{"q": "helo", "limit": 5}"#)?;
+    let ids: Vec<_> = page.hits.iter().map(|h| h.document.id()).collect();
+    assert_eq!(ids, ["n1"]);
+
+    db.close()?;
+    Ok(())
+}
 ```
 
 A `SearchResponse` has `hits` (each with `document`, `score`, the relaxation `level` that found it, and a `cursor`), `facets`, `relaxation`, and `next_cursor()`. Scoring is BM25F plus an optional static rank (SPEC §7.2). %%MATCHING_CELL%% How a hit is scored is [BM25F ranking](/guide/ranking/). Facets, sort, cursors, deadlines, and explain are [Faceted search](/guide/faceted-search/).
