@@ -235,7 +235,7 @@ one filter fail with two codes and contradict item 8, so it is `LIMIT`.) The mes
 to the setter equals the one of the same filter inside a request JSON, or both fail with one code; one test per
 limit; refused text; the later setter kept; a cursor of one form pages the other).
 
-## Amendment (2026-11-27): the website guides are checked against the public surface, outside `persia` (ROADMAP 10.1.34, 10.1.42)
+## Amendment (2026-11-27): the website guides are checked against the public surface, outside `persia` (ROADMAP 10.1.34, 10.1.42, 10.1.43)
 
 ROADMAP 10.1.34 made the Rust samples of two website guides doctests of `persia` (`crates/persia/src/guides.rs`,
 `#[doc = include_str!("../../../website/...")]`). A crate's directory is all `cargo package` ships, so those paths
@@ -267,3 +267,13 @@ the crate too.
    string literal is refused, as it cannot be resolved. `guide_samples_are_doctests_of_the_public_api`: the module is
    wired, every page it lists exists and has a Rust sample, and no sample names `persia_engine`, `persia::internal`,
    `QueryLimits` or `Filter::from_json`.
+4. **Which blocks are samples: the ones rustdoc runs** (ROADMAP 10.1.43). The check reads a fence as rustdoc does
+   (`doctest` in `xtask/src/repo_checks/guides.rs`, a port of rustdoc 1.99's info-string tokenizer and of
+   `LangString::parse`'s Rust rule on stable): Rust when the info string has no word, or has `rust`, or a rustdoc
+   attribute (`no_run`, `ignore`, `ignore-*`, `should_panic`, `compile_fail`, `test_harness`, `standalone_crate`,
+   `edition*`) before any other word; `{.class}` and `{key=value}` attributes are no words; never when the tokenizer
+   fails. A table of 61 info strings with what this toolchain's rustdoc did with each (`rustdoc --test --test-args
+   --list`) is its unit test. One finding: an Expressive Code title outside braces (`rust title="src/main.rs"`)
+   stops rustdoc's tokenizer at the `=`, and rustdoc then runs no doctest of the block (it only warns), so a page
+   cannot use that form for a sample. Pages are found only from `#[doc = include_str!("...")]` lines outside
+   comments.
