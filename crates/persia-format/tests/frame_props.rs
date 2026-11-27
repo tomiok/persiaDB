@@ -928,12 +928,16 @@ proptest! {
     }
 }
 
-/// The committed fuzz seeds (`fuzz/corpus/frame/`, first byte = mode; bit 0 fixes CRCs along the chain) are what
+/// The committed fuzz seeds (`fuzz/corpus/frame/`, first byte = mode; bit 0 fixes CRCs along the chain; read from
+/// their copies under `tests/fixtures/fuzz_seeds/`, kept equal by a repo check, ROADMAP 10.1.53) are what
 /// their names say, so they keep covering each scan end if the layout changes.
 #[test]
 fn fuzz_seeds_match_their_names() {
     const BASE: u64 = 12288; // the fuzz target's base for mode bit 2 clear
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fuzz/corpus/frame/");
+    let dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/fuzz_seeds/frame/"
+    );
     let seed = |name: &str| {
         let input = std::fs::read(format!("{dir}{name}")).unwrap();
         assert_eq!(

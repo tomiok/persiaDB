@@ -7,14 +7,19 @@
 //! that runs: a Rust block of a page `crates/persia-docs` runs as a doctest, in a temporary directory. This check
 //! keeps the shown block equal to its twin, line for line, once the twin is read as the page shows it:
 //!
-//! - rustdoc's hidden lines (`# ` after the indentation, or a lone `#`) are dropped;
-//! - the line `let dir = tempfile::tempdir()?;` is dropped;
-//! - `dir.path().join("app.persia")`, which must occur once, is written `"app.persia"`.
+//! - rustdoc's reading of each line is taken: `##` after the indentation shows `#`, and a hidden line (`# ` after
+//!   the indentation, or a lone `#`) is dropped;
+//! - a hidden line may only be a comment (`# //...`, a lone `#`) or the one line binding `dir` to a temporary
+//!   directory (`let dir = tempfile::tempdir()` then `?;`, `.unwrap();` or `.expect("...");`), which may also be
+//!   shown in the twin and is dropped: any other hidden line is code the shown page lacks, so it is refused;
+//! - `dir.path().join("app.persia")`, which must occur once, is written `"app.persia"`, and no other `dir` may be
+//!   left (the shown page never makes it).
 //!
 //! Nothing else may differ: comments, assertions and calls are the twin's, so the shown sample calls what the twin
 //! runs and asserts what it asserts. The twin must be a block rustdoc runs (no `ignore` or `no_run`) on a page a
-//! module of `crates/persia-docs` lists (`#[doc = include_str!("...")]`, [`pages`]), and the dependency block shown
-//! before it must equal the twin page's first `toml` block, when the shown page has one.
+//! module of `crates/persia-docs` lists (`#[doc = include_str!("...")]`, [`pages`]), and the dependency block
+//! (`toml`) the page shows before the sample must equal the twin page's first `toml` block, and must be there when
+//! [`Shown::requires_toml`] says so: the sample pastes into a fresh crate only with it.
 
 use std::path::Path;
 
@@ -28,6 +33,9 @@ struct Shown {
     after: &'static str,
     twin: &'static str,
     twin_after: &'static str,
+    /// The page must show a `toml` dependency block before the sample (one equal to the twin page's is checked
+    /// whenever it is there).
+    requires_toml: bool,
 }
 
 /// Every shown sample with a twin. The README's is the getting-started guide's first sample, so the two cannot
@@ -39,12 +47,14 @@ const SHOWN: &[Shown] = &[
         after: "## Quickstart",
         twin: "website/src/content/docs/guide/getting-started.md",
         twin_after: "## Open a database, index, and search",
+        requires_toml: true,
     },
     Shown {
         page: "website/src/content/docs/index.mdx",
         after: "",
         twin: "crates/persia-docs/src/samples/landing.md",
         twin_after: "",
+        requires_toml: true,
     },
 ];
 
@@ -71,27 +81,78 @@ fn first_word(info: &str) -> &str {
         .unwrap_or_default()
 }
 
-/// The twin's lines as the shown page writes them (the module docs' three rules), or why they cannot be.
+/// Whether `code` (a line without its indentation) binds `dir` to a temporary directory:
+/// `let dir = tempfile::tempdir()` and then `?;`, `.unwrap();` or `.expect("...");` with a plain message.
+fn binds_dir(code: &str) -> bool {
+    let Some(rest) = code.strip_prefix("let dir = tempfile::tempdir()") else {
+        return false;
+    };
+    rest == "?;"
+        || rest == ".unwrap();"
+        || rest
+            .strip_prefix(".expect(\"")
+            .and_then(|message| message.strip_suffix("\");"))
+            .is_some_and(|message| !message.contains(['"', '\\']))
+}
+
+/// Whether `line` names the identifier `dir` (a word of its own, not part of `directory` or `tmp_dir`).
+fn names_dir(line: &str) -> bool {
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    line.match_indices("dir").any(|(at, _)| {
+        let (before, after) = (line.get(..at), line.get(at + 3..));
+        !word(before.and_then(|s| s.chars().next_back()))
+            && !word(after.and_then(|s| s.chars().next()))
+    })
+}
+
+/// The twin's lines as the shown page writes them (the module docs' rules), or why they cannot be.
 fn as_shown(twin: &Fence<'_>) -> Result<Vec<String>, String> {
-    let mut joins = 0;
+    const JOIN: &str = r#"dir.path().join("app.persia")"#;
+    let (mut joins, mut binds) = (0, 0);
+    let mut why = Vec::new();
     let mut lines = Vec::new();
-    for (_, line) in &twin.lines {
-        let trimmed = line.trim_start();
-        if trimmed == "#"
-            || trimmed.starts_with("# ")
-            || trimmed == "let dir = tempfile::tempdir()?;"
-        {
-            continue;
+    for &(n, line) in &twin.lines {
+        let trimmed = line.trim();
+        // rustdoc's reading of a line (its `map_line`): `##` after the indentation is a shown `#`, `# ` and a lone
+        // `#` start a hidden line.
+        let (hidden, line) = if trimmed.starts_with("##") {
+            (None, line.replacen("##", "#", 1))
+        } else if trimmed == "#" {
+            (Some(""), String::new())
+        } else {
+            (trimmed.strip_prefix("# ").map(str::trim), line.to_owned())
+        };
+        match hidden {
+            Some(code) if code.is_empty() || code.starts_with("//") => {}
+            Some(code) if binds_dir(code) => binds += 1,
+            Some(code) => why.push(format!(
+                "line {n}: the hidden line {code:?} is not on the shown page (only comments and the `dir` line may be hidden)"
+            )),
+            None if binds_dir(line.trim()) => binds += 1,
+            None => {
+                joins += line.matches(JOIN).count();
+                let shown = line.replace(JOIN, r#""app.persia""#);
+                if names_dir(&shown) {
+                    why.push(format!(
+                        "line {n}: `dir` is left once the path is written \"app.persia\", and the shown page never makes it"
+                    ));
+                }
+                lines.push(shown);
+            }
         }
-        joins += line.matches(r#"dir.path().join("app.persia")"#).count();
-        lines.push(line.replace(r#"dir.path().join("app.persia")"#, r#""app.persia""#));
     }
-    if joins == 1 {
+    if joins != 1 {
+        why.push(format!("it names `{JOIN}` {joins} times, not once"));
+    }
+    if binds != 1 {
+        why.push(format!(
+            "it binds `dir` to `tempfile::tempdir()` {binds} times, not once"
+        ));
+    }
+    if why.is_empty() {
         Ok(lines)
     } else {
-        Err(format!(
-            "it names `dir.path().join(\"app.persia\")` {joins} times, not once"
-        ))
+        Err(why.join("; "))
     }
 }
 
@@ -180,7 +241,7 @@ fn shown_samples_equal_a_doctest() {
                 )
             })),
         }
-        // The dependency block before the sample, when the page shows one.
+        // The dependency block before the sample: there when the entry requires it, and the twin page's.
         let toml = |blocks: &[Fence<'_>]| -> Option<Vec<String>> {
             blocks
                 .iter()
@@ -191,13 +252,18 @@ fn shown_samples_equal_a_doctest() {
             .iter()
             .position(|f| std::ptr::eq(f, shown))
             .and_then(|at| toml(&shown_blocks[..at]));
-        if let Some(shown_toml) = shown_toml
-            && toml(&fences(&twin_page)) != Some(shown_toml)
-        {
-            found.push(format!(
-                "{}: the `toml` block before the sample is not {}'s",
-                s.page, s.twin
-            ));
+        match shown_toml {
+            None if s.requires_toml => found.push(format!(
+                "{}: no `toml` dependency block before the sample at line {}, so it does not paste into a fresh crate",
+                s.page, shown.at
+            )),
+            Some(shown_toml) if toml(&fences(&twin_page)).as_ref() != Some(&shown_toml) => {
+                found.push(format!(
+                    "{}: the `toml` block before the sample is not {}'s",
+                    s.page, s.twin
+                ));
+            }
+            _ => {}
         }
     }
     assert!(found.is_empty(), "{found:#?}");
@@ -207,7 +273,7 @@ fn shown_samples_equal_a_doctest() {
 fn twins_read_as_shown() {
     let block = |text: &'static str| fences(text).into_iter().next().unwrap();
     let twin = block(
-        "```rust\nfn main() {\n#   let dir = tempfile::tempdir().unwrap();\n    let dir = tempfile::tempdir()?;\n    \
+        "```rust\nfn main() {\n#   // test setup\n#   let dir = tempfile::tempdir().expect(\"a directory\");\n    \
          let db = Db::open(dir.path().join(\"app.persia\"))?; // one file\n#\n    db.close()\n}\n```\n",
     );
     assert_eq!(
@@ -219,18 +285,55 @@ fn twins_read_as_shown() {
             "}"
         ]
     );
-    // `##` is rustdoc's escape for a shown `#`, and `#[...]` an attribute: both kept.
-    let kept = block("```rust\n##[x]\n#[test]\nlet a = dir.path().join(\"app.persia\");\n```\n");
-    assert_eq!(as_shown(&kept).unwrap().len(), 3);
-    // No temporary path, or two: refused.
-    assert!(
-        as_shown(&block(
-            "```rust\nlet db = Db::open(\"app.persia\")?;\n```\n"
-        ))
-        .is_err()
+    // The `dir` line may be shown in the twin; `##` is rustdoc's escape for a shown `#`, and `#[...]` an attribute.
+    let kept = block(
+        "```rust\n    let dir = tempfile::tempdir()?;\n    ##[x]\n#[test]\nlet a = dir.path().join(\"app.persia\");\n```\n",
     );
-    let two = "```rust\nlet a = dir.path().join(\"app.persia\");\nlet b = dir.path().join(\"app.persia\");\n```\n";
-    assert!(as_shown(&block(two)).is_err());
+    assert_eq!(
+        as_shown(&kept).unwrap(),
+        ["    #[x]", "#[test]", "let a = \"app.persia\";"]
+    );
+    let refused = |text: &'static str, why: &str| {
+        let found = as_shown(&block(text)).unwrap_err();
+        assert!(found.contains(why), "{found}");
+    };
+    // Hidden code the shown page lacks: an import, a binding, a second `dir` line.
+    refused(
+        "```rust\n# use persia::Something;\nlet dir = tempfile::tempdir()?;\nlet db = Db::open(dir.path().join(\"app.persia\"))?;\n```\n",
+        "line 2: the hidden line \"use persia::Something;\"",
+    );
+    refused(
+        "```rust\nlet dir = tempfile::tempdir()?;\n#   let schema = 1;\nlet db = Db::open(dir.path().join(\"app.persia\"))?;\n```\n",
+        "line 3: the hidden line \"let schema = 1;\"",
+    );
+    refused(
+        "```rust\n# let dir = tempfile::tempdir()?;\nlet dir = tempfile::tempdir()?;\nlet db = Db::open(dir.path().join(\"app.persia\"))?;\n```\n",
+        "binds `dir` to `tempfile::tempdir()` 2 times",
+    );
+    refused(
+        "```rust\n# let dir = tempfile::tempdir().expect(\"a \\\" quote\");\nlet db = Db::open(dir.path().join(\"app.persia\"))?;\n```\n",
+        "the hidden line",
+    );
+    // Another use of `dir` stays on the shown page, which never makes it; `directory` and `tmp_dir` are other words.
+    refused(
+        "```rust\nlet dir = tempfile::tempdir()?;\nlet db = Db::open(dir.path().join(\"app.persia\"))?;\nprintln!(\"{:?}\", dir.path());\n```\n",
+        "line 4: `dir` is left",
+    );
+    assert!(!names_dir("let directory = tmp_dir; // dirs"));
+    assert!(names_dir("drop(dir)"));
+    // No temporary path, or two, or no `dir` line: refused.
+    refused(
+        "```rust\nlet dir = tempfile::tempdir()?;\nlet db = Db::open(\"app.persia\")?;\n```\n",
+        "0 times",
+    );
+    let two = "```rust\nlet dir = tempfile::tempdir()?;\nlet a = dir.path().join(\"app.persia\");\nlet b = dir.path().join(\"app.persia\");\n```\n";
+    refused(two, "2 times");
+    refused(
+        "```rust\nlet db = Db::open(dir.path().join(\"app.persia\"))?;\n```\n",
+        "binds `dir` to `tempfile::tempdir()` 0 times",
+    );
+    assert!(binds_dir("let dir = tempfile::tempdir().unwrap();"));
+    assert!(!binds_dir("let dir = tempfile::tempdir()?; let x = 1;"));
     // A difference names the shown line.
     let shown = block("text\n```rust\nfn main() {\n    db.comit()\n}\n```\n");
     let want = [

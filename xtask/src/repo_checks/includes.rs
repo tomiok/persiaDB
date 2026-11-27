@@ -254,8 +254,8 @@ fn fuzz_seed_copies_equal_the_corpus() {
             }
         }
     }
-    // The engine's seed tests read 11 copies: the check is not vacuous.
-    assert!(copies >= 11, "{copies} copies found");
+    // The seed tests read 25 copies (the engine's 11, persia-format's 14): the check is not vacuous.
+    assert!(copies >= 25, "{copies} copies found");
     assert!(differ.is_empty(), "{differ:#?}");
 }
 
