@@ -194,7 +194,7 @@ SPEC §6.2.3 and §7.2 define a static rank the collection can add to a text sco
 { "ranking": { "static_rank": { "field": "sales", "weight": 0.1, "fn": "log1p" } } }
 ```
 
-SPEC §7.2 writes the total as the sum of the term scores plus this contribution. A hit of a query with words does not add it today: its score is the clause sum, and the proximity bonus when the request asked for it. The static rank orders only L5's hits (below).
+SPEC §7.2 writes the total as the sum of the term scores plus this contribution, and its dated note says a hit of a query with words does not add it yet ([SPEC §7.2](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#72-scoring-bm25f); ROADMAP 10.1.45 decides which holds): its score is the clause sum, and the proximity bonus when the request asked for it. The static rank orders only L5's hits (below).
 
 L5 fallback has no query words, so its hit score is the contribution (ROADMAP 8.2.5). Ties break by index location, most recent first: the memtable, then segments from the last the manifest lists to the first, each by docid descending. That recency is where the index holds the document, not when it was written. With no static rank, or with `weight` 0, every L5 score is 0, recency alone orders the hits, and `Relaxation::fallback` is `FallbackOrder::Recency`. Otherwise it is `FallbackOrder::StaticRank`. The request's `sort` does not order these hits. Each hit still carries the request's sort values, and a `score` key on an L5 hit is this contribution. [Fuzzy search](/guide/fuzzy-search/#fallback-when-nothing-matches) is the rest of L5.
 
@@ -303,7 +303,7 @@ L1 through L4 and L6 score their words with this formula and then follow the req
 | Proximity bonus | Off unless the request asks, on a search that does not relax (ROADMAP 7.3.5, 10.1.7). |
 | Proximity across relaxed steps | ROADMAP 10.1.14. |
 | Proximity on by default | Waits on judged queries (ROADMAP 15.1.6). |
-| Static rank in a query hit's score | SPEC §7.2 adds it; a hit of a query with words does not today. It orders L5's hits. |
+| Static rank in a query hit's score | SPEC §7.2 adds it, and notes that a hit of a query with words does not yet (ROADMAP 10.1.45). It orders L5's hits. |
 | Collection tie-break and a proximity weight in `ranking` | ROADMAP 32.5.1. Needs a new manifest version. |
 | Static rank `saturation` | ROADMAP 27.6.1. |
 | `global_stats` across shards | SPEC §11.5. Milestone M13. |

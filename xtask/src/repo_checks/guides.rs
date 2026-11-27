@@ -1,11 +1,12 @@
 //! The website guides and the files `persia` is compiled with (ROADMAP 10.1.34, 10.1.42).
 //!
-//! - **Includes stay in `persia`.** No `include_str!`, `include_bytes!` or `include!` in a source file under
-//!   `crates/persia/` names a path outside that directory: `cargo package` ships the crate's directory only, so the
-//!   first publish (or a test of the published crate) would fail on one. A path is resolved against the directory of
-//!   the file that names it, as rustc does, and normalized lexically (`.` dropped, `..` pops a component); an argument
-//!   that is not a plain string literal (`concat!(env!("OUT_DIR"), ..)`, a raw string) cannot be checked and is
-//!   refused too. Checks that read files elsewhere in the repository live in `crates/persia-docs`, never published.
+//! - **Includes stay in `persia`.** No `include_str!`, `include_bytes!` or `include!` (with any of `(`, `[`, `{`)
+//!   and no `#[path = "..."]` module attribute in a source file under `crates/persia/` names a path outside that
+//!   directory: `cargo package` ships the crate's directory only, so the first publish (or a test of the published
+//!   crate) would fail on one. A path is resolved against the directory of the file that names it, as rustc does,
+//!   and normalized lexically (`.` dropped, `..` pops a component); an argument that is not a plain string literal
+//!   (`concat!(env!("OUT_DIR"), ..)`, a raw string) cannot be checked and is refused too. Checks that read
+//!   files elsewhere in the repository live in `crates/persia-docs`, never published.
 //! - **Guide samples are doctests of the public API.** `crates/persia-docs/src/guides.rs` runs the guides' Rust
 //!   samples as doctests (its module docs say with which features, and what the compiler cannot refuse there); this
 //!   check keeps it wired, keeps every page it lists present with a Rust sample, and refuses names a guide has
@@ -57,12 +58,15 @@ fn normalize(path: &Path) -> Option<PathBuf> {
 }
 
 /// The includes of `text`, the source of `file` (relative to the repository root), whose path is not under
-/// `crate_dir` (relative to the root), as `file:line: ...` messages. An include whose argument is not a plain string
-/// literal is reported as unchecked.
+/// `crate_dir` (relative to the root), as `file:line: ...` messages: the include macros, with any of their three
+/// delimiters, and `#[path = "..."]` attributes, which make rustc read a module's file from that path. A path is
+/// resolved against the directory of `file` (rustc's rule for a `#[path]` outside an inline module, and for every
+/// include). An include whose argument is not a plain string literal, or a macro name not followed by a delimiter,
+/// is reported as unchecked.
 fn includes_outside(file: &Path, text: &str, crate_dir: &Path) -> Vec<String> {
     let dir = file.parent().unwrap_or(Path::new(""));
     let mut found = Vec::new();
-    for name in INCLUDE_MACROS {
+    for name in INCLUDE_MACROS.iter().chain(&["#[path"]) {
         for (at, _) in text.match_indices(name) {
             let (head, tail) = text.split_at(at);
             // `my_include!(` is another macro.
@@ -70,18 +74,22 @@ fn includes_outside(file: &Path, text: &str, crate_dir: &Path) -> Vec<String> {
             if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
                 continue;
             }
-            let Some(args) = tail
-                .strip_prefix(name)
-                .and_then(|rest| rest.trim_start().strip_prefix('('))
-            else {
-                continue;
-            };
             let line = head.matches('\n').count() + 1;
             let where_ = format!("{}:{line}", file.display());
-            let literal = args
-                .trim_start()
-                .strip_prefix('"')
-                .and_then(|rest| rest.split_once('"'))
+            let rest = tail.strip_prefix(name).unwrap_or_default().trim_start();
+            // A macro call takes any of the three delimiters (`include_str!["x"]` reads a file as `(` does); the
+            // attribute is `#[path = "..."]`.
+            let opened = if *name == "#[path" {
+                rest.strip_prefix('=')
+            } else {
+                rest.strip_prefix('(')
+                    .or_else(|| rest.strip_prefix('['))
+                    .or_else(|| rest.strip_prefix('{'))
+            };
+            let literal = opened
+                .map(str::trim_start)
+                .and_then(|args| args.strip_prefix('"'))
+                .and_then(|args| args.split_once('"'))
                 .map(|(path, _)| path)
                 .filter(|path| !path.contains('\\'));
             let Some(path) = literal else {
@@ -94,7 +102,7 @@ fn includes_outside(file: &Path, text: &str, crate_dir: &Path) -> Vec<String> {
             let inside = normalize(&dir.join(path)).is_some_and(|p| p.starts_with(crate_dir));
             if !inside {
                 found.push(format!(
-                    "{where_}: `{name}(\"{path}\")` reads a file outside {}, which `cargo package` does not ship",
+                    "{where_}: `{name}` names \"{path}\", a file outside {}, which `cargo package` does not ship",
                     crate_dir.display()
                 ));
             }
@@ -158,6 +166,12 @@ fn includes_resolve_against_their_file() {
         ),
         ("crates/persia/tests/t.rs", "include!( \"common/mod.rs\" )"),
         ("crates/persia/src/a.rs", r#"my_include!("../../../x")"#),
+        // A module file, as the tests' shared support modules name theirs.
+        (
+            "crates/persia/tests/blob.rs",
+            "#[path = \"support/store.rs\"]\nmod store;",
+        ),
+        ("crates/persia/src/a.rs", r#"include_str!["b.md"]"#),
     ] {
         let found = check(file, text);
         assert!(found.is_empty(), "{text}: {found:?}");
@@ -181,6 +195,13 @@ fn includes_resolve_against_their_file() {
             r#"include!("../../../../../etc/passwd")"#,
         ),
         ("crates/persia/src/a.rs", r#"include_str!("/etc/hosts")"#),
+        // The other delimiters, and a module file outside the crate.
+        ("crates/persia/src/a.rs", r#"include_str!["../../../x"]"#),
+        ("crates/persia/src/a.rs", r#"include_bytes!{"../../../x"}"#),
+        (
+            "crates/persia/src/a.rs",
+            "#[path = \"../../../x.rs\"] mod m;",
+        ),
     ] {
         let found = check(file, text);
         assert_eq!(found.len(), 1, "{text}: {found:?}");
@@ -191,6 +212,9 @@ fn includes_resolve_against_their_file() {
         r#"include!(concat!(env!("OUT_DIR"), "/x.rs"))"#,
         r##"include_str!(r#"x.md"#)"##,
         r#"include_str!("a\\b.md")"#,
+        // No delimiter, and a `#[path]` without a literal.
+        "include_str! <x>",
+        "#[path(x)] mod m;",
     ] {
         assert_eq!(check("crates/persia/src/a.rs", text).len(), 1, "{text}");
     }
@@ -409,8 +433,9 @@ pub(super) struct Doctest {
 
 /// rustdoc's reading of a fence's info string: Rust when it has no word (empty, or only `{...}` attributes), or
 /// when a `rust` word, or a rustdoc attribute word seen before any other word (`no_run`, `ignore`, `ignore-*`,
-/// `should_panic`, `compile_fail`, `test_harness`, `standalone_crate`, `edition*`), is among its words; never when
-/// the tokenizer fails. `rust2021` and the like are neutral (rustdoc warns), `E0425` is another word on stable.
+/// `should_panic`, `compile_fail`, `test_harness`, `standalone_crate`), is among its words; never when the
+/// tokenizer fails. `edition*` words and `rust2021` and the like are neutral (an edition sets the doctest's edition
+/// and makes nothing Rust: `edition2021,json` is not collected), `E0425` is another word on stable.
 pub(super) fn doctest(info: &str) -> Doctest {
     let Some(tags) = info_tags(info) else {
         return Doctest {
@@ -436,7 +461,8 @@ pub(super) fn doctest(info: &str) -> Doctest {
             // Per-target ignores are unstable: rustdoc reads the word and does nothing with it. Not counted as
             // running, in case a toolchain turns them on.
             w if w.starts_with("ignore-") => runs = false,
-            w if w.starts_with("edition") => seen_rust = !seen_other || seen_rust,
+            // Sets the edition only: rustdoc 1.99 collects no `edition2021,json` block.
+            w if w.starts_with("edition") => {}
             w if w
                 .strip_prefix("rust")
                 .is_some_and(|e| ["2015", "2018", "2021", "2024"].contains(&e)) => {}
@@ -568,6 +594,10 @@ fn fences_are_rust_as_rustdoc_reads_them() {
         "compile_fail,E0425",
         "edition2021",
         "edition2024",
+        "edition2021,rust",
+        "test_harness,json",
+        "compile_fail,json",
+        "standalone_crate,json",
         "test_harness",
         "standalone_crate",
         " rust ",
@@ -603,6 +633,8 @@ fn fences_are_rust_as_rustdoc_reads_them() {
         "json (x) no_run",
         "json {.x} no_run",
         "E0425,compile_fail",
+        "edition2021,json",
+        "edition2024,json",
         "\"json\"",
         "\"json\",no_run",
         "{k=\"v\"}x",

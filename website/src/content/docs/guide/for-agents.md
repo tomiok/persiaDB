@@ -20,7 +20,6 @@ If a page on this site disagrees with the SPEC, the SPEC wins.
 Machine-readable copies of these pages: [llms.txt](/llms.txt) and [llms-full.txt](/llms-full.txt).
 
 ## Status
-## Status
 
 Pre-alpha. %%PROGRESS_SUMMARY%%.
 The live counter is [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md). Do not treat a number on an older page as newer than that file.
@@ -32,7 +31,7 @@ The on-disk format is unstable until v1.0 (SPEC §15).
 |---|---|
 | Usable database API? | Yes, as a Git dependency: the `persia` crate (`Db`, `Collection`, `SearchRequest`). Its surface is [`crates/persia/public-api.txt`](https://github.com/tomiok/persiaDB/blob/main/crates/persia/public-api.txt). |
 | Published on crates.io? | No. `publish = false`. Depend on the Git repository. |
-| CLI? | `persia import`, `search`, `gc`, `verify`, `stats`, `compact`, `inspect`, `dump`, `container files` / `sweep`, and `bench`. |
+| CLI? | `persia import`, `search`, `gc`, `verify`, `stats`, `compact`, `inspect container` / `segment`, `dump segment` / `documents`, `container files` / `sweep`, `store files` / `sweep`, and `bench`. |
 | Working library code? | %%LIBRARY_NOW%% |
 | Next work? | The ready-next list in PROGRESS.md. |
 | Embedded API milestone? | %%M10_BLOCKED%% |
@@ -54,7 +53,7 @@ There is no Go module and no npm package. `sdk/go` in the SPEC is a future gRPC 
 [CLAUDE.md](https://github.com/tomiok/persiaDB/blob/main/CLAUDE.md) is the engineering ruleset. The short list:
 
 - The engine is written here. Do not add Tantivy, Lucene, SQLite, RocksDB, or another search or storage engine.
-- `unsafe` is allowed only in files listed in `xtask/src/repo_checks.rs` (`UNSAFE_ALLOWED`): `persia-format`'s mmap and the container's mapped-read module. Each block needs a `SAFETY` comment and an ADR. ADR-0018 reserves one future module, the C exports of `persia-ffi`, which is not in the tree.
+- `unsafe` is allowed only in the files `UNSAFE_ALLOWED` in `xtask/src/repo_checks.rs` lists, each with the ADR that allows it (the memory-mapped reads of the format, the container, the read-only open and the blob pack, the OS calls of `persia-storage`, and test or bench code that maps its own files or counts allocations). Each block needs a `SAFETY` comment and an ADR. ADR-0018 reserves one future module, the C exports of `persia-ffi`, which is not in the tree.
 - Bytes from disk, network, or callers return `Err`, never a panic. Damaged bytes are a corruption error (`ErrorCode::Corrupt` at the `persia` API).
 - A change to on-disk layout updates SPEC.md, bumps a version or feature flag, adds an ADR, and adds a golden test.
 - Segments are immutable once written. Data is written first, the commit record last, then fsync.

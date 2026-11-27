@@ -60,8 +60,15 @@ test('the live tree names the embedded API, not the engine', () => {
 	assert.match(status.tokens['%%QUERY_CELL%%'], /return ranked hits through Collection::search/);
 	assert.match(
 		status.tokens['%%MATCHING_CELL%%'],
-		/filters, sorts, cursor pages, facets, deadlines, and explain, through Collection::search/,
+		/filters, sorts, cursor pages, facets, and explain, through Collection::search/,
 	);
+	// A SearchRequest has no deadline setter (ROADMAP 10.1.44): no token may offer one through the facade.
+	const snapshot = readFileSync(path.join(root, 'crates/persia/public-api.txt'), 'utf8');
+	if (!/^pub fn persia::SearchRequest::deadline[(<]/m.test(snapshot)) {
+		for (const token of ['%%MATCHING_CELL%%', '%%QUERY_PATH_NOW%%', '%%QUERY_CELL%%', '%%FEATURES_LEAD%%']) {
+			assert.equal(status.tokens[token].includes('deadline'), false, `${token} offers a deadline`);
+		}
+	}
 	assert.match(status.tokens['%%FEATURES_LEAD%%'], /run through Collection::search/);
 	assert.match(status.tokens['%%OPEN_CELL%%'], /Db::open and OpenOptions::open open a database file/);
 	assert.match(status.m5Cell, /Segments are searched through Collection::search/);

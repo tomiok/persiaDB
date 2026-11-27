@@ -174,7 +174,7 @@ Write order is deliberate: the blob is durable first, then the document that ref
 logged (SPEC §9.5). A crash in between leaves an orphan. Garbage collection keeps anything a live
 snapshot, the WAL, or a pin still references. Remote orphans wait out a grace period (default 24
 hours). The local pack is rewritten with no grace period once enough of it is unreferenced.
-`persia verify` fails if a referenced blob is missing. `Db::put_blob` stores a file and `Collection::put_with_blob` a file with its document; `PutBlobOptions::resume` takes a `ResumeToken` for a remote upload.
+`persia verify` fails if a referenced blob is missing. `Db::put_blob` stores a file and `Collection::put_with_blob` a file with its document; `PutBlobOptions::resume` takes the `ResumeToken` of an interrupted upload; the local pack cannot resume (`ErrorCode::Unsupported`), and a remote store is not open through `Db` yet (M12).
 
 %%BLOB_NOW%% `BlobId` and `BlobRef` are re-exported under `persia::`: their limits and binary encoding are in SPEC §9.1 and ADR-0011.
 [Blob storage](/guide/blobs/) is the pack file, the remote layout, resume, reader leases, and garbage collection.

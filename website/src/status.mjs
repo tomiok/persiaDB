@@ -130,6 +130,15 @@ const CALLS = ['open', 'create_collection', 'put', 'put_batch', 'delete', 'commi
 /** The embedded API calls the status sentences name, in this order, when the public-API snapshot lists them. */
 const FACADE_DB = ['open', 'create_collection', 'collection', 'put_blob', 'get_blob', 'commit', 'backup', 'close'];
 const FACADE_COLLECTION = ['put', 'put_json', 'put_struct', 'get', 'delete', 'search', 'search_json'];
+/** The SearchRequest setters behind each capability a status sentence names through the facade. */
+const FACADE_REQUEST = [
+	['filter', 'filters'],
+	['sort', 'sorts'],
+	['after', 'cursor pages'],
+	['facets', 'facets'],
+	['deadline', 'deadlines'],
+	['explain', 'explain'],
+];
 
 /**
  * @typedef {Object} StatusInput
@@ -148,6 +157,7 @@ const FACADE_COLLECTION = ['put', 'put_json', 'put_struct', 'get', 'delete', 'se
  * @property {boolean} hasSearch A search on the embedded API (persia::Collection::search) or the engine database handle.
  * @property {string[]} [dbCalls] The persia::Db calls of FACADE_DB the public-API snapshot lists.
  * @property {string[]} [collectionCalls] The persia::Collection calls of FACADE_COLLECTION the snapshot lists.
+ * @property {string[]} [requestSetters] The SearchRequest setters of FACADE_REQUEST the snapshot lists.
  * @property {boolean} hasCollectionSearch The engine's CollectionViews::search, over a collection snapshot.
  * @property {boolean} hasRelaxSearch CollectionViews::search_relaxed, the cascade orchestrator.
  * @property {boolean} hasDropTerms L2 wired to its transform (not the pending stub).
@@ -867,6 +877,11 @@ export function buildStatus(ctx) {
 	requestBits.push('sorts', 'cursor pages', 'facets');
 	if (deadlineState === 'done') requestBits.push('deadlines');
 	if (explainState === 'done') requestBits.push('explain');
+	// Through the facade, only what a SearchRequest setter offers: the engine's deadline has no setter (ROADMAP 10.1.44).
+	const setters = ctx.requestSetters ?? [];
+	const facadeBits = FACADE_REQUEST.filter(([setter, label]) => setters.includes(setter) && requestBits.includes(label)).map(
+		([, label]) => label,
+	);
 	const featuresLead = seal(
 		`${
 			facade
@@ -891,7 +906,7 @@ export function buildStatus(ctx) {
 	);
 	const matchingCell = seal(
 		facade
-			? `${capitalize(isState(m7))}: ${englishList(requestBits)}, through Collection::search.`
+			? `${capitalize(isState(m7))}: ${englishList(facadeBits)}, through Collection::search.`
 			: collectionSearch
 			? `Library code (${countState(m7)}): ${englishList(requestBits)}, through CollectionViews::search.`
 			: matching
@@ -1024,6 +1039,7 @@ function readInput() {
 		persiaExports: visibleExports(persiaLib) && /^pub struct persia::Db$/m.test(facade),
 		dbCalls: FACADE_DB.filter((name) => facadeFn(`Db::${name}`)),
 		collectionCalls: FACADE_COLLECTION.filter((name) => facadeFn(`Collection::${name}`)),
+		requestSetters: FACADE_REQUEST.map(([setter]) => setter).filter((name) => facadeFn(`SearchRequest::${name}`)),
 		blobExports: exports(blobLib),
 		hasOpenOptions: /^pub struct persia::OpenOptions$/m.test(facade) || /pub struct OpenOptions\b/.test(dbRs),
 		hasPutStruct: facadeFn('Collection::put_struct') || dbFns.has('put_struct') || /pub fn put_struct\b/.test(persiaLib),

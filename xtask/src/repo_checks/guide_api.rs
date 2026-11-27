@@ -1,6 +1,7 @@
 //! The website guides name only `persia`'s public API (ROADMAP 10.1.41). `crates/persia/public-api.txt` (the
 //! committed public-API snapshot, ADR-0063) is the source of truth; every page under `website/src/content/docs/guide/`
-//! is read, outside the regions marked as engine internals:
+//! is read, and the site's other pages (`website/src/content/docs/*.md(x)`: the landing page, features,
+//! architecture, ...) by every rule but the sample one, outside the regions marked as engine internals:
 //!
 //! - **Paths.** Every path of two or more segments that starts with `persia::` (`use persia::{..}` groups
 //!   expanded, across lines) names an item the snapshot lists: the path of one of its `pub` lines (an item, a
@@ -25,9 +26,17 @@
 //! `<!-- /engine-internals -->`, in MDX (which has no HTML comments) between `{/* engine-internals */}` and
 //! `{/* /engine-internals */}`, each marker alone on its line. The first non-blank line after the opening marker
 //! must say so in prose (it contains "internal"), so a reader is told that the names in it are not API to call.
-//! The path and name rules skip a marked part; the sample rule does not. A marker of the other form, an unclosed
-//! or nested part, or a closing marker without an opening one fails. Status sentences (`%%TOKEN%%`, from
+//! Inside a marked part the engine-crate and engine-type word rules and the paths by type name are skipped; a
+//! `persia::` path is still checked against the snapshot, except `persia::internal` and the paths under it (the
+//! hidden layer, named there as an internal). The sample rule holds everywhere. A marker of the other form, an
+//! unclosed or nested part, or a closing marker without an opening one fails. Status sentences (`%%TOKEN%%`, from
 //! `website/src/status.mjs`) are checked by `website/src/status.test.mjs`, not here.
+//!
+//! **Reading.** A path may start with `::` and have blanks around `::`; inline code is every backtick span (of any
+//! run length) and every `<code>...</code>`. Known limits: a renamed import (`use persia as p; p::internal`) and a
+//! method named on a value (`page.next_cursor()`) are not resolved, as the check does not type the text; in a
+//! sample rustdoc compiling it refuses both where they name nothing public (`persia-docs` run alone), and outside
+//! samples review catches them.
 
 // Test-only tooling: every string index here is the position of an ASCII byte (an identifier character, `:`, `{`,
 // `}`, `,` or a backtick), so it is on a char boundary.
@@ -38,6 +47,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::guides::{doctest, fences, pages, read, root};
 
 const GUIDE_DIR: &str = "website/src/content/docs/guide";
+
+/// The site's other pages (the landing page, features, architecture, ...), read by the same rules.
+const DOCS_DIR: &str = "website/src/content/docs";
 
 /// The lower crates, as path roots: never API a guide calls (ADR-0063: `persia` is the facade).
 const ENGINE_CRATES: &[&str] = &[
@@ -203,15 +215,24 @@ impl Api {
 }
 
 /// The paths of `text` with two or more segments, each with the byte offset it starts at: a path starts at an
-/// identifier that follows no identifier character and no `::`, and `a::{b, c::{d, self}, e as f}` groups expand.
+/// identifier that follows no identifier character and no `a::` (a leading `::`, as in `::persia::internal`, starts
+/// one), `a::{b, c::{d, self}, e as f}` groups expand, and spaces or tabs around `::` (`persia :: internal`) are
+/// the same path.
 fn paths(text: &str) -> Vec<(usize, String)> {
     let bytes = text.as_bytes();
     let mut found = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
+        // `i` is an ASCII byte here, so `text[..i]` ends on a char boundary.
+        let continues = || {
+            text[..i]
+                .trim_end_matches([' ', '\t'])
+                .strip_suffix("::")
+                .is_some_and(|rest| rest.bytes().next_back().is_some_and(is_ident))
+        };
         let starts = (bytes[i].is_ascii_alphabetic() || bytes[i] == b'_')
             && (i == 0 || !is_ident(bytes[i - 1]))
-            && !text[..i].ends_with("::");
+            && !continues();
         if !starts {
             i += 1;
             continue;
@@ -236,10 +257,15 @@ fn read_path(text: &str, start: usize) -> (Vec<String>, usize) {
             .find(|&j| !is_ident(bytes[j]))
             .unwrap_or(bytes.len())
     };
+    let blank_end = |from: usize| {
+        (from..bytes.len())
+            .find(|&j| bytes[j] != b' ' && bytes[j] != b'\t')
+            .unwrap_or(bytes.len())
+    };
     let mut end = ident_end(start);
     let mut prefix = text[start..end].to_owned();
-    while text[end..].starts_with("::") {
-        let next = end + 2;
+    while text[blank_end(end)..].starts_with("::") {
+        let next = blank_end(blank_end(end) + 2);
         match bytes.get(next) {
             Some(&b) if b.is_ascii_alphabetic() || b == b'_' => {
                 let to = ident_end(next);
@@ -308,6 +334,35 @@ fn group(prefix: &str, inner: &str) -> Vec<String> {
 fn words(code: &str) -> impl Iterator<Item = &str> {
     code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .filter(|w| !w.is_empty())
+}
+
+/// The inline code of one line of Markdown: each span between a run of backticks and the next run of the same
+/// length (`` ``Database`` `` as well as `` `Database` ``), and the text of each `<code>...</code>`. A span that
+/// does not close on its line is not read.
+fn inline_code(line: &str) -> Vec<&str> {
+    let mut spans = Vec::new();
+    let mut rest = line;
+    while let Some(open) = rest.find('`') {
+        let run = rest[open..].bytes().take_while(|&b| b == b'`').count();
+        let after = &rest[open + run..];
+        let fence = &rest[open..open + run];
+        // The closing run: the same number of backticks, not part of a longer run.
+        let close = after.match_indices(fence).map(|(at, _)| at).find(|&at| {
+            !after[at + run..].starts_with('`') && (at == 0 || !after[..at].ends_with('`'))
+        });
+        let Some(close) = close else { break };
+        spans.push(&after[..close]);
+        rest = &after[close + run..];
+    }
+    let mut rest = line;
+    while let Some((_, tail)) = rest.split_once("<code>") {
+        let Some((code, after)) = tail.split_once("</code>") else {
+            break;
+        };
+        spans.push(code);
+        rest = after;
+    }
+    spans
 }
 
 /// The lines (1-based) outside engine-internals parts, or the marker errors.
@@ -381,13 +436,14 @@ fn checked_lines(page: &str, text: &str) -> Result<Vec<bool>, Vec<String>> {
     }
 }
 
-/// What is wrong with the guide `page` (its file name) of text `text`, against `api`; `runs` is whether
-/// `guides.rs` runs its samples.
-fn page_violations(page: &str, text: &str, api: &Api, runs: bool) -> Vec<String> {
+/// What is wrong with the page `page` (its file name) of text `text`, against `api`; `runs` is whether
+/// `guides.rs` runs its samples, `None` for a page outside the guides, to which the sample rule does not apply.
+fn page_violations(page: &str, text: &str, api: &Api, runs: Option<bool>) -> Vec<String> {
     let mut found = Vec::new();
     let blocks = fences(text);
-    // Samples (checked inside engine-internals parts too).
-    for block in &blocks {
+    // Samples (checked inside engine-internals parts too), on the guide pages.
+    for block in blocks.iter().filter(|_| runs.is_some()) {
+        let runs = runs == Some(true);
         let shown = block
             .info
             .split_whitespace()
@@ -415,12 +471,15 @@ fn page_violations(page: &str, text: &str, api: &Api, runs: bool) -> Vec<String>
     let is_checked = |line: usize| checked.get(line).copied().unwrap_or(true);
     let line_of = |offset: usize| text[..offset].matches('\n').count() + 1;
     // Paths, by `persia::` or by a `persia` type's name.
+    // Inside an engine-internals part only a `persia::` path is checked, and `persia::internal` is the one root it
+    // may name (the hidden layer, described as an internal there).
     for (offset, path) in paths(text) {
         let line = line_of(offset);
-        if !is_checked(line) {
+        let first = path.split("::").next().unwrap_or_default();
+        let internal = path == "persia::internal" || path.starts_with("persia::internal::");
+        if !is_checked(line) && (first != "persia" || internal) {
             continue;
         }
-        let first = path.split("::").next().unwrap_or_default();
         let full = if first == "persia" {
             path.clone()
         } else if api.types.contains(first) {
@@ -452,7 +511,7 @@ fn page_violations(page: &str, text: &str, api: &Api, runs: bool) -> Vec<String>
         let code: Vec<&str> = if in_block.contains(&number) {
             vec![line]
         } else {
-            line.split('`').skip(1).step_by(2).collect()
+            inline_code(line)
         };
         for word in code
             .into_iter()
@@ -478,24 +537,39 @@ fn guides_name_only_the_public_api() {
     let guides = read("crates/persia-docs/src/guides.rs");
     let running: BTreeSet<&str> = pages(&guides)
         .into_iter()
-        .filter_map(|p| p.rsplit('/').next())
+        .filter_map(|p| p.strip_prefix("../../../"))
         .collect();
-    let mut names: Vec<String> = std::fs::read_dir(root().join(GUIDE_DIR))
-        .unwrap()
-        .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .filter(|n| {
-            std::path::Path::new(n)
-                .extension()
-                .is_some_and(|e| e == "md" || e == "mdx")
-        })
-        .collect();
-    names.sort();
-    assert!(names.len() > 20, "{GUIDE_DIR}: {names:?}");
-    let found: Vec<String> = names
+    let pages_of = |dir: &str| -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(root().join(dir))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| {
+                std::path::Path::new(n)
+                    .extension()
+                    .is_some_and(|e| e == "md" || e == "mdx")
+            })
+            .map(|n| format!("{dir}/{n}"))
+            .collect();
+        names.sort();
+        names
+    };
+    let guide_pages = pages_of(GUIDE_DIR);
+    assert!(guide_pages.len() > 20, "{GUIDE_DIR}: {guide_pages:?}");
+    let found: Vec<String> = guide_pages
         .iter()
-        .flat_map(|name| {
-            let text = read(&format!("{GUIDE_DIR}/{name}"));
-            page_violations(name, &text, &api, running.contains(name.as_str()))
+        .chain(&pages_of(DOCS_DIR))
+        .flat_map(|path| {
+            let text = read(path);
+            let name = path
+                .strip_prefix(GUIDE_DIR)
+                .map_or(path.as_str(), |n| n.trim_start_matches('/'));
+            let guide = path.starts_with(GUIDE_DIR);
+            page_violations(
+                name,
+                &text,
+                &api,
+                guide.then(|| running.contains(path.as_str())),
+            )
         })
         .collect();
     assert!(
@@ -581,7 +655,7 @@ fn paths_expand_groups_and_start_at_a_root() {
 #[test]
 fn pages_are_checked_against_the_snapshot() {
     let api = Api::parse(SNAPSHOT);
-    let check = |page: &str, text: &str, runs: bool| page_violations(page, text, &api, runs);
+    let check = |page: &str, text: &str, runs: bool| page_violations(page, text, &api, Some(runs));
     // Clean: listed paths, another crate's paths, domain terms in prose, a status token.
     let clean = "Call `Db::open` or `persia::Db::open`; `Vec::new` and `serde_json::Value::String` are not ours.\n\
                  A Database file holds segments and a manifest. %%ENGINE_CALLS%%\n\
@@ -614,12 +688,32 @@ fn pages_are_checked_against_the_snapshot() {
         ),
         ("```text\nCollectionViews::search\n```", "engine type"),
         ("persia_engine does it.", "engine crate"),
+        // Bypasses: a leading `::`, blanks around `::`, a double-backtick span, an HTML code element.
+        (
+            "Call `::persia::internal::pack_path`.",
+            "`persia::internal::pack_path` is not",
+        ),
+        (
+            "Call `persia :: internal :: pack_path`.",
+            "`persia::internal::pack_path` is not",
+        ),
+        ("The engine's ``Database`` type.", "engine type"),
+        ("The engine's <code>Database</code> type.", "engine type"),
         ("```rust\nfn main() {}\n```", "does not run"),
     ] {
         let found = check("a.md", text, false);
         assert_eq!(found.len(), 1, "{text}: {found:?}");
         assert!(found[0].contains(what), "{text}: {found:?}");
     }
+    // A page outside the guides: the name rules, not the sample rule.
+    let other = page_violations(
+        "index.mdx",
+        "```rust\nfn main() { persia::Nothing; }\n```",
+        &api,
+        None,
+    );
+    assert_eq!(other.len(), 1, "{other:?}");
+    assert!(other[0].contains("`persia::Nothing` is not"), "{other:?}");
     // A listed page: its samples run.
     let found = check("a.md", "```rust\nfn main() {}\n```", true);
     assert!(found.is_empty(), "{found:?}");
@@ -634,7 +728,7 @@ fn pages_are_checked_against_the_snapshot() {
 #[test]
 fn engine_internals_parts_are_marked_and_narrow() {
     let api = Api::parse(SNAPSHOT);
-    let check = |page: &str, text: &str| page_violations(page, text, &api, false);
+    let check = |page: &str, text: &str| page_violations(page, text, &api, Some(false));
     let md = "Intro names `Db::open`.\n<!-- engine-internals -->\nThese are engine internals, not API to call: \
               `Database`, `persia_engine::db::Database::open`.\n<!-- /engine-internals -->\nAfter: `Database`.\n";
     let found = check("a.md", md);
@@ -644,6 +738,11 @@ fn engine_internals_parts_are_marked_and_narrow() {
         .replace("<!-- engine-internals -->", "{/* engine-internals */}")
         .replace("<!-- /engine-internals -->", "{/* /engine-internals */}");
     assert_eq!(check("a.mdx", &mdx).len(), 1);
+    // Inside a part, a `persia::` path is still checked, except the hidden `persia::internal` layer.
+    let part = "<!-- engine-internals -->\nInternals: `persia::internal::pack_path`, `Db::close`, `persia::Nothing`.\n<!-- /engine-internals -->";
+    let found = check("a.md", part);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("`persia::Nothing` is not"), "{found:?}");
     // The other form's marker, a part that does not say so, does not close, nests or closes nothing.
     for (page, text, what) in [
         ("a.mdx", md, "other file type"),
