@@ -31,16 +31,26 @@ struct Shown {
 }
 
 /// Every shown sample with a twin. The README's is the getting-started guide's first sample, so the two cannot
-/// drift apart (the guide says it is the README quickstart in a temporary directory).
-const SHOWN: &[Shown] = &[Shown {
-    page: "README.md",
-    after: "## Quickstart",
-    twin: "website/src/content/docs/guide/getting-started.md",
-    twin_after: "## Open a database, index, and search",
-}];
+/// drift apart (the guide says it is the README quickstart in a temporary directory). The landing page's has its
+/// own twin (`crates/persia-docs/src/samples/landing.md`): a shorter program, kept as the page shows it.
+const SHOWN: &[Shown] = &[
+    Shown {
+        page: "README.md",
+        after: "## Quickstart",
+        twin: "website/src/content/docs/guide/getting-started.md",
+        twin_after: "## Open a database, index, and search",
+    },
+    Shown {
+        page: "website/src/content/docs/index.mdx",
+        after: "",
+        twin: "crates/persia-docs/src/samples/landing.md",
+        twin_after: "",
+    },
+];
 
-/// The modules of `crates/persia-docs` whose item docs are pages run as doctests.
-const DOC_MODULES: &[&str] = &["crates/persia-docs/src/guides.rs"];
+/// The modules of `crates/persia-docs` whose item docs are pages run as doctests: `src/<name>.rs`, each wired by
+/// `#[cfg(doctest)] mod <name>;` in its `lib.rs`.
+const DOC_MODULES: &[&str] = &["guides", "samples"];
 
 /// The fences of `text` after its line `after` (all of them when `after` is empty).
 fn fences_after<'a>(text: &'a str, after: &str, page: &str) -> Vec<Fence<'a>> {
@@ -107,13 +117,18 @@ fn difference(shown: &Fence<'_>, want: &[String]) -> Option<String> {
     ))
 }
 
-/// The pages `crates/persia-docs` runs, relative to the root.
+/// The pages `crates/persia-docs` runs, relative to the root: those of each of [`DOC_MODULES`], which must be wired.
 fn doctested_pages() -> Vec<std::path::PathBuf> {
     let src = Path::new("crates/persia-docs/src");
+    let lib = read("crates/persia-docs/src/lib.rs");
     DOC_MODULES
         .iter()
         .flat_map(|module| {
-            let text = read(module);
+            assert!(
+                lib.contains(&format!("#[cfg(doctest)]\nmod {module};")),
+                "crates/persia-docs/src/lib.rs: `#[cfg(doctest)] mod {module};` is missing, so its pages do not run"
+            );
+            let text = read(&format!("crates/persia-docs/src/{module}.rs"));
             pages(&text)
                 .into_iter()
                 .filter_map(|page| normalize(&src.join(page)))

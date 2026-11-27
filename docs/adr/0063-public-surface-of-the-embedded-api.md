@@ -340,3 +340,14 @@ the crate too.
    which that page already calls the README quickstart in a temporary directory, so the two cannot drift apart
    (the README's `main` now returns `Result<(), Box<dyn std::error::Error>>`, as the guide's does). CI runs the
    check in the test job's `cargo test --workspace` and the twin in its `cargo test -p persia-docs`.
+8. **The landing page's sample is checked the same way** (ROADMAP 10.1.51). `website/src/content/docs/index.mdx`
+   shows a `rust title="src/main.rs"` block, which rustdoc does not collect (item 4), opening `app.persia` as the
+   README does. A title rustdoc reads (Expressive Code also takes one from a first-line `// src/main.rs` comment)
+   would not be enough: run as shown, the fixed path has item 7's problem, and a temporary directory on the page
+   would change the hero. So its twin is `crates/persia-docs/src/samples/landing.md`, the doc of an item of the new
+   `#[cfg(doctest)] mod samples` (wired in `lib.rs`, checked by item 7's check): the same program, with a hidden
+   line making the directory (`tempfile::tempdir().expect(..)`, test setup: the shown `main` returns
+   `persia::Result`, which an `io::Error` does not convert into) and the same `toml` block. The hero is unchanged.
+   It stays a shorter program than the README's: two twins, each shown sample equal to what runs. The check is in
+   the Rust workflow (`ci.yml`, no paths filter), not `website.yml`, whose paths filter would skip a change to the
+   twin alone.
