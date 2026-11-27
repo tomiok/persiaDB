@@ -1,6 +1,6 @@
 ---
 title: "Getting started with PersiaDB"
-description: "Getting started with PersiaDB, a pre-alpha Rust search library: what you can call today, and the planned Db API."
+description: "Getting started with PersiaDB, a pre-alpha embedded search database for Rust: add the dependency, open a .persia file, index documents, search them, and use the persia CLI."
 head:
   - tag: title
     content: "Getting started with PersiaDB: a Rust search library"
@@ -10,85 +10,69 @@ head:
       content: "Getting started with PersiaDB: a Rust search library"
 ---
 
-Getting started with PersiaDB means separating this Rust search library's design from the code you can call.
-The design is embedded full-text search in Rust: a library in your process, one file, ranked results, and no search daemon.
-%%PRE_ALPHA%%
-%%M10_BLOCKED%%
-What you can call today is library code. persia-engine creates a database file, writes documents, and searches a collection snapshot; the [README quickstart](https://github.com/tomiok/persiaDB#index-documents-and-search-them) runs those calls. That is not `persia::Db::open`.
+PersiaDB is embedded full-text search in Rust: a library in your process, one `.persia` file, ranked results, and no search daemon.
+This page shows the public API of the `persia` crate as it is on `main`, and the `persia` command-line tool.
 
-[What is an embedded search database?](/guide/embedded-search/) defines that in-process shape.
-The [comparison](/guide/comparison/) places the design next to SQLite FTS5, Tantivy, and Meilisearch, and it is not a benchmark.
-The [FAQ](/guide/faq/) has the short answers.
-When this page and the [SPEC](https://github.com/tomiok/persiaDB/blob/main/SPEC.md) disagree, the SPEC wins.
+Persia DB is pre-alpha. There is no release, and the on-disk format is unstable until v1.0, with no compatibility promise (SPEC §15).
+%%M10_BLOCKED%%
 Live status is [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md): %%PROGRESS_SUMMARY%%.
 The same snapshot, by milestone, is the [roadmap](/roadmap/).
 
-## What this Rust search library implements today
+[What is an embedded search database?](/guide/embedded-search/) defines the in-process shape.
+The [comparison](/guide/comparison/) places the design next to SQLite FTS5, Tantivy, and Meilisearch, and it is not a benchmark.
+The [FAQ](/guide/faq/) has the short answers.
+When this page and the [SPEC](https://github.com/tomiok/persiaDB/blob/main/SPEC.md) disagree, the SPEC wins.
 
-The crates are not published (`publish = false` in the workspace). There is no crates.io release and no `cargo add persia`.
+## Add Persia to a Rust project
 
-`persia`, the embedded API crate, exports no types. Its source is the module docs in [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia/src/lib.rs). There is no `Db` and no `Collection`.
-
-`persia-server` is a placeholder binary: it prints "not implemented (M11)" and exits with status 1. No gRPC or HTTP server runs.
-
-`persia-cli` lists and removes temporary and quarantine files next to a container or a local store (`persia container files`, `persia container sweep`, `persia store files`, `persia store sweep`). It can inspect and dump one segment file (`persia inspect segment`, `persia dump segment`, with `--verify` on inspect), and check a whole database read-only (`persia verify`). For a whole database it also prints statistics (`persia stats`), writes a collection's documents as JSON Lines (`persia dump documents`), and compacts the container (`persia compact`). `persia bench` is a quick local micro-benchmark; its numbers are local guidance only. It does not import or search.
-
-`persia-format` encodes and decodes on-disk bytes. It does not open a file as a database. A git dependency, for code that wants those codecs:
+The crates are not published (`publish = false` in the workspace). There is no crates.io release and no `cargo add persia`. Depend on the Git repository:
 
 ```toml
 [dependencies]
-persia-format = { git = "https://github.com/tomiok/persiaDB" }
+persia = { git = "https://github.com/tomiok/persiaDB" }
 ```
 
-This round-trips a container header (SPEC §4.2). It is the doctest on [`Header`](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/header.rs). It does not create `app.persia` and it does not search:
+## Open a database, index, and search
+
+This is the [README quickstart](https://github.com/tomiok/persiaDB#quickstart):
 
 ```rust
-use persia_format::header::{Access, HEADER_LEN, Header};
-use persia_format::{Reader, Writer};
+use persia::{Db, SearchRequest};
 
-let header = Header::new([7; 16]);
-let mut w = Writer::new();
-header.encode(&mut w)?;
-assert_eq!(w.len(), HEADER_LEN);
+fn main() -> persia::Result<()> {
+    let db = Db::open("app.persia")?; // creates app.persia if it is missing
+    let notes = db.create_collection_json(
+        r#"{"name": "notes", "fields": {"body": {"type": "text"}}}"#,
+    )?;
+    notes.put_json(r#"{"id": "n1", "body": "Hello, world"}"#)?;
+    notes.put_json(r#"{"id": "n2", "body": "hello, hello again"}"#)?;
+    notes.put_json(r#"{"id": "n3", "body": "goodbye"}"#)?;
+    notes.commit()?;
 
-let decoded = Header::decode(&mut Reader::new(w.as_slice()))?;
-assert_eq!(decoded, header);
-assert_eq!(decoded.access(), Access::ReadWrite);
+    // Ranked with BM25F: "n2" says hello twice, so it ranks first. "goodbye" does not match.
+    let page = notes.search(&SearchRequest::new("hello"))?;
+    let ids: Vec<_> = page.hits.iter().map(|h| h.document.id()).collect();
+    assert_eq!(ids, ["n2", "n1"]);
+
+    // A typo still returns hits, and the response says how the query was relaxed.
+    let page = notes.search(&SearchRequest::new("helo"))?;
+    assert!(!page.hits.is_empty());
+    println!("{:?} {:?}", page.relaxation.level, page.relaxation.corrected());
+    // Fuzzy [Correction { original: "helo", corrected: "hello" }]
+
+    db.close()
+}
 ```
 
-Also implemented in that crate, and only as byte codecs: checksums, integer blocks, zstd block compression, block framing, the two superblock slots, frames (including the streaming encoder), the memory-map reader, and `BlobId` / `BlobRef`. The public module list is [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs). The [code](/guide/code/) page quotes exports from that file.
+`Db::open` creates the file and any missing parent directories, and opens an existing database without replacing it (SPEC §8.1). No daemon and no configuration file are involved. A second run of this program fails at `create_collection_json` with `ErrorCode::AlreadyExists`: use `db.collection("notes")` on an existing database, or delete `app.persia` first.
 
-`persia-blob` stores the bytes a document points at: a local `<name>.persia.blobs` pack, a remote key layout, and garbage collection. The calls are `persia::internal`, not `persia::Db`. [Blob storage](/guide/blobs/) is that API, the write order, and what is still planned.
+`OpenOptions` sets how a database opens: `read_only`, `create_if_missing`, `durability` (`Fsync` by default), `memtable_bytes`, `block_cache_bytes`, and more. `Db::open` accepts a path or a `file://` URL. `s3://`, `gs://`, and `az://` return `ErrorCode::Unsupported` in this build: object storage is planned (M12).
 
-%%LIBRARY_NOW%%
+Every call returns `persia::Result`. Its `Error` carries a stable `ErrorCode` (`NotFound`, `AlreadyExists`, `Conflict`, `InvalidArgument`, `Corrupt`, `Unsupported`, `ReadOnly`, and others). The API reference is `cargo doc -p persia --open` in a clone of the repository.
 
-Those crates are in the same git repository and are unpublished the same way. Depending on them does not give you `Db::open`.
+## Collections and schemas
 
-## Embedded full-text search in Rust
-
-**Illustrative public API.** The block below is the SPEC sketch of `persia::Db` (SPEC §6.2, §7.1, §7.6, §8.1, and §9.6). It is not a stability promise. %%ENGINE_CALLS%% %%M10_BLOCKED%%
-
-The shape a caller is meant to use:
-
-```rust
-// ILLUSTRATIVE — these methods are not in the persia crate.
-let db = persia::Db::open("app.persia")?;
-
-// Schema is declared up front (SPEC §6.2). Adding a field later is allowed.
-// Changing a field's type is not.
-let products = db.create_collection(schema)?;
-
-products.put(doc)?;
-products.commit()?;
-
-// The design names the relaxation on the response (SPEC §7.6).
-// L4 reports a correction when that step found the hits. A one-term query skips L2.
-// See Fuzzy search.
-let results = products.search("runing")?;
-let relaxation = &results.relaxation;
-```
-
-The collection schema in SPEC §6.2, as JSON. `CollectionSchema::from_json` in `persia-engine` parses a schema. The block below is the SPEC sketch, and it does not open a database:
+`Db::create_collection` takes a `CollectionSchema`, built with `SchemaBuilder`. `Db::create_collection_json` takes the same schema as JSON (SPEC §6.2):
 
 ```json
 {
@@ -105,11 +89,28 @@ The collection schema in SPEC §6.2, as JSON. `CollectionSchema::from_json` in `
 }
 ```
 
-Field types in that schema are `text`, `keyword`, `i64`, `f64`, `bool`, `datetime`, and `stored` (SPEC §6.1). A `text` field's `analyzer` is a built-in pipeline: `en` in the sketch above stems and drops stopwords. The nine names and what each one emits are [Text analysis](/guide/text-analysis/). Every document also has a string `id` (at most 512 bytes, unique in the collection). Documents are submitted as JSON, or as a `serde` struct via a planned `put_struct`, and stored as CBOR (SPEC §6.4).
+Field types are `text`, `keyword`, `i64`, `f64`, `bool`, `datetime`, and `stored` (SPEC §6.1). A `text` field's `analyzer` is a built-in pipeline: `en` stems and drops stopwords. The names and what each one emits are [Text analysis](/guide/text-analysis/). Every document has a string `id` (at most 512 bytes, unique in the collection). `db.collection(name)` returns a handle on an existing collection, `collection_names` lists them, and `drop_collection` removes one.
 
-`put` is an upsert by id. `delete` writes a tombstone. `commit` publishes a manifest. A `put` is specified to be visible to a later search on that database before commit (read-your-writes, SPEC §8.2–§8.4). One writer; a second writer fails immediately. Handles are specified as `Send` and `Sync`.
+## Documents and commits
 
-Search is specified to accept a text query or a structured query (SPEC §7.1): fields and boosts, filters, sort, `limit` / `offset`, facets, and `relax`. Scoring is BM25F plus an optional static rank (SPEC §7.2). %%MATCHING_CELL%% How a hit is scored is [BM25F ranking](/guide/ranking/). The longer page for facets, sort, cursors, deadlines, and explain is [Faceted search](/guide/faceted-search/).
+A `Collection` takes documents as a `persia::Document` (`put`, `put_batch`), as JSON (`put_json`), or as any `serde` type (`put_struct`). It reads them back with `get`, `get_json`, and `get_struct`, and removes one with `delete`. Documents are stored as CBOR (SPEC §6.4).
+
+`put` is an upsert by id, and `delete` writes a tombstone. A write that returned is visible to every later read on that database, committed or not (read-your-writes, SPEC §8.4). `commit` flushes every collection's writes into segments and publishes them. The database also commits in the background on its own thread, and at `Db::close`, which joins that thread.
+
+A database has one writer at a time, across processes: a second read-write open fails at once with `ErrorCode::Conflict`. Other handles open it read-only with `OpenOptions::new().read_only(true)` and see new commits after `Db::refresh`. A `Db` is `Send + Sync`: share it by reference or in an `Arc`.
+
+Large payloads go into the blob pack beside the file (`<name>.persia.blobs`): `Db::put_blob`, `Db::get_blob`, `Db::get_blob_range`, and `Collection::put_with_blob`. [Blob storage](/guide/blobs/) is that API and its write order. With the cargo feature `async`, `AsyncDb` and `AsyncCollection` return futures that need no runtime.
+
+## Search
+
+`Collection::search` takes a `SearchRequest`: `SearchRequest::new(q)` and the builders `fields`, `filter`, `soft_filter`, `sort`, `limit`, `offset`, `after` (a cursor), `facets`, `explain`, `relax`, and `proximity`. `Collection::search_json` takes the same request as JSON (SPEC §7.1):
+
+```rust
+let page = notes.search_json(r#"{"q": "helo", "limit": 5, "relax": false}"#)?;
+assert!(page.hits.is_empty()); // relaxation is off, and nothing is spelled "helo"
+```
+
+A `SearchResponse` has `hits` (each with `document`, `score`, the relaxation `level` that found it, and a `cursor`), `facets`, `relaxation`, and `next_cursor()`. Scoring is BM25F plus an optional static rank (SPEC §7.2). %%MATCHING_CELL%% How a hit is scored is [BM25F ranking](/guide/ranking/). Facets, sort, cursors, deadlines, and explain are [Faceted search](/guide/faceted-search/).
 
 ### Relaxation
 
@@ -125,23 +126,61 @@ Search is specified to accept a text query or a structured query (SPEC §7.1): f
 | L5 | `fallback` | Static rank, then index-location recency, flagged with `fallback`. `none` builds no step |
 | L6 | `filters` | Only with `relax.filters: "last_resort"`, after every enabled earlier level: L0's words without the request's filters. A query that searches no word does not build it. `"filters_dropped": true` only when this step found the hits |
 
-Filters are not relaxed unless the caller sets `relax.filters` to `"last_resort"`. `relax: false` on a query turns the cascade off.
+Filters are not relaxed unless the caller sets `relax.filters` to `"last_resort"`. `relax: false` on a request turns the cascade off.
 
-The response is specified to carry what happened. This object is the shape in SPEC §7.6. `CollectionViews::search_relaxed` returns a `Relaxation` value. The engine produces that correction when L4 is the step that found the hits (ROADMAP 8.2.4.3, 8.1.22). L0 through L5 build queries. L5 ranks by static rank, then index-location recency, ignores the request's `sort`, and sets `fallback`. With `relax.filters: "last_resort"`, one last step (L6) drops the request's filters when every earlier level found fewer than `min_results` hits. Queries that search no word do not plan it, and `filters_dropped` is true only when L6 supplies the hits (ROADMAP 8.2.6). [minimum_should_match](/guide/typo-tolerant-search/#minimum_should_match) is the L2 ladder:
+The response says what happened. In Rust, `SearchResponse::relaxation` has `level`, `applied`, `original`, `effective`, and `truncated`, and the accessors `corrected()`, `fallback()`, and `filters_dropped()`. In the response JSON (SPEC §7.5.2) the same object reads, for the query `helo` above:
 
 ```json
 {
   "level": "fuzzy",
-  "applied": ["drop_terms:75%", "fuzzy"],
-  "original": "zapatilas rojs",
-  "effective": "zapatillas rojas",
-  "corrected": { "zapatilas": "zapatillas", "rojs": "rojas" }
+  "applied": ["prefix", "fuzzy"],
+  "original": "helo",
+  "effective": "hello",
+  "corrected": { "helo": "hello" },
+  "truncated": false,
+  "filters_dropped": false
 }
 ```
 
-### Command line
+## Command line
 
-**Partly in the tree.** `persia inspect segment` and `persia dump segment` read one segment file, and `--verify` checks it. `persia verify` checks a whole database. `persia stats`, `persia dump documents`, and `persia compact` report, dump, and compact a whole database, and `persia bench` is a small local benchmark. Still planned (ROADMAP 10.4.2): JSONL import and a one-shot search. The binary does neither.
+The binary is `persia`, in the `persia-cli` crate. From a clone of the repository, run it as `cargo run -p persia-cli -- <command>`. Import a JSON Lines file into a new database, search it, and print its statistics:
+
+```bash
+echo '{"name": "notes", "fields": {"body": {"type": "text"}}}' > notes.schema.json
+echo '{"id": "n1", "body": "hello, world"}' > notes.jsonl
+persia import app.persia --collection notes --schema notes.schema.json --input notes.jsonl
+persia search app.persia --collection notes --query helo
+persia stats app.persia
+```
+
+| Command | What it does |
+|---|---|
+| `persia import <file> --collection <name> [--schema <json>] [--input <jsonl>] [--json]` | Puts one document per JSON Lines line (standard input by default) and commits at the end. `--schema` creates the database and the collection if they are missing. The first bad line stops the import. |
+| `persia search <file> --collection <name> (--query <text> \| --request <json>) [--json]` | Runs one search, read-only. `--query` uses every default, relaxation included. `--request` takes a request JSON. `--json` prints the response JSON. |
+| `persia stats <file> [--json]` | What a read-only open reports: the last commit, live and dead space, the WAL, the blob pack, and each collection's schema, documents, and segments. |
+| `persia dump documents <file> --collection <name>` | Writes a collection's live documents as JSON Lines, the form `import` reads. |
+| `persia verify <file> [--quick \| --deep]` | Checks a whole database read-only, including its blob pack. |
+| `persia compact <file> [--json]` | Rewrites the container without its dead frames. |
+| `persia gc <file> [--grace <age>] [--json]` | Collects the blob pack: deletes the blobs no document references. |
+| `persia bench [--docs <n>] [--queries <n>] [--seed <n>] [--json]` | A quick micro-benchmark of this build in a scratch directory. Its numbers are local guidance only, not a published benchmark. |
+| `persia inspect container <file> [--id <id>]` | The superblock and the frames after it. |
+| `persia inspect segment <file> --schema <json> [--verify]`, `persia dump segment <file> --schema <json> --field <name> [--term <term>]` | One segment file: its structure, or a field's terms and postings. |
+| `persia container files <file>`, `persia container sweep <file> [--quarantine]` | Lists or removes the temporary and quarantine files next to a database. |
+| `persia store files <root>`, `persia store sweep <root> [--force]` | The same for a local object store directory. |
+
+`persia --help` and `persia <command> --help` print every option. Exit status is 0 on success, 2 on a usage error, 3 on corrupt data or a missing referenced blob, 4 when the file is not a Persia container, and 1 on any other failure.
+
+## What is not there yet
+
+- **Server.** `persia-server` is a placeholder binary: it prints "not implemented (M11)" and exits with status 1. No gRPC or HTTP server runs.
+- **Object storage.** S3, GCS, and Azure Blob backends are M12. Kubernetes sharding and stateless query nodes are M13.
+- **SDKs.** Rust and Go network clients and a TypeScript network client follow the server. Embedded Go, TypeScript, and Python bindings that open a file in-process are planned for v1.0 ([Embedded SDKs](/guide/sdks/)).
+- **A release.** Nothing is on crates.io, and the on-disk format can change before v1.0.
+
+## The crates underneath
+
+`persia` is the stable surface. The engine crates below it are in the same repository and are unpublished the same way; they are not stable APIs. `persia-format` holds the on-disk codecs, `persia-storage` the `Storage` trait and the single-file container, `persia-analysis` the tokenizers and analyzers, `persia-engine` segments, the WAL, query execution, and relaxation, and `persia-blob` the blob pack. [Crate architecture](/guide/architecture/) shows the layers, and the [code](/guide/code/) page quotes their exports.
 
 ## Common questions
 
@@ -149,15 +188,11 @@ The [FAQ](/guide/faq/) answers the same kind of question for status, how this di
 
 ### Can I add Persia to a Rust project today?
 
-Not as a database. %%NO_PUBLIC_API%% You can depend on `persia-format` from git, as shown above, and on `persia-storage`, `persia-engine`, and `persia-analysis`. %%ENGINE_CALLS%%
-
-### How do I open a database, index, and search?
-
-You don't, yet, through `persia::Db::open`. Those calls are the illustrative block on this page. %%ENGINE_CALLS%% Below that API, `persia_engine::db::Database` opens a file, and the [README quickstart](https://github.com/tomiok/persiaDB#index-documents-and-search-them) searches it. %%M10_BLOCKED%% [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) is the checklist.
+Yes, as a Git dependency, with the pre-alpha caveats above: no release, and a format that can still change. See [Add Persia to a Rust project](#add-persia-to-a-rust-project).
 
 ### How do I read which relaxation was applied?
 
-On the intended API, from the search response field `relaxation` (SPEC §7.6): `level`, `applied`, `original`, `effective`, `corrected`, and `fallback` when L5 found the hits. Stricter levels rank above looser ones. %%RELAXATION_NOW%% See [Typo-tolerant search](/guide/typo-tolerant-search/) and [Fuzzy search](/guide/fuzzy-search/).
+From `SearchResponse::relaxation` (SPEC §7.6): `level`, `applied`, `original`, `effective`, `corrected()`, `fallback()` when L5 found the hits, and `filters_dropped()`. Each hit also carries the `level` that found it, and stricter levels rank above looser ones. See [Typo-tolerant search](/guide/typo-tolerant-search/) and [Fuzzy search](/guide/fuzzy-search/).
 
 ### Is the on-disk format stable?
 
@@ -165,11 +200,11 @@ No. Format version 1.0 is a draft until the v1.0 release (SPEC §15). There is n
 
 ### Is there a server, a cloud backend, or a client SDK?
 
-Planned, not started. gRPC and HTTP are M11. S3, GCS, and Azure Blob are M12. Kubernetes sharding is M13. Rust and Go network clients are 14.2 and 14.3, compatibility is 14.4, and the TypeScript network client is 14.5, after M11 and M13. Embedded Go, TypeScript, and Python bindings, which would open a file in-process, are scheduled for v1.0 as ROADMAP 14.6 and depend on the `persia` facade (M10) ([Embedded SDKs](/guide/sdks/)); they are not implemented either. Embedded mode, when it exists, has no authentication and no config file (SPEC §14).
+Not yet. gRPC and HTTP are M11. S3, GCS, and Azure Blob are M12. Kubernetes sharding is M13. Rust and Go network clients are 14.2 and 14.3, compatibility is 14.4, and the TypeScript network client is 14.5, after M11 and M13. Embedded Go, TypeScript, and Python bindings are scheduled for v1.0 as ROADMAP 14.6 ([Embedded SDKs](/guide/sdks/)). Embedded mode has no authentication and no config file (SPEC §14).
 
 ### Why is a query supposed to avoid empty results?
 
-That is a product rule (SPEC §7.6), not an optional plugin. A query that matches nothing is relaxed step by step, and the response says what changed. %%RELAXATION_CELL%% The collection search it wraps is library code. [Typo-tolerant search](/guide/typo-tolerant-search/) separates the two. [Fuzzy search](/guide/fuzzy-search/) is the edit-distance step. [Faceted search](/guide/faceted-search/) is the request that search runs.
+That is a product rule (SPEC §7.6), not an optional plugin. A query that matches nothing is relaxed step by step, and the response says what changed. %%RELAXATION_CELL%% [Typo-tolerant search](/guide/typo-tolerant-search/) is the cascade. [Fuzzy search](/guide/fuzzy-search/) is the edit-distance step. [Faceted search](/guide/faceted-search/) is the request that search runs.
 
 ### Where is the source of truth?
 

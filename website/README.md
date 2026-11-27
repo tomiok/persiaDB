@@ -32,7 +32,7 @@ use the `/persiaDB/` base.
 
 ## Waitlist
 
-The landing page and `/waitlist/` include a form that encrypts the submission in the browser.
+The `/waitlist/` page has a form that encrypts the submission in the browser.
 Setup (keypair, Cloudflare Worker, GitHub secret) is [`scripts/waitlist/README.md`](../scripts/waitlist/README.md).
 The relay that forwards ciphertext lives in [`relay/waitlist`](relay/waitlist/README.md).
 
