@@ -505,11 +505,33 @@ fn a_thread_the_os_refuses_fails_the_first_job_and_the_next_one_starts_the_pool(
             source.downcast_ref::<std::io::Error>().is_some(),
             "{source:?}"
         );
-        assert_eq!(db.pool_threads(), 0, "all or nothing");
+        // A refused start installs no thread (by construction); `async_lifecycle.rs` counts the threads to show that
+        // the ones it spawned ended.
+        assert_eq!(db.pool_threads(), 0);
         // The refused job did not run; the next one starts the pool and runs.
         assert!(block_on(notes.get("refused")).unwrap().is_none());
         assert_eq!(db.pool_threads(), 3);
         block_on(db.close()).unwrap();
         assert!(!has(&path, "refused"));
     }
+}
+
+/// A size far beyond what the OS can start is not preallocated for (no capacity overflow, no abort): the first job
+/// fails as the OS refuses a thread, with `Io`, and the database still answers and closes. (No second job runs here:
+/// it would try the whole start again, with no refusal hook to stop it.)
+#[test]
+fn a_pool_far_larger_than_the_os_can_start_fails_its_first_job_without_a_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    seeded(&path);
+    let options = OpenOptions::new()
+        .async_threads(usize::MAX)
+        .async_refuse_thread(0);
+    let (db, notes) = open(&path, options);
+    let err = block_on(notes.get("seed")).unwrap_err();
+    assert_eq!(err.code(), ErrorCode::Io, "{err}");
+    assert_eq!(db.pool_threads(), 0);
+    assert_eq!(db.collection_names().unwrap(), ["notes"]);
+    block_on(db.close()).unwrap();
+    Db::open(&path).unwrap().close().unwrap();
 }

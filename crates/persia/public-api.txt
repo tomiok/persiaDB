@@ -772,17 +772,23 @@ pub fn persia::AnalyzerRef::parse(text: &str) -> core::option::Option<Self>
 pub fn persia::AnalyzerRef::version(&self) -> u32
 pub fn persia::AsyncCollection::commit(&self) -> persia::JobFuture<()>
 pub fn persia::AsyncCollection::delete(&self, id: impl core::convert::Into<alloc::string::String>) -> persia::JobFuture<()>
+pub fn persia::AsyncCollection::durability(&self) -> persia::Durability
 pub fn persia::AsyncCollection::get(&self, id: impl core::convert::Into<alloc::string::String>) -> persia::JobFuture<core::option::Option<persia::Document>>
 pub fn persia::AsyncCollection::get_json(&self, id: impl core::convert::Into<alloc::string::String>) -> persia::JobFuture<core::option::Option<alloc::string::String>>
 pub fn persia::AsyncCollection::get_struct<T>(&self, id: impl core::convert::Into<alloc::string::String>) -> persia::JobFuture<core::option::Option<T>> where T: serde_core::de::DeserializeOwned + core::marker::Send + 'static
+pub fn persia::AsyncCollection::name(&self) -> &str
 pub fn persia::AsyncCollection::put(&self, doc: persia::Document) -> persia::JobFuture<()>
 pub fn persia::AsyncCollection::put_batch(&self, docs: alloc::vec::Vec<persia::Document>) -> persia::JobFuture<()>
 pub fn persia::AsyncCollection::put_json(&self, json: impl core::convert::Into<alloc::string::String>) -> persia::JobFuture<()>
 pub fn persia::AsyncCollection::put_struct<T: serde_core::ser::Serialize + ?core::marker::Sized>(&self, value: &T) -> persia::JobFuture<()>
 pub fn persia::AsyncCollection::put_with_blob<R>(&self, doc: persia::Document, reader: R, options: persia::PutBlobOptions) -> persia::JobFuture<persia::BlobRef> where R: alloc::io::read::Read + core::marker::Send + 'static
+pub fn persia::AsyncCollection::schema(&self) -> persia::Result<persia::CollectionSchema>
 pub fn persia::AsyncCollection::search(&self, request: persia::SearchRequest) -> persia::JobFuture<persia::SearchResponse>
 pub fn persia::AsyncCollection::search_json(&self, json: impl core::convert::Into<alloc::string::String>) -> persia::JobFuture<persia::SearchResponse>
+pub fn persia::AsyncCollection::to_struct<T: serde_core::de::DeserializeOwned>(&self, doc: &persia::Document) -> persia::Result<T>
+pub fn persia::AsyncCollection::with_durability(self, durability: persia::Durability) -> Self
 pub fn persia::AsyncDb::backup(&self, dest: impl core::convert::AsRef<std::path::Path>) -> persia::JobFuture<()>
+pub fn persia::AsyncDb::block_cache_stats(&self) -> persia::Result<persia::BlockCacheStats>
 pub fn persia::AsyncDb::close(self) -> persia::JobFuture<()>
 pub fn persia::AsyncDb::collection(&self, name: &str) -> persia::Result<persia::AsyncCollection>
 pub fn persia::AsyncDb::collection_names(&self) -> persia::Result<alloc::vec::Vec<alloc::string::String>>
@@ -791,8 +797,10 @@ pub fn persia::AsyncDb::create_collection(&self, schema: persia::CollectionSchem
 pub fn persia::AsyncDb::create_collection_json(&self, json: impl core::convert::Into<alloc::string::String>) -> persia::JobFuture<persia::AsyncCollection>
 pub fn persia::AsyncDb::drop_collection(&self, name: impl core::convert::Into<alloc::string::String>) -> persia::JobFuture<()>
 pub fn persia::AsyncDb::get_blob_range(&self, blob_ref: persia::BlobRef, range: core::ops::range::Range<u64>) -> persia::JobFuture<alloc::vec::Vec<u8>>
+pub fn persia::AsyncDb::is_read_only(&self) -> bool
 pub fn persia::AsyncDb::open(location: impl core::convert::AsRef<std::path::Path>) -> persia::JobFuture<Self>
 pub fn persia::AsyncDb::open_with(options: persia::OpenOptions, location: impl core::convert::AsRef<std::path::Path>) -> persia::JobFuture<Self>
+pub fn persia::AsyncDb::path(&self) -> &std::path::Path
 pub fn persia::AsyncDb::put_blob<R>(&self, reader: R, options: persia::PutBlobOptions) -> persia::JobFuture<persia::BlobRef> where R: alloc::io::read::Read + core::marker::Send + 'static
 pub fn persia::AsyncDb::refresh(&self) -> persia::JobFuture<()>
 pub fn persia::Blob::from_path(path: impl core::convert::Into<std::path::PathBuf>) -> Self

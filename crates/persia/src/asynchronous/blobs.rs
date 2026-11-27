@@ -20,6 +20,9 @@ impl AsyncDb {
     /// the future is dropped: the blob is stored, and a later garbage collection takes it if no document references
     /// it. Bytes in a file: pass the opened [`File`](std::fs::File).
     ///
+    /// A future dropped before its job starts skips the upload, but its reader stays in the queued job until the pool
+    /// reaches that job (or the close completes it): a reader that holds a file or a socket keeps it until then.
+    ///
     /// ```
     /// # use std::future::Future;
     /// # fn block_on<F: Future>(future: F) -> F::Output {
@@ -108,7 +111,8 @@ impl AsyncCollection {
     /// the future resolves to the reference the document carries. The reader is owned and read on a pool thread, as
     /// for [`AsyncDb::put_blob`]. A blob already stored is not passed here: give the document its reference
     /// ([`Document::set_blob_ref`]) and [`put`](Self::put) it. Once started it runs to its end even if the future is
-    /// dropped: the blob is stored and the document put.
+    /// dropped: the blob is stored and the document put. As for [`AsyncDb::put_blob`], a future dropped before its job
+    /// starts leaves its reader in the queued job until the pool reaches that job or the close completes it.
     ///
     /// ```
     /// # use std::future::Future;

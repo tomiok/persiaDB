@@ -11,6 +11,7 @@ mod blobs;
 mod collections;
 mod job;
 mod json;
+mod lookups;
 mod pool;
 
 use std::fmt;
@@ -79,6 +80,9 @@ use crate::{SearchRequest, SearchResponse};
 pub struct AsyncDb {
     /// `None` once [`AsyncDb::close`] took it.
     db: Option<Db>,
+    /// The state `db` shares with its handles, for the calls that do no I/O ([`AsyncDb::path`], ...): it is there
+    /// for as long as the `AsyncDb`, which `db` is not.
+    shared: Arc<Inner>,
     pool: Pool,
 }
 
@@ -87,7 +91,7 @@ impl fmt::Debug for AsyncDb {
         f.debug_struct("AsyncDb")
             .field("db", &self.db)
             .field("pool", &self.pool)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -171,7 +175,12 @@ impl AsyncDb {
                     pool::emit(hook.as_ref(), &started);
                     let opened = options.open(&location).map(|db| {
                         let pool = Pool::new(db.inner.options.pool.clone());
-                        Self { db: Some(db), pool }
+                        let shared = Arc::clone(&db.inner);
+                        Self {
+                            db: Some(db),
+                            shared,
+                            pool,
+                        }
                     });
                     let error = opened.as_ref().err().map(Error::code);
                     // A dropped future's open is closed here, before `Finished`: `finish` drops the `Db`.
@@ -261,7 +270,8 @@ impl AsyncDb {
     }
 
     /// A handle on the collection named `name` ([`Db::collection`]): a lookup in the latest published state, which
-    /// takes no lock and runs on the caller's thread.
+    /// does no I/O of its own and runs on the caller's thread (on a read-only database it can wait for a running
+    /// [`refresh`](Self::refresh) to swap its state in).
     ///
     /// ```
     /// # use std::future::Future;
@@ -297,7 +307,8 @@ impl AsyncDb {
         })
     }
 
-    /// Test hook: the number of threads the database's async pool runs now: 0 before its first job and once closed.
+    /// Test hook: the number of threads the database's async pool has installed: 0 before a start succeeds and once
+    /// closed. A refused start installs none by construction; that its spawned threads ended is not shown by this.
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn pool_threads(&self) -> usize {

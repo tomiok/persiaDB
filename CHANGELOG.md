@@ -18,7 +18,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   future dropped before its job starts skips it; a started change (the collection calls, the uploads, `put_json`,
   `put_struct`, `refresh`, `backup`) runs to its end with its result discarded; a started read (`get_json`,
   `get_struct`, `get_blob_range`, `search_json`) has its token set. There is no async `get_blob`: read a blob by
-  ranges.
+  ranges. The calls that do no I/O are synchronous on the async handles: `AsyncDb::path`, `is_read_only` and
+  `block_cache_stats`, and `AsyncCollection::name`, `schema`, `durability`, `with_durability` and `to_struct`.
+  `AsyncDb::backup` reads its `dest` at the call (a malformed one is refused at once; a relative one is made absolute
+  against the working directory then).
 - `persia::OpenOptions::async_threads(usize)` (feature `async`; ROADMAP 10.1.27, ADR-0064 amended): the number of
   threads of an `AsyncDb`'s pool, `min(4, cores)` by default, started by the first job and joined by `close`. 0 is
   refused at open with `ErrorCode::InvalidArgument`; there is no upper bound. The pool now starts all its threads or

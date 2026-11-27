@@ -2,14 +2,14 @@
 //! 2026-11-27). Each is a change of the database (or, for `refresh`, of what it shows) that has no point to stop at
 //! once started: dropping the future of one that has started lets it run to its end, and its result is discarded.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::{AsyncCollection, AsyncDb, JobFuture, JobKind};
-use crate::{CollectionSchema, Error, Result};
+use crate::{CollectionSchema, Error, ErrorCode, Result};
 
 impl AsyncDb {
-    /// [`Db::create_collection`](crate::Db::create_collection) on the pool; resolves to a handle on the new collection. Once started it runs to its
-    /// end (the collection is created and committed) even if the future is dropped.
+    /// [`Db::create_collection`](crate::Db::create_collection) on the pool; resolves to a handle on the new collection.
+    /// Once started it runs to its end (the collection is created and committed) even if the future is dropped.
     ///
     /// ```
     /// # use std::future::Future;
@@ -41,8 +41,8 @@ impl AsyncDb {
     /// ```
     ///
     /// # Errors
-    /// As [`Db::create_collection`](crate::Db::create_collection); [`ErrorCode::Closed`](crate::ErrorCode::Closed) if the database closed before the
-    /// job started.
+    /// As [`Db::create_collection`](crate::Db::create_collection); [`ErrorCode::Closed`](crate::ErrorCode::Closed) if
+    /// the database closed before the job started.
     pub fn create_collection(&self, schema: CollectionSchema) -> JobFuture<AsyncCollection> {
         let pool = self.pool.clone();
         self.submit(JobKind::CreateCollection, move |inner, _| {
@@ -51,8 +51,8 @@ impl AsyncDb {
         })
     }
 
-    /// [`Db::create_collection_json`](crate::Db::create_collection_json) on the pool: the JSON is read on the pool's thread. Once started it runs to its
-    /// end even if the future is dropped.
+    /// [`Db::create_collection_json`](crate::Db::create_collection_json) on the pool: the JSON is read on the pool's
+    /// thread. Once started it runs to its end even if the future is dropped.
     ///
     /// ```
     /// # use std::future::Future;
@@ -85,8 +85,8 @@ impl AsyncDb {
     /// ```
     ///
     /// # Errors
-    /// As [`Db::create_collection_json`](crate::Db::create_collection_json); [`ErrorCode::Closed`](crate::ErrorCode::Closed) if the database closed
-    /// before the job started.
+    /// As [`Db::create_collection_json`](crate::Db::create_collection_json);
+    /// [`ErrorCode::Closed`](crate::ErrorCode::Closed) if the database closed before the job started.
     pub fn create_collection_json(&self, json: impl Into<String>) -> JobFuture<AsyncCollection> {
         let json = json.into();
         let pool = self.pool.clone();
@@ -96,8 +96,9 @@ impl AsyncDb {
         })
     }
 
-    /// The names of the database's collections, in ascending byte order ([`Db::collection_names`](crate::Db::collection_names)): a read of the
-    /// latest published state, which takes no lock and runs on the caller's thread, as [`AsyncDb::collection`] does.
+    /// The names of the database's collections, in ascending byte order
+    /// ([`Db::collection_names`](crate::Db::collection_names)): a read of the latest published state, which takes no
+    /// lock and runs on the caller's thread, as [`AsyncDb::collection`] does.
     ///
     /// ```
     /// # use std::future::Future;
@@ -134,8 +135,8 @@ impl AsyncDb {
             .collection_names()
     }
 
-    /// [`Db::drop_collection`](crate::Db::drop_collection) on the pool. Once started it runs to its end (the collection is dropped and the drop
-    /// committed) even if the future is dropped.
+    /// [`Db::drop_collection`](crate::Db::drop_collection) on the pool. Once started it runs to its end (the collection
+    /// is dropped and the drop committed) even if the future is dropped.
     ///
     /// ```
     /// # use std::future::Future;
@@ -166,8 +167,8 @@ impl AsyncDb {
     /// ```
     ///
     /// # Errors
-    /// As [`Db::drop_collection`](crate::Db::drop_collection); [`ErrorCode::Closed`](crate::ErrorCode::Closed) if the database closed before the
-    /// job started.
+    /// As [`Db::drop_collection`](crate::Db::drop_collection); [`ErrorCode::Closed`](crate::ErrorCode::Closed) if the
+    /// database closed before the job started.
     pub fn drop_collection(&self, name: impl Into<String>) -> JobFuture<()> {
         let name = name.into();
         self.submit(JobKind::DropCollection, move |inner, _| {
@@ -175,9 +176,9 @@ impl AsyncDb {
         })
     }
 
-    /// [`Db::refresh`](crate::Db::refresh) on the pool: a read-only database shows what the writer has made durable since; a read-write
-    /// one has nothing to do. Once started it runs to its end even if the future is dropped: the database shows the
-    /// refreshed state, or keeps the one it had on an error.
+    /// [`Db::refresh`](crate::Db::refresh) on the pool: a read-only database shows what the writer has made durable
+    /// since; a read-write one has nothing to do. Once started it runs to its end even if the future is dropped: the
+    /// database shows the refreshed state, or keeps the one it had on an error.
     ///
     /// ```
     /// # use std::future::Future;
@@ -211,16 +212,21 @@ impl AsyncDb {
     /// ```
     ///
     /// # Errors
-    /// As [`Db::refresh`](crate::Db::refresh); [`ErrorCode::Closed`](crate::ErrorCode::Closed) if the database closed before the job
-    /// started.
+    /// As [`Db::refresh`](crate::Db::refresh); [`ErrorCode::Closed`](crate::ErrorCode::Closed) if the database closed
+    /// before the job started.
     pub fn refresh(&self) -> JobFuture<()> {
         self.submit(JobKind::Refresh, |inner, _| inner.refresh())
     }
 
-    /// [`Db::backup`](crate::Db::backup) to `dest` on the pool: a copy of the database at one commit, never replacing a file
-    /// (SPEC §4.8). Once started it runs to its end even if the future is dropped: the backup is then complete at
-    /// `dest` (or, on an error, cleaned up as [`Db::backup`](crate::Db::backup) says), never cut off halfway. A dropped future does not
-    /// stop a long copy: to have no backup, drop the future before its job starts, or remove `dest` after.
+    /// [`Db::backup`](crate::Db::backup) to `dest` on the pool: a copy of the database at one commit, never replacing a
+    /// file (SPEC §4.8). Once started it runs to its end even if the future is dropped: the backup is then complete at
+    /// `dest` (or, on an error, cleaned up as [`Db::backup`](crate::Db::backup) says), never cut off halfway. A dropped
+    /// future does not stop a long copy: to have no backup, drop the future before its job starts, or remove `dest`
+    /// after.
+    ///
+    /// `dest` is read at the call, as the synchronous backup reads it: an empty or malformed one, or a URL of another
+    /// scheme, is refused at once and nothing is queued, and a relative one names a place under the working directory
+    /// at the call, not when the job runs.
     ///
     /// ```
     /// # use std::future::Future;
@@ -254,10 +260,26 @@ impl AsyncDb {
     /// ```
     ///
     /// # Errors
-    /// As [`Db::backup`](crate::Db::backup); [`ErrorCode::Closed`](crate::ErrorCode::Closed) if the database closed before the job
-    /// started.
+    /// As [`Db::backup`](crate::Db::backup); [`ErrorCode::Io`](crate::ErrorCode::Io) if the working directory cannot be
+    /// read to resolve a relative `dest`; [`ErrorCode::Closed`](crate::ErrorCode::Closed) if the database closed before
+    /// the job started.
     pub fn backup(&self, dest: impl AsRef<Path>) -> JobFuture<()> {
-        let dest = dest.as_ref().to_owned();
+        let dest = match resolved(dest.as_ref()) {
+            Ok(dest) => dest,
+            Err(e) => return JobFuture::ready(Err(e)),
+        };
         self.submit(JobKind::Backup, move |inner, _| inner.backup(&dest))
     }
+}
+
+/// `dest` as a path (a `file://` URL read, another scheme refused), made absolute against the working directory now.
+fn resolved(dest: &Path) -> Result<PathBuf> {
+    let path = crate::location::path_of(dest)?;
+    std::path::absolute(&path).map_err(|source| {
+        Error::with_source(
+            ErrorCode::Io,
+            format_args!("resolving the backup destination {}", path.display()),
+            source,
+        )
+    })
 }

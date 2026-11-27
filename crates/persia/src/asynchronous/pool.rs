@@ -299,7 +299,8 @@ impl Pool {
             });
         }
         let generation = state.generation;
-        let mut started = Vec::with_capacity(count);
+        // Not preallocated: `count` is the caller's `async_threads`, which may be far more than the OS can start.
+        let mut started = Vec::new();
         for n in 0..count {
             match self.spawn(n, generation) {
                 Ok(handle) => started.push(handle),

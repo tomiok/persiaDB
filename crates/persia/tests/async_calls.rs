@@ -622,3 +622,171 @@ fn a_read_only_database_refreshes_on_the_pool() {
     writer.close().unwrap();
     released(&path);
 }
+
+/// An owned reader of [`BYTES`] that then fails, holding a share of a counter while it lives.
+struct Failing {
+    bytes: &'static [u8],
+    _alive: Arc<()>,
+}
+
+impl Read for Failing {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if self.bytes.is_empty() {
+            return Err(io::Error::other("the reader broke"));
+        }
+        self.bytes.read(out)
+    }
+}
+
+#[test]
+fn an_upload_whose_reader_fails_is_io_and_stores_no_blob() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    seeded(&path);
+    let expected = reference_of_bytes(dir.path());
+    let (probe, options) = Probe::new();
+    let (db, notes) = open(&path, options);
+    let alive = Arc::new(());
+    let failing = || Failing {
+        bytes: BYTES,
+        _alive: Arc::clone(&alive),
+    };
+
+    let err = block_on(db.put_blob(failing(), PutBlobOptions::new())).unwrap_err();
+    assert_eq!(err.code(), ErrorCode::Io, "{err}");
+    assert_eq!(ran(&probe), (JobKind::PutBlob, Some(ErrorCode::Io)));
+    let err = block_on(notes.put_with_blob(Document::new("w"), failing(), PutBlobOptions::new()))
+        .unwrap_err();
+    assert_eq!(err.code(), ErrorCode::Io, "{err}");
+    assert_eq!(ran(&probe), (JobKind::PutWithBlob, Some(ErrorCode::Io)));
+
+    // Neither the blob nor the document is there.
+    assert_eq!(
+        block_on(db.get_blob_range(expected, 0..1))
+            .unwrap_err()
+            .code(),
+        ErrorCode::NotFound
+    );
+    assert!(block_on(notes.get("w")).unwrap().is_none());
+    block_on(db.close()).unwrap();
+    assert_eq!(
+        Arc::strong_count(&alive),
+        1,
+        "the failed uploads dropped their readers"
+    );
+    released(&path);
+}
+
+#[test]
+fn a_read_only_database_refuses_every_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    seeded(&path);
+    let alive = Arc::new(());
+    let (db, notes) = open(&path, OpenOptions::new().read_only(true));
+    assert!(db.is_read_only());
+    let refused: Vec<(&str, AnyFuture)> = vec![
+        (
+            "create_collection",
+            Box::new(db.create_collection(SchemaBuilder::new("made").build().unwrap())),
+        ),
+        (
+            "create_collection_json",
+            Box::new(db.create_collection_json(r#"{"name": "made", "fields": {}}"#)),
+        ),
+        ("drop_collection", Box::new(db.drop_collection("notes"))),
+        (
+            "put_blob",
+            Box::new(db.put_blob(Tracked::new(&alive), PutBlobOptions::new())),
+        ),
+        (
+            "put_with_blob",
+            Box::new(notes.put_with_blob(
+                Document::new("w"),
+                Tracked::new(&alive),
+                PutBlobOptions::new(),
+            )),
+        ),
+        ("put_json", Box::new(notes.put_json(r#"{"id": "j"}"#))),
+        (
+            "put_struct",
+            Box::new(notes.put_struct(&note("s", "typed"))),
+        ),
+    ];
+    for (call, future) in refused {
+        let code = code_of(future);
+        assert_eq!(code, ErrorCode::ReadOnly, "{call}");
+    }
+    // What does not write still works: a read, a refresh, a backup of the state it shows.
+    assert!(block_on(notes.get_json("seed")).unwrap().is_some());
+    block_on(db.refresh()).unwrap();
+    let dest = dir.path().join("backup.persia");
+    block_on(db.backup(&dest)).unwrap();
+    assert_eq!(db.collection_names().unwrap(), ["notes"]);
+    block_on(db.close()).unwrap();
+    assert_eq!(Arc::strong_count(&alive), 1);
+    released(&path);
+    assert!(asyncs::has(&dest, "seed"));
+}
+
+/// The error code a future of any of the calls above resolves to; it panics if the call succeeded.
+fn code_of(future: AnyFuture) -> ErrorCode {
+    let future = match future.downcast::<persia::JobFuture<persia::AsyncCollection>>() {
+        Ok(f) => return block_on(*f).unwrap_err().code(),
+        Err(other) => other,
+    };
+    let future = match future.downcast::<persia::JobFuture<()>>() {
+        Ok(f) => return block_on(*f).unwrap_err().code(),
+        Err(other) => other,
+    };
+    let Ok(future) = future.downcast::<persia::JobFuture<BlobRef>>() else {
+        panic!("a future of another type");
+    };
+    block_on(*future).unwrap_err().code()
+}
+
+/// The calls that do no I/O answer on the caller's thread (no job), as their synchronous forms do.
+#[test]
+fn the_calls_that_do_no_io_answer_on_the_callers_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    seeded(&path);
+    let (probe, options) = Probe::new();
+    let (db, notes) = open(&path, options.block_cache_bytes(1 << 20));
+    let seed = block_on(notes.get("seed")).unwrap().unwrap();
+    assert_eq!(ran(&probe), (JobKind::Get, None));
+
+    assert_eq!(db.path(), path);
+    assert!(!db.is_read_only());
+    assert_eq!(db.block_cache_stats().unwrap().capacity, 1 << 20);
+    assert_eq!(notes.name(), "notes");
+    assert!(notes.schema().unwrap().field("body").is_some());
+    assert_eq!(notes.durability(), persia::Durability::Fsync);
+    let read: BTreeMap<String, String> = notes.to_struct(&seed).unwrap();
+    assert_eq!(read["body"], "quick brown fox");
+    let fast = notes.clone().with_durability(persia::Durability::Buffered);
+    assert_eq!(fast.durability(), persia::Durability::Buffered);
+    assert_eq!(
+        notes.durability(),
+        persia::Durability::Fsync,
+        "the other handle keeps its own"
+    );
+    // A `backup` whose `dest` cannot be a backup's is refused at the call.
+    let empty = block_on(db.backup("")).unwrap_err();
+    assert_eq!(empty.code(), ErrorCode::InvalidArgument, "{empty}");
+    let remote = block_on(db.backup("s3://bucket/app.persia")).unwrap_err();
+    assert_eq!(remote.code(), ErrorCode::Unsupported, "{remote}");
+    assert!(probe.quiet(), "none of these queued a job");
+
+    // The handle built by `with_durability` writes on the pool.
+    block_on(fast.put(Document::new("fast"))).unwrap();
+    assert_eq!(ran(&probe), (JobKind::Put, None));
+    block_on(db.close()).unwrap();
+    assert_eq!(
+        notes.schema().unwrap_err().code(),
+        ErrorCode::Closed,
+        "a handle outlives its database"
+    );
+    released(&path);
+    assert!(asyncs::has(&path, "fast"));
+}
