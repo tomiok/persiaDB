@@ -63,6 +63,18 @@
 //!      (ROADMAP 10.4.8), at points observed in the bytes it has read: the container and the pack are byte-identical
 //!      after every kill and every refused rerun, the `notes` record is a WAL record, and once the application has
 //!      closed the database `persia gc` collects.
+//! 7. **Application processes killed beside `persia gc` and `persia compact`** (ROADMAP 10.4.8):
+//!    - Soak (`seeded_soak_of_killed_application_processes_with_persia_gc_and_compact`): seeded application processes
+//!      (`tags-app`) that commit and exit, drop the handle, or are killed (SIGKILL) mid-stream; a model of the
+//!      acknowledged operations (and of the prefix of the unacknowledged ones that landed) says whether the WAL holds a
+//!      pending `notes` record. Then `persia gc --grace 2h` and `persia compact` are refused exactly while it does
+//!      (writing nothing but a tail repair) and otherwise run, beside a reader process now and then (held back exactly
+//!      while it is behind); every acknowledged document and blob reads back through the application's open.
+//!    - The application's open and close after a refusal (its replay flushes a `plain` backlog, its close flushes the
+//!      note), killed (SIGKILL) at observed points: per the committed seq the note is pending or not, the commands are
+//!      refused or run accordingly, and the application's next open loses nothing.
+//!    - `persia compact` killed (SIGKILL) while its open flushes a `plain` backlog (no pending `notes` record) and
+//!      during its rewrite: nothing is lost, a rerun and `persia container sweep` complete, `persia gc` collects.
 //!
 //! Skipped (with the reason printed) where locks cannot be judged (`locks_per_handle`, ADR-0054 item 13): the reader
 //! scenarios need a reader's lock to be judged.
@@ -137,6 +149,7 @@ fn child_role() {
         "holder" => holder(&env.path),
         "try-writer" => try_writer(&env.path),
         "tags-reader" => tags_reader(&env.path),
+        "tags-app" => tags_app(&env.path),
         other => panic!("unknown child role {other}"),
     }
 }
@@ -2212,6 +2225,65 @@ fn tags_reader(path: &Path) {
     }
 }
 
+/// An application process of the two-collection database (`tags@1` registered, the default memtable): opens it
+/// read-write and reports `ready <seq>`, then runs one command per stdin line and reports each once it returned:
+/// `put <collection> <id> <size> <cseed> <durability>` (with the blob `content(size, cseed)`) and
+/// `delete <collection> <id> <durability>` report `ok`, `commit` reports `committed <seq>`. At EOF it drops the handle
+/// without a commit and exits. The durabilities are [`durability_word`]'s.
+fn tags_app(path: &Path) {
+    let mut db = BlobDatabase::open(path, tags_options()).unwrap();
+    report(&format!("ready {}", db.log().seq()));
+    for line in std::io::stdin().lock().lines() {
+        let line = line.unwrap();
+        let words: Vec<&str> = line.split(' ').collect();
+        match words.as_slice() {
+            ["put", collection, id, size, cseed, durability] => {
+                let bytes = content(size.parse().unwrap(), cseed.parse().unwrap());
+                db.put(
+                    collection,
+                    &doc_of(collection, id),
+                    Blob::from_reader(&bytes[..]),
+                    parse_durability(durability),
+                )
+                .unwrap();
+                report("ok");
+            }
+            ["delete", collection, id, durability] => {
+                db.log_mut()
+                    .delete(collection, id, parse_durability(durability))
+                    .unwrap();
+                db.release_durable();
+                report("ok");
+            }
+            ["commit"] => {
+                let seq = db.commit().unwrap();
+                report(&format!("committed {seq}"));
+            }
+            _ => panic!("tags-app: unknown command {line}"),
+        }
+    }
+    drop(db);
+}
+
+/// The word of `durability` in a `tags-app` command.
+fn durability_word(durability: Durability) -> &'static str {
+    match durability {
+        Durability::Buffered => "buffered",
+        Durability::Async => "async",
+        Durability::Fsync => "fsync",
+    }
+}
+
+/// The durability of a `tags-app` command word.
+fn parse_durability(word: &str) -> Durability {
+    match word {
+        "buffered" => Durability::Buffered,
+        "async" => Durability::Async,
+        "fsync" => Durability::Fsync,
+        other => panic!("tags-app: unknown durability {other}"),
+    }
+}
+
 /// What a `tags-reader` must report for `docs` at `seq`: `<seq> <collection>/<id>=<hash>,...` in its order.
 fn expected_read(seq: u64, docs: &Docs) -> String {
     let mut out = Vec::new();
@@ -2851,4 +2923,1327 @@ fn kill_9_of_persia_gc_during_its_open_s_pre_scan_writes_nothing() {
     if reports_reads {
         assert!(in_scan > 0, "seed {seed}: no kill landed in the pre-scan");
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// 7. Application processes killed beside persia gc and persia compact (ROADMAP 10.4.8)
+// ---------------------------------------------------------------------------------------------------------------
+
+#[cfg(not(feature = "slow"))]
+const PROC_SOAK_ROUNDS: u64 = 6;
+#[cfg(feature = "slow")]
+const PROC_SOAK_ROUNDS: u64 = 96;
+
+/// Operations per application process of the process soak (before its end).
+const PROC_SESSION_OPS: u64 = 20;
+
+/// One operation of an application process (a `tags-app` child), as the parent sends it.
+#[derive(Debug, Clone)]
+enum AppOp {
+    Put {
+        collection: &'static str,
+        id: String,
+        blob: (u64, u64),
+        durability: Durability,
+    },
+    Delete {
+        collection: &'static str,
+        id: String,
+        durability: Durability,
+    },
+    Commit,
+}
+
+impl AppOp {
+    /// Its `tags-app` command line.
+    fn line(&self) -> String {
+        match self {
+            Self::Put {
+                collection,
+                id,
+                blob: (size, cseed),
+                durability,
+            } => format!(
+                "put {collection} {id} {size} {cseed} {}",
+                durability_word(*durability)
+            ),
+            Self::Delete {
+                collection,
+                id,
+                durability,
+            } => format!("delete {collection} {id} {}", durability_word(*durability)),
+            Self::Commit => "commit".to_owned(),
+        }
+    }
+
+    /// Whether, once it returned, it and every record logged before it are in the file (SPEC §8.2.1: `Async` and
+    /// `Fsync` write the in-memory chunk out, a commit syncs it): a process kill after it loses none of them. A
+    /// `Buffered` record stays in the process's memory until then.
+    fn writes_out(&self) -> bool {
+        match self {
+            Self::Put { durability, .. } | Self::Delete { durability, .. } => {
+                *durability != Durability::Buffered
+            }
+            Self::Commit => true,
+        }
+    }
+}
+
+/// What the application's database holds, as the model knows it: the live documents, the operations of each
+/// collection logged since the last commit (locally every commit flushes every memtable, SPEC §8.2, so these are
+/// exactly the records a replay applies; `notes_ops > 0` is a pending record of `notes`, SPEC §8.6), and the
+/// committed seq.
+#[derive(Debug, Clone, Default)]
+struct AppModel {
+    docs: Docs,
+    notes_ops: u64,
+    plain_ops: u64,
+    seq: u64,
+}
+
+impl AppModel {
+    /// Applies `op` (a commit resets the counts; its seq is the caller's to set).
+    fn apply(&mut self, op: &AppOp) {
+        let mut count = |collection: &str| {
+            if collection == NOTES {
+                self.notes_ops += 1;
+            } else {
+                self.plain_ops += 1;
+            }
+        };
+        match op {
+            AppOp::Put {
+                collection,
+                id,
+                blob,
+                ..
+            } => {
+                count(collection);
+                self.docs
+                    .insert(((*collection).to_owned(), id.clone()), *blob);
+            }
+            AppOp::Delete { collection, id, .. } => {
+                count(collection);
+                self.docs.remove(&((*collection).to_owned(), id.clone()));
+            }
+            AppOp::Commit => {
+                self.notes_ops = 0;
+                self.plain_ops = 0;
+            }
+        }
+    }
+
+    /// Whether the WAL holds a pending record of `notes`, which refuses `persia gc` and `persia compact` (ROADMAP
+    /// 10.4.8).
+    fn pending(&self) -> bool {
+        self.notes_ops > 0
+    }
+}
+
+/// The FNV-1a of each `(size, content seed)` blob met so far.
+type Hashes = BTreeMap<(u64, u64), u64>;
+
+/// What the application's read-only open (with `tags@1`) shows: its committed seq, the operations replayed into each
+/// memtable (its version), and each live document's blob as `(size, FNV-1a of the bytes read)`.
+#[derive(Debug, PartialEq, Eq)]
+struct Shown {
+    seq: u64,
+    notes_ops: u64,
+    plain_ops: u64,
+    docs: BTreeMap<(String, String), (u64, u64)>,
+}
+
+/// What the application's read-only open of `path` shows, every blob read whole.
+fn shown(path: &Path, ctx: &str) -> Shown {
+    let ro = ReadOnlyBlobDatabase::open(path, &tags_options())
+        .unwrap_or_else(|e| panic!("{ctx}: the application's read-only open: {e}"));
+    let snapshot = ro.database().snapshot();
+    let mut docs = BTreeMap::new();
+    let mut ops = [0; 2];
+    for (n, collection) in [NOTES, PLAIN].into_iter().enumerate() {
+        let c = snapshot.collection(collection).unwrap();
+        ops[n] = c.memtable().version();
+        for id in live_ids(&snapshot, collection) {
+            let doc = c.get(&id).unwrap().unwrap();
+            let blob = doc
+                .blob_ref()
+                .unwrap_or_else(|| panic!("{ctx}: {collection}/{id} has no blob"));
+            let mut bytes = Vec::new();
+            ro.get_blob(blob)
+                .unwrap_or_else(|e| panic!("{ctx}: get_blob({collection}/{id}): {e}"))
+                .read_to_end(&mut bytes)
+                .unwrap_or_else(|e| panic!("{ctx}: reading {collection}/{id}'s blob: {e}"));
+            docs.insert((collection.to_owned(), id), (blob.size(), fnv(&bytes)));
+        }
+    }
+    Shown {
+        seq: ro.database().seq(),
+        notes_ops: ops[0],
+        plain_ops: ops[1],
+        docs,
+    }
+}
+
+/// What the application's open must show for `model`.
+fn expected_shown(model: &AppModel, hashes: &mut Hashes) -> Shown {
+    let docs = model
+        .docs
+        .iter()
+        .map(|(key, &(size, cseed))| {
+            let hash = *hashes
+                .entry((size, cseed))
+                .or_insert_with(|| fnv(&content(size, cseed)));
+            (key.clone(), (size, hash))
+        })
+        .collect();
+    Shown {
+        seq: model.seq,
+        notes_ops: model.notes_ops,
+        plain_ops: model.plain_ops,
+        docs,
+    }
+}
+
+/// How `seen` differs from `want`, for a failure message.
+fn shown_diff(seen: &Shown, want: &Shown) -> String {
+    let mut out = vec![format!(
+        "seq {} (want {}), notes ops {} (want {}), plain ops {} (want {})",
+        seen.seq, want.seq, seen.notes_ops, want.notes_ops, seen.plain_ops, want.plain_ops
+    )];
+    for (key, value) in &want.docs {
+        match seen.docs.get(key) {
+            None => out.push(format!("{key:?} missing")),
+            Some(got) if got != value => out.push(format!("{key:?} is {got:?}, want {value:?}")),
+            Some(_) => {}
+        }
+    }
+    for key in seen.docs.keys().filter(|k| !want.docs.contains_key(*k)) {
+        out.push(format!("{key:?} is a phantom"));
+    }
+    out.join("; ")
+}
+
+/// The application's read-only open of `path` shows exactly `model`: its seq, the records each memtable replays, and
+/// every live document with its blob byte-identical.
+fn check_shown(path: &Path, model: &AppModel, hashes: &mut Hashes, ctx: &str) {
+    let seen = shown(path, ctx);
+    let want = expected_shown(model, hashes);
+    assert!(
+        seen == want,
+        "{ctx}: the application's open shows other things: {}",
+        shown_diff(&seen, &want)
+    );
+}
+
+/// Whether the container at `path` holds a commit cut after its Manifest (a Manifest frame after the committed
+/// `log_end`, SPEC §8.6), which the next writer's open retires with a commit of its own.
+fn cut_commit(path: &Path) -> bool {
+    let container =
+        persia_storage::container::Container::open(path, persia_storage::container::Mode::ReadOnly)
+            .unwrap();
+    container
+        .uncommitted_frames()
+        .iter()
+        .any(|f| f.kind == persia_format::frame::FrameKind::Manifest)
+}
+
+/// The committed manifest of the container at `path`, read from its active slot and Manifest frame without a replay
+/// (an open replays the WAL, which takes seconds on the 72 MiB backlogs of these tests): its seq and the segment ids
+/// of each collection.
+fn committed_manifest(path: &Path) -> (u64, Vec<Vec<persia_engine::manifest::SegmentId>>) {
+    let container =
+        persia_storage::container::Container::open(path, persia_storage::container::Mode::ReadOnly)
+            .unwrap();
+    let superblock = container.superblock();
+    let frame = container
+        .read_frame(superblock.manifest_off, 64 << 20)
+        .unwrap();
+    let manifest = persia_engine::manifest::Manifest::decode(&frame.payload).unwrap();
+    let segments = [NOTES, PLAIN]
+        .into_iter()
+        .map(|c| {
+            manifest
+                .collection(c)
+                .unwrap()
+                .segments()
+                .iter()
+                .map(|s| s.id)
+                .collect()
+        })
+        .collect();
+    (superblock.seq, segments)
+}
+
+/// The committed seq of the container at `path` ([`committed_manifest`]'s, without a replay).
+fn container_seq(path: &Path) -> u64 {
+    committed_manifest(path).0
+}
+
+/// The segment ids of each collection ([`committed_manifest`]'s, without a replay).
+fn segment_ids(path: &Path) -> Vec<Vec<persia_engine::manifest::SegmentId>> {
+    committed_manifest(path).1
+}
+
+/// The seq of a `<word> <seq>` report.
+fn seq_of(report: &str, word: &str, ctx: &str) -> u64 {
+    report
+        .strip_prefix(word)
+        .and_then(|rest| rest.strip_prefix(' '))
+        .and_then(|seq| seq.parse().ok())
+        .unwrap_or_else(|| panic!("{ctx}: expected `{word} <seq>`, got {report:?}"))
+}
+
+/// The model after a killed or dropped application process: `durable` with the longest prefix of `uncertain` (the
+/// `Buffered` operations acknowledged after the last write-out, then the first unacknowledged one, which may have run)
+/// that makes it what the application's open shows (`seen`), and that prefix's length. A commit can only be the last
+/// of `uncertain`; it landed only if the seq moved. Fails unless some prefix matches: every acknowledged-durable
+/// operation is there, nothing else is, and the log kept its order.
+fn resolve(
+    durable: &AppModel,
+    uncertain: &[AppOp],
+    seen: &Shown,
+    hashes: &mut Hashes,
+    ctx: &str,
+) -> (AppModel, usize) {
+    let mut candidate = durable.clone();
+    let mut matched = None;
+    let mut tried = Vec::new();
+    for k in 0..=uncertain.len() {
+        if k > 0 {
+            let op = &uncertain[k - 1];
+            candidate.apply(op);
+            if matches!(op, AppOp::Commit) {
+                if seen.seq <= durable.seq {
+                    break;
+                }
+                candidate.seq = seen.seq;
+            }
+        }
+        let want = expected_shown(&candidate, hashes);
+        if want == *seen {
+            matched = Some((candidate.clone(), k));
+        } else {
+            tried.push(format!("prefix {k}: {}", shown_diff(seen, &want)));
+        }
+    }
+    matched.unwrap_or_else(|| {
+        panic!(
+            "{ctx}: what the application's open shows is no prefix of the unacknowledged operations {uncertain:?}: {}",
+            tried.join(" | ")
+        )
+    })
+}
+
+#[derive(Debug, Default)]
+struct ProcStats {
+    sessions: u64,
+    closed: u64,
+    dropped: u64,
+    kills: u64,
+    buffered_lost: u64,
+    in_flight_landed: u64,
+    cut_commits: u64,
+    retired: u64,
+    refused_rounds: u64,
+    refusals: u64,
+    tail_repairs: u64,
+    closed_after_refusal: u64,
+    carried_pending: u64,
+    accepted_rounds: u64,
+    accepted_with_plain_wal: u64,
+    compactions: u64,
+    reader_rounds: u64,
+    held_back: u64,
+    refreshes: u64,
+    /// The sweep counters of [`check_swept`].
+    two: TwoStats,
+}
+
+/// How an application process of the soak ends.
+#[derive(Debug, Clone, Copy)]
+enum SessionEnd {
+    /// Its last command commits; then it exits.
+    Close,
+    /// It drops the handle at EOF, without a commit.
+    Drop,
+    /// SIGKILL once it acknowledged this many commands (all of them sent beforehand, so it is running the next).
+    Kill(u64),
+}
+
+/// One seeded application process (`tags-app`) on `path`: puts, replacements and deletions with blobs in `notes` and
+/// `plain` (or, one session in four, a commit and then `plain` only), at every durability, some commits, ended by
+/// [`SessionEnd`]. Its open must find `model.seq` (one more where a cut commit waits to be retired). Afterwards `model`
+/// is what the application's open shows, which [`resolve`] checks is the acknowledged operations plus a prefix of the
+/// unacknowledged ones.
+fn proc_session(
+    path: &Path,
+    round: u64,
+    rng: &mut Rng,
+    model: &mut AppModel,
+    hashes: &mut Hashes,
+    stats: &mut ProcStats,
+    ctx: &str,
+) {
+    stats.sessions += 1;
+    let plain_only = rng.chance(25);
+    let mut plan = model.clone();
+    let mut ops = Vec::new();
+    if plain_only {
+        plan.apply(&AppOp::Commit);
+        ops.push(AppOp::Commit);
+    }
+    for n in 0..PROC_SESSION_OPS {
+        let collection = if plain_only || rng.chance(50) {
+            PLAIN
+        } else {
+            NOTES
+        };
+        let durability = match rng.range(0, 100) {
+            0..40 => Durability::Fsync,
+            40..65 => Durability::Async,
+            _ => Durability::Buffered,
+        };
+        let blob = |rng: &mut Rng| {
+            if rng.chance(10) {
+                POOL[usize::try_from(rng.range(0, POOL.len() as u64)).unwrap()]
+            } else {
+                (pick_size(rng, 3), rng.next_u64())
+            }
+        };
+        let roll = rng.range(0, 100);
+        let existing = pick_two(rng, &plan.docs, collection);
+        let op = match (roll, existing) {
+            (40..62, Some(id)) => AppOp::Put {
+                collection,
+                id,
+                blob: blob(rng),
+                durability,
+            },
+            (62..85, Some(id)) => AppOp::Delete {
+                collection,
+                id,
+                durability,
+            },
+            (95.., _) => AppOp::Commit,
+            _ => AppOp::Put {
+                collection,
+                id: format!("{collection}-{round}-{n}"),
+                blob: blob(rng),
+                durability,
+            },
+        };
+        plan.apply(&op);
+        ops.push(op);
+    }
+    let end = match rng.range(0, 100) {
+        0..30 => SessionEnd::Close,
+        30..45 => SessionEnd::Drop,
+        _ => SessionEnd::Kill(rng.range(0, ops.len() as u64 + 1)),
+    };
+    if let SessionEnd::Close = end {
+        ops.push(AppOp::Commit);
+    }
+    let cut = cut_commit(path);
+    let mut app = ChildIo::spawn("tags-app", path, 0, &format!("app-{round}"), 0);
+    let ready = seq_of(&app.expect(ctx), "ready", ctx);
+    assert_eq!(
+        ready,
+        model.seq + u64::from(cut),
+        "{ctx}: the application's open commits only to retire a cut commit"
+    );
+    stats.retired += u64::from(cut);
+    model.seq = ready;
+    for op in &ops {
+        app.send(&op.line());
+    }
+    let mut reports = Vec::new();
+    match end {
+        SessionEnd::Kill(k) => {
+            for _ in 0..k {
+                reports.push(app.expect(ctx));
+            }
+            reports.extend(app.kill());
+            stats.kills += 1;
+        }
+        SessionEnd::Close | SessionEnd::Drop => {
+            reports.extend(app.finish());
+            assert_eq!(reports.len(), ops.len(), "{ctx}: {reports:?}");
+            if let SessionEnd::Close = end {
+                stats.closed += 1;
+            } else {
+                stats.dropped += 1;
+            }
+        }
+    }
+    assert!(reports.len() <= ops.len(), "{ctx}: {reports:?}");
+    let mut durable = model.clone();
+    let mut uncertain: Vec<AppOp> = Vec::new();
+    for (op, report) in ops.iter().zip(&reports) {
+        if let AppOp::Commit = op {
+            durable.seq = seq_of(report, "committed", ctx);
+        } else {
+            assert_eq!(report, "ok", "{ctx}: {op:?}");
+        }
+        uncertain.push(op.clone());
+        if op.writes_out() {
+            for u in uncertain.drain(..) {
+                durable.apply(&u);
+            }
+        }
+    }
+    let acked_buffered = uncertain.len();
+    let in_flight = ops.get(reports.len()).cloned();
+    if let Some(op) = &in_flight {
+        uncertain.push(op.clone());
+    }
+    let seen = shown(path, ctx);
+    let (resolved, landed) = resolve(&durable, &uncertain, &seen, hashes, ctx);
+    stats.buffered_lost += acked_buffered.saturating_sub(landed) as u64;
+    stats.in_flight_landed += u64::from(in_flight.is_some() && landed == uncertain.len());
+    if cut_commit(path) {
+        assert!(
+            matches!(in_flight, Some(AppOp::Commit)) && resolved.seq == durable.seq,
+            "{ctx}: a cut commit, yet the kill did not land in a commit ({in_flight:?})"
+        );
+        stats.cut_commits += 1;
+    }
+    eprintln!(
+        "{ctx}: {end:?} after {} of {} commands, {landed} of {} unacknowledged landed; notes ops {}, plain ops {}",
+        reports.len(),
+        ops.len(),
+        uncertain.len(),
+        resolved.notes_ops,
+        resolved.plain_ops
+    );
+    *model = resolved;
+}
+
+/// `persia gc --grace 2h --json` on `path`.
+fn cli_gc_2h(path: &Path) -> Output {
+    persia(&["gc", arg(path), "--grace", "2h", "--json"])
+}
+
+/// `persia compact --json` on `path`.
+fn cli_compact(path: &Path) -> Output {
+    persia(&["compact", arg(path), "--json"])
+}
+
+/// The JSON report of a `persia compact` that exited 0.
+fn compact_report(out: &Output, ctx: &str) -> Json {
+    assert!(
+        out.status.success(),
+        "{ctx}: persia compact exited {:?}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout.clone()).unwrap();
+    assert_eq!(text.lines().count(), 1, "{ctx}: {text}");
+    serde_json::from_str(&text).unwrap()
+}
+
+/// `runs` refused runs on `path` (ROADMAP 10.4.8), alternating `persia gc --grace 2h` and `persia compact`, the first
+/// one `gc_first`: each exits 1 with the hint and no report; the first writes at most the container's tail repair (the
+/// container after it is a prefix of the one before), the others nothing; the pack is byte-identical throughout; so
+/// the segments of both collections and the committed seq are unchanged. Returns whether the first repaired a tail.
+fn refused_runs(path: &Path, gc_first: bool, runs: usize, ctx: &str) -> bool {
+    let segments = segment_ids(path);
+    let seq = container_seq(path);
+    let container = std::fs::read(path).unwrap();
+    let pack_bytes = std::fs::read(pack(path)).ok();
+    let mut last: Option<Vec<u8>> = None;
+    for n in 0..runs {
+        let gc = (n % 2 == 0) == gc_first;
+        let what = if gc { "gc" } else { "compact" };
+        let ctx = format!("{ctx}: refused {what} {n}");
+        let out = if gc {
+            cli_gc_2h(path)
+        } else {
+            cli_compact(path)
+        };
+        check_refused(&out, &ctx);
+        let now = std::fs::read(path).unwrap();
+        match &last {
+            None => assert!(
+                container.starts_with(&now),
+                "{ctx}: the refused run wrote more than a tail repair ({} to {} bytes)",
+                container.len(),
+                now.len()
+            ),
+            Some(prev) => assert!(*prev == now, "{ctx}: a second refused run wrote"),
+        }
+        assert!(
+            std::fs::read(pack(path)).ok() == pack_bytes,
+            "{ctx}: the refused run wrote to the pack"
+        );
+        last = Some(now);
+    }
+    assert_eq!(segment_ids(path), segments, "{ctx}: the segments");
+    assert_eq!(container_seq(path), seq, "{ctx}: the committed seq");
+    last.is_some_and(|now| now != container)
+}
+
+/// The pack's frames: its bytes from 12288 on (after the header and the two superblock slots, SPEC §9.3).
+fn pack_frames(bytes: &[u8]) -> &[u8] {
+    bytes.get(12288..).unwrap_or_default()
+}
+
+/// An accepted `persia gc --grace 2h` on `path` (no pending `notes` record): it commits only to retire a cut commit,
+/// otherwise writes at most a tail repair to the container; the sweep is held back exactly when a reader lease
+/// (`reader`, its seq) is behind the committed seq, and then deletes nothing and does not rewrite the pack (its
+/// frames a prefix of those before: the pack's open may truncate the chunks a deduplicated or killed put staged after
+/// its `log_end`, SPEC §9.3); otherwise it marks exactly the referenced blobs, deletes none while below the rewrite
+/// ratio, and a rewritten pack holds exactly the referenced blobs, no orphan chunk. `verify --deep` passes after it.
+/// Without a pack (no blob stored yet) there is nothing to collect.
+fn gc_accepted(
+    path: &Path,
+    model: &mut AppModel,
+    reader: Option<u64>,
+    ctx: &str,
+    stats: &mut ProcStats,
+) {
+    let ctx = format!("{ctx}: gc");
+    let cut = cut_commit(path);
+    let has_pack = pack(path).exists();
+    let before = has_pack.then(|| verify(path, false, &format!("{ctx}: before")));
+    let container = std::fs::read(path).unwrap();
+    let pack_bytes = std::fs::read(pack(path)).ok();
+    let inode = has_pack.then(|| pack_inode(path));
+    let done = gc_report(&cli_gc_2h(path), &ctx);
+    assert_eq!(done["missing"], serde_json::json!([]), "{ctx}: {done}");
+    assert_eq!(done["grace_secs"], 7200, "{ctx}: {done}");
+    let seq = container_seq(path);
+    assert_eq!(
+        seq,
+        model.seq + u64::from(cut),
+        "{ctx}: its open commits only to retire a cut commit"
+    );
+    stats.retired += u64::from(cut);
+    model.seq = seq;
+    if !cut {
+        assert!(
+            container.starts_with(&std::fs::read(path).unwrap()),
+            "{ctx}: its open wrote more than a tail repair to the container"
+        );
+    }
+    let (Some(before), Some(pack_bytes), Some(inode)) = (before, pack_bytes, inode) else {
+        assert_eq!(done["deleted"]["blobs"], 0, "{ctx}: {done}");
+        let rows = verify_ok(&["--deep"], path, &ctx);
+        assert_eq!(row(&rows, "verify"), "ok", "{ctx}");
+        return;
+    };
+    let behind = reader.is_some_and(|s| s < model.seq);
+    assert_eq!(
+        done["held_back"], behind,
+        "{ctx}: reader {reader:?}: {done}"
+    );
+    let after = verify(path, true, &format!("{ctx}: after"));
+    let marked = done["marked"]["blobs"].as_u64().unwrap();
+    let deleted = done["deleted"]["blobs"].as_u64().unwrap();
+    assert_eq!(marked, before.referenced, "{ctx}: marked: {done}");
+    assert_eq!(after.referenced, before.referenced, "{ctx}: referenced");
+    if behind {
+        stats.held_back += 1;
+        assert_eq!(deleted, 0, "{ctx}: {done}");
+        let now = std::fs::read(pack(path)).unwrap();
+        assert!(
+            pack_inode(path) == inode && pack_frames(&pack_bytes).starts_with(pack_frames(&now)),
+            "{ctx}: a held-back sweep rewrote the pack, or changed a frame ({} to {} bytes)",
+            pack_bytes.len(),
+            now.len()
+        );
+        return;
+    }
+    match done["rewrite"]["outcome"].as_str().unwrap() {
+        "done" => {
+            stats.two.rewrites += 1;
+            stats.two.deleted += deleted;
+            assert_eq!(
+                (after.bound, after.orphan_chunks),
+                (after.referenced, 0),
+                "{ctx}: the rewritten pack: {after:?}"
+            );
+            // At least every unreferenced blob `persia verify` saw bound (a bind a killed put left cut, which this
+            // open committed, is one more).
+            assert!(
+                deleted >= before.bound - before.referenced,
+                "{ctx}: deleted {deleted}: {before:?}"
+            );
+        }
+        "below_ratio" => {
+            stats.two.below_ratio += 1;
+            assert_eq!(deleted, 0, "{ctx}: deleted below the ratio: {done}");
+            assert!(after.bound >= before.bound, "{ctx}: {after:?} {before:?}");
+        }
+        other => panic!("{ctx}: rewrite {other}: {done}"),
+    }
+}
+
+/// An accepted `persia compact` on `path`: one commit (and one more to retire a cut commit), `verify --deep` passes.
+fn compact_accepted(path: &Path, model: &mut AppModel, ctx: &str, stats: &mut ProcStats) {
+    let ctx = format!("{ctx}: compact");
+    let cut = cut_commit(path);
+    let done = compact_report(&cli_compact(path), &ctx);
+    let seq = model.seq + u64::from(cut) + 1;
+    assert_eq!(done["seq"], seq, "{ctx}: {done}");
+    assert_eq!(container_seq(path), seq, "{ctx}");
+    stats.retired += u64::from(cut);
+    stats.compactions += 1;
+    model.seq = seq;
+    if pack(path).exists() {
+        verify(path, true, &ctx);
+    } else {
+        let rows = verify_ok(&["--deep"], path, &ctx);
+        assert_eq!(row(&rows, "verify"), "ok", "{ctx}");
+    }
+}
+
+/// The application, as a process, opens the database at `path` (finding `model.seq`, or one more where it retires a
+/// cut commit) and closes it with a commit: what a refusal's hint asks.
+fn app_close(path: &Path, model: &mut AppModel, ctx: &str) {
+    let cut = cut_commit(path);
+    let mut app = ChildIo::spawn("tags-app", path, 0, "close", 0);
+    let ready = seq_of(&app.expect(ctx), "ready", ctx);
+    assert_eq!(ready, model.seq + u64::from(cut), "{ctx}: the close's open");
+    app.send("commit");
+    let seq = seq_of(&app.expect(ctx), "committed", ctx);
+    app.finish();
+    model.apply(&AppOp::Commit);
+    model.seq = seq;
+}
+
+/// A `tags-reader` process and what it shows: the seq it opened or last refreshed at, and the documents then.
+struct ShownReader {
+    io: ChildIo,
+    seq: u64,
+    docs: Docs,
+}
+
+impl ShownReader {
+    fn spawn(path: &Path, model: &AppModel, ctx: &str) -> Self {
+        let io = ChildIo::spawn("tags-reader", path, 0, "soak", 0);
+        assert_eq!(io.expect(ctx), format!("ready {}", model.seq), "{ctx}");
+        let mut reader = Self {
+            io,
+            seq: model.seq,
+            docs: model.docs.clone(),
+        };
+        reader.reads(ctx);
+        reader
+    }
+
+    /// It reads every blob it shows, byte-identical.
+    fn reads(&mut self, ctx: &str) {
+        self.io.send("read");
+        assert_eq!(
+            self.io.expect(ctx),
+            format!("read {}", expected_read(self.seq, &self.docs)),
+            "{ctx}: the reader"
+        );
+    }
+
+    /// It refreshes to `model` and reads every blob.
+    fn refresh(&mut self, model: &AppModel, ctx: &str) {
+        self.io.send("refresh");
+        assert_eq!(
+            self.io.expect(ctx),
+            format!("refreshed {}", expected_read(model.seq, &model.docs)),
+            "{ctx}: the reader's refresh"
+        );
+        self.seq = model.seq;
+        self.docs = model.docs.clone();
+    }
+}
+
+/// ROADMAP 10.4.8 soak with real processes. Each round, a seeded application process (`tags-app`: `tags@1`
+/// registered, so it indexes `notes`) puts, replaces and deletes documents with blobs in `notes` and `plain`
+/// (`Buffered`, `Async` and `Fsync`; some commits; one session in four a commit then `plain` only), and either commits
+/// and exits, drops its handle without a commit, or is killed (SIGKILL) once it acknowledged a seeded number of the
+/// commands it was sent, so it is running the next. The model ([`AppModel`]) takes every acknowledged operation that
+/// was written out (`Async`, `Fsync`, a commit and all before it) and [`resolve`] the longest prefix of the others
+/// that the application's open shows: anything else (a lost acknowledged write, a phantom, a reordering) fails.
+/// Then, in one round in three or so beside a `tags-reader` process holding a lease:
+/// - with a pending `notes` record per the model, `persia gc --grace 2h` and `persia compact` (seeded order, two or
+///   three runs) are each refused, writing nothing but a tail repair (the pack byte-identical, the segments and the
+///   seq unchanged), the reader reads on, and then (seeded) the application process closes the database, or the
+///   records wait for the next session;
+/// - without one, both run (seeded order): `persia gc` writes nothing to the container (but a tail repair, or the
+///   commit that retires a cut commit), is held back exactly while the reader is behind (deleting nothing, the pack
+///   not rewritten), otherwise deletes no live blob (`marked` equal to the references, a rewritten pack holding
+///   exactly them); see [`gc_accepted`]; `persia compact` commits once
+///   and keeps every WAL record (the replayed counts unchanged); `verify --deep` passes after each; the reader reads
+///   on, is behind after the compaction (gc held back), and once it refreshes gc sweeps.
+///
+/// After every run the application's open shows exactly the model (every acknowledged document and blob,
+/// byte-identical), and `shared` finds every note (none was flushed with the stand-in).
+#[test]
+fn seeded_soak_of_killed_application_processes_with_persia_gc_and_compact() {
+    if child_env().is_some() {
+        return;
+    }
+    let _serial = serial();
+    let seed = base_seed(0x5eed_1048_50a7);
+    let rounds = env_count("PERSIA_TEST_ROUNDS", PROC_SOAK_ROUNDS);
+    let started = Instant::now();
+    let dir = KeptOnFailure::new();
+    let judged = locks_judged(dir.path());
+    let path = create_two(dir.path());
+    let mut rng = Rng(seed);
+    let mut model = AppModel {
+        seq: container_seq(&path),
+        ..AppModel::default()
+    };
+    let mut hashes = Hashes::new();
+    let mut stats = ProcStats::default();
+    for round in 0..rounds {
+        let ctx = format!("seed {seed} round {round}");
+        proc_session(
+            &path,
+            round,
+            &mut rng,
+            &mut model,
+            &mut hashes,
+            &mut stats,
+            &ctx,
+        );
+        // Drawn on every system, so the schedule is the same where locks cannot be judged; a lease needs the pack.
+        let wants_reader = rng.chance(35);
+        let mut reader = if judged && wants_reader && pack(&path).exists() {
+            stats.reader_rounds += 1;
+            Some(ShownReader::spawn(&path, &model, &format!("{ctx}: reader")))
+        } else {
+            None
+        };
+        if model.pending() {
+            stats.refused_rounds += 1;
+            let runs = if rng.chance(30) { 3 } else { 2 };
+            let repaired = refused_runs(&path, rng.chance(50), runs, &ctx);
+            stats.refusals += runs as u64;
+            stats.tail_repairs += u64::from(repaired);
+            check_shown(&path, &model, &mut hashes, &format!("{ctx}: refused"));
+            if let Some(r) = reader.as_mut() {
+                r.reads(&format!("{ctx}: refused"));
+            }
+            if rng.chance(60) {
+                app_close(&path, &mut model, &format!("{ctx}: close"));
+                stats.closed_after_refusal += 1;
+                check_shown(&path, &model, &mut hashes, &format!("{ctx}: closed"));
+            } else {
+                stats.carried_pending += 1;
+            }
+        }
+        if !model.pending() {
+            stats.accepted_rounds += 1;
+            stats.accepted_with_plain_wal += u64::from(model.plain_ops > 0);
+            let gc_first = rng.chance(50);
+            for gc in [gc_first, !gc_first] {
+                if gc {
+                    gc_accepted(
+                        &path,
+                        &mut model,
+                        reader.as_ref().map(|r| r.seq),
+                        &ctx,
+                        &mut stats,
+                    );
+                } else {
+                    compact_accepted(&path, &mut model, &ctx, &mut stats);
+                }
+                check_shown(&path, &model, &mut hashes, &ctx);
+                if let Some(r) = reader.as_mut() {
+                    r.reads(&ctx);
+                }
+            }
+            if let Some(r) = reader.as_mut() {
+                // The compaction's commit put it behind: the sweep waits for it until it refreshes.
+                assert!(r.seq < model.seq, "{ctx}: the reader is behind");
+                gc_accepted(&path, &mut model, Some(r.seq), &ctx, &mut stats);
+                r.refresh(&model, &format!("{ctx}: refresh"));
+                stats.refreshes += 1;
+                gc_accepted(&path, &mut model, Some(r.seq), &ctx, &mut stats);
+                check_shown(&path, &model, &mut hashes, &ctx);
+                r.reads(&ctx);
+            }
+        }
+        if let Some(r) = reader {
+            r.io.finish();
+        }
+        check_two(&path, &model.docs, &format!("{ctx}: end of round"));
+    }
+    // The application closes the database; then both commands run.
+    let ctx = format!("seed {seed} end");
+    app_close(&path, &mut model, &ctx);
+    gc_accepted(&path, &mut model, None, &ctx, &mut stats);
+    compact_accepted(&path, &mut model, &ctx, &mut stats);
+    check_shown(&path, &model, &mut hashes, &ctx);
+    check_two(&path, &model.docs, &ctx);
+    eprintln!(
+        "{stats:?}, {} live documents, pack {} KiB, total {:.1?}",
+        model.docs.len(),
+        std::fs::metadata(pack(&path)).map_or(0, |m| m.len() >> 10),
+        started.elapsed()
+    );
+    assert!(
+        stats.kills > 0,
+        "seed {seed}: no session was killed: {stats:?}"
+    );
+    assert!(
+        stats.refused_rounds > 0 && stats.accepted_rounds > 0,
+        "seed {seed}: a pending notes record never, or always: {stats:?}"
+    );
+    if judged {
+        assert!(
+            stats.reader_rounds > 0,
+            "seed {seed}: no round had a reader: {stats:?}"
+        );
+    }
+}
+
+/// The length of the file at `path`.
+fn file_len(path: &Path) -> u64 {
+    std::fs::metadata(path).unwrap().len()
+}
+
+/// When the parent kills an application process that opens the database and closes it (observed, never timed).
+#[derive(Debug, Clone, Copy)]
+enum CloseKill {
+    /// Once the container grew by at least this many bytes before the open reported (its replay-time flush).
+    Grew(u64),
+    /// After this many polls from the spawn, wherever that lands.
+    Polls(u64),
+    /// Once it reported its open, before it was asked to commit.
+    Opened,
+    /// After this many polls once it was asked to commit.
+    Committing(u64),
+    /// Not killed.
+    Never,
+}
+
+/// Where an application process of [`run_app_close_until`] got.
+#[derive(Debug, Default)]
+struct AppRun {
+    /// The seq its open reported.
+    ready: Option<u64>,
+    /// The seq its commit reported.
+    committed: Option<u64>,
+    /// How much the container had grown when its open reported.
+    grown_at_ready: Option<u64>,
+    /// How much it had grown at the kill, or at the end.
+    grown: u64,
+    killed: bool,
+}
+
+/// Runs a `tags-app` on `path` that opens the database and then commits, polling in a loop (no sleep) and killing it
+/// (SIGKILL) at `at`.
+fn run_app_close_until(path: &Path, at: CloseKill) -> AppRun {
+    let initial = file_len(path);
+    let mut app = ChildIo::spawn("tags-app", path, 0, "closer", 0);
+    let mut run = AppRun::default();
+    let (mut polls, mut asked) = (0_u64, None);
+    let record = |run: &mut AppRun, msg: &str, grown: u64| {
+        if msg.starts_with("ready ") {
+            run.ready = Some(seq_of(msg, "ready", "closer"));
+            run.grown_at_ready = Some(grown);
+        } else {
+            run.committed = Some(seq_of(msg, "committed", "closer"));
+        }
+    };
+    loop {
+        let grown = file_len(path).saturating_sub(initial);
+        match app.try_recv() {
+            Ok(msg) => {
+                record(&mut run, &msg, grown);
+                if run.committed.is_some() {
+                    run.grown = grown;
+                    app.finish();
+                    return run;
+                }
+                if !matches!(at, CloseKill::Opened) {
+                    app.send("commit");
+                    asked = Some(polls);
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                panic!("the application exited by itself: {run:?}")
+            }
+        }
+        let hit = match at {
+            CloseKill::Grew(b) => run.ready.is_none() && grown >= b,
+            CloseKill::Polls(n) => polls >= n,
+            CloseKill::Opened => run.ready.is_some(),
+            CloseKill::Committing(n) => asked.is_some_and(|a| polls - a >= n),
+            CloseKill::Never => false,
+        };
+        if hit {
+            run.grown = grown;
+            run.killed = true;
+            for msg in app.kill() {
+                record(&mut run, &msg, grown);
+            }
+            return run;
+        }
+        polls += 1;
+    }
+}
+
+/// ROADMAP 10.4.8, the application's recovery after a refusal, killed. The database of
+/// [`flushing_backlog_database`] with its `notes` record after the `plain` backlog: `persia gc` and `persia compact`
+/// refuse it, and the application opens it (its replay flushes the backlog in a commit, `notes` waiting) and closes it
+/// (a commit that flushes the note). A run that is not killed, on a copy, gives the seqs: `s0` before, `s_open` after
+/// the open, `s_close` after the close, and its copy is checked as the point that is not killed. That process is
+/// killed (SIGKILL) at seeded points the parent observes: once while the container grows during the open's flush;
+/// `--features slow` adds a second mid-flush point, right after the open reported, after polls once its commit was
+/// asked, and after seeded polls from the spawn. After each kill (and the run that is not killed) the committed seq is
+/// in `s0..=s_close` (at least what the open reported), and per that model (the note is pending until `s_close`):
+/// - `verify --deep` passes and the application's read-only open shows every document with its blob byte-identical,
+///   the note a WAL record exactly while pending;
+/// - while pending, `persia gc` and `persia compact` (seeded order) are refused, writing nothing but a tail repair
+///   (the pack byte-identical, the segments and the seq unchanged); otherwise both run;
+/// - the application's next open and close lose nothing: then `persia gc` collects the three orphans (if it did not
+///   already), marks every document's blob, and `persia compact` and `verify --deep` pass.
+#[test]
+fn kill_9_of_the_application_s_open_and_close_after_a_refusal_loses_nothing() {
+    if child_env().is_some() {
+        return;
+    }
+    let _serial = serial();
+    let seed = base_seed(0x5eed_1048_c105);
+    let mut rng = Rng(seed);
+    let template = KeptOnFailure::new();
+    let (source, docs) = flushing_backlog_database(template.path(), true);
+    let s0 = container_seq(&source);
+    gc_refused(&source, "the source");
+    // The run that is not killed calibrates the points, and its copy is then checked as the `Never` point.
+    let calibration_dir = KeptOnFailure::new();
+    let calibration_path = copy_database(&source, calibration_dir.path());
+    let calibration = run_app_close_until(&calibration_path, CloseKill::Never);
+    let (Some(s_open), Some(s_close), Some(growth)) = (
+        calibration.ready,
+        calibration.committed,
+        calibration.grown_at_ready,
+    ) else {
+        panic!("seed {seed}: the calibration run: {calibration:?}");
+    };
+    eprintln!(
+        "seed {seed}: seq {s0}, {s_open} after the open (the container grown by {growth}), {s_close} after the close"
+    );
+    assert!(
+        s_open > s0 && s_close > s_open && growth > 3 << 20,
+        "seed {seed}: the open flushes the backlog in a commit, the close commits: {calibration:?}"
+    );
+    let early = CloseKill::Grew(rng.range(1, growth / 2));
+    let late = CloseKill::Grew(rng.range(growth / 2, growth));
+    let committing = CloseKill::Committing(rng.range(0, 40));
+    let polls = CloseKill::Polls(rng.range(1, 5000));
+    // Each point replays the 72 MiB backlog several times (debug builds are slow at it): the default run takes one
+    // mid-flush kill and the run that is not killed, `--features slow` every kind.
+    let points = if cfg!(feature = "slow") {
+        vec![
+            CloseKill::Never,
+            early,
+            late,
+            CloseKill::Opened,
+            committing,
+            polls,
+        ]
+    } else {
+        vec![CloseKill::Never, early]
+    };
+    let mut calibrated = Some((calibration_dir, calibration_path, calibration));
+    let mut mid_flush = 0;
+    for at in points {
+        let ctx = format!("seed {seed} ({at:?})");
+        let (_dir, path, run) = match (at, calibrated.take()) {
+            (CloseKill::Never, Some(done)) => done,
+            (_, left) => {
+                calibrated = left;
+                let dir = KeptOnFailure::new();
+                let path = copy_database(&source, dir.path());
+                let run = run_app_close_until(&path, at);
+                (dir, path, run)
+            }
+        };
+        let seq = container_seq(&path);
+        eprintln!("{ctx}: {run:?}, seq {seq}");
+        assert!(
+            (s0..=s_close).contains(&seq) && run.ready.is_none_or(|r| seq >= r),
+            "{ctx}: seq {seq} is none of the run's"
+        );
+        mid_flush += u64::from(run.killed && run.ready.is_none() && run.grown > 0 && seq < s_open);
+        let pending = seq < s_close;
+        verify(&path, true, &ctx);
+        let wal = check_two(&path, &docs, &ctx);
+        if pending {
+            assert_eq!(
+                wal.live,
+                [("wal".to_owned(), Some(content_id(&path, NOTES, "wal")))],
+                "{ctx}: the note is a WAL record"
+            );
+            refused_runs(&path, rng.chance(50), 2, &ctx);
+            check_two(&path, &docs, &format!("{ctx}: refused"));
+        } else {
+            assert_eq!(wal.doc_count, 0, "{ctx}: the close flushed the note");
+            let done = gc_report(&cli_gc_2h(&path), &format!("{ctx}: gc"));
+            assert_eq!(done["missing"], serde_json::json!([]), "{ctx}: {done}");
+            assert_eq!(done["deleted"]["blobs"], 3, "{ctx}: {done}");
+            compact_report(&cli_compact(&path), &format!("{ctx}: compact"));
+        }
+
+        close_with_the_application(&path);
+        let wal = check_two(&path, &docs, &format!("{ctx}: closed"));
+        assert_eq!(wal.doc_count, 0, "{ctx}: the application flushed the note");
+        let done = gc_report(&cli_gc_2h(&path), &format!("{ctx}: after the close"));
+        assert_eq!(done["missing"], serde_json::json!([]), "{ctx}: {done}");
+        assert_eq!(done["marked"]["blobs"], docs.len(), "{ctx}: {done}");
+        assert_eq!(
+            done["deleted"]["blobs"],
+            if pending { 3 } else { 0 },
+            "{ctx}: {done}"
+        );
+        compact_report(
+            &cli_compact(&path),
+            &format!("{ctx}: compact after the close"),
+        );
+        let v = verify(&path, true, &format!("{ctx}: end"));
+        assert_eq!(
+            (v.referenced, v.bound),
+            (docs.len() as u64, docs.len() as u64),
+            "{ctx}: {v:?}"
+        );
+        check_two(&path, &docs, &format!("{ctx}: end"));
+    }
+    assert!(
+        mid_flush > 0,
+        "seed {seed}: no kill landed inside the open's flush"
+    );
+}
+
+/// When the parent kills a `persia compact` (observed on the file system, never timed).
+#[derive(Debug, Clone, Copy)]
+enum CompactKill {
+    /// Right after the spawn.
+    Spawned,
+    /// After this many polls.
+    Polls(u64),
+    /// Once the container grew by at least this many bytes (its open's replay-time flush).
+    Grew(u64),
+    /// Once the compaction's temporary file `<name>.compact.*` is listed.
+    TempSeen,
+    /// Once it holds at least this many bytes.
+    TempBytes(u64),
+    /// Once the path names another file (after the rename: the directory sync, the close).
+    Replaced,
+    /// Not killed.
+    Never,
+}
+
+/// The compaction's temporary files beside the container (`<name>.compact.*`, SPEC §4.6) and their sizes.
+fn compact_temps(path: &Path) -> Vec<(PathBuf, u64)> {
+    let mut prefix = path.file_name().unwrap().to_owned();
+    prefix.push(".compact.");
+    let prefix = prefix.to_str().unwrap().to_owned();
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(path.parent().unwrap()).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name().to_str().unwrap().starts_with(&prefix)
+            && let Ok(m) = entry.metadata()
+        {
+            out.push((entry.path(), m.len()));
+        }
+    }
+    out
+}
+
+/// Where a killed `persia compact` was: whether the container had grown, a temporary file had been seen, and the
+/// path named another file.
+#[derive(Debug)]
+struct CompactLanded {
+    grown: bool,
+    temp: bool,
+    replaced: bool,
+}
+
+/// Runs `persia compact --json` on `path` and kills it at `at`, polling in a loop (no sleep) until then: `Err` with
+/// its output when it exited first.
+fn run_compact_until(path: &Path, at: CompactKill) -> Result<CompactLanded, Output> {
+    let initial = file_len(path);
+    let inode = std::fs::metadata(path).unwrap().ino();
+    let mut guard = Reaped(Some(
+        Command::new(env!("CARGO_BIN_EXE_persia"))
+            .args(["compact", arg(path), "--json"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    ));
+    let (mut polls, mut temp) = (0_u64, false);
+    loop {
+        let child = guard.0.as_mut().unwrap();
+        if child.try_wait().unwrap().is_some() {
+            return Err(guard.0.take().unwrap().wait_with_output().unwrap());
+        }
+        let meta = std::fs::metadata(path).unwrap();
+        let replaced = meta.ino() != inode;
+        let grown = !replaced && meta.len() > initial;
+        let temps = compact_temps(path);
+        temp |= !temps.is_empty();
+        let hit = match at {
+            CompactKill::Spawned => true,
+            CompactKill::Polls(n) => polls >= n,
+            CompactKill::Grew(b) => !replaced && meta.len().saturating_sub(initial) >= b,
+            CompactKill::TempSeen => temp,
+            CompactKill::TempBytes(b) => temps.iter().any(|&(_, len)| len >= b),
+            CompactKill::Replaced => replaced,
+            CompactKill::Never => false,
+        };
+        if hit {
+            let mut child = guard.0.take().unwrap();
+            child.kill().unwrap(); // SIGKILL; also succeeds on a child that exited but is not reaped yet.
+            let out = child.wait_with_output().unwrap();
+            if out.status.signal().is_none() {
+                return Err(out);
+            }
+            return Ok(CompactLanded {
+                grown,
+                temp,
+                replaced,
+            });
+        }
+        polls += 1;
+    }
+}
+
+/// ROADMAP 10.4.8 with real processes, the accepted side: `persia compact` on the database of
+/// [`flushing_backlog_database`] without a `notes` record (the pre-scan finds no pending record of a skipped
+/// collection, so the open is the writer's: its replay flushes the `plain` backlog in commits (two here: the memtable
+/// fills twice, the second time at the last `plain` record), then the compaction
+/// rewrites the container and commits once more), killed (SIGKILL) at seeded points the parent observes: while the
+/// container grows during the flush and once the compaction's temporary file holds a seeded number of bytes;
+/// `--features slow` adds right after the spawn, seeded polls, the temporary file's first listing, once the path
+/// names the new file and the run that is not killed. After each kill: the committed seq is the one before, a
+/// flush's or the compaction's, and the path names the compacted file exactly at the latter; `verify --deep`
+/// passes with every reference bound; the application's read-only open shows every document with its blob
+/// byte-identical and `notes` holds no WAL record; a rerun of `persia compact` completes (one commit on a compacted
+/// file, after its open's flushes otherwise),
+/// `persia container sweep` removes any temporary file left, `persia gc` collects exactly the three orphans and marks
+/// every document's blob, and everything reads back after the application closes the database.
+#[test]
+fn kill_9_of_persia_compact_while_its_open_flushes_a_backlog_loses_nothing() {
+    if child_env().is_some() {
+        return;
+    }
+    let _serial = serial();
+    let seed = base_seed(0x5eed_1048_c0a7);
+    let mut rng = Rng(seed);
+    let template = KeptOnFailure::new();
+    let (source, docs) = flushing_backlog_database(template.path(), false);
+    let s0 = container_seq(&source);
+    let s_compact = {
+        let dir = tempfile::tempdir().unwrap();
+        let path = copy_database(&source, dir.path());
+        let done = compact_report(&cli_compact(&path), "calibration");
+        done["seq"].as_u64().unwrap()
+    };
+    eprintln!("seed {seed}: seq {s0}, {s_compact} after a compaction that is not killed");
+    assert!(
+        s_compact >= s0 + 2,
+        "seed {seed}: the open flushes the backlog in at least one commit, then one compacts"
+    );
+    // The flush writes a segment of more than 3 MiB (the replay-time flush test measures it); the compacted file holds
+    // it.
+    let grew = CompactKill::Grew(rng.range(1 << 20, 3 << 20));
+    let mid_copy = CompactKill::TempBytes(rng.range(64 << 10, 3 << 20));
+    let points = if cfg!(feature = "slow") {
+        vec![
+            CompactKill::Spawned,
+            CompactKill::Polls(rng.range(1, 5000)),
+            grew,
+            CompactKill::TempSeen,
+            mid_copy,
+            CompactKill::Replaced,
+            CompactKill::Never,
+        ]
+    } else {
+        vec![grew, mid_copy]
+    };
+    let (mut mid_flush, mut mid_rewrite) = (0, 0);
+    for at in points {
+        let ctx = format!("seed {seed} ({at:?})");
+        let dir = KeptOnFailure::new();
+        let path = copy_database(&source, dir.path());
+        let inode = std::fs::metadata(&path).unwrap().ino();
+        let landed = match run_compact_until(&path, at) {
+            Err(out) => {
+                let done = compact_report(&out, &ctx);
+                assert_eq!(done["seq"], s_compact, "{ctx}: {done}");
+                None
+            }
+            Ok(landed) => Some(landed),
+        };
+        let seq = container_seq(&path);
+        let replaced = std::fs::metadata(&path).unwrap().ino() != inode;
+        eprintln!(
+            "{ctx}: killed {landed:?} (None: exited), seq {seq}, replaced {replaced}, temporary files {:?}",
+            compact_temps(&path)
+        );
+        assert!(
+            (s0..=s_compact).contains(&seq),
+            "{ctx}: seq {seq} is none of the run's"
+        );
+        assert_eq!(
+            replaced,
+            seq == s_compact,
+            "{ctx}: the path names the compacted file exactly at its seq"
+        );
+        assert!(
+            landed.as_ref().is_none_or(|l| !l.replaced || replaced),
+            "{ctx}: the path named the compacted file at the kill, and no longer does"
+        );
+        mid_flush += u64::from(landed.as_ref().is_some_and(|l| l.grown && !l.temp));
+        mid_rewrite += u64::from(landed.as_ref().is_some_and(|l| l.temp) && !replaced);
+        let v = verify(&path, true, &ctx);
+        assert_eq!(v.referenced, docs.len() as u64, "{ctx}: {v:?}");
+        let wal = check_two(&path, &docs, &ctx);
+        assert_eq!(wal.doc_count, 0, "{ctx}: notes holds no WAL record");
+
+        let again = compact_report(&cli_compact(&path), &format!("{ctx}: rerun"));
+        // Once compacted, the backlog is flushed: the rerun only compacts. Before, its open may flush again.
+        let rerun_seq = again["seq"].as_u64().unwrap();
+        if seq == s_compact {
+            assert_eq!(rerun_seq, seq + 1, "{ctx}: rerun {again}");
+        } else {
+            assert!(rerun_seq > seq, "{ctx}: rerun {again}");
+        }
+        let swept = persia(&["container", "sweep", arg(&path)]);
+        assert!(
+            swept.status.success(),
+            "{ctx}: container sweep: {}",
+            String::from_utf8_lossy(&swept.stderr)
+        );
+        assert!(
+            compact_temps(&path).is_empty(),
+            "{ctx}: a temporary file is left"
+        );
+        let done = gc_report(&cli_gc_2h(&path), &format!("{ctx}: gc"));
+        assert_eq!(done["missing"], serde_json::json!([]), "{ctx}: {done}");
+        assert_eq!(done["marked"]["blobs"], docs.len(), "{ctx}: {done}");
+        assert_eq!(done["deleted"]["blobs"], 3, "{ctx}: {done}");
+        let v = verify(&path, true, &format!("{ctx}: after gc"));
+        assert_eq!(
+            (v.referenced, v.bound, v.orphan_chunks),
+            (docs.len() as u64, docs.len() as u64, 0),
+            "{ctx}: {v:?}"
+        );
+        check_two(&path, &docs, &format!("{ctx}: after gc"));
+        close_with_the_application(&path);
+        check_two(&path, &docs, &format!("{ctx}: closed"));
+    }
+    assert!(
+        mid_flush > 0,
+        "seed {seed}: no kill landed inside the open's flush"
+    );
+    assert!(
+        mid_rewrite > 0,
+        "seed {seed}: no kill landed inside the compaction's rewrite"
+    );
 }

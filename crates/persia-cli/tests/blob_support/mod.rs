@@ -251,6 +251,12 @@ impl ChildIo {
         self.rx.recv().ok()
     }
 
+    /// The child's next report if one has arrived, without blocking: `Empty` while it reports nothing new,
+    /// `Disconnected` once its stdout closed and every report was received (it exited or was killed).
+    pub fn try_recv(&self) -> Result<String, std::sync::mpsc::TryRecvError> {
+        self.rx.try_recv()
+    }
+
     /// The child's next report, which must exist.
     pub fn expect(&self, ctx: &str) -> String {
         self.recv()
