@@ -307,7 +307,8 @@ the crate too.
    an internal); an unclosed, nested or unannounced part fails. Paths may start with `::` and have blanks around
    `::`, and inline code is every backtick span and `<code>` element. The status sentences
    `website/src/status.mjs` puts into pages (`%%TOKEN%%`) are checked by `website/src/status.test.mjs`, which reads
-   the same snapshot for the calls it names. A method named on a value (`page.next_cursor()`) and a renamed import
+   the same snapshot for the calls it names (run by `website.yml`'s build job, ROADMAP 10.1.52, which also runs on a
+   change to the snapshot). A method named on a value (`page.next_cursor()`) and a renamed import
    (`use persia as p; p::internal`) are not resolved: the check does not type the text, and rustdoc compiling the
    samples (run alone, `cargo test -p persia-docs`) refuses those that name nothing public.
 6. **The include check covers every published crate** (ROADMAP 10.1.53). `persia-engine`'s integration tests

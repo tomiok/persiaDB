@@ -9,6 +9,8 @@ on:
       - 'website/**'
       - 'scripts/waitlist/**'
       - 'PROGRESS.md'
+      # status.mjs reads the facade's calls from it (ROADMAP 10.1.52).
+      - 'crates/persia/public-api.txt'
       - '.github/workflows/website.yml'
       - '.github/workflows/waitlist.yml'
   push:
@@ -17,6 +19,8 @@ on:
       - 'website/**'
       - 'scripts/waitlist/**'
       - 'PROGRESS.md'
+      # status.mjs reads the facade's calls from it (ROADMAP 10.1.52).
+      - 'crates/persia/public-api.txt'
       - '.github/workflows/website.yml'
       - '.github/workflows/waitlist.yml'
   workflow_dispatch:
@@ -56,6 +60,11 @@ jobs:
             website/src/waitlist/protocol/*.test.mjs \
             website/relay/waitlist/src/*.test.mjs \
             scripts/waitlist/*.test.mjs
+      # ROADMAP 10.1.52: the status sentences status.mjs puts into pages name no engine item and no capability the
+      # facade's crates/persia/public-api.txt lacks (ADR-0063, website-guides amendment item 5), and the layer diagram
+      # and its captions follow PROGRESS.md. Node built-ins only, so before `npm ci`.
+      - name: Status and layer tests
+        run: node --test website/src/status.test.mjs website/src/layers.test.mjs
       - name: Install
         working-directory: website
         run: npm ci
