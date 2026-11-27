@@ -518,6 +518,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- Docs site: the guides "Filtered full-text search" and "Typo-tolerant search" are rewritten against the embedded
+  API (ROADMAP 10.1.34): search through `Collection::search` and `search_json`, filters by
+  `SearchRequest::filter_json` or a typed `Filter` (no `Filter::from_json`), hard and soft filters, and only the
+  `soft_filter` dropped by the last-resort step. Their Rust samples are whole programs that `cargo test` runs as
+  doctests of `persia` (`crates/persia/src/guides.rs`), so a sample that stops compiling fails CI. The L6
+  descriptions of the feature reference, getting-started, fuzzy-search and faceted-search pages say the same.
 - **Breaking** (`persia-engine`): `persia_engine::search::request::TypedSortValue::Datetime` holds the value's
   microseconds (`i64`) instead of its text (ROADMAP 10.1.30, ADR-0065 amended); `persia_engine::document::datetime_text`
   gives the text SPEC §6.4.1 writes. The response JSON is unchanged.

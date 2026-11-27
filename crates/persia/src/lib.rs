@@ -35,6 +35,9 @@ mod collection;
 mod db;
 mod documents;
 mod error;
+// The Rust samples of the website's guides, run as doctests (ROADMAP 10.1.34): only rustdoc compiles it.
+#[cfg(doctest)]
+mod guides;
 // The hidden layer under the facade (ADR-0051): public only with the `internal` feature, for `persia-cli` and the
 // fuzz targets. Not a stable API.
 #[cfg(feature = "internal")]

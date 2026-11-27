@@ -51,7 +51,7 @@ head:
             "name": "Does fuzzy search drop filters?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "Not by default. L1 through L5 keep the request filter. With relax.filters set to last_resort, one last step drops that filter when every earlier level found fewer than min_results hits and the query searches a word. A query that searches no word does not build the step. filters_dropped is true only when that step found the hits."
+              "text": "Not by default. Every level keeps the request's filters, and the hard filter is never dropped. With relax.filters set to last_resort, one last step drops the soft_filter when every earlier level found fewer than min_results hits and the query searches a word. A query that searches no word does not build the step. filters_dropped is true only when that step found the hits."
             }
           },
           {
@@ -160,11 +160,11 @@ The request's `sort` does not order these hits. Each hit still carries the reque
 
 Filters stay on L0 through L5 unless the caller sets `relax.filters` to `"last_resort"` (ROADMAP 8.2.6, [ADR-0047](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0047-filter-relaxation-as-a-last-step.md)). That plans one last step, L6 `filters`, after every enabled earlier level. `fallback: "none"` omits L5 and L6 still comes last.
 
-The step is built only when every earlier level found fewer than `min_results` hits. It is not built to fill a page, even with `fill`. It is L0's words with the request's filters removed. Excluded words stay excluded. A query that searches no word does not build it: empty text, stopwords only, exclusions alone, or a filter with no word. A compiled query with no request filter does not build it either.
+The step is built only when every earlier level found fewer than `min_results` hits. It is not built to fill a page, even with `fill`. It is L0's words without the request's `soft_filter`; the hard `filter` stays (ROADMAP 8.2.13). Excluded words stay excluded. A query that searches no word does not build it: empty text, stopwords only, exclusions alone, or a filter with no word. A request with no `soft_filter` does not build it either.
 
-For a query compiled from `q`, the filter it drops is the request filter. `Compiled::filter` keeps that filter beside the query, and `Compiled::with_query` joins it to any query put in its place, so no level before L6 loses it (ROADMAP 8.2.14, [ADR-0048](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0048-request-filter-kept-beside-the-compilation.md)). A filter inside the caller's own query stays, unless it is the same filter. A programmatic query drops every filter of its root `bool`.
+The search carries both of the request's filters beside the query it compiled from `q`, so no level before L6 loses either (ROADMAP 8.2.14, [ADR-0048](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0048-request-filter-kept-beside-the-compilation.md)), and L6 drops the `soft_filter` alone.
 
-When this step supplies the hits, the response sets `level` to `filters` and `filters_dropped` to true. Those hits do not pass the request's filters. Facets count them, so a facet can show a value the filter rejects (SPEC §7.5, an interim rule, ROADMAP 8.1.9). Do not opt in when a filter enforces tenancy or permissions: no request key marks a filter as one that must hold (ROADMAP 8.2.13, still open). The operators and the join are [Filtered full-text search](/guide/filtered-search/).
+When this step supplies the hits, the response sets `level` to `filters` and `filters_dropped` to true. Those hits do not pass the `soft_filter`; they pass the hard `filter`. Facets count them, so a facet can show a value the filter rejects (SPEC §7.5, an interim rule, ROADMAP 8.1.9). Put a filter that enforces tenancy or permissions in the hard `filter`, which no level drops (ROADMAP 8.2.13). The operators and the join are [Filtered full-text search](/guide/filtered-search/).
 
 ## Relax options
 
@@ -231,7 +231,7 @@ L5 fallback, unless `fallback` is `none`, returns documents the filters keep and
 
 ### Does fuzzy search drop filters?
 
-Not by default. L1 through L5 keep the request filter. With `relax.filters` set to `"last_resort"`, one last step drops that filter when every earlier level found fewer than `min_results` hits and the query searches a word. A query that searches no word does not build the step. `filters_dropped` is true only when that step found the hits.
+Not by default. Every level keeps the request's filters, and the hard `filter` is never dropped. With `relax.filters` set to `"last_resort"`, one last step drops the `soft_filter` when every earlier level found fewer than `min_results` hits and the query searches a word. A query that searches no word does not build the step. `filters_dropped` is true only when that step found the hits.
 
 ### Can I call Db::open and run a fuzzy query?
 
