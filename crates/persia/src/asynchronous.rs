@@ -2,15 +2,23 @@
 //! adds no dependency.
 //!
 //! [`AsyncDb`] and [`AsyncCollection`] run the calls of [`Db`] and [`Collection`] on a pool of plain threads that
-//! belongs to the database: started by its first job, `min(4, cores)` of them, joined by [`AsyncDb::close`], and not
-//! shared with the maintenance thread. Each call returns a [`JobFuture`], a std [`Future`](std::future::Future) that
-//! any executor polls: no runtime is named, none is needed.
+//! belongs to the database: started by its first job, [`OpenOptions::async_threads`] of them (`min(4, cores)` by
+//! default), joined by [`AsyncDb::close`], and not shared with the maintenance thread. Each call returns a
+//! [`JobFuture`], a std [`Future`](std::future::Future) that any executor polls: no runtime is named, none is needed.
 
+// The rest of the embedded API on the same pool (ROADMAP 10.1.26; ADR-0064, amended 2026-11-27).
+mod blobs;
+mod collections;
 mod job;
+mod json;
+mod lookups;
 mod pool;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use persia_engine::db::CancelToken;
 
 pub use job::JobFuture;
 use job::Slot;
@@ -22,15 +30,17 @@ use pool::{JobEvent, JobKind};
 #[cfg(feature = "test-hooks")]
 pub use pool::{JobEvent, JobHook, JobKind};
 
+use crate::db::Inner;
 use crate::{Collection, Db, Document, Error, ErrorCode, OpenOptions, Result};
 use crate::{SearchRequest, SearchResponse};
 
 /// A database opened for async use: a [`Db`] whose calls run on its own pool of threads (ADR-0064 item 12).
 ///
-/// The pool starts with the first job, `min(4, cores)` threads, and [`AsyncDb::close`] joins it before it closes the
-/// database. Dropping an `AsyncDb` without closing it refuses later jobs with [`ErrorCode::Closed`], completes the
-/// queued ones with it, lets the running ones end on their own (the pool's threads are not joined), and drops the
-/// database, which waits a while for its last commit (as dropping a [`Db`] does): prefer `close`.
+/// The pool starts with the first job, [`OpenOptions::async_threads`] threads (`min(4, cores)` by default), and
+/// [`AsyncDb::close`] joins it before it closes the database. Dropping an `AsyncDb` without closing it refuses later
+/// jobs with [`ErrorCode::Closed`], completes the queued ones with it, lets the running ones end on their own (the
+/// pool's threads are not joined), and drops the database, which waits a while for its last commit (as dropping a
+/// [`Db`] does): prefer `close`.
 ///
 /// ```
 /// # use std::future::Future;
@@ -70,6 +80,9 @@ use crate::{SearchRequest, SearchResponse};
 pub struct AsyncDb {
     /// `None` once [`AsyncDb::close`] took it.
     db: Option<Db>,
+    /// The state `db` shares with its handles, for the calls that do no I/O ([`AsyncDb::path`], ...): it is there
+    /// for as long as the `AsyncDb`, which `db` is not.
+    shared: Arc<Inner>,
     pool: Pool,
 }
 
@@ -78,7 +91,7 @@ impl fmt::Debug for AsyncDb {
         f.debug_struct("AsyncDb")
             .field("db", &self.db)
             .field("pool", &self.pool)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -151,7 +164,7 @@ impl AsyncDb {
     pub fn open_with(options: OpenOptions, location: impl AsRef<Path>) -> JobFuture<Self> {
         let location: PathBuf = location.as_ref().to_owned();
         let slot = Slot::new(None);
-        let delivered = std::sync::Arc::clone(&slot);
+        let delivered = Arc::clone(&slot);
         let hook = options.pool.hook.clone();
         let thread = std::thread::Builder::new()
             .name("persia-async-open".to_owned())
@@ -162,7 +175,12 @@ impl AsyncDb {
                     pool::emit(hook.as_ref(), &started);
                     let opened = options.open(&location).map(|db| {
                         let pool = Pool::new(db.inner.options.pool.clone());
-                        Self { db: Some(db), pool }
+                        let shared = Arc::clone(&db.inner);
+                        Self {
+                            db: Some(db),
+                            shared,
+                            pool,
+                        }
                     });
                     let error = opened.as_ref().err().map(Error::code);
                     // A dropped future's open is closed here, before `Finished`: `finish` drops the `Db`.
@@ -232,7 +250,7 @@ impl AsyncDb {
             return JobFuture::ready(Ok(()));
         };
         let slot = Slot::new(None);
-        let delivered = std::sync::Arc::clone(&slot);
+        let delivered = Arc::clone(&slot);
         let thread = std::thread::Builder::new()
             .name("persia-async-close".to_owned())
             .spawn(move || {
@@ -252,7 +270,8 @@ impl AsyncDb {
     }
 
     /// A handle on the collection named `name` ([`Db::collection`]): a lookup in the latest published state, which
-    /// takes no lock and runs on the caller's thread.
+    /// does no I/O of its own and runs on the caller's thread (on a read-only database it can wait for a running
+    /// [`refresh`](Self::refresh) to swap its state in).
     ///
     /// ```
     /// # use std::future::Future;
@@ -288,6 +307,14 @@ impl AsyncDb {
         })
     }
 
+    /// Test hook: the number of threads the database's async pool has installed: 0 before a start succeeds and once
+    /// closed. A refused start installs none by construction; that its spawned threads ended is not shown by this.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn pool_threads(&self) -> usize {
+        self.pool.running_threads()
+    }
+
     /// [`Db::commit`] on the pool.
     ///
     /// ```
@@ -317,11 +344,21 @@ impl AsyncDb {
     /// # Errors
     /// As [`Db::commit`].
     pub fn commit(&self) -> JobFuture<()> {
+        self.submit(JobKind::Commit, |inner, _| inner.commit())
+    }
+
+    /// Queues `work` on the pool, with the state the database's handles share; a closed `AsyncDb` gives a future ready
+    /// with [`ErrorCode::Closed`].
+    fn submit<T, F>(&self, kind: JobKind, work: F) -> JobFuture<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Arc<Inner>, Option<&CancelToken>) -> Result<T> + Send + 'static,
+    {
         let Some(db) = self.db.as_ref() else {
             return JobFuture::ready(Err(Error::closed()));
         };
-        let inner = std::sync::Arc::clone(&db.inner);
-        self.pool.submit(JobKind::Commit, move |_| inner.commit())
+        let inner = Arc::clone(&db.inner);
+        self.pool.submit(kind, move |token| work(&inner, token))
     }
 }
 
@@ -384,12 +421,16 @@ impl fmt::Debug for AsyncCollection {
     }
 }
 
-/// The error of a read whose future was dropped before it ran.
-fn cancelled(what: &str) -> Error {
-    Error::new(
-        ErrorCode::Cancelled,
-        format!("the {what} was cancelled: its future was dropped"),
-    )
+/// [`ErrorCode::Cancelled`] if the future of the read `what` was dropped (its `token` set) before it read: a read
+/// that is one lookup (a get, a blob range) has no point to stop at once it has started reading.
+fn check_cancelled(token: Option<&CancelToken>, what: &str) -> Result<()> {
+    if token.is_some_and(CancelToken::is_cancelled) {
+        return Err(Error::new(
+            ErrorCode::Cancelled,
+            format!("the {what} was cancelled: its future was dropped"),
+        ));
+    }
+    Ok(())
 }
 
 impl AsyncCollection {
@@ -553,9 +594,7 @@ impl AsyncCollection {
         let collection = self.collection.clone();
         let id = id.into();
         self.pool.submit(JobKind::Get, move |token| {
-            if token.is_some_and(persia_engine::db::CancelToken::is_cancelled) {
-                return Err(cancelled("get"));
-            }
+            check_cancelled(token, "get")?;
             collection.get(&id)
         })
     }

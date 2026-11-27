@@ -35,13 +35,36 @@ pub enum JobKind {
     Search,
     /// `AsyncDb::open`, on its own thread.
     Open,
+    /// `AsyncDb::create_collection`, `AsyncDb::create_collection_json`.
+    CreateCollection,
+    /// `AsyncDb::drop_collection`.
+    DropCollection,
+    /// `AsyncDb::refresh`.
+    Refresh,
+    /// `AsyncDb::backup`.
+    Backup,
+    /// `AsyncDb::put_blob`.
+    PutBlob,
+    /// `AsyncDb::get_blob_range`.
+    GetBlobRange,
+    /// `AsyncCollection::put_with_blob`.
+    PutWithBlob,
+    /// `AsyncCollection::put_json`, `AsyncCollection::put_struct` (the value's JSON).
+    PutJson,
+    /// `AsyncCollection::get_json`, `AsyncCollection::get_struct`.
+    GetJson,
+    /// `AsyncCollection::search_json`.
+    SearchJson,
 }
 
 impl JobKind {
     /// Whether a started job of this kind is cancelled when its future is dropped (a read) rather than run to its
     /// end (a write).
     const fn is_read(self) -> bool {
-        matches!(self, Self::Get | Self::Search)
+        matches!(
+            self,
+            Self::Get | Self::Search | Self::GetJson | Self::SearchJson | Self::GetBlobRange
+        )
     }
 }
 
@@ -82,9 +105,12 @@ pub type JobHook = Arc<dyn Fn(&JobEvent) + Send + Sync>;
 /// How a pool is set up: from the open's options.
 #[derive(Clone, Default)]
 pub(crate) struct PoolOptions {
-    /// The number of threads; `min(4, cores)` when `None`.
-    pub(crate) threads: Option<NonZeroUsize>,
+    /// The number of threads (`OpenOptions::async_threads`); `min(4, cores)` when `None`. 0 is refused at open.
+    pub(crate) threads: Option<usize>,
     pub(crate) hook: Option<JobHook>,
+    /// Test hook: the OS is taken to refuse the thread of this index (0-based) at the pool's first start.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) refuse_thread: Option<usize>,
 }
 
 impl fmt::Debug for PoolOptions {
@@ -92,7 +118,7 @@ impl fmt::Debug for PoolOptions {
         f.debug_struct("PoolOptions")
             .field("threads", &self.threads)
             .field("hook", &self.hook.is_some())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -153,6 +179,9 @@ struct State {
     closed: bool,
     /// The threads, once the first job started them.
     threads: Vec<JoinHandle<()>>,
+    /// Which start of the pool its threads belong to. A start the OS refused a thread of moves it on, so the threads
+    /// that start made see the change and end (all or nothing: a pool runs every thread it was given, or none).
+    generation: u64,
 }
 
 struct Shared {
@@ -185,6 +214,13 @@ impl fmt::Debug for Pool {
     }
 }
 
+/// A start of the pool that failed: its error, and the threads it had started, for the caller to join once it has
+/// released the pool's lock (they end when they see the generation moved on).
+struct Refused {
+    error: Error,
+    started: Vec<JoinHandle<()>>,
+}
+
 impl Pool {
     /// A pool with no thread yet: the first job starts them.
     pub(crate) fn new(options: PoolOptions) -> Self {
@@ -194,6 +230,7 @@ impl Pool {
                     queue: VecDeque::new(),
                     closed: false,
                     threads: Vec::new(),
+                    generation: 0,
                 }),
                 work: Condvar::new(),
                 options,
@@ -203,14 +240,17 @@ impl Pool {
 
     /// The number of threads the pool starts.
     fn thread_count(&self) -> usize {
-        self.shared.options.threads.map_or_else(
-            || {
-                std::thread::available_parallelism()
-                    .map_or(1, NonZeroUsize::get)
-                    .min(MAX_DEFAULT_THREADS)
-            },
-            NonZeroUsize::get,
-        )
+        self.shared.options.threads.unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map_or(1, NonZeroUsize::get)
+                .min(MAX_DEFAULT_THREADS)
+        })
+    }
+
+    /// The number of threads the pool runs now: 0 before its first job and after it closed.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn running_threads(&self) -> usize {
+        self.shared.lock().threads.len()
     }
 
     /// Queues `work` as a job of `kind` and returns its future; a closed pool returns one ready with
@@ -226,9 +266,13 @@ impl Pool {
             return JobFuture::ready(Err(Error::closed()));
         }
         if state.threads.is_empty()
-            && let Err(e) = self.start_threads(&mut state)
+            && let Err(refused) = self.start_threads(&mut state)
         {
-            return JobFuture::ready(Err(e));
+            drop(state);
+            // The threads that start made end: none was given a job, and each sees the generation moved on.
+            self.shared.work.notify_all();
+            join(refused.started);
+            return JobFuture::ready(Err(refused.error));
         }
         state.queue.push_back(Box::new(Task {
             kind,
@@ -240,31 +284,57 @@ impl Pool {
         JobFuture::new(slot)
     }
 
-    /// Starts the pool's threads. If the OS refuses one, those started stay (they serve the queue), and only a
-    /// pool with none fails.
-    fn start_threads(&self, state: &mut State) -> Result<()> {
-        let mut refused = None;
-        for n in 0..self.thread_count() {
-            let shared = Arc::clone(&self.shared);
-            match std::thread::Builder::new()
-                .name(format!("persia-async-{n}"))
-                .spawn(move || serve(&shared))
-            {
-                Ok(handle) => state.threads.push(handle),
+    /// Starts the pool's threads, all or none: if the OS refuses one, the ones started end, the job that asked is
+    /// refused with [`ErrorCode::Io`], and the next job tries again.
+    fn start_threads(&self, state: &mut State) -> std::result::Result<(), Refused> {
+        let count = self.thread_count();
+        if count == 0 {
+            // `OpenOptions::open` refuses 0; a pool with no thread would leave every job queued for ever.
+            return Err(Refused {
+                error: Error::new(
+                    ErrorCode::InvalidArgument,
+                    "the database's async pool needs at least one thread",
+                ),
+                started: Vec::new(),
+            });
+        }
+        let generation = state.generation;
+        // Not preallocated: `count` is the caller's `async_threads`, which may be far more than the OS can start.
+        let mut started = Vec::new();
+        for n in 0..count {
+            match self.spawn(n, generation) {
+                Ok(handle) => started.push(handle),
                 Err(source) => {
-                    refused = Some(source);
-                    break;
+                    state.generation = generation.wrapping_add(1);
+                    return Err(Refused {
+                        error: Error::with_source(
+                            ErrorCode::Io,
+                            format_args!(
+                                "starting thread {n} of the database's async pool of {count} threads"
+                            ),
+                            source,
+                        ),
+                        started,
+                    });
                 }
             }
         }
-        match refused {
-            Some(source) if state.threads.is_empty() => Err(Error::with_source(
-                ErrorCode::Io,
-                "starting the database's async pool",
-                source,
-            )),
-            _ => Ok(()),
+        state.threads = started;
+        Ok(())
+    }
+
+    /// Spawns the pool thread `n` of the start `generation`.
+    fn spawn(&self, n: usize, generation: u64) -> std::io::Result<JoinHandle<()>> {
+        #[cfg(feature = "test-hooks")]
+        if generation == 0 && self.shared.options.refuse_thread == Some(n) {
+            return Err(std::io::Error::other(
+                "the OS refused the thread (a test hook)",
+            ));
         }
+        let shared = Arc::clone(&self.shared);
+        std::thread::Builder::new()
+            .name(format!("persia-async-{n}"))
+            .spawn(move || serve(&shared, generation))
     }
 
     /// Closes the pool: every later job is refused with [`ErrorCode::Closed`], every queued one completes with it,
@@ -284,11 +354,15 @@ impl Pool {
     }
 }
 
-/// A pool thread: runs queued jobs in order until the pool closes.
-fn serve(shared: &Shared) {
+/// A pool thread of the start `generation`: runs queued jobs in order until the pool closes, or ends at once if that
+/// start failed.
+fn serve(shared: &Shared, generation: u64) {
     loop {
         let mut state = shared.lock();
         let job = loop {
+            if state.generation != generation {
+                return;
+            }
             if let Some(job) = state.queue.pop_front() {
                 break job;
             }
@@ -355,8 +429,8 @@ mod tests {
     #[test]
     fn a_job_that_panics_is_an_io_error_and_its_thread_serves_the_next_job() {
         let pool = Pool::new(PoolOptions {
-            threads: NonZeroUsize::new(1),
-            hook: None,
+            threads: Some(1),
+            ..PoolOptions::default()
         });
         let panicked = pool.submit(JobKind::Put, |_| -> Result<()> { panic!("a bug in a job") });
         let err = block_on(panicked).unwrap_err();
@@ -374,5 +448,20 @@ mod tests {
         let refused = pool.submit(JobKind::Commit, |_| Ok(()));
         assert_eq!(block_on(refused).unwrap_err().code(), ErrorCode::Closed);
         assert!(pool.close().is_empty(), "closed once");
+    }
+
+    #[test]
+    fn a_pool_of_no_thread_refuses_its_jobs_rather_than_queue_them_for_ever() {
+        // `OpenOptions::open` refuses `async_threads(0)`; the pool does not rely on it.
+        let pool = Pool::new(PoolOptions {
+            threads: Some(0),
+            ..PoolOptions::default()
+        });
+        let refused = pool.submit(JobKind::Commit, |_| Ok(()));
+        assert_eq!(
+            block_on(refused).unwrap_err().code(),
+            ErrorCode::InvalidArgument
+        );
+        assert!(pool.close().is_empty(), "no thread started");
     }
 }

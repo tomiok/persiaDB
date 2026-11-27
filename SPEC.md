@@ -3839,6 +3839,8 @@ Key knobs: `memtable_bytes`, `commit_interval`, `fsync_policy`, `merge_threads`,
 Defaults: `memtable_bytes` 64 MiB (with a 10 s idle flush), `commit_interval` 60 s (§8.2 step 3); `merge_threads` 1
 (0 merges on the writer's thread); `merge.*` as in §8.5; `compaction.dead_space_percent` 40 and
 `compaction.min_dead_bytes` 1 MiB, `compaction.automatic` on (§4.6).
+Embedded only, with the cargo feature `async`: `async_threads`, the threads of a database's async pool
+(`OpenOptions::async_threads`), default `min(4, cores)`, 0 refused at open (ADR-0064).
 
 ---
 

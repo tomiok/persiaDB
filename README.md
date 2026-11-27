@@ -30,7 +30,7 @@
 </p>
 
 <!-- BEGIN GENERATED progress:summary by `cargo xtask progress`. Do not edit by hand. -->
-**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **468 of 618** MVP leaves done (76%), 0 in progress (last snapshot 2026-11-27). Post-MVP work is 0 of 228 and sits outside that percentage.
+**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **470 of 621** MVP leaves done (76%), 0 in progress (last snapshot 2026-11-27). Post-MVP work is 0 of 228 and sits outside that percentage.
 <!-- END GENERATED progress:summary -->
 
 On `main` today, the [`persia`](./crates/persia/src/lib.rs) crate opens a single-file database, stores documents and blobs, and runs a ranked search (BM25F, filters, sorts, facets, cursors) that relaxes by default when a query finds too few hits. Writes go through a checksummed WAL with crash recovery, and commits, merges, and compaction run on the database's own thread. Nothing is published yet, and format 1.0 is unstable until the v1.0 release ([SPEC §15](./SPEC.md#15-versioning-and-compatibility)); the internals are in [`SPEC.md`](./SPEC.md).
@@ -41,7 +41,7 @@ The product is a search database you link, the way you link SQLite. The design i
 
 | | Benefit | Where it stands |
 |---|---|---|
-| **Embedded** | The calling process is the database. `Db::open("app.persia")` is the whole setup: no daemon, no config file, no cluster. | Works: `persia::Db`, `OpenOptions`, and `Collection`. The cargo feature `async` adds `AsyncDb` and `AsyncCollection`, which need no runtime. The rest of the async surface and API polish are still in M10. |
+| **Embedded** | The calling process is the database. `Db::open("app.persia")` is the whole setup: no daemon, no config file, no cluster. | Works: `persia::Db`, `OpenOptions`, and `Collection`. The cargo feature `async` adds `AsyncDb` and `AsyncCollection`, which need no runtime and offer every call of the embedded API but `get_blob` (an async program reads a blob by ranges). The remaining API polish is in M10. |
 | **Rust, short dependency list** | The index format, analysis, segment codec, BM25F scoring, and query execution are written in this repository ([ADR-0001](./docs/adr/0001-own-engine-and-allowed-dependencies.md)). | `cargo deny` rejects Tantivy, SQLite, and RocksDB. `cargo xtask check-deps` rejects any direct dependency outside the workspace allow-list. There is no `build.rs`. |
 | **One file, then object storage** | A local database is `<name>.persia`, plus an optional `<name>.persia.blobs` pack. Segments are immutable. The same segment bytes are specified for S3, GCS, and Azure Blob, in front of stateless query nodes. | Works locally: the container, segments, the blob pack, and `Db::backup` of a live database. Object-storage backends (M12), the server (M11), and Kubernetes (M13) are planned; `Db::open("s3://…")` returns `Unsupported` today. |
 | **A page of results** | Relaxation is the default ([SPEC §7.6](./SPEC.md#76-zero-results-avoidance-default-on)). Too few hits, and the engine walks synonyms, dropped terms, prefix, a fuzzy step, and a fallback, then names the step that matched. | Works: `Collection::search` relaxes by default, reports the level and any "did you mean" corrections in `SearchResponse::relaxation`, and takes per-request `relax` options (`"relax": false` turns it off). |
@@ -301,7 +301,7 @@ MVP (M0–M15) is the v1.0 release. The live graph, the burn-up, and the ready-n
 | **M7** Query engine & ranking | ✅ done | 51/51 |
 | **M8** Zero-results avoidance | ✅ done | 55/55 |
 | **M9** Blob store | ✅ done | 44/44 |
-| **M10** Embedded API | 🔨 in progress | 37/45 |
+| **M10** Embedded API | 🔨 in progress | 39/48 |
 | **M11** Server | ⏳ blocked | 0/24 |
 | **M12** Cloud storage backends | ⏳ blocked | 0/29 |
 | **M13** Distribution & Kubernetes | ⏳ blocked | 0/33 |

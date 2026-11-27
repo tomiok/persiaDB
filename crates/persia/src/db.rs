@@ -212,7 +212,7 @@ impl Db {
     /// ```
     #[must_use]
     pub fn is_read_only(&self) -> bool {
-        matches!(self.inner.mode, Mode::ReadOnly(_))
+        self.inner.is_read_only()
     }
 
     /// Brings a read-only database up to what its writer has made durable since the open or the last refresh: its
@@ -320,16 +320,7 @@ impl Db {
     /// # Errors
     /// [`ErrorCode::Closed`].
     pub fn block_cache_stats(&self) -> Result<BlockCacheStats> {
-        self.inner.check_open()?;
-        let cache = &self.inner.block_cache;
-        let stats = cache.stats();
-        Ok(BlockCacheStats {
-            hits: stats.hits,
-            misses: stats.misses,
-            entries: stats.blocks,
-            bytes: stats.bytes,
-            capacity: cache.capacity(),
-        })
+        self.inner.block_cache_stats()
     }
 
     /// Test hook: whether a read-only database reads its container through a memory mapping (SPEC §4.7).
@@ -491,6 +482,25 @@ impl Inner {
     /// The path the database was opened at.
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// [`Db::is_read_only`].
+    pub(crate) fn is_read_only(&self) -> bool {
+        matches!(self.mode, Mode::ReadOnly(_))
+    }
+
+    /// [`Db::block_cache_stats`].
+    pub(crate) fn block_cache_stats(&self) -> Result<BlockCacheStats> {
+        self.check_open()?;
+        let cache = &self.block_cache;
+        let stats = cache.stats();
+        Ok(BlockCacheStats {
+            hits: stats.hits,
+            misses: stats.misses,
+            entries: stats.blocks,
+            bytes: stats.bytes,
+            capacity: cache.capacity(),
+        })
     }
 
     /// [`ErrorCode::Closed`] once the database is closed or dropped.

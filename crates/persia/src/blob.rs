@@ -182,8 +182,14 @@ impl Db {
     /// # Errors
     /// [`ErrorCode::InvalidArgument`] for a range outside the blob; then as [`Db::get_blob`].
     pub fn get_blob_range(&self, blob_ref: &BlobRef, range: Range<u64>) -> Result<Vec<u8>> {
-        self.inner
-            .with_blobs(|blobs| blobs.get_blob_range(blob_ref, range).map_err(Error::wrap))
+        self.inner.get_blob_range(blob_ref, range)
+    }
+}
+
+impl Inner {
+    /// [`Db::get_blob_range`], on the state every handle shares (the async API runs it on its pool).
+    pub(crate) fn get_blob_range(&self, blob_ref: &BlobRef, range: Range<u64>) -> Result<Vec<u8>> {
+        self.with_blobs(|blobs| blobs.get_blob_range(blob_ref, range).map_err(Error::wrap))
     }
 }
 

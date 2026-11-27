@@ -11,6 +11,7 @@ use std::sync::Arc;
 use persia_blob::pack_path;
 use persia_engine::db::{CommittedImage, CompactionHold, write_backup};
 
+use crate::db::Inner;
 use crate::internal::gc::GcHold;
 use crate::{Db, Error, ErrorCode, Result};
 
@@ -137,8 +138,15 @@ impl Db {
     /// sync, after both files are complete at their names (they may not survive a crash), and a removal during the
     /// clean-up of a failed backup may itself fail (logged), leaving `dest` and its pack complete.
     pub fn backup(&self, dest: impl AsRef<Path>) -> Result<()> {
-        self.inner.check_open()?;
-        let dest = crate::location::path_of(dest.as_ref())?;
+        self.inner.backup(dest.as_ref())
+    }
+}
+
+impl Inner {
+    /// [`Db::backup`], on the state every handle shares (the async API runs it on its pool).
+    pub(crate) fn backup(&self, dest: &Path) -> Result<()> {
+        self.check_open()?;
+        let dest = crate::location::path_of(dest)?;
         let pack_dest = pack_path(&dest);
         for path in [&dest, &pack_dest] {
             // Not following a symbolic link: a dangling one is a name that exists too.
@@ -164,9 +172,9 @@ impl Db {
                 ));
             }
         }
-        let images = self.inner.committed_images()?;
+        let images = self.committed_images()?;
         #[cfg(feature = "test-hooks")]
-        if let Some(hook) = &self.inner.options.backup_hook {
+        if let Some(hook) = &self.options.backup_hook {
             (hook.0)(BackupStep::Taken { seq: images.seq });
         }
         let mut files: Vec<(&Path, &CommittedImage<File>)> = Vec::with_capacity(2);
@@ -177,7 +185,7 @@ impl Db {
         write_backup(&files).map_err(|e| {
             Error::wrap(e).context(format_args!(
                 "backing up {} (seq {}) to {}",
-                self.inner.path().display(),
+                self.path().display(),
                 images.seq,
                 dest.display()
             ))

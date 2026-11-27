@@ -1,6 +1,6 @@
 //! The async API (ROADMAP 10.1.11; ADR-0064 items 11 to 14): `AsyncDb` and `AsyncCollection` on the database's own
-//! pool, and what dropping a future does to its job, driven by a `block_on` written here (no runtime is a
-//! dev-dependency, ROADMAP 0.6.11).
+//! pool, and what dropping a future does to its job, driven by a `block_on` written in the tests' support (no runtime
+//! is a dev-dependency, ROADMAP 0.6.11).
 //!
 //! Jobs are held where they start by the pool's test hook (`OpenOptions::async_hook`), on a pool of one thread
 //! (`OpenOptions::async_threads`), so which job is queued and which runs is decided by the test, not by timing. No
@@ -9,12 +9,9 @@
 #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)] // Tests: inputs are fixed.
 
 use std::future::Future;
-use std::num::NonZeroUsize;
-use std::path::Path;
 use std::pin::pin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, Wake, Waker};
 
 use persia::{
@@ -22,120 +19,10 @@ use persia::{
     SearchRequest,
 };
 
-/// Wakes the thread that polls.
-struct Unpark(std::thread::Thread);
+#[path = "support/asyncs.rs"]
+mod asyncs;
 
-impl Wake for Unpark {
-    fn wake(self: Arc<Self>) {
-        self.0.unpark();
-    }
-}
-
-/// Drives `future` on this thread, parking it while the future is pending.
-fn block_on<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
-    let mut cx = Context::from_waker(&waker);
-    let mut future = pin!(future);
-    loop {
-        match future.as_mut().poll(&mut cx) {
-            Poll::Ready(output) => return output,
-            Poll::Pending => std::thread::park(),
-        }
-    }
-}
-
-/// Watches the pool's jobs: every event goes to `events`, and the next job to start after [`Probe::hold_next`] waits
-/// on the pool thread until [`Probe::release`].
-struct Probe {
-    events: Receiver<JobEvent>,
-    hold: Arc<AtomicBool>,
-    release: Sender<()>,
-}
-
-impl Probe {
-    /// The probe and the options that install it, on a pool of one thread.
-    fn new() -> (Self, OpenOptions) {
-        let (send, events) = channel();
-        let (release, released) = channel::<()>();
-        let hold = Arc::new(AtomicBool::new(false));
-        let holding = Arc::clone(&hold);
-        let send = Mutex::new(send);
-        let released = Mutex::new(released);
-        let hook = move |event: &JobEvent| {
-            send.lock().unwrap().send(event.clone()).unwrap();
-            if matches!(event, JobEvent::Started { .. }) && holding.swap(false, Ordering::SeqCst) {
-                released.lock().unwrap().recv().unwrap();
-            }
-        };
-        let options = OpenOptions::new()
-            .async_threads(NonZeroUsize::new(1).unwrap())
-            .async_hook(Arc::new(hook));
-        (
-            Self {
-                events,
-                hold,
-                release,
-            },
-            options,
-        )
-    }
-
-    /// The next job to start waits for [`Probe::release`].
-    fn hold_next(&self) {
-        self.hold.store(true, Ordering::SeqCst);
-    }
-
-    fn release(&self) {
-        self.release.send(()).unwrap();
-    }
-
-    /// The next event of a job on the pool (the open's own events are skipped: see [`Probe::next_any`]).
-    fn next(&self) -> JobEvent {
-        loop {
-            let event = self.next_any();
-            if !matches!(
-                event,
-                JobEvent::Started {
-                    kind: JobKind::Open,
-                    ..
-                } | JobEvent::Finished {
-                    kind: JobKind::Open,
-                    ..
-                }
-            ) {
-                return event;
-            }
-        }
-    }
-
-    fn next_any(&self) -> JobEvent {
-        self.events.recv().unwrap()
-    }
-}
-
-/// A database at `path` with the collection `notes` (a `text` field `body`) and the document `seed`, closed again.
-fn seeded(path: &Path) {
-    let db = Db::open(path).unwrap();
-    let notes = db
-        .create_collection_json(r#"{"name": "notes", "fields": {"body": {"type": "text"}}}"#)
-        .unwrap();
-    notes
-        .put_json(r#"{"id": "seed", "body": "quick brown fox"}"#)
-        .unwrap();
-    db.close().unwrap();
-}
-
-fn open(path: &Path, options: OpenOptions) -> (AsyncDb, AsyncCollection) {
-    let db = block_on(AsyncDb::open_with(options, path)).unwrap();
-    let notes = db.collection("notes").unwrap();
-    (db, notes)
-}
-
-/// The ids the collection holds, read through a plain `Db` after the async one closed.
-fn has(path: &Path, id: &str) -> bool {
-    let db = OpenOptions::new().read_only(true).open(path).unwrap();
-    db.collection("notes").unwrap().get(id).unwrap().is_some()
-}
+use asyncs::{Probe, Unpark, block_on, has, open, seeded};
 
 #[test]
 fn every_call_runs_on_the_pool() {
@@ -548,5 +435,103 @@ fn an_open_whose_future_is_dropped_closes_what_it_opened() {
         "{finished:?}"
     );
     // The dropped open's database is closed: a read-write open takes the lock.
+    Db::open(&path).unwrap().close().unwrap();
+}
+
+/// `OpenOptions::async_threads` (ROADMAP 10.1.27; ADR-0064 item 12): the pool of the size set starts with the first
+/// job, not at the open nor at a lookup, and not again; the default is `min(4, cores)`.
+#[test]
+fn a_pool_of_the_size_set_starts_on_first_use() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    seeded(&path);
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    for (options, size) in [
+        (OpenOptions::new().async_threads(1), 1),
+        (OpenOptions::new().async_threads(3), 3),
+        (OpenOptions::new(), cores.min(4)),
+    ] {
+        let db = block_on(AsyncDb::open_with(options, &path)).unwrap();
+        assert_eq!(db.pool_threads(), 0, "not at the open");
+        let notes = db.collection("notes").unwrap();
+        assert_eq!(db.pool_threads(), 0, "not at a lookup");
+        assert!(block_on(notes.get("seed")).unwrap().is_some());
+        assert_eq!(db.pool_threads(), size, "the first job starts them all");
+        block_on(notes.put(Document::new("again"))).unwrap();
+        assert_eq!(db.pool_threads(), size, "started once");
+        block_on(db.close()).unwrap();
+    }
+}
+
+#[test]
+fn a_pool_of_no_thread_is_refused_at_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let none = OpenOptions::new().async_threads(0);
+    let err = block_on(AsyncDb::open_with(none.clone(), &path)).unwrap_err();
+    assert_eq!(err.code(), ErrorCode::InvalidArgument);
+    // A plain open with the same options is refused the same way: the options are checked before anything is made.
+    assert_eq!(
+        none.open(&path).unwrap_err().code(),
+        ErrorCode::InvalidArgument
+    );
+    assert!(!path.exists(), "nothing was created");
+    // Any other size opens.
+    let db = block_on(AsyncDb::open_with(
+        OpenOptions::new().async_threads(1),
+        &path,
+    ))
+    .unwrap();
+    block_on(db.close()).unwrap();
+}
+
+/// A thread the OS refuses fails the job that started the pool with `Io` (its source the spawn's `io::Error`), never
+/// a panic; the threads that start made end (none runs: `pool_threads` is 0), the database still works, and the next
+/// job starts the whole pool.
+#[test]
+fn a_thread_the_os_refuses_fails_the_first_job_and_the_next_one_starts_the_pool() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    seeded(&path);
+    for refused in [0, 2] {
+        let options = OpenOptions::new()
+            .async_threads(3)
+            .async_refuse_thread(refused);
+        let (db, notes) = open(&path, options);
+        let err = block_on(notes.put(Document::new("refused"))).unwrap_err();
+        assert_eq!(err.code(), ErrorCode::Io, "{err}");
+        let source = std::error::Error::source(&err).expect("the spawn's error");
+        assert!(
+            source.downcast_ref::<std::io::Error>().is_some(),
+            "{source:?}"
+        );
+        // A refused start installs no thread (by construction); `async_lifecycle.rs` counts the threads to show that
+        // the ones it spawned ended.
+        assert_eq!(db.pool_threads(), 0);
+        // The refused job did not run; the next one starts the pool and runs.
+        assert!(block_on(notes.get("refused")).unwrap().is_none());
+        assert_eq!(db.pool_threads(), 3);
+        block_on(db.close()).unwrap();
+        assert!(!has(&path, "refused"));
+    }
+}
+
+/// A size far beyond what the OS can start is not preallocated for (no capacity overflow, no abort): the first job
+/// fails as the OS refuses a thread, with `Io`, and the database still answers and closes. (No second job runs here:
+/// it would try the whole start again, with no refusal hook to stop it.)
+#[test]
+fn a_pool_far_larger_than_the_os_can_start_fails_its_first_job_without_a_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    seeded(&path);
+    let options = OpenOptions::new()
+        .async_threads(usize::MAX)
+        .async_refuse_thread(0);
+    let (db, notes) = open(&path, options);
+    let err = block_on(notes.get("seed")).unwrap_err();
+    assert_eq!(err.code(), ErrorCode::Io, "{err}");
+    assert_eq!(db.pool_threads(), 0);
+    assert_eq!(db.collection_names().unwrap(), ["notes"]);
+    block_on(db.close()).unwrap();
     Db::open(&path).unwrap().close().unwrap();
 }

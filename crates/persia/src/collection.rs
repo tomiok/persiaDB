@@ -134,14 +134,7 @@ impl Db {
     /// schema names an analyzer this open lacks; [`ErrorCode::ReadOnly`] on a read-only database;
     /// a commit that fails: [`ErrorCode::Io`], and [`ErrorCode::Poisoned`] for every later write.
     pub fn create_collection(&self, schema: CollectionSchema) -> Result<Collection> {
-        let name = schema.name().to_owned();
-        self.inner.write("create a collection", |db| {
-            db.log_mut()
-                .create_collection(schema)
-                .map(drop)
-                .map_err(Error::wrap)
-        })?;
-        Ok(self.handle(name))
+        self.inner.create_collection(schema)
     }
 
     /// [`Db::create_collection`] of the schema the JSON text `json` defines (SPEC §6.2).
@@ -159,9 +152,7 @@ impl Db {
     /// [`ErrorCode::InvalidArgument`] for JSON that is not a valid schema ([`ErrorCode::Limit`] past a limit of SPEC
     /// §17); then as [`Db::create_collection`].
     pub fn create_collection_json(&self, json: &str) -> Result<Collection> {
-        self.inner.check_writable("create a collection")?;
-        let schema = CollectionSchema::from_json(json).map_err(Error::wrap)?;
-        self.create_collection(schema)
+        self.inner.create_collection_json(json)
     }
 
     /// A handle on the collection named `name`.
@@ -185,7 +176,7 @@ impl Db {
         if snapshot.collection(name).is_none() {
             return Err(no_such_collection(name));
         }
-        Ok(self.handle(name.to_owned()))
+        Ok(self.inner.handle(name.to_owned()))
     }
 
     /// The names of the database's collections, in ascending byte order.
@@ -230,7 +221,37 @@ impl Db {
     /// [`ErrorCode::NotFound`] if the database has no such collection; [`ErrorCode::ReadOnly`] on a read-only
     /// database; a commit that fails: [`ErrorCode::Io`], and [`ErrorCode::Poisoned`] for every later write.
     pub fn drop_collection(&self, name: &str) -> Result<()> {
-        self.inner.write("drop a collection", |db| {
+        self.inner.drop_collection(name)
+    }
+}
+
+// The bodies of the calls above, on the state every handle shares, so the async API (ADR-0064) runs them on its pool.
+impl Inner {
+    /// [`Db::create_collection`].
+    pub(crate) fn create_collection(
+        self: &Arc<Self>,
+        schema: CollectionSchema,
+    ) -> Result<Collection> {
+        let name = schema.name().to_owned();
+        self.write("create a collection", |db| {
+            db.log_mut()
+                .create_collection(schema)
+                .map(drop)
+                .map_err(Error::wrap)
+        })?;
+        Ok(self.handle(name))
+    }
+
+    /// [`Db::create_collection_json`].
+    pub(crate) fn create_collection_json(self: &Arc<Self>, json: &str) -> Result<Collection> {
+        self.check_writable("create a collection")?;
+        let schema = CollectionSchema::from_json(json).map_err(Error::wrap)?;
+        self.create_collection(schema)
+    }
+
+    /// [`Db::drop_collection`].
+    pub(crate) fn drop_collection(&self, name: &str) -> Result<()> {
+        self.write("drop a collection", |db| {
             db.log_mut()
                 .drop_collection(name)
                 .map(drop)
@@ -238,9 +259,10 @@ impl Db {
         })
     }
 
-    fn handle(&self, name: String) -> Collection {
+    /// A handle on the collection named `name`, at the database's durability.
+    pub(crate) fn handle(self: &Arc<Self>, name: String) -> Collection {
         Collection {
-            db: Arc::clone(&self.inner),
+            db: Arc::clone(self),
             name,
             durability: None,
         }

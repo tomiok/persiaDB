@@ -129,3 +129,127 @@ decisions d, e and o).
   writer lock.
 - **An optional `tokio` feature** (ROADMAP 10.1.6 as written). It would put a runtime in the embedded crate's
   dependency graph and bind the API to one runtime.
+
+## Amendment (2026-11-27): the async pool's size is a public option (ROADMAP 10.1.27)
+
+Item 12 fixed the pool at `min(4, cores)` threads, and wave 8 had its size only as a hidden test hook. The owner
+decided:
+
+1. **`OpenOptions::async_threads(threads: usize)`**, public and documented, behind the feature `async` (no such
+   setter without it). It takes a plain `usize`, so that 0 can be written: an open (`OpenOptions::open`, and so
+   `AsyncDb::open_with`) with 0 fails with `ErrorCode::InvalidArgument` before it creates or reads anything, the way
+   `memtable_bytes(0)` does, never a panic. The default stays `min(4, cores)` (`available_parallelism`, 1 when the OS
+   does not say). The option is per open, like every other: nothing is stored in the database.
+2. **No upper bound.** A count the OS cannot start is not refused at open; it fails the first job instead (item 3).
+   No SPEC rule or measurement gives a bound to enforce, and a bound would refuse a machine that can run more. The
+   pool does not preallocate for the count, so a huge one (`usize::MAX`) fails as the OS refuses a thread, never as an
+   allocation. A refused start is not remembered: each later job tries the whole start again, under the pool's lock,
+   so a `close` or a `Drop` that needs that lock waits for one such attempt, and a count the OS can never start costs
+   every job a failed start. Accepted: retrying lets a pool start once the OS has threads again.
+3. **All or nothing, never a panic.** The first job starts every thread of the pool. If the OS refuses one
+   (`std::thread::Builder::spawn` returns an `io::Error`), that job resolves to `ErrorCode::Io` with the `io::Error`
+   as its `source()`, and did not run. The threads that this start had already spawned end, and are joined before the
+   call returns: each sees, under the pool's lock and before it takes a job, that the start's generation moved on.
+   So a failed start leaves no thread behind. The next job tries the whole start again. (Wave 8 kept the threads
+   that started and failed only a pool of none; a pool of fewer threads than set is no longer possible.) A pool given
+   0 threads in code that bypasses the open's check refuses its jobs with `InvalidArgument` instead of queueing them
+   for ever.
+4. **Tested through hidden test hooks** (feature `test-hooks`, not in the public-API snapshot): `AsyncDb::pool_threads`
+   (the threads the pool has installed: 0 until a start succeeds, the size set after it; a refused start installs
+   none, by construction) and `OpenOptions::async_refuse_thread(n)` (the OS taken to refuse thread `n` at the pool's
+   first start). `crates/persia/tests/async_api.rs`, and `async_lifecycle.rs`, whose census of the process's threads
+   on Linux is what shows that a refused start's threads ended.
+5. **No Go, TypeScript or C form yet.** The embedded bindings of ADR-0018 do not expose the async API (their calls
+   are synchronous, and each language has its own way to run them off its event loop), so the option has no form
+   there; it gets one with them if they ever expose async.
+
+## Amendment (2026-11-27): the rest of the embedded API as async (ROADMAP 10.1.26)
+
+Item 16 left collection management, blobs, `refresh`, `backup` and the JSON and typed variants without an async form,
+so an async program created its collections through a `Db` first. The owner decided which get one. Every new call
+runs on the same pool as item 11's (item 12), returns a `JobFuture<T>`, is queued when it is called, and follows item
+13: a future dropped before its job starts skips it and leaves nothing; a job still queued at `close` completes with
+`Closed`. What dropping the future of a job that has started does is per call, below. Arguments are owned, since the
+job runs on another thread.
+
+| Call | Form | Dropping the future once the job has started |
+|---|---|---|
+| `AsyncDb::create_collection(CollectionSchema)` | async, resolves to an `AsyncCollection` | runs to its end (created and committed) |
+| `AsyncDb::create_collection_json(impl Into<String>)` | async; the JSON is read on the pool | runs to its end |
+| `AsyncDb::collection_names()` | synchronous on `AsyncDb`: a lookup in the published state, which does no I/O of its own, as `AsyncDb::collection` (item 14) | (no job) |
+| `AsyncDb::drop_collection(impl Into<String>)` | async | runs to its end (dropped and committed) |
+| `AsyncDb::put_blob<R: Read + Send + 'static>(R, PutBlobOptions)` | async, owned reader | runs to its end (the blob is stored whole) |
+| `Db::get_blob` | not offered | |
+| `AsyncDb::get_blob_range(BlobRef, Range<u64>)` | async, a read | token set; checked before the read |
+| `AsyncCollection::put_with_blob<R: Read + Send + 'static>(Document, R, PutBlobOptions)` | async, owned reader | runs to its end (blob stored, document put) |
+| `AsyncDb::refresh()` | async | runs to its end (the new state, or the old one on an error) |
+| `AsyncDb::backup(impl AsRef<Path>)` | async | runs to its end (the backup is complete, or cleaned up on an error) |
+| `AsyncCollection::put_json(impl Into<String>)` | async; the JSON is read on the pool | runs to its end |
+| `AsyncCollection::get_json(impl Into<String>)` | async, a read | token set; checked before the read |
+| `AsyncCollection::put_struct<T: Serialize + ?Sized>(&T)` | async; the value is written as JSON on the caller's thread, then put as `put_json` | runs to its end |
+| `AsyncCollection::get_struct<T: DeserializeOwned + Send + 'static>(impl Into<String>)` | async, a read; the `T` is built on the pool | token set; checked before the read |
+| `AsyncCollection::search_json(impl Into<String>)` | async, a read | token set; the search stops soon after (SPEC §7.3) |
+| `AsyncDb::path()`, `is_read_only()`, `block_cache_stats()` | synchronous on `AsyncDb`: they read the open's state (no I/O; `block_cache_stats` reads counters under the cache's mutex) | (no job) |
+| `AsyncCollection::name()`, `schema()`, `durability()`, `with_durability(Durability)`, `to_struct(&Document)` | synchronous on `AsyncCollection`: a name, a lookup in the published state, a handle builder, a conversion of a document at hand; none does I/O of its own (item 14) | (no job) |
+| `Db::open`, `OpenOptions::open`, `Db::close` | `AsyncDb::open`, `open_with`, `close` (item 16) | as item 16 |
+| the hidden test hooks of `Db` and `Collection` (`maintain_now`, `committed_seq`, `with_writer`, `is_mapped`, `is_pack_mapped`, `hold_writer_while`) | not offered: test hooks, not API | |
+
+Why:
+
+1. **Uploads take an owned reader.** A blob upload streams from a reader, and a job on a pool thread cannot borrow
+   the caller's: the reader is moved into the job, so it is `Read + Send + 'static` (a `File`, a `Cursor` over owned
+   bytes, a `&'static [u8]`, a channel's reader). `Blob<'r>` holds a `Box<dyn Read + 'r>` that need not be `Send`, so
+   the async `put_with_blob` takes the reader and its `PutBlobOptions` instead of a `Blob`; making `Blob`'s reader
+   `Send` would refuse a synchronous caller's non-`Send` reader. Bytes in a file are passed as the opened `File`; a
+   blob already stored is put by giving the document its reference (`Document::set_blob_ref`) and calling `put`. The
+   reader must not call back into the database, as for the synchronous form; on a pool of one thread such a call
+   waits behind the upload for ever.
+2. **An upload that has started is not cancelled.** Stopping it halfway would leave staged chunks waiting for a resume
+   or a GC (ADR-0034), and the bytes the reader yielded would be lost to the caller. So it runs to its end, as a write
+   does (item 13): the blob is durable and whole; a `put_blob` whose result is discarded leaves a blob no document
+   references, which a later blob GC collects, exactly as a synchronous `put_blob` whose reference is dropped.
+   `put_with_blob` stores the blob and puts the document. Cooperative cancellation of an upload is not offered: it
+   would need a way for the blob store to stop between chunks and drop what it staged, which it does not have.
+3. **No async `get_blob`.** It returns a `BlobReader`, whose reads are I/O on the caller's thread: an async form would
+   resolve to a handle that then blocks the caller's executor on every read. An async program reads a blob by ranges
+   with `get_blob_range`, each a job on the pool. (Between two range reads a blob that no document references can be
+   collected; a `BlobReader` pins it. A program that streams a whole blob from async code can move a synchronous
+   `Db`'s `BlobReader` to a thread of its own.) `get_blob` does not write into a caller's writer, so there is no
+   borrowed writer to decide about.
+4. **Typed values.** `put_struct` writes the value as JSON on the caller's thread when it is called, so it borrows the
+   value only for the call and needs no `Send + 'static` bound on `T`; a value that cannot be written is refused at
+   once with `InvalidArgument`, and nothing is queued. The JSON is read against the schema on the pool, as
+   `put_json` does. `get_struct` builds its `T` on the pool, so `T: DeserializeOwned + Send + 'static`.
+5. **`backup` runs to its end.** A backup is a copy of two files (SPEC §4.8) with no point to stop at that would leave
+   nothing: `write_backup` has no cancellation, and its clean-up runs only on an error. So a dropped future does not
+   stop a long copy; the backup ends complete at `dest`, or is cleaned up as on any error. A caller that wants no
+   backup drops the future before the job starts, or removes `dest` after.
+6. **`refresh`** reopens and swaps in one state under its lock: no halfway state, so it runs to its end.
+7. **`collection_names` stays synchronous**, as `collection` does (item 16): a lookup in the published state, which
+   does no I/O of its own, so a job would only add a thread hop (item 14 on the lock it reads under).
+8. **Reads** (`get_json`, `get_struct`, `get_blob_range`, `search_json`) run under a token, as `get` and `search` do:
+   a dropped future sets it; a lookup checks it before it reads (it has no point to stop at inside), and
+   `search_json` passes it to the search, which stops soon after.
+9. **Tested** in `crates/persia/tests/async_calls.rs` through the test `block_on`, on a pool of one thread held by the
+   test hook: each call against its synchronous result and its job kind; each dropped before it starts (skipped,
+   nothing left: no collection, document, blob or backup file); each change dropped after it starts (it ran whole);
+   each read dropped after it starts (its token set, `Cancelled`); jobs queued at `close` (`Closed`); every owned
+   reader dropped once its job is gone; and every test closes and reopens the file.
+10. **No Go, TypeScript or C form yet.** The embedded bindings of ADR-0018 do not expose the async API, so these
+    calls have no form there.
+11. **`backup`'s `dest` is read at the call** (review): parsed as the synchronous backup parses it (a `file://` URL
+    read, an empty or malformed one `InvalidArgument`, another scheme `Unsupported`), refused at once with nothing
+    queued, and a relative path made absolute against the working directory at the call, so a later change of it does
+    not move the backup. Whether `dest` is free is still checked by the job, when it runs.
+12. **A skipped upload keeps its reader until the pool reaches it** (review): dropping a queued upload's future marks
+    it skipped, but the job, and the reader moved into it, stay in the queue until a pool thread takes it or the close
+    (or the drop of the `AsyncDb`) completes the queue. A reader that holds a file or a socket keeps it until then.
+13. **The synchronous calls on the async handles** (review): every call of `Db` and `Collection` that does
+    no I/O of its own has a synchronous form on `AsyncDb` or `AsyncCollection` (the rows above), so an async program
+    needs no `Db` beside its `AsyncDb`. Only `get_blob` (item 3) and the hidden test hooks have none.
+14. **"No lock" means no writer mutex** (re-review). `collection`, `collection_names`, `AsyncCollection::schema` and
+    `to_struct` read the published state through the read side of its lock, and `block_cache_stats` reads counters
+    under the cache's mutex. None does I/O of its own and none waits for the writer. On a read-write database the
+    write side of the state lock is taken only at close. On a read-only database a running `refresh` holds it while it
+    refreshes the pack, so these calls can wait for that I/O. Item 16 above says `collection` "takes no lock": read it
+    with this correction. Moving the pack refresh out from under the write side is not part of this change.
