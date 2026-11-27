@@ -26,7 +26,11 @@ use persia_blob::gc::{GcObject, Mark, PinCheck, PinGate, Sweep, SweepOptions};
 pub use persia_blob::pack::lease::ReaderLeaseReport;
 use persia_blob::{BlobId, BlobStore};
 // What [`GcReport`] holds, for the CLI (`persia gc`, ROADMAP 10.4.5), which reaches `persia-blob` only through here.
+// Names for the CLI only: nothing in this crate uses them, so without `internal` (this module private) they would
+// be unused imports (ROADMAP 10.1.40).
+#[cfg(feature = "internal")]
 pub use persia_blob::Error as BlobError;
+#[cfg(feature = "internal")]
 pub use persia_blob::gc::Rewrite;
 use persia_engine::db::{Database, DatabaseError, MarkOnlyDatabase};
 
