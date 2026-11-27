@@ -172,9 +172,17 @@ to install, in the repo tooling that already reads JSON (`serde_json`, allowed i
    layer, ADR-0051) or `test-hooks`, which are not stable.
 5. **The gate.** The listing is committed as `crates/persia/public-api.txt`; `just public-api` regenerates it, and
    `cargo xtask public-api --check` (CI's `repo-checks` job, and `just repo-checks`) fails with the lines added and
-. **Generated on Linux.** rustdoc renders the target it runs on, so the committed file is the surface on Linux
+   removed when the surface moved without the file.
+6. **Generated on Linux.** rustdoc renders the target it runs on, so the committed file is the surface on Linux
    (x86_64): CI's `repo-checks` job runs on `ubuntu-latest`. Items behind `cfg(windows)` or another target are not in
    it; none of `persia`'s public items is target-specific today.
+7. **No rustdoc warning** (ROADMAP 10.1.49). The build of item 1 runs rustdoc with `-D warnings`, so a rustdoc
+   warning in `persia` or a crate it re-exports from (`persia-engine`, `persia-blob`, `persia-format`,
+   `persia-analysis`), such as a broken or private intra-doc link, fails `cargo xtask public-api` and its `--check`
+   in CI. Here rather than a `cargo doc` line in the lint job: it is the one CI step that already runs rustdoc on
+   those crates, so the gate costs no second documentation build, and these are the crates whose docs a `persia`
+   user reads (re-exported items carry their defining crate's docs). The crates `persia` does not re-export from
+   (`persia-storage`, `persia-cli`, `persia-docs`, `xtask`) are not gated.
 
 ## Amendment (2026-11-26): `Correction` and `FallbackOrder` join item 2 (ROADMAP 10.1.25, review)
 

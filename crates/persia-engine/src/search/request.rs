@@ -132,7 +132,7 @@ pub enum RequestError {
         /// Why.
         reason: &'static str,
     },
-    /// Two values of types the sort key did not produce were compared (SPEC §7.4). [`super::Sort::check`] rejects
+    /// Two values of types the sort key did not produce were compared (SPEC §7.4). `Sort::check` rejects
     /// such a cursor. They are not a tie: that would skip or repeat a hit.
     #[error("sort values of a type the key did not produce")]
     MismatchedSortValue,

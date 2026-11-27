@@ -537,7 +537,7 @@ impl Compiled {
     /// cannot drop a request filter by replacing the query, so no relaxation level searches without the hard ones, and
     /// none before the filter step without the soft ones. Pass a query without the request filters: a filter its root
     /// `bool` holds is the caller's own, and hard (ROADMAP 8.2.13): one equal to a request filter is not added again,
-    /// and the filter step keeps it even when it equals a soft one ([`Self::droppable`]), so passing [`Self::query`]
+    /// and the filter step keeps it even when it equals a soft one (`droppable`), so passing [`Self::query`]
     /// back pins its soft filters too.
     ///
     /// The clauses keep describing the new query only while it holds their parts where they were ([`Self::parts`]): a

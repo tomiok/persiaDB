@@ -165,7 +165,7 @@ impl<'a> SegmentsDf<'a> {
         self.segments
     }
 
-    /// The documents of [`Self::segments`] holding the term.
+    /// The documents holding the term in the segments the walk listed it in.
     pub fn df(&self) -> u64 {
         self.df
     }

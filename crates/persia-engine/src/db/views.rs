@@ -310,7 +310,7 @@ impl CollectionViews<'_> {
     }
 
     /// As [`Self::top_k`], run as `exec` says (SPEC §7.3, ROADMAP 7.6): each view a task on its threads, keeping
-    /// its own best `k` and sharing its threshold with the others (the [`super::exec`] docs). The hits merge in view
+    /// its own best `k` and sharing its threshold with the others (the `exec` module docs). The hits merge in view
     /// order, so they are the same whatever the threads, the timing or the pruning.
     ///
     /// # Errors
