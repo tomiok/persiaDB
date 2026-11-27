@@ -1,10 +1,10 @@
 //! Search through a [`Collection`] (SPEC §7; ROADMAP 10.1.3; ADR-0062, ADR-0063).
 //!
 //! The facade's [`SearchRequest`] is a builder of the request SPEC §7.1 describes, distinct from the engine's types:
-//! [`Collection::search`] lowers it, and [`Collection::search_json`] parses the request JSON, into the engine's one
-//! typed request (`QueryRequest`, ADR-0062), which runs on the collection's latest published snapshot. A cursor
-//! crosses the API as an opaque token (SPEC §7.4): [`Hit::cursor`], [`SearchResponse::next_cursor`] and
-//! [`SearchRequest::after`].
+//! [`Collection::search`] lowers it (parsing a filter given in JSON, ROADMAP 10.1.35), and [`Collection::search_json`]
+//! parses the request JSON, into the engine's one typed request (`QueryRequest`, ADR-0062), which runs on the
+//! collection's latest published snapshot. A cursor crosses the API as an opaque token (SPEC §7.4): [`Hit::cursor`],
+//! [`SearchResponse::next_cursor`] and [`SearchRequest::after`].
 
 use std::sync::Arc;
 
@@ -54,8 +54,8 @@ pub use sort_value::SortValue;
 pub struct SearchRequest {
     q: String,
     fields: Option<Vec<String>>,
-    filter: Option<Filter>,
-    soft_filter: Option<Filter>,
+    filter: Option<FilterPart>,
+    soft_filter: Option<FilterPart>,
     sort: Option<Sort>,
     limit: Option<usize>,
     offset: Option<usize>,
@@ -105,7 +105,8 @@ impl SearchRequest {
         self
     }
 
-    /// A hard filter (SPEC §7.1.2): no hit of any relaxation level breaks it.
+    /// A hard filter (SPEC §7.1.2): no hit of any relaxation level breaks it. It takes the request's one hard filter,
+    /// as [`Self::filter_json`] does: the later of the two calls is the one kept.
     ///
     /// ```
     /// use persia::{Filter, SearchRequest};
@@ -118,12 +119,13 @@ impl SearchRequest {
     /// ```
     #[must_use]
     pub fn filter(mut self, filter: Filter) -> Self {
-        self.filter = Some(filter);
+        self.filter = Some(FilterPart::Built(filter));
         self
     }
 
     /// A soft filter (SPEC §7.1.2, §7.6): kept like `filter` at every level but the last resort, which a collection
-    /// with `relax.filters = "last_resort"` drops it for.
+    /// with `relax.filters = "last_resort"` drops it for. It takes the request's one soft filter, as
+    /// [`Self::soft_filter_json`] does: the later of the two calls is the one kept.
     ///
     /// ```
     /// use persia::{Filter, SearchRequest};
@@ -136,7 +138,62 @@ impl SearchRequest {
     /// ```
     #[must_use]
     pub fn soft_filter(mut self, filter: Filter) -> Self {
-        self.soft_filter = Some(filter);
+        self.soft_filter = Some(FilterPart::Built(filter));
+        self
+    }
+
+    /// A hard filter in its JSON form (SPEC §7.1.2), the object a request JSON's `filter` holds; fields are named, not
+    /// given by id. It is parsed when the request runs, as [`Collection::search_json`] parses `filter` (SPEC §7.1.4):
+    /// by the same parser, against the schema of the collection the search runs on, held to the same query limits
+    /// (SPEC §7.1.3). So a filter given here and the same filter inside a request JSON select the same documents. It
+    /// takes the request's one hard filter, as [`Self::filter`] does: the later of the two calls is the one kept.
+    ///
+    /// ```
+    /// use persia::{ErrorCode, SearchRequest};
+    ///
+    /// let dir = tempfile::tempdir()?;
+    /// let db = persia::Db::open(dir.path().join("app.persia"))?;
+    /// let products = db.create_collection_json(
+    ///     r#"{"name": "products", "fields": {"title": {"type": "text"}, "brand": {"type": "keyword"}}}"#,
+    /// )?;
+    /// products.put_json(r#"{"id": "p1", "title": "red running shoes", "brand": "acme"}"#)?;
+    /// products.put_json(r#"{"id": "p2", "title": "red rain coat", "brand": "zeta"}"#)?;
+    /// let request = SearchRequest::new("red").filter_json(r#"{"term": ["brand", "acme"]}"#);
+    /// let ids: Vec<String> = products.search(&request)?.hits.iter().map(|h| h.document.id().to_owned()).collect();
+    /// assert_eq!(ids, ["p1"]);
+    /// // A filter that is not one is refused when the search runs.
+    /// let err = products.search(&SearchRequest::new("red").filter_json(r#"{"term": ["colour", "red"]}"#)).unwrap_err();
+    /// assert_eq!(err.code(), ErrorCode::InvalidArgument);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn filter_json(mut self, json: impl Into<String>) -> Self {
+        self.filter = Some(FilterPart::Json(json.into()));
+        self
+    }
+
+    /// A soft filter in its JSON form (SPEC §7.1.2, §7.6), the object a request JSON's `soft_filter` holds: parsed when
+    /// the request runs, as [`Self::filter_json`] says. It takes the request's one soft filter, as
+    /// [`Self::soft_filter`] does: the later of the two calls is the one kept.
+    ///
+    /// ```
+    /// use persia::SearchRequest;
+    ///
+    /// let dir = tempfile::tempdir()?;
+    /// let db = persia::Db::open(dir.path().join("app.persia"))?;
+    /// let products = db.create_collection_json(
+    ///     r#"{"name": "products", "fields": {"title": {"type": "text"}, "price": {"type": "i64"}}}"#,
+    /// )?;
+    /// products.put_json(r#"{"id": "p1", "title": "red shoes", "price": 80}"#)?;
+    /// products.put_json(r#"{"id": "p2", "title": "red shoes", "price": 120}"#)?;
+    /// let request = SearchRequest::new("shoes").soft_filter_json(r#"{"range": ["price", {"lte": 100}]}"#);
+    /// let ids: Vec<String> = products.search(&request)?.hits.iter().map(|h| h.document.id().to_owned()).collect();
+    /// assert_eq!(ids, ["p1"]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn soft_filter_json(mut self, json: impl Into<String>) -> Self {
+        self.soft_filter = Some(FilterPart::Json(json.into()));
         self
     }
 
@@ -263,10 +320,10 @@ impl SearchRequest {
             request = request.with_fields(fields);
         }
         if let Some(filter) = &self.filter {
-            request = request.with_filter(filter.clone());
+            request = request.with_filter(filter.lower(schema, "filter_json")?);
         }
         if let Some(filter) = &self.soft_filter {
-            request = request.with_soft_filter(filter.clone());
+            request = request.with_soft_filter(filter.lower(schema, "soft_filter_json")?);
         }
         if let Some(sort) = &self.sort {
             request = request.with_sort(sort.clone());
@@ -289,6 +346,31 @@ impl SearchRequest {
         }
         Ok(request)
     }
+}
+
+/// A filter of a [`SearchRequest`]: built in code, or its JSON form, parsed when the request runs (ROADMAP 10.1.35).
+#[derive(Debug, Clone)]
+enum FilterPart {
+    Built(Filter),
+    Json(String),
+}
+
+impl FilterPart {
+    /// The filter for `schema`. JSON is read as the request JSON's `filter` and `soft_filter` are (SPEC §7.1.4): the
+    /// engine's filter parser, held to [`query_limits`]. A filter built in code is checked when the request runs.
+    fn lower(&self, schema: &CollectionSchema, setter: &str) -> Result<Filter> {
+        match self {
+            Self::Built(filter) => Ok(filter.clone()),
+            Self::Json(json) => Filter::from_json(json, schema, &query_limits())
+                .map_err(|e| Error::wrap(e).context(setter)),
+        }
+    }
+}
+
+/// The database's query limits (SPEC §7.1.3): the defaults, which the embedded API does not change. A request JSON's
+/// filters, a filter given in JSON ([`SearchRequest::filter_json`]) and every search are held to them.
+fn query_limits() -> QueryLimits {
+    QueryLimits::default()
 }
 
 /// The page a search returns (SPEC §7.5).
@@ -638,8 +720,11 @@ impl Collection {
     ///
     /// # Errors
     /// [`ErrorCode::InvalidArgument`](crate::ErrorCode::InvalidArgument) for a part that does not fit the schema, a
-    /// cursor token that is damaged or from another sort or search, or `proximity` on a search that relaxes;
-    /// [`ErrorCode::Limit`](crate::ErrorCode::Limit) past a limit of SPEC §7.1.3 or §17;
+    /// filter given in JSON ([`SearchRequest::filter_json`], [`SearchRequest::soft_filter_json`]) that is not one
+    /// (malformed, a repeated key, an unknown operator or field, longer than 1 MiB), a cursor token that is damaged or
+    /// from another sort or search, or `proximity` on a search that relaxes;
+    /// [`ErrorCode::Limit`](crate::ErrorCode::Limit) past a limit of SPEC §7.1.3 (a filter's too, given in code or in
+    /// JSON) or §17;
     /// [`ErrorCode::NotFound`](crate::ErrorCode::NotFound) if the collection was dropped;
     /// [`ErrorCode::Corrupt`](crate::ErrorCode::Corrupt) if a segment is damaged;
     /// [`ErrorCode::Closed`](crate::ErrorCode::Closed).
@@ -666,7 +751,9 @@ impl Collection {
     fn search_with(&self, request: &SearchRequest, run: &RunOptions) -> Result<SearchResponse> {
         self.read(|c| {
             let lowered = request.lower(c.schema())?;
-            let ran = lowered.run(c, run).map_err(Error::wrap)?;
+            let ran = lowered
+                .run(c, &run.clone().limits(query_limits()))
+                .map_err(Error::wrap)?;
             response(ran, c.shared_schema())
         })
     }
@@ -713,10 +800,12 @@ impl Collection {
     /// [`search_json`](Self::search_json) run as `run` says.
     fn search_json_with(&self, json: &str, run: &RunOptions) -> Result<SearchResponse> {
         self.read(|c| {
-            let limits = QueryLimits::default();
+            let limits = query_limits();
             let request =
                 QueryRequest::from_json(json, c.schema(), &limits).map_err(Error::wrap)?;
-            let ran = request.run(c, run).map_err(Error::wrap)?;
+            let ran = request
+                .run(c, &run.clone().limits(limits))
+                .map_err(Error::wrap)?;
             response(ran, c.shared_schema())
         })
     }

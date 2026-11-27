@@ -926,12 +926,14 @@ pub fn persia::SearchRequest::explain(self, explain: bool) -> Self
 pub fn persia::SearchRequest::facets(self, facets: impl core::iter::traits::collect::IntoIterator<Item = persia::FacetRequest>) -> Self
 pub fn persia::SearchRequest::fields<S: core::convert::Into<alloc::string::String>>(self, fields: impl core::iter::traits::collect::IntoIterator<Item = S>) -> Self
 pub fn persia::SearchRequest::filter(self, filter: persia::Filter) -> Self
+pub fn persia::SearchRequest::filter_json(self, json: impl core::convert::Into<alloc::string::String>) -> Self
 pub fn persia::SearchRequest::limit(self, limit: usize) -> Self
 pub fn persia::SearchRequest::new(q: impl core::convert::Into<alloc::string::String>) -> Self
 pub fn persia::SearchRequest::offset(self, offset: usize) -> Self
 pub fn persia::SearchRequest::proximity(self, proximity: bool) -> Self
 pub fn persia::SearchRequest::relax(self, relax: persia::RelaxOptions) -> Self
 pub fn persia::SearchRequest::soft_filter(self, filter: persia::Filter) -> Self
+pub fn persia::SearchRequest::soft_filter_json(self, json: impl core::convert::Into<alloc::string::String>) -> Self
 pub fn persia::SearchRequest::sort(self, sort: persia::Sort) -> Self
 pub fn persia::SearchResponse::next_cursor(&self) -> core::option::Option<&str>
 pub fn persia::SearchResponse::to_json(&self) -> persia::Result<alloc::string::String>

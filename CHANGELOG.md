@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia::SearchRequest::filter_json` and `soft_filter_json` (ROADMAP 10.1.35, ADR-0063 amended; SPEC §7.1.4): a
+  hard or soft filter in its JSON form (SPEC §7.1.2, fields by name) on a request built in code, parsed when the
+  search runs as `Collection::search_json` parses `filter` and `soft_filter`: the same parser, the schema of the
+  snapshot searched, the database's query limits. The same filter in either form gives the same response. Text that
+  is not a filter is `ErrorCode::InvalidArgument`, a filter past a query limit `ErrorCode::Limit`. Each takes the
+  request's one hard or soft filter with `filter` and `soft_filter`: the later call is kept.
 - `persia`'s async API covers the rest of the embedded API (feature `async`; ROADMAP 10.1.26, ADR-0064 amended), on
   the same per-database pool: `AsyncDb::create_collection`, `create_collection_json`, `drop_collection`, `refresh`,
   `backup`, `put_blob` and `get_blob_range`, and `AsyncCollection::put_json`, `get_json`, `put_struct`, `get_struct`,
