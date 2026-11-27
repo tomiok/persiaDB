@@ -885,12 +885,13 @@ fn an_offset_after_a_cursor_skips_hits_after_it() {
 
 #[test]
 fn the_fuzz_seeds_are_valid_requests_and_tokens() {
-    // `fuzz/corpus/request_json`: each a request of the fuzz target's schema, which `schema()` repeats.
+    // `fuzz/corpus/request_json` (its copy under `tests/fixtures/fuzz_seeds/`, kept equal by a repo check, ROADMAP
+    // 10.1.53): each a request of the fuzz target's schema, which `schema()` repeats.
     let requests = [
-        include_str!("../../../fuzz/corpus/request_json/all"),
-        include_str!("../../../fuzz/corpus/request_json/plain"),
-        include_str!("../../../fuzz/corpus/request_json/proximity"),
-        include_str!("../../../fuzz/corpus/request_json/projection"),
+        include_str!("fixtures/fuzz_seeds/request_json/all"),
+        include_str!("fixtures/fuzz_seeds/request_json/plain"),
+        include_str!("fixtures/fuzz_seeds/request_json/proximity"),
+        include_str!("fixtures/fuzz_seeds/request_json/projection"),
     ];
     let db = database();
     let snapshot = db.snapshot();
@@ -905,9 +906,9 @@ fn the_fuzz_seeds_are_valid_requests_and_tokens() {
     }
     // `fuzz/corpus/cursor_token`: each the canonical token of a cursor.
     for seed in [
-        include_str!("../../../fuzz/corpus/cursor_token/full"),
-        include_str!("../../../fuzz/corpus/cursor_token/plain"),
-        include_str!("../../../fuzz/corpus/cursor_token/requested"),
+        include_str!("fixtures/fuzz_seeds/cursor_token/full"),
+        include_str!("fixtures/fuzz_seeds/cursor_token/plain"),
+        include_str!("fixtures/fuzz_seeds/cursor_token/requested"),
     ] {
         let cursor = Cursor::from_token(seed).unwrap_or_else(|e| panic!("{seed}: {e}"));
         assert_eq!(cursor.to_token(), seed);

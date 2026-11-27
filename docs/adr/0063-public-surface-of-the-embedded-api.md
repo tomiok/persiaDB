@@ -243,7 +243,7 @@ one filter fail with two codes and contradict item 8, so it is `LIMIT`.) The mes
 to the setter equals the one of the same filter inside a request JSON, or both fail with one code; one test per
 limit; refused text; the later setter kept; a cursor of one form pages the other).
 
-## Amendment (2026-11-27): the website guides are checked against the public surface, outside `persia` (ROADMAP 10.1.34, 10.1.41, 10.1.42, 10.1.43)
+## Amendment (2026-11-27): the website guides are checked against the public surface, outside `persia` (ROADMAP 10.1.34, 10.1.41, 10.1.42, 10.1.43, 10.1.53)
 
 ROADMAP 10.1.34 made the Rust samples of two website guides doctests of `persia` (`crates/persia/src/guides.rs`,
 `#[doc = include_str!("../../../website/...")]`). A crate's directory is all `cargo package` ships, so those paths
@@ -270,12 +270,13 @@ the crate too.
    with E0603 and passes the workspace run). So CI's test job (and `just test`) runs `cargo test -p persia-docs`
    after `cargo test --workspace`, which still runs the doctests too. A `#[doc(hidden)]` item compiles in both, so
    the repo check of 3 also refuses names in the samples.
-3. **Repo checks** (`xtask/src/repo_checks/guides.rs`). `persia_includes_nothing_outside_its_directory`: no
-   `include_str!`, `include_bytes!` or `include!` (any of its three delimiters) and no `#[path = "..."]` module
-   attribute in a `.rs` file under `crates/persia/` names a path outside that directory, resolved against the naming file's directory and normalized lexically; an argument that is not a plain
-   string literal is refused, as it cannot be resolved. `guide_samples_are_doctests_of_the_public_api`: the module is
-   wired, every page it lists exists and has a Rust sample, and no sample names `persia_engine`, `persia::internal`,
-   `QueryLimits` or `Filter::from_json`.
+3. **Repo checks** (`xtask/src/repo_checks/guides.rs`, `includes.rs`). `persia_includes_nothing_outside_its_directory`,
+   now `published_crates_include_nothing_outside_their_directory` (item 6): no `include_str!`, `include_bytes!` or
+   `include!` (any of its three delimiters) and no `#[path = "..."]` module attribute in a `.rs` file under
+   `crates/persia/` names a path outside that directory, resolved against the naming file's directory and
+   normalized lexically; an argument that is not a plain string literal is refused, as it cannot be resolved.
+   `guide_samples_are_doctests_of_the_public_api`: the module is wired, every page it lists exists and has a Rust
+   sample, and no sample names `persia_engine`, `persia::internal`, `QueryLimits` or `Filter::from_json`.
 4. **Which blocks are samples: the ones rustdoc runs** (ROADMAP 10.1.43). The check reads a fence as rustdoc does
    (`doctest` in `xtask/src/repo_checks/guides.rs`, a port of rustdoc 1.99's info-string tokenizer and of
    `LangString::parse`'s Rust rule on stable): Rust when the info string has no word, or has `rust`, or a rustdoc
@@ -309,3 +310,19 @@ the crate too.
    the same snapshot for the calls it names. A method named on a value (`page.next_cursor()`) and a renamed import
    (`use persia as p; p::internal`) are not resolved: the check does not type the text, and rustdoc compiling the
    samples (run alone, `cargo test -p persia-docs`) refuses those that name nothing public.
+6. **The include check covers every published crate** (ROADMAP 10.1.53). `persia-engine`'s integration tests
+   included 11 committed fuzz seeds from `fuzz/corpus/`, which the engine's package would not ship. They now read
+   copies under `crates/persia-engine/tests/fixtures/fuzz_seeds/<target>/<name>` (a few hundred bytes in all;
+   `binary` by `.gitattributes`' `**/tests/fixtures/**`), and `fuzz_seed_copies_equal_the_corpus`
+   (`xtask/src/repo_checks/includes.rs`) requires each copy, in any member's `tests/fixtures/fuzz_seeds/`, to be
+   byte for byte its `fuzz/corpus/` file: the corpus stays the source (cargo-fuzz reads it, and the tests check the
+   seeds it runs), so a seed changed or removed there fails until its copy follows. Copies rather than moving the
+   tests into a never-published crate as item 1 did: they test engine internals (`Document::decode`,
+   `Cursor::from_token`, the query compiler's property test), which a crate depending on `persia` cannot reach, and a
+   second never-published crate depending on `persia-engine` would be a new edge for three tests. The include check,
+   `published_crates_include_nothing_outside_their_directory`, runs on every crate meant to be published, read from
+   the manifests: each member of the root workspace (`members`, `dir/*` expanded) unless its own manifest writes
+   `publish = false` (or `publish = []`). A crate inheriting `publish.workspace = true` is held back only by the
+   workspace's `false` of today and is checked; `persia-docs`, `persia-testutil` (a dev-dependency only) and
+   `xtask` (repo tooling) write `false` themselves; `fuzz/` is its own workspace. A new crate is checked unless its
+   manifest opts out in the same way.

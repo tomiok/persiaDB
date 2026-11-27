@@ -1286,12 +1286,13 @@ proptest! {
     }
 }
 
-/// The seeds of the `query_text` fuzz target (`fuzz/corpus/query_text`), without the knob byte that picks limits.
+/// The seeds of the `query_text` fuzz target (`fuzz/corpus/query_text`, copied under `tests/fixtures/fuzz_seeds/` and
+/// kept equal by a repo check, ROADMAP 10.1.53), without the knob byte that picks limits.
 fn fuzz_seeds() -> [String; 2] {
     let seed = |bytes: &[u8]| String::from_utf8_lossy(bytes.get(1..).unwrap_or(&[])).into_owned();
     [
-        seed(include_bytes!("../../../fuzz/corpus/query_text/syntax")),
-        seed(include_bytes!("../../../fuzz/corpus/query_text/limits")),
+        seed(include_bytes!("fixtures/fuzz_seeds/query_text/syntax")),
+        seed(include_bytes!("fixtures/fuzz_seeds/query_text/limits")),
     ]
 }
 

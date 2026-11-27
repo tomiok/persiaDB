@@ -1,29 +1,22 @@
-//! The website guides and the files `persia` is compiled with (ROADMAP 10.1.34, 10.1.42).
+//! The website guides (ROADMAP 10.1.34, 10.1.43). The include paths of the published crates are `includes.rs`.
 //!
-//! - **Includes stay in `persia`.** No `include_str!`, `include_bytes!` or `include!` (with any of `(`, `[`, `{`)
-//!   and no `#[path = "..."]` module attribute in a source file under `crates/persia/` names a path outside that
-//!   directory: `cargo package` ships the crate's directory only, so the first publish (or a test of the published
-//!   crate) would fail on one. A path is resolved against the directory of the file that names it, as rustc does,
-//!   and normalized lexically (`.` dropped, `..` pops a component); an argument that is not a plain string literal
-//!   (`concat!(env!("OUT_DIR"), ..)`, a raw string) cannot be checked and is refused too. Checks that read
-//!   files elsewhere in the repository live in `crates/persia-docs`, never published.
-//! - **Guide samples are doctests of the public API.** `crates/persia-docs/src/guides.rs` runs the guides' Rust
-//!   samples as doctests (its module docs say with which features, and what the compiler cannot refuse there); this
-//!   check keeps it wired, keeps every page it lists present with a Rust sample, and refuses names a guide has
-//!   reached for outside the documented API. Pages are the `#[doc = include_str!("...")]` lines of `guides.rs`
-//!   outside comments ([`pages`]). A block is a sample when rustdoc collects it as a doctest ([`doctest`]): a port of
-//!   rustdoc 1.99's info-string tokenizer and its Rust rule, unit-tested against what that rustdoc did with each
-//!   string, so `no_run`, `ignore`, `should_panic`, `compile_fail`, `edition20xx` or `{.class}` blocks are samples
-//!   too, and an Expressive Code `rust title="..."` is not (rustdoc's tokenizer stops at the `=` and runs nothing).
-//!   A toolchain bump re-checks that table: put each string of `fences_are_rust_as_rustdoc_reads_them` over a block
-//!   and compare `rustdoc --test --test-args --list`. Indented code blocks (which rustdoc also runs) are not read
-//!   as samples; the guides use fences only.
+//! **Guide samples are doctests of the public API.** `crates/persia-docs/src/guides.rs` runs the guides' Rust
+//! samples as doctests (its module docs say with which features, and what the compiler cannot refuse there); this
+//! check keeps it wired, keeps every page it lists present with a Rust sample, and refuses names a guide has
+//! reached for outside the documented API. Pages are the `#[doc = include_str!("...")]` lines of `guides.rs`
+//! outside comments ([`pages`]). A block is a sample when rustdoc collects it as a doctest ([`doctest`]): a port of
+//! rustdoc 1.99's info-string tokenizer and its Rust rule, unit-tested against what that rustdoc did with each
+//! string, so `no_run`, `ignore`, `should_panic`, `compile_fail`, `edition20xx` or `{.class}` blocks are samples
+//! too, and an Expressive Code `rust title="..."` is not (rustdoc's tokenizer stops at the `=` and runs nothing).
+//! A toolchain bump re-checks that table: put each string of `fences_are_rust_as_rustdoc_reads_them` over a block
+//! and compare `rustdoc --test --test-args --list`. Indented code blocks (which rustdoc also runs) are not read
+//! as samples; the guides use fences only.
 
 // Test-only tooling: every string index here comes from `char_indices`, a `match_indices` hit or a count of ASCII
 // characters, so it is on a char boundary.
 #![allow(clippy::string_slice)]
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 pub(super) fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
@@ -31,202 +24,6 @@ pub(super) fn root() -> PathBuf {
 
 pub(super) fn read(rel: &str) -> String {
     std::fs::read_to_string(root().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
-}
-
-// --- Includes (ROADMAP 10.1.42) ---
-
-/// The macros whose argument is a path the compiler reads, relative to the file that names it.
-const INCLUDE_MACROS: &[&str] = &["include_str!", "include_bytes!", "include!"];
-
-/// `path` without `.` and with each `..` applied to the component before it; `None` when a `..` climbs above the
-/// start of `path` or `path` is absolute (both are outside any directory of the repository the check names).
-fn normalize(path: &Path) -> Option<PathBuf> {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !out.pop() {
-                    return None;
-                }
-            }
-            Component::Normal(part) => out.push(part),
-            Component::RootDir | Component::Prefix(_) => return None,
-        }
-    }
-    Some(out)
-}
-
-/// The includes of `text`, the source of `file` (relative to the repository root), whose path is not under
-/// `crate_dir` (relative to the root), as `file:line: ...` messages: the include macros, with any of their three
-/// delimiters, and `#[path = "..."]` attributes, which make rustc read a module's file from that path. A path is
-/// resolved against the directory of `file` (rustc's rule for a `#[path]` outside an inline module, and for every
-/// include). An include whose argument is not a plain string literal, or a macro name not followed by a delimiter,
-/// is reported as unchecked.
-fn includes_outside(file: &Path, text: &str, crate_dir: &Path) -> Vec<String> {
-    let dir = file.parent().unwrap_or(Path::new(""));
-    let mut found = Vec::new();
-    for name in INCLUDE_MACROS.iter().chain(&["#[path"]) {
-        for (at, _) in text.match_indices(name) {
-            let (head, tail) = text.split_at(at);
-            // `my_include!(` is another macro.
-            let before = head.chars().next_back();
-            if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
-                continue;
-            }
-            let line = head.matches('\n').count() + 1;
-            let where_ = format!("{}:{line}", file.display());
-            let rest = tail.strip_prefix(name).unwrap_or_default().trim_start();
-            // A macro call takes any of the three delimiters (`include_str!["x"]` reads a file as `(` does); the
-            // attribute is `#[path = "..."]`.
-            let opened = if *name == "#[path" {
-                rest.strip_prefix('=')
-            } else {
-                rest.strip_prefix('(')
-                    .or_else(|| rest.strip_prefix('['))
-                    .or_else(|| rest.strip_prefix('{'))
-            };
-            let literal = opened
-                .map(str::trim_start)
-                .and_then(|args| args.strip_prefix('"'))
-                .and_then(|args| args.split_once('"'))
-                .map(|(path, _)| path)
-                .filter(|path| !path.contains('\\'));
-            let Some(path) = literal else {
-                found.push(format!(
-                    "{where_}: `{name}` with an argument that is not a plain string literal, which this check cannot \
-                     resolve"
-                ));
-                continue;
-            };
-            let inside = normalize(&dir.join(path)).is_some_and(|p| p.starts_with(crate_dir));
-            if !inside {
-                found.push(format!(
-                    "{where_}: `{name}` names \"{path}\", a file outside {}, which `cargo package` does not ship",
-                    crate_dir.display()
-                ));
-            }
-        }
-    }
-    found
-}
-
-/// Every `.rs` file under `dir` (relative to the root), relative to the root.
-fn rust_files(dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let mut pending = vec![dir.to_path_buf()];
-    while let Some(next) = pending.pop() {
-        for entry in std::fs::read_dir(root().join(&next)).unwrap() {
-            let entry = entry.unwrap();
-            let rel = next.join(entry.file_name());
-            if entry.file_type().unwrap().is_dir() {
-                pending.push(rel);
-            } else if rel.extension().is_some_and(|e| e == "rs") {
-                files.push(rel);
-            }
-        }
-    }
-    files.sort();
-    files
-}
-
-/// `persia` reads no file outside `crates/persia/` at compile time (ROADMAP 10.1.42).
-#[test]
-fn persia_includes_nothing_outside_its_directory() {
-    let crate_dir = Path::new("crates/persia");
-    let files = rust_files(crate_dir);
-    assert!(
-        files.iter().any(|f| f.ends_with("src/lib.rs")),
-        "no crates/persia/src/lib.rs among {files:?}"
-    );
-    let found: Vec<String> = files
-        .iter()
-        .flat_map(|file| {
-            let text = read(file.to_str().unwrap());
-            includes_outside(file, &text, crate_dir)
-        })
-        .collect();
-    assert!(found.is_empty(), "{found:#?}");
-}
-
-#[test]
-fn includes_resolve_against_their_file() {
-    let crate_dir = Path::new("crates/persia");
-    let check = |file: &str, text: &str| includes_outside(Path::new(file), text, crate_dir);
-    // Inside: the same directory, a sibling, out and back in; and another macro.
-    for (file, text) in [
-        ("crates/persia/src/a.rs", r#"include_str!("b.md")"#),
-        (
-            "crates/persia/src/a.rs",
-            r#"include_bytes!("../tests/data/x.bin")"#,
-        ),
-        (
-            "crates/persia/src/a.rs",
-            r#"include_str!("./../../persia/README.md")"#,
-        ),
-        ("crates/persia/tests/t.rs", "include!( \"common/mod.rs\" )"),
-        ("crates/persia/src/a.rs", r#"my_include!("../../../x")"#),
-        // A module file, as the tests' shared support modules name theirs.
-        (
-            "crates/persia/tests/blob.rs",
-            "#[path = \"support/store.rs\"]\nmod store;",
-        ),
-        ("crates/persia/src/a.rs", r#"include_str!["b.md"]"#),
-    ] {
-        let found = check(file, text);
-        assert!(found.is_empty(), "{text}: {found:?}");
-    }
-    // Outside: the repository, a sibling crate whose name starts with this one's, past the root, absolute.
-    for (file, text) in [
-        (
-            "crates/persia/src/a.rs",
-            r#"include_str!("../../../website/x.md")"#,
-        ),
-        (
-            "crates/persia/src/error.rs",
-            r#"let doc = include_str!("../../../docs/sdk/c-abi.md");"#,
-        ),
-        (
-            "crates/persia/src/a.rs",
-            r#"include_bytes!("../../persia-engine/x")"#,
-        ),
-        (
-            "crates/persia/src/a.rs",
-            r#"include!("../../../../../etc/passwd")"#,
-        ),
-        ("crates/persia/src/a.rs", r#"include_str!("/etc/hosts")"#),
-        // The other delimiters, and a module file outside the crate.
-        ("crates/persia/src/a.rs", r#"include_str!["../../../x"]"#),
-        ("crates/persia/src/a.rs", r#"include_bytes!{"../../../x"}"#),
-        (
-            "crates/persia/src/a.rs",
-            "#[path = \"../../../x.rs\"] mod m;",
-        ),
-    ] {
-        let found = check(file, text);
-        assert_eq!(found.len(), 1, "{text}: {found:?}");
-        assert!(found[0].starts_with(&format!("{file}:1: ")), "{found:?}");
-    }
-    // Not a literal: refused, as it cannot be resolved.
-    for text in [
-        r#"include!(concat!(env!("OUT_DIR"), "/x.rs"))"#,
-        r##"include_str!(r#"x.md"#)"##,
-        r#"include_str!("a\\b.md")"#,
-        // No delimiter, and a `#[path]` without a literal.
-        "include_str! <x>",
-        "#[path(x)] mod m;",
-    ] {
-        assert_eq!(check("crates/persia/src/a.rs", text).len(), 1, "{text}");
-    }
-    // The line number.
-    let found = check(
-        "crates/persia/src/a.rs",
-        "\n\n  include_str!(\"../../../x\")",
-    );
-    assert!(
-        found[0].starts_with("crates/persia/src/a.rs:3: "),
-        "{found:?}"
-    );
 }
 
 // --- Guide samples (ROADMAP 10.1.34, 10.1.43) ---
