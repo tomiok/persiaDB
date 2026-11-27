@@ -35,6 +35,7 @@ pub type DetachedSlot = Arc<Mutex<Option<JoinHandle<()>>>>;
 /// | [`durability`](Self::durability) | [`Durability::Fsync`] | `fsync_policy` |
 /// | [`block_cache_bytes`](Self::block_cache_bytes) | 8 MiB | (SPEC §10.6) |
 /// | [`mapped_reads`](Self::mapped_reads) | on a local disk, not on Windows | (SPEC §4.7) |
+/// | `async_threads` (feature `async`) | `min(4, cores)` | (ADR-0064) |
 ///
 /// No option is stored in the database: each open chooses its own.
 ///
@@ -282,6 +283,50 @@ impl OpenOptions {
         self
     }
 
+    /// How many threads the database's async pool runs (ADR-0064 item 12, feature `async`): the threads every call of
+    /// an [`AsyncDb`](crate::AsyncDb) and its [`AsyncCollection`](crate::AsyncCollection)s runs on. `min(4, cores)` by
+    /// default. The pool starts with the first job, not at the open, and [`AsyncDb::close`](crate::AsyncDb::close)
+    /// joins it; a `Db` opened without `AsyncDb` never starts it. 0 is refused at open. There is no upper bound: a
+    /// count the OS cannot start fails the first job with [`ErrorCode::Io`](crate::ErrorCode::Io) (the threads it had
+    /// started are joined, and the next job tries again).
+    ///
+    /// ```
+    /// # use std::future::Future;
+    /// # fn block_on<F: Future>(future: F) -> F::Output {
+    /// #     struct Unpark(std::thread::Thread);
+    /// #     impl std::task::Wake for Unpark {
+    /// #         fn wake(self: std::sync::Arc<Self>) { self.0.unpark(); }
+    /// #     }
+    /// #     let waker = std::sync::Arc::new(Unpark(std::thread::current())).into();
+    /// #     let mut cx = std::task::Context::from_waker(&waker);
+    /// #     let mut future = std::pin::pin!(future);
+    /// #     loop {
+    /// #         match future.as_mut().poll(&mut cx) {
+    /// #             std::task::Poll::Ready(output) => return output,
+    /// #             std::task::Poll::Pending => std::thread::park(),
+    /// #         }
+    /// #     }
+    /// # }
+    /// use persia::{AsyncDb, ErrorCode, OpenOptions};
+    ///
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// let db = block_on(AsyncDb::open_with(OpenOptions::new().async_threads(2), dir.path().join("app.persia")))?;
+    /// block_on(db.commit())?; // the first job starts the pool's two threads
+    /// block_on(db.close())?;
+    ///
+    /// let none = OpenOptions::new().async_threads(0);
+    /// let err = block_on(AsyncDb::open_with(none, dir.path().join("other.persia"))).unwrap_err();
+    /// assert_eq!(err.code(), ErrorCode::InvalidArgument);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[cfg(feature = "async")]
+    #[must_use]
+    pub fn async_threads(mut self, threads: usize) -> Self {
+        self.pool.threads = Some(threads);
+        self
+    }
+
     /// Test hook: the maintenance thread runs only the rounds [`Db::maintain_now`] asks for, so a test decides when
     /// background commits and merges happen.
     #[cfg(feature = "test-hooks")]
@@ -329,12 +374,13 @@ impl OpenOptions {
         self
     }
 
-    /// Test hook: the number of threads of the async pool (`min(4, cores)` by default, ADR-0064 item 12).
+    /// Test hook: the async pool takes the OS to refuse its thread of index `n` (0-based) at its first start, as
+    /// `std::thread::Builder::spawn` does when the OS is out of threads; the next start is not refused.
     #[cfg(all(feature = "async", feature = "test-hooks"))]
     #[doc(hidden)]
     #[must_use]
-    pub fn async_threads(mut self, threads: std::num::NonZeroUsize) -> Self {
-        self.pool.threads = Some(threads);
+    pub fn async_refuse_thread(mut self, n: usize) -> Self {
+        self.pool.refuse_thread = Some(n);
         self
     }
 
@@ -364,7 +410,8 @@ impl OpenOptions {
     ///
     /// # Errors
     /// [`ErrorCode::InvalidArgument`](crate::ErrorCode::InvalidArgument) for a `memtable_bytes` of 0, which would
-    /// flush a segment before every write; then as [`Db::open`].
+    /// flush a segment before every write, and for an `async_threads` of 0 (feature `async`); then as
+    /// [`Db::open`].
     pub fn open(&self, location: impl AsRef<Path>) -> Result<Db> {
         self.validate()?;
         let path = location::path_of(location.as_ref())?;
@@ -378,7 +425,7 @@ impl OpenOptions {
         let refused = if self.memtable_bytes == 0 {
             Some("memtable_bytes must be at least 1: 0 would flush a segment at every write")
         } else {
-            None
+            self.refused_pool()
         };
         refused.map_or(Ok(()), |message| {
             Err(crate::Error::new(
@@ -386,6 +433,20 @@ impl OpenOptions {
                 message,
             ))
         })
+    }
+
+    /// Refuses an async pool of no thread, whose jobs would wait for ever.
+    #[cfg(feature = "async")]
+    fn refused_pool(&self) -> Option<&'static str> {
+        (self.pool.threads == Some(0)).then_some(
+            "async_threads must be at least 1: a pool of no thread would never run a job",
+        )
+    }
+
+    #[cfg(not(feature = "async"))]
+    #[allow(clippy::unused_self)] // The `async` form reads the pool's options.
+    fn refused_pool(&self) -> Option<&'static str> {
+        None
     }
 
     /// The engine's options for one open (they are not `Clone`: each open draws its own segment ids).

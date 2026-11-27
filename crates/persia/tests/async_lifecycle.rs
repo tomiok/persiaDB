@@ -1,11 +1,11 @@
 //! The async pool's threads (ROADMAP 10.1.11; ADR-0064 item 12): none before the first job, the configured number
-//! after it, separate from the maintenance thread, and none once `AsyncDb::close` resolved. One test in its own
-//! binary, so the process's threads are this test's alone.
+//! after it, separate from the maintenance thread, none left by a start the OS refused a thread of (ROADMAP
+//! 10.1.27), and none once `AsyncDb::close` resolved. One test in its own binary, so the process's threads are this
+//! test's alone.
 #![cfg(feature = "async")]
 #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)] // Tests: inputs are fixed.
 
 use std::future::Future;
-use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
@@ -73,7 +73,7 @@ fn threads(prefix: &str, expected: &[&str]) -> Vec<String> {
 }
 
 #[test]
-fn the_pool_starts_on_first_use_and_close_joins_it() {
+fn the_pool_starts_on_first_use_all_or_nothing_and_close_joins_it() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("app.persia");
     let setup = persia::Db::open(&path).unwrap();
@@ -82,7 +82,7 @@ fn the_pool_starts_on_first_use_and_close_joins_it() {
         .unwrap();
     setup.close().unwrap();
 
-    let options = OpenOptions::new().async_threads(NonZeroUsize::new(2).unwrap());
+    let options = OpenOptions::new().async_threads(2);
     let db = block_on(AsyncDb::open_with(options, &path)).unwrap();
     // The open's own thread is joined, the pool has not started, the maintenance thread runs (the kernel keeps 15
     // bytes of a name).
@@ -116,4 +116,32 @@ fn the_pool_starts_on_first_use_and_close_joins_it() {
     let reader = OpenOptions::new().read_only(true).open(&path).unwrap();
     let c = reader.collection("c").unwrap();
     assert!(c.get("a").unwrap().is_some() && c.get("b").unwrap().is_some());
+    drop(reader);
+
+    // A start the OS refuses a thread of (ROADMAP 10.1.27): the job fails, and the threads that start made are joined
+    // before it returns, so none is left. The next job starts the whole pool.
+    let options = OpenOptions::new()
+        .async_threads(3)
+        .async_refuse_thread(2)
+        .read_only(true);
+    let db = block_on(AsyncDb::open_with(options, &path)).unwrap();
+    let c = db.collection("c").unwrap();
+    assert_eq!(
+        block_on(c.get("a")).unwrap_err().code(),
+        persia::ErrorCode::Io
+    );
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        threads("persia-async", &[]),
+        Vec::<String>::new(),
+        "the two threads the refused start made were joined"
+    );
+    assert!(block_on(c.get("a")).unwrap().is_some());
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+    let pool = ["persia-async-0", "persia-async-1", "persia-async-2"];
+    #[cfg(target_os = "linux")]
+    assert_eq!(threads("persia-async", &pool), pool);
+    block_on(db.close()).unwrap();
+    #[cfg(target_os = "linux")]
+    assert_eq!(threads("persia-", &[]), Vec::<String>::new());
 }

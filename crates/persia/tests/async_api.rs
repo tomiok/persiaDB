@@ -9,7 +9,6 @@
 #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)] // Tests: inputs are fixed.
 
 use std::future::Future;
-use std::num::NonZeroUsize;
 use std::path::Path;
 use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -68,7 +67,7 @@ impl Probe {
             }
         };
         let options = OpenOptions::new()
-            .async_threads(NonZeroUsize::new(1).unwrap())
+            .async_threads(1)
             .async_hook(Arc::new(hook));
         (
             Self {
@@ -549,4 +548,80 @@ fn an_open_whose_future_is_dropped_closes_what_it_opened() {
     );
     // The dropped open's database is closed: a read-write open takes the lock.
     Db::open(&path).unwrap().close().unwrap();
+}
+
+/// `OpenOptions::async_threads` (ROADMAP 10.1.27; ADR-0064 item 12): the pool of the size set starts with the first
+/// job, not at the open nor at a lookup, and not again; the default is `min(4, cores)`.
+#[test]
+fn a_pool_of_the_size_set_starts_on_first_use() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    seeded(&path);
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    for (options, size) in [
+        (OpenOptions::new().async_threads(1), 1),
+        (OpenOptions::new().async_threads(3), 3),
+        (OpenOptions::new(), cores.min(4)),
+    ] {
+        let db = block_on(AsyncDb::open_with(options, &path)).unwrap();
+        assert_eq!(db.pool_threads(), 0, "not at the open");
+        let notes = db.collection("notes").unwrap();
+        assert_eq!(db.pool_threads(), 0, "not at a lookup");
+        assert!(block_on(notes.get("seed")).unwrap().is_some());
+        assert_eq!(db.pool_threads(), size, "the first job starts them all");
+        block_on(notes.put(Document::new("again"))).unwrap();
+        assert_eq!(db.pool_threads(), size, "started once");
+        block_on(db.close()).unwrap();
+    }
+}
+
+#[test]
+fn a_pool_of_no_thread_is_refused_at_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let none = OpenOptions::new().async_threads(0);
+    let err = block_on(AsyncDb::open_with(none.clone(), &path)).unwrap_err();
+    assert_eq!(err.code(), ErrorCode::InvalidArgument);
+    // A plain open with the same options is refused the same way: the options are checked before anything is made.
+    assert_eq!(
+        none.open(&path).unwrap_err().code(),
+        ErrorCode::InvalidArgument
+    );
+    assert!(!path.exists(), "nothing was created");
+    // Any other size opens.
+    let db = block_on(AsyncDb::open_with(
+        OpenOptions::new().async_threads(1),
+        &path,
+    ))
+    .unwrap();
+    block_on(db.close()).unwrap();
+}
+
+/// A thread the OS refuses fails the job that started the pool with `Io` (its source the spawn's `io::Error`), never
+/// a panic; the threads that start made end (none runs: `pool_threads` is 0), the database still works, and the next
+/// job starts the whole pool.
+#[test]
+fn a_thread_the_os_refuses_fails_the_first_job_and_the_next_one_starts_the_pool() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    seeded(&path);
+    for refused in [0, 2] {
+        let options = OpenOptions::new()
+            .async_threads(3)
+            .async_refuse_thread(refused);
+        let (db, notes) = open(&path, options);
+        let err = block_on(notes.put(Document::new("refused"))).unwrap_err();
+        assert_eq!(err.code(), ErrorCode::Io, "{err}");
+        let source = std::error::Error::source(&err).expect("the spawn's error");
+        assert!(
+            source.downcast_ref::<std::io::Error>().is_some(),
+            "{source:?}"
+        );
+        assert_eq!(db.pool_threads(), 0, "all or nothing");
+        // The refused job did not run; the next one starts the pool and runs.
+        assert!(block_on(notes.get("refused")).unwrap().is_none());
+        assert_eq!(db.pool_threads(), 3);
+        block_on(db.close()).unwrap();
+        assert!(!has(&path, "refused"));
+    }
 }

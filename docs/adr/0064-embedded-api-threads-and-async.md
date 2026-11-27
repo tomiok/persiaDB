@@ -129,3 +129,30 @@ decisions d, e and o).
   writer lock.
 - **An optional `tokio` feature** (ROADMAP 10.1.6 as written). It would put a runtime in the embedded crate's
   dependency graph and bind the API to one runtime.
+
+## Amendment (2026-11-27): the async pool's size is a public option (ROADMAP 10.1.27)
+
+Item 12 fixed the pool at `min(4, cores)` threads, and wave 8 had its size only as a hidden test hook. The owner
+decided:
+
+1. **`OpenOptions::async_threads(threads: usize)`**, public and documented, behind the feature `async` (no such
+   setter without it). It takes a plain `usize`, so that 0 can be written: an open (`OpenOptions::open`, and so
+   `AsyncDb::open_with`) with 0 fails with `ErrorCode::InvalidArgument` before it creates or reads anything, the way
+   `memtable_bytes(0)` does, never a panic. The default stays `min(4, cores)` (`available_parallelism`, 1 when the OS
+   does not say). The option is per open, like every other: nothing is stored in the database.
+2. **No upper bound.** A count the OS cannot start is not refused at open; it fails the first job instead (item 3).
+   No SPEC rule or measurement gives a bound to enforce, and a bound would refuse a machine that can run more.
+3. **All or nothing, never a panic.** The first job starts every thread of the pool. If the OS refuses one
+   (`std::thread::Builder::spawn` returns an `io::Error`), that job resolves to `ErrorCode::Io` with the `io::Error`
+   as its `source()`, and did not run; the threads that start had made end and are joined before the call returns
+   (each sees the start's generation moved on, under the pool's lock, before it takes a job), so a failed start leaves
+   no thread behind. The next job tries the whole start again. (Wave 8 kept the threads that started and failed only a
+   pool of none; a pool of fewer threads than set is no longer possible.) A pool given 0 threads in code that bypasses
+   the open's check refuses its jobs with `InvalidArgument` instead of queueing them for ever.
+4. **Tested through hidden test hooks** (feature `test-hooks`, not in the public-API snapshot): `AsyncDb::pool_threads`
+   (the threads the pool runs now: 0 until the first job, the size set after it) and
+   `OpenOptions::async_refuse_thread(n)` (the OS taken to refuse thread `n` at the pool's first start).
+   `crates/persia/tests/async_api.rs` and `async_lifecycle.rs` (a census of the process's threads on Linux).
+5. **No Go, TypeScript or C form yet.** The embedded bindings of ADR-0018 do not expose the async API (their calls
+   are synchronous, and each language has its own way to run them off its event loop), so the option has no form
+   there; it gets one with them if they ever expose async.

@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia::OpenOptions::async_threads(usize)` (feature `async`; ROADMAP 10.1.27, ADR-0064 amended): the number of
+  threads of an `AsyncDb`'s pool, `min(4, cores)` by default, started by the first job and joined by `close`. 0 is
+  refused at open with `ErrorCode::InvalidArgument`; there is no upper bound. The pool now starts all its threads or
+  none: a thread the OS refuses fails the job that started it with `ErrorCode::Io` (the `io::Error` as its source),
+  the threads already started are joined, and the next job tries again (before, the threads that started stayed and
+  the pool ran with fewer).
 - `persia::Hit::sort_values()`, `step()` and `rank_score()` (ROADMAP 10.1.30, ADR-0065 amended; SPEC §7.4, §7.5.2,
   §7.6): a hit's values for the request's sort keys as the new `#[non_exhaustive]` `persia::SortValue` (`Score`,
   `I64`, `F64`, `Datetime` in microseconds, `Bool`, `Keyword` bytes, `Missing`), and for a relaxed search's hit its

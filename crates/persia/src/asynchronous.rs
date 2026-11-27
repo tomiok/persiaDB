@@ -2,9 +2,9 @@
 //! adds no dependency.
 //!
 //! [`AsyncDb`] and [`AsyncCollection`] run the calls of [`Db`] and [`Collection`] on a pool of plain threads that
-//! belongs to the database: started by its first job, `min(4, cores)` of them, joined by [`AsyncDb::close`], and not
-//! shared with the maintenance thread. Each call returns a [`JobFuture`], a std [`Future`](std::future::Future) that
-//! any executor polls: no runtime is named, none is needed.
+//! belongs to the database: started by its first job, [`OpenOptions::async_threads`] of them (`min(4, cores)` by
+//! default), joined by [`AsyncDb::close`], and not shared with the maintenance thread. Each call returns a
+//! [`JobFuture`], a std [`Future`](std::future::Future) that any executor polls: no runtime is named, none is needed.
 
 mod job;
 mod pool;
@@ -27,10 +27,11 @@ use crate::{SearchRequest, SearchResponse};
 
 /// A database opened for async use: a [`Db`] whose calls run on its own pool of threads (ADR-0064 item 12).
 ///
-/// The pool starts with the first job, `min(4, cores)` threads, and [`AsyncDb::close`] joins it before it closes the
-/// database. Dropping an `AsyncDb` without closing it refuses later jobs with [`ErrorCode::Closed`], completes the
-/// queued ones with it, lets the running ones end on their own (the pool's threads are not joined), and drops the
-/// database, which waits a while for its last commit (as dropping a [`Db`] does): prefer `close`.
+/// The pool starts with the first job, [`OpenOptions::async_threads`] threads (`min(4, cores)` by default), and
+/// [`AsyncDb::close`] joins it before it closes the database. Dropping an `AsyncDb` without closing it refuses later
+/// jobs with [`ErrorCode::Closed`], completes the queued ones with it, lets the running ones end on their own (the
+/// pool's threads are not joined), and drops the database, which waits a while for its last commit (as dropping a
+/// [`Db`] does): prefer `close`.
 ///
 /// ```
 /// # use std::future::Future;
@@ -286,6 +287,13 @@ impl AsyncDb {
             collection: db.collection(name)?,
             pool: self.pool.clone(),
         })
+    }
+
+    /// Test hook: the number of threads the database's async pool runs now: 0 before its first job and once closed.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn pool_threads(&self) -> usize {
+        self.pool.running_threads()
     }
 
     /// [`Db::commit`] on the pool.

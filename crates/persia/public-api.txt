@@ -864,6 +864,7 @@ pub fn persia::Hit::rank_score(&self) -> core::option::Option<f64>
 pub fn persia::Hit::sort_values(&self) -> &[persia::SortValue]
 pub fn persia::Hit::step(&self) -> core::option::Option<usize>
 pub fn persia::Levels::resolve(&self) -> &[persia::Level]
+pub fn persia::OpenOptions::async_threads(self, threads: usize) -> Self
 pub fn persia::OpenOptions::block_cache_bytes(self, bytes: u64) -> Self
 pub fn persia::OpenOptions::commit_interval(self, interval: core::time::Duration) -> Self
 pub fn persia::OpenOptions::create_if_missing(self, create: bool) -> Self
