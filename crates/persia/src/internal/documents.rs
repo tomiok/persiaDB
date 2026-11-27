@@ -24,7 +24,8 @@ use persia_blob::pack::lease::leases_dir;
 use persia_blob::pack::{ContainerFile, RealFs, Vfs};
 use persia_blob::{BlobId, BlobRef, BlobStore, PackStore, pack_path};
 use persia_engine::db::{
-    Database, DatabaseError, DatabaseOptions, MappedReads, ReadOnlyDatabase, ReadOnlyOptions,
+    Database, DatabaseError, DatabaseOptions, MappedReads, MarkOnlyDatabase, ReadOnlyDatabase,
+    ReadOnlyOptions,
 };
 use persia_engine::document::Document;
 use persia_engine::wal::{Durability, WalMark};
@@ -286,7 +287,7 @@ pub struct BlobDatabase<S: ?Sized, L = Database> {
     held: VecDeque<(WalMark, Pins)>,
     /// Declared before the log, so it drops first: a pack opened read-write with the log's writer proof must not
     /// outlive the container whose lock the proof stood for (ROADMAP 9.2.7, ADR-0053).
-    blobs: Blobs<S>,
+    pub(super) blobs: Blobs<S>,
     log: L,
     /// The `db_uuid` the pack was opened with, when [`BlobDatabase::with_pack`] did. [`LogMut`]'s drop checks the
     /// log still names it (debug builds).
@@ -294,6 +295,13 @@ pub struct BlobDatabase<S: ?Sized, L = Database> {
     /// How many [`GcHold`](super::gc::GcHold)s live: while any does, [`BlobDatabase::gc`] sweeps nothing (a backup
     /// copies the pack, ROADMAP 10.1.8).
     pub(super) gc_holds: Arc<AtomicUsize>,
+}
+
+impl<S: ?Sized, L> BlobDatabase<S, L> {
+    /// The document log.
+    pub fn log(&self) -> &L {
+        &self.log
+    }
 }
 
 impl<S: BlobStore + ?Sized, L: DocumentLog> BlobDatabase<S, L> {
@@ -306,11 +314,6 @@ impl<S: BlobStore + ?Sized, L: DocumentLog> BlobDatabase<S, L> {
             pack_db_uuid: None,
             gc_holds: Arc::default(),
         }
-    }
-
-    /// The document log.
-    pub fn log(&self) -> &L {
-        &self.log
     }
 
     /// The document log, for the operations this layer does not wrap (create a collection, delete, finish merges,
@@ -329,7 +332,8 @@ impl<S: BlobStore + ?Sized, L: DocumentLog> BlobDatabase<S, L> {
         }
     }
 
-    /// The blob store with its pin set.
+    /// The blob store with its pin set. Only with a [`DocumentLog`]: through the store a blob can be stored, so a
+    /// handle over a [`MarkOnlyDatabase`] (which collects only, ADR-0069 item 3) does not offer it.
     pub fn blobs(&self) -> &Blobs<S> {
         &self.blobs
     }
@@ -341,6 +345,8 @@ impl<S: BlobStore + ?Sized, L: DocumentLog> BlobDatabase<S, L> {
     /// # Errors
     /// - [`Error::Blob`] or [`Error::Open`] when the blob cannot be read or stored: nothing is logged;
     /// - [`Error::BlobNotStored`] for a [`Blob::Stored`] the store lacks: nothing is logged;
+    /// - [`Error::Blob`] of [`persia_blob::Error::BlobRefMismatch`] for a [`Blob::Stored`] whose size or chunk size is
+    ///   not the bound blob's (the caller's error, ROADMAP 10.1.33): nothing is logged;
     /// - [`Error::Database`] as [`Database::put`]; the blob is stored and, unless the record may have reached the
     ///   WAL, unpinned (an orphan GC reclaims).
     pub fn put(
@@ -644,6 +650,94 @@ impl BlobDatabase<PackStore> {
             PackStore::open_writer(pack, &proof)?
         };
         Ok(Self::with_writer_pack(db, store))
+    }
+}
+
+impl BlobDatabase<PackStore, MarkOnlyDatabase> {
+    /// Opens the database at `path` for the blob GC only (ROADMAP 10.4.7, ADR-0069): [`MarkOnlyDatabase::open`], the
+    /// writer's open with a no-token stand-in for each `text` field's analyzer `options.registry` lacks and no flush
+    /// of what such a stand-in indexed, then its pack read-write with its writer proof, as [`BlobDatabase::open`]
+    /// does. The handle marks and sweeps ([`BlobDatabase::gc`]) and does nothing else: a [`MarkOnlyDatabase`] is no
+    /// [`DocumentLog`], so nothing can be put, stored or committed through it.
+    ///
+    /// ```
+    /// use persia::internal::documents::{Blob, BlobDatabase};
+    /// use persia::internal::gc::GcOptions;
+    /// use persia_engine::analysis::{Analyzer, AnalyzerRegistry, WhitespaceTokenizer};
+    /// use persia_engine::db::DatabaseOptions;
+    /// use persia_engine::document::Document;
+    /// use persia_engine::schema::CollectionSchema;
+    /// use persia_engine::wal::Durability;
+    ///
+    /// # let dir = tempfile::tempdir()?;
+    /// let path = dir.path().join("app.persia");
+    /// // The application registers `tags@1` and names it in a schema.
+    /// let mut registry = AnalyzerRegistry::builtin();
+    /// registry.register("tags", 1, Analyzer::builder(WhitespaceTokenizer).build())?;
+    /// let schema = CollectionSchema::from_json_in(
+    ///     r#"{"name": "notes", "fields": {"tags": {"type": "text", "analyzer": "tags"}}}"#,
+    ///     &registry,
+    /// )?;
+    /// let app_options = || DatabaseOptions { registry: registry.clone(), ..DatabaseOptions::default() };
+    /// let mut app = BlobDatabase::create(&path, app_options())?;
+    /// app.log_mut().create_collection(schema)?;
+    /// let kept = app.put("notes", &Document::new("n"), Blob::from_reader(&b"kept"[..]), Durability::Fsync)?;
+    /// drop(app);
+    /// // A tool with the built-in analyzers only collects it.
+    /// let db = BlobDatabase::open_mark_only(&path, DatabaseOptions::default())?;
+    /// assert_eq!(db.log().skipped_analysis().len(), 1);
+    /// let report = db.gc(&GcOptions::default())?;
+    /// assert_eq!(report.marked_blobs, 1);
+    /// drop(db); // it offers no blob store: nothing can be stored through it
+    /// let app = BlobDatabase::open(&path, app_options())?;
+    /// assert_eq!(app.get_blob_range(&kept, 0..4)?, b"kept");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// The handle offers no blob store, which needs a [`DocumentLog`] (through it a blob could be stored):
+    ///
+    /// ```compile_fail
+    /// use persia::internal::documents::BlobDatabase;
+    /// use persia_engine::db::DatabaseOptions;
+    ///
+    /// # let dir = tempfile::tempdir()?;
+    /// let db = BlobDatabase::open_mark_only(dir.path().join("app.persia"), DatabaseOptions::default())?;
+    /// let _store = db.blobs(); // no such method on a mark-only handle
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// and nothing can be put through it:
+    ///
+    /// ```compile_fail
+    /// use persia::internal::documents::{Blob, BlobDatabase};
+    /// use persia_engine::db::DatabaseOptions;
+    /// use persia_engine::document::Document;
+    /// use persia_engine::wal::Durability;
+    ///
+    /// # let dir = tempfile::tempdir()?;
+    /// let mut db = BlobDatabase::open_mark_only(dir.path().join("app.persia"), DatabaseOptions::default())?;
+    /// db.put("notes", &Document::new("n"), Blob::from_reader(&b"x"[..]), Durability::Fsync)?; // needs a `DocumentLog`
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// [`Error::Database`] as [`MarkOnlyDatabase::open`] (another writer holds the lock; `AnalysisSkipped` when the
+    /// replay would have to flush a skipped field's collection); [`Error::Blob`] as [`PackStore::open_writer`].
+    pub fn open_mark_only(path: impl AsRef<Path>, options: DatabaseOptions) -> Result<Self, Error> {
+        let path = path.as_ref();
+        let db = MarkOnlyDatabase::open(path, options)?;
+        let pack = pack_beside(db.container_path(), path);
+        let (store, db_uuid) = {
+            let proof = db.writer_proof();
+            (PackStore::open_writer(pack, &proof)?, proof.db_uuid())
+        };
+        Ok(Self {
+            held: VecDeque::new(),
+            blobs: Blobs::new(Arc::new(store)),
+            log: db,
+            pack_db_uuid: Some(db_uuid),
+            gc_holds: Arc::default(),
+        })
     }
 }
 
@@ -1102,11 +1196,13 @@ impl<S: BlobStore + ?Sized, L: DocumentLog> BlobDatabase<S, L> {
 
 impl<S: BlobStore + ?Sized, F: ContainerFile + Sync> BlobDatabase<S, Database<F>> {
     /// [`Database::put_batch`] of `docs`, after pinning every blob reference they carry and checking the store holds
-    /// it (SPEC §9.6): a reference the store lacks rejects the whole batch before anything is logged. The pins are
-    /// held until the batch is durable, as [`BlobDatabase::put`] holds its document's.
+    /// it (SPEC §9.6): a reference the store lacks, or one it holds with another size or chunk size, rejects the whole
+    /// batch before anything is logged. The pins are held until the batch is durable, as [`BlobDatabase::put`] holds
+    /// its document's.
     ///
     /// # Errors
-    /// [`Error::BlobNotStored`] (nothing is logged); then as [`Database::put_batch`].
+    /// [`Error::BlobNotStored`], or [`Error::Blob`] of [`persia_blob::Error::BlobRefMismatch`] (ROADMAP 10.1.33): nothing
+    /// is logged; then as [`Database::put_batch`].
     pub fn put_batch(
         &mut self,
         collection: &str,

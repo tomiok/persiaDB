@@ -530,14 +530,13 @@ fn a_blob_reference_the_target_does_not_hold_stops_the_import_at_its_line() {
 }
 
 /// A `BlobRef` with the right `blob_id` but another `size` or `chunk_size` than the blob it names, given back to the
-/// database that holds the blob: the put refuses it (`check_ref`, SPEC §9.4), the import stops at its line and logs
-/// nothing for it. `check_ref` reports the mismatch as corruption, the only kind it has, so today the command exits
-/// with the corruption status 3, although the bad bytes are the input's: telling a caller's mismatched reference
-/// from stored damage, and the exit status that follows, is ROADMAP 10.1.33. This pins today's status.
+/// database that holds the blob: the put refuses it (`check_given_ref`, SPEC §9.6), the import stops at its line,
+/// naming it and the attribute, and logs nothing for it. The bad bytes are the input's, so the embedded API says
+/// `InvalidArgument` and the command exits 1, not with the corruption status 3 (ROADMAP 10.1.33).
 #[test]
-fn a_blob_reference_of_another_size_or_chunk_size_stops_the_import_at_its_line() {
+fn a_blob_reference_of_another_size_or_chunk_size_stops_the_import_at_its_line_with_status_1() {
     let _serial = serial();
-    for field in ["size", "chunk_size"] {
+    for (field, shown) in [("size", "gives size"), ("chunk_size", "gives chunk size")] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("app.persia");
         let dumped = with_a_blob(&path);
@@ -556,10 +555,17 @@ fn a_blob_reference_of_another_size_or_chunk_size_stops_the_import_at_its_line()
             "--input",
             arg(&input),
         ]);
-        assert_eq!(out.status.code(), Some(3), "{field}: {}", stderr(&out));
+        assert_eq!(out.status.code(), Some(1), "{field}: {}", stderr(&out));
         let err = stderr(&out);
         assert!(
             err.contains("line 2: putting the document \"changed\""),
+            "{field}: {err}"
+        );
+        assert!(
+            err.contains(&format!(
+                "the blob reference to {}",
+                doc["blob"]["blob_id"].as_str().unwrap()
+            )) && err.contains(&format!("{shown} {}", n + 1)),
             "{field}: {err}"
         );
         assert!(
@@ -571,6 +577,77 @@ fn a_blob_reference_of_another_size_or_chunk_size_stops_the_import_at_its_line()
         let verified = persia(&["verify", arg(&path)]);
         assert!(verified.status.success(), "{field}: {}", stderr(&verified));
     }
+}
+
+/// Stored damage a put reaches is still corruption (ROADMAP 10.1.33): the import opens a sound database, then the
+/// blob manifest's `BlobIndex` frame in the pack is damaged, and the line whose reference the put looks up there
+/// exits with status 3 (`ErrorCode::Corrupt`), naming its line, with nothing logged for it.
+///
+/// The damage must land after the open, which checks every committed frame: the input comes on the standard input,
+/// and its first `BLANK` bytes (blank lines, skipped) are more than a pipe holds, so once they are written the import
+/// has read past the pipe's capacity, and it reads its input only after the open (no timer). Unix only: the pipe's
+/// capacity and a write to a file another process maps.
+#[cfg(unix)]
+#[test]
+fn a_damaged_blob_manifest_frame_a_put_reaches_exits_with_the_corruption_status() {
+    /// More than a pipe holds (64 KiB by default on Linux, at most 1 MiB unless raised) plus the reader's buffer.
+    const BLANK: usize = 4 << 20;
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let dumped = with_a_blob(&path);
+    let before = dump(&path, "files");
+    let pack = dir.path().join("app.persia.blobs");
+    let bytes = std::fs::read(&pack).unwrap();
+    // The manifest's magic (SPEC §9.1.1) inside the one `BlobIndex` frame.
+    let at: Vec<usize> = bytes
+        .windows(4)
+        .enumerate()
+        .filter_map(|(i, w)| (w == b"PBLM").then_some(i))
+        .collect();
+    assert_eq!(at.len(), 1, "one blob manifest in the pack");
+    let damaged = at[0] + 12; // a byte of its blob_id: the frame's checksum no longer matches
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_persia"))
+        .args(["import", arg(&path), "--collection", "files"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let line = format!("{}\n", " ".repeat(1023));
+    let blank_lines = BLANK / line.len();
+    stdin
+        .write_all(line.repeat(blank_lines).as_bytes())
+        .unwrap();
+    // The import is past its open: damage the frame the put of the next line reads.
+    {
+        use std::os::unix::fs::FileExt;
+        let file = std::fs::OpenOptions::new().write(true).open(&pack).unwrap();
+        file.write_all_at(&[bytes[damaged] ^ 0xff], u64::try_from(damaged).unwrap())
+            .unwrap();
+    }
+    writeln!(stdin, "{}", dumped[0]).unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains(&format!(
+            "line {}: putting the document \"f1\"",
+            blank_lines + 1
+        )),
+        "{err}"
+    );
+    assert!(
+        err.contains("documents put before it, imported: 0;"),
+        "{err}"
+    );
+    // Nothing was logged for the line: the documents are as they were.
+    assert_eq!(dump(&path, "files"), before);
+    // `verify` finds the damage too (its pack scan), with the same status.
+    assert_eq!(persia(&["verify", arg(&path)]).status.code(), Some(3));
 }
 
 /// A database with three notes, committed, and its writer closed.

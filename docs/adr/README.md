@@ -56,8 +56,8 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0031](./0031-tiered-merge-policy-and-merger.md) | Tiered merge policy, and a merger that fills a segment builder | proposed |
 | [0032](./0032-background-merges-and-obsolete-objects.md) | Background merges, and obsolete objects freed by reference counting | proposed |
 | [0033](./0033-open-sequence-read-only-opens-and-flushes-during-replay.md) | Open sequence, read-only opens, and flushes during replay | proposed |
-| [0034](./0034-blob-upload-staging-and-expected-id.md) | Blob upload staging, binding, and the expected-id API | accepted (amended by 0051) |
-| [0035](./0035-blob-manifest-encoding.md) | Blob manifest encoding | accepted (amended by 0041, 0050) |
+| [0034](./0034-blob-upload-staging-and-expected-id.md) | Blob upload staging, binding, and the expected-id API | accepted (amended by 0051; amended 2026-11-26: reads check a reference as caller input, ROADMAP 10.1.33) |
+| [0035](./0035-blob-manifest-encoding.md) | Blob manifest encoding | accepted (amended by 0041, 0050; amended 2026-11-26: reads check a reference as caller input, ROADMAP 10.1.33) |
 | [0036](./0036-term-proximity-scoring.md) | Term proximity scoring: pair distance of adjacent required words, bound-safe, off by default | accepted |
 | [0037](./0037-relaxation-cascade-and-level-rank-key.md) | The relaxation cascade, and a rank key led by the level | proposed |
 | [0038](./0038-l2-drop-terms-ladder-and-term-importance.md) | L2 `drop_terms`: a `minimum_should_match` ladder ordered by term importance | proposed |
@@ -91,3 +91,4 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0066](./0066-l5-fallback-past-the-budget.md) | L5 `fallback` runs past the relaxation budget when the page would otherwise be empty, bounded by the request's deadline; the page stays truncated | proposed |
 | [0067](./0067-backup-of-a-live-database.md) | Backing up a live database: committed images taken under the writer mutex (a commit, then compaction and GC held), copied without it from second handles, written new and linked pack first | proposed |
 | [0068](./0068-compaction-only-open.md) | A compaction-only open (`CompactOnlyDatabase`): the writer's recovery with no-token stand-ins for the analyzers it lacks, refusing any flush of a collection they indexed; what `persia compact` opens | proposed |
+| [0069](./0069-mark-only-open.md) | A mark-only open (`MarkOnlyDatabase`): the compaction-only open's recovery, offering GC's mark and the pack's writer proof; what `persia gc` opens, so it collects a database whose schema names a registered analyzer | proposed |

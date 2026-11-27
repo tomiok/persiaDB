@@ -29,9 +29,9 @@
 use std::fs::File;
 use std::path::Path;
 
-use persia_storage::container::{self, Container, ContainerFile, Mode, SpaceUsage};
+use persia_storage::container::{Container, ContainerFile, Mode, SpaceUsage};
 
-use super::read_only::{Analysis, SkippedAnalysis};
+use super::read_only::SkippedAnalysis;
 use super::{Compacted, Database, DatabaseError, DatabaseOptions};
 
 /// A database opened only to compact its container (module docs): the writer's open, with stand-ins for the analyzers
@@ -58,7 +58,7 @@ impl CompactOnlyDatabase<File> {
     /// ```
     ///
     /// # Errors
-    /// As [`Container::open`] ([`container::Error::Locked`] while another writer holds the lock) and
+    /// As [`Container::open`] ([`persia_storage::container::Error::Locked`] while another writer holds the lock) and
     /// [`CompactOnlyDatabase::open_container`].
     pub fn open(path: impl AsRef<Path>, options: DatabaseOptions) -> Result<Self, DatabaseError> {
         Self::open_container(Container::open(path, Mode::ReadWrite)?, options)
@@ -87,23 +87,19 @@ impl<F: ContainerFile + Sync> CompactOnlyDatabase<F> {
     /// ```
     ///
     /// # Errors
-    /// [`DatabaseError::Container`] with [`container::Error::ReadOnly`] for a container opened read-only;
+    /// [`DatabaseError::Container`] with [`persia_storage::container::Error::ReadOnly`] for a container opened
+    /// read-only;
     /// [`DatabaseError::AnalysisSkipped`] when the replay would flush (any collection: every flush flushes every
     /// memtable) while a collection with a skipped field holds a replayed record, before that commit writes anything;
-    /// [`DatabaseError::UnregisteredAnalyzer`] for a version of a built-in analyzer this build lacks; otherwise as
-    /// [`Database::open_container`].
+    /// [`DatabaseError::Manifest`] with [`crate::manifest::ManifestError::UnsupportedAnalyzer`] for a version of a
+    /// built-in analyzer this build lacks (the manifest's decode refuses it);
+    /// [`DatabaseError::UnregisteredAnalyzer`] when the stand-in cannot be registered under the analyzer's name (the
+    /// registry refuses it); otherwise as [`Database::open_container`].
     pub fn open_container(
         container: Container<F>,
         options: DatabaseOptions,
     ) -> Result<Self, DatabaseError> {
-        if container.mode() != Mode::ReadWrite {
-            return Err(container::Error::ReadOnly {
-                reason: container::ReadOnlyReason::OpenedReadOnly,
-            }
-            .into());
-        }
-        let db = Database::recover_as(container, options, Analysis::SkipUnregistered)?;
-        Ok(Self { db })
+        Database::open_skipping_analysis(container, options).map(|db| Self { db })
     }
 
     /// The `text` fields whose analysis is skipped, in collection then field order: those whose analyzer the

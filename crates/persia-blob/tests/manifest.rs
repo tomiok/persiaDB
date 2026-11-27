@@ -1313,6 +1313,16 @@ fn is_corruption_is_true_for_corrupt_only() {
         ),
         // -- reader leases (9.2.16) --
         (Error::LeaseContended { attempts: 3 }, false),
+        // -- caller references (10.1.33) --
+        (
+            Error::BlobRefMismatch {
+                blob_id: BlobId::from_bytes([1; 32]),
+                field: persia_blob::error::BlobRefField::Size,
+                given: 2,
+                stored: 1,
+            },
+            false,
+        ),
         // An empty file is not a container: corruption, as the container classifies it.
         (
             Error::Container(
@@ -1364,6 +1374,8 @@ fn is_corruption_is_true_for_corrupt_only() {
             Error::ResumeUnchecked | Error::BlobSizeMismatch { .. } => "resume checks",
             // -- reader leases (9.2.16) --
             Error::LeaseContended { .. } | Error::Container(_) => "reader leases",
+            // -- caller references (10.1.33) --
+            Error::BlobRefMismatch { .. } => "caller references",
             Error::BlobNotFound { .. }
             | Error::RangeOutOfBounds { .. }
             | Error::StagedChunkConflict { .. }
@@ -1600,6 +1612,60 @@ fn checks_against_the_lookup() {
             other => panic!("expected Corrupt for {what}, got {other:?}"),
         }
     }
+}
+
+/// ROADMAP 10.1.33: a reference a caller gives to be logged is input, so another size or chunk size than the bound
+/// manifest's is [`Error::BlobRefMismatch`] (not corruption), naming the first field that differs with both values;
+/// a manifest that names another blob than the id it was looked up by is still damage.
+#[test]
+fn a_given_reference_that_differs_is_the_callers_error() {
+    use persia_blob::error::BlobRefField;
+    use persia_format::BlobRef;
+    use std::collections::BTreeMap;
+
+    let manifest = golden_three();
+    let id = manifest.blob_id();
+    let other = BlobId::from_bytes([9; 32]);
+    let blob_ref = |id, size, chunk| BlobRef::new(id, size, "a/b", chunk, BTreeMap::new()).unwrap();
+    manifest.check_given_ref(&blob_ref(id, 13, 5)).unwrap();
+    for (reference, field, given, stored) in [
+        (blob_ref(id, 12, 5), BlobRefField::Size, 12, 13),
+        (blob_ref(id, 14, 5), BlobRefField::Size, 14, 13),
+        (blob_ref(id, 13, 4), BlobRefField::ChunkSize, 4, 5),
+        (blob_ref(id, 13, 6), BlobRefField::ChunkSize, 6, 5),
+        // Both differ: the size is reported first.
+        (blob_ref(id, 12, 4), BlobRefField::Size, 12, 13),
+    ] {
+        let err = manifest.check_given_ref(&reference).unwrap_err();
+        assert!(!err.is_corruption(), "{err}");
+        match err {
+            Error::BlobRefMismatch {
+                blob_id,
+                field: got_field,
+                given: got_given,
+                stored: got_stored,
+            } => assert_eq!(
+                (blob_id, got_field, got_given, got_stored),
+                (id, field, given, stored)
+            ),
+            other => panic!("expected BlobRefMismatch for {field}, got {other:?}"),
+        }
+        // The same reference read from a stored document: damage.
+        assert!(manifest.check_ref(&reference).unwrap_err().is_corruption());
+    }
+    let err = manifest
+        .check_given_ref(&blob_ref(other, 13, 5))
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Corrupt {
+                encoding: "blob manifest",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
 }
 
 // -- Inline manifests (ROADMAP 9.3.3, ADR-0050): flag bit 0, the blob's bytes after its one CRC. --

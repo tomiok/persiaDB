@@ -211,15 +211,16 @@ pub trait BlobStore: Send + Sync {
     fn discard_upload(&self, upload_id: UploadId) -> Result<()>;
 
     /// Whether the blob `blob_ref` refers to is bound here and its manifest matches it
-    /// ([`BlobManifest::check_ref`]): what `put(doc, blob)` checks before it logs a document with a `BlobRef` it
-    /// was given (SPEC §9.6).
+    /// ([`BlobManifest::check_given_ref`]): what `put(doc, blob)` checks before it logs a document with a `BlobRef`
+    /// it was given (SPEC §9.6).
     ///
     /// # Errors
-    /// [`Error::Corrupt`] when a manifest is bound under the id but does not match `blob_ref`, or the store's errors.
+    /// [`Error::BlobRefMismatch`] when a manifest is bound under the id with another size or chunk size than
+    /// `blob_ref`'s, [`Error::Corrupt`] when the manifest names another blob, or the store's errors.
     fn contains(&self, blob_ref: &BlobRef) -> Result<bool> {
         match self.manifest(blob_ref.blob_id())? {
             None => Ok(false),
-            Some(manifest) => manifest.check_ref(blob_ref).map(|()| true),
+            Some(manifest) => manifest.check_given_ref(blob_ref).map(|()| true),
         }
     }
 
@@ -284,14 +285,15 @@ pub fn read_chunk_checked<S: BlobStore + ?Sized>(
 }
 
 /// Bytes `range` of the blob `blob_ref` refers to (SPEC §9.6 `get_blob_range`). Looks the manifest up, checks it
-/// against `blob_ref` ([`BlobManifest::check_ref`]), then reads every chunk the range touches whole, in one
-/// [`BlobStore::read_chunks_checked`], which checks each as [`read_chunk_checked`] does. An empty range in bounds
-/// reads nothing.
+/// against `blob_ref` as a reference the caller passes ([`BlobManifest::check_given_ref`], ROADMAP 10.1.33), then
+/// reads every chunk the range touches whole, in one [`BlobStore::read_chunks_checked`], which checks each as
+/// [`read_chunk_checked`] does. An empty range in bounds reads nothing.
 ///
 /// # Errors
 /// - [`Error::BlobNotFound`] when the id is not bound;
+/// - [`Error::BlobRefMismatch`] when the bound manifest has another size or chunk size than `blob_ref`;
 /// - [`Error::RangeOutOfBounds`] when `range` is inverted or ends past the blob;
-/// - [`Error::Corrupt`] when the manifest does not match `blob_ref` or a chunk does not match the manifest;
+/// - [`Error::Corrupt`] when the manifest names another blob or a chunk does not match the manifest;
 /// - the store's errors.
 pub fn read_range<S: BlobStore + ?Sized>(
     store: &S,
@@ -303,7 +305,7 @@ pub fn read_range<S: BlobStore + ?Sized>(
             blob_id: blob_ref.blob_id(),
         });
     };
-    manifest.check_ref(blob_ref)?;
+    manifest.check_given_ref(blob_ref)?;
     read_manifest_range(store, &manifest, range)
 }
 
@@ -571,16 +573,25 @@ mod tests {
         ));
     }
 
+    /// A reference the caller passes that differs from the bound manifest is the caller's error, not corruption, both
+    /// for `contains` (a put) and for `read_range` (a read): ROADMAP 10.1.33.
     #[test]
-    fn a_reference_that_differs_from_the_manifest_is_corrupt() {
+    fn a_given_reference_that_differs_from_the_manifest_is_the_callers_error() {
         let store = MemoryBlobStore::new();
         let m = stored(&store, b"0123456789", 4, 1);
         let wrong_size = BlobRef::new(m.blob_id(), 11, "a/b", 4, BTreeMap::new()).unwrap();
         let wrong_chunk = BlobRef::new(m.blob_id(), 10, "a/b", 5, BTreeMap::new()).unwrap();
         for r in [wrong_size, wrong_chunk] {
-            assert!(store.contains(&r).unwrap_err().is_corruption());
-            assert!(read_range(&store, &r, 0..1).unwrap_err().is_corruption());
+            let given = store.contains(&r).unwrap_err();
+            assert!(
+                matches!(given, Error::BlobRefMismatch { blob_id, .. } if blob_id == m.blob_id()),
+                "{given:?}"
+            );
+            assert!(!given.is_corruption());
+            let read = read_range(&store, &r, 0..1).unwrap_err();
+            assert!(matches!(read, Error::BlobRefMismatch { .. }), "{read:?}");
         }
+        assert!(store.contains(&reference(&m)).unwrap());
     }
 
     #[test]

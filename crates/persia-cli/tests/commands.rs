@@ -1011,7 +1011,7 @@ fn compact_refuses_to_flush_a_backlog_that_needs_a_registered_analyzer() {
     assert_eq!(out.stdout, b"");
     let err = stderr(&out);
     assert!(
-        err.contains(r#"collection "notes": its unflushed writes would have to be flushed, which needs the analyzer tags@1 of field "tags""#),
+        err.contains(r#"collection "notes": its unflushed writes would have to be flushed, which needs the analyzer tags@1 of field "tags" that this open lacks (an open that skips analysis never flushes them without it); open the database with its application, commit (closing a `persia::Db` does), then retry"#),
         "{err}"
     );
     assert!(

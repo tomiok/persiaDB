@@ -102,8 +102,10 @@ impl Db {
     /// ```
     ///
     /// # Errors
-    /// [`ErrorCode::NotFound`] if this database's store does not hold the blob; [`ErrorCode::Corrupt`] if what it
-    /// holds under its id does not match `blob_ref`; [`ErrorCode::Closed`]. Errors while reading come from
+    /// [`ErrorCode::NotFound`] if this database's store does not hold the blob; [`ErrorCode::InvalidArgument`] if it
+    /// holds the blob with another size or chunk size than `blob_ref` gives (the reference is the caller's input: the
+    /// same `blob_id` may have another chunk size in another database, SPEC §9.6); [`ErrorCode::Corrupt`] if what it
+    /// holds under the id is damaged or names another blob; [`ErrorCode::Closed`]. Errors while reading come from
     /// [`Read::read`] as [`io::Error`]s whose inner error is an [`Error`].
     pub fn get_blob(&self, blob_ref: &BlobRef) -> Result<BlobReader> {
         let pins = self.inner.with_blobs(|blobs| {

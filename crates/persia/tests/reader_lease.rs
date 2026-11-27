@@ -9,6 +9,8 @@
 //!    pack's directory (`LeaseElsewhere`, a retargeted symbolic link included), and takes equal and newer documents.
 //! 5. A reader process killed (SIGKILL) while holding its lease leaves a stale one: the next GC removes it and sweeps.
 //! 6. A directory that refuses writes opens without a lease (`lease()` is `None`).
+//! 7. The mark-only open's GC (ROADMAP 10.4.7, ADR-0069) judges leases by its committed seq, as the writer's does,
+//!    a commit of its own recovery included.
 #![allow(
     clippy::unwrap_used,
     clippy::panic,
@@ -147,6 +149,137 @@ fn a_reader_behind_a_delete_holds_gc_back_until_it_refreshes() {
     assert_eq!(reader.get_blob_range(&kept, 0..4).unwrap(), b"kept");
 }
 
+/// ROADMAP 10.4.7, ADR-0069: the mark-only open's GC judges reader leases against its committed seq, as the writer's
+/// does: a reader at exactly that seq lets the sweep run, and keeps reading.
+#[test]
+fn a_mark_only_gc_judges_reader_leases_by_the_committed_seq() {
+    let dir = tempfile::tempdir().unwrap();
+    if !locks_judged(dir.path()) {
+        return;
+    }
+    let path = dir.path().join("app.persia");
+    let mut writer = create(&path);
+    let kept = put(&mut writer, "kept", b"kept");
+    put(&mut writer, "gone", b"swept");
+    delete(&mut writer, "gone");
+    let seq = writer.log().seq();
+    drop(writer);
+    let reader = ReadOnlyBlobDatabase::open(&path, &DatabaseOptions::default()).unwrap();
+    assert_eq!(record(&reader).manifest_seq(), Some(seq));
+
+    let db = BlobDatabase::open_mark_only(&path, DatabaseOptions::default()).unwrap();
+    assert_eq!(db.log().seq(), seq);
+    let report = db
+        .gc(&GcOptions {
+            rewrite_ratio: 0.0,
+            ..GcOptions::default()
+        })
+        .unwrap();
+    let readers = report.readers.clone().unwrap();
+    assert!(!readers.held_back && readers.current == 1, "{report:?}");
+    assert_eq!(report.sweep.blobs_deleted, 1, "{report:?}");
+    assert!(
+        matches!(report.sweep.rewrite, Some(Rewrite::Done { .. })),
+        "{report:?}"
+    );
+    assert_eq!(reader.get_blob_range(&kept, 0..4).unwrap(), b"kept");
+}
+
+/// ROADMAP 10.4.7, ADR-0069: when the mark-only open's own recovery commits (a backlog of a collection without a
+/// skipped field over its memtable size, flushed while the skipped collection holds nothing), a reader lease at the
+/// seq before it is behind: the GC is held back and deletes nothing, as after any writer's commit.
+#[test]
+fn a_mark_only_open_that_commits_puts_a_reader_lease_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    if !locks_judged(dir.path()) {
+        return;
+    }
+    let path = dir.path().join("app.persia");
+    let tags = || {
+        let mut registry = persia_engine::analysis::AnalyzerRegistry::builtin();
+        registry
+            .register(
+                "tags",
+                1,
+                persia_engine::analysis::Analyzer::builder(
+                    persia_engine::analysis::WhitespaceTokenizer,
+                )
+                .build(),
+            )
+            .unwrap();
+        DatabaseOptions {
+            registry,
+            ..DatabaseOptions::default()
+        }
+    };
+    let mut app = tags();
+    let notes = persia_engine::schema::CollectionSchema::from_json_in(
+        r#"{"name": "notes", "fields": {"tags": {"type": "text", "analyzer": "tags"}}}"#,
+        &app.registry,
+    )
+    .unwrap();
+    app.policy.flush.memtable_bytes = 1 << 30;
+    let mut writer = BlobDatabase::create(&path, app).unwrap();
+    writer.log_mut().create_collection(notes).unwrap();
+    writer
+        .log_mut()
+        .create_collection(SchemaBuilder::new("plain").strict(false).build().unwrap())
+        .unwrap();
+    for id in ["kept", "gone"] {
+        writer
+            .put(
+                "notes",
+                &Document::new(id),
+                Blob::from_reader(id.as_bytes()),
+                Durability::Fsync,
+            )
+            .unwrap();
+    }
+    writer.commit().unwrap();
+    writer
+        .log_mut()
+        .delete("notes", "gone", Durability::Fsync)
+        .unwrap();
+    writer.release_durable();
+    writer.commit().unwrap();
+    // A `plain` backlog, never committed: the mark-only open below flushes it at a small memtable size.
+    for i in 0..64 {
+        let mut doc = Document::new(format!("p{i:03}"));
+        doc.insert_extra("pad", serde_json::Value::String("x".repeat(256)));
+        writer
+            .log_mut()
+            .put("plain", &doc, Durability::Buffered)
+            .unwrap();
+    }
+    writer
+        .log_mut()
+        .put("plain", &Document::new("last"), Durability::Fsync)
+        .unwrap();
+    let seq = writer.log().seq();
+    drop(writer);
+    // The reader replays the backlog with the application's analyzers and a memtable that never flushes.
+    let reader = ReadOnlyBlobDatabase::open(&path, &tags()).unwrap();
+    assert_eq!(record(&reader).manifest_seq(), Some(seq));
+
+    let mut options = DatabaseOptions::default();
+    options.policy.flush.memtable_bytes = 1024;
+    let db = BlobDatabase::open_mark_only(&path, options).unwrap();
+    assert_eq!(db.log().skipped_analysis().len(), 1);
+    assert!(
+        db.log().seq() > seq,
+        "its recovery committed the plain flush"
+    );
+    let report = db
+        .gc(&GcOptions {
+            rewrite_ratio: 0.0,
+            ..GcOptions::default()
+        })
+        .unwrap();
+    let readers = report.readers.clone().unwrap();
+    assert!(readers.held_back && readers.behind == 1, "{report:?}");
+    assert_eq!(report.sweep.blobs_deleted, 0, "{report:?}");
+    assert_eq!(report.sweep.rewrite, None, "no rewrite");
+}
 #[test]
 fn a_refused_refresh_keeps_the_record() {
     let dir = tempfile::tempdir().unwrap();

@@ -201,7 +201,8 @@ fn put_rejects_a_reference_its_database_never_bound_and_logs_nothing() {
             "{err}"
         );
     }
-    // Bound under the id, but not with this size: the reference does not match it.
+    // Bound under the id, but not with this size: the reference does not match it, the caller's error (ROADMAP
+    // 10.1.33), not damage.
     let wrong = BlobRef::new(
         ours.blob_id(),
         ours.size() + 1,
@@ -211,7 +212,11 @@ fn put_rejects_a_reference_its_database_never_bound_and_logs_nothing() {
     )
     .unwrap();
     let err = rejected(&mut db, &wrong, "a mismatched reference");
-    assert!(matches!(&err, Error::Blob(e) if e.is_corruption()), "{err}");
+    assert!(
+        matches!(&err, Error::Blob(e @ persia_blob::Error::BlobRefMismatch { .. }) if !e.is_corruption()),
+        "{err}"
+    );
+    assert!(!err.is_corruption(), "{err}");
     // The reference it bound itself is taken.
     db.put(
         "notes",

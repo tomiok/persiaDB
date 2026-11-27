@@ -317,6 +317,58 @@ fn a_reference_the_store_lacks_is_not_found_and_logs_nothing() {
     );
 }
 
+/// ROADMAP 10.1.33, SPEC §9.6: a reference given to a put that names a stored blob with another size or chunk size
+/// is the caller's error (`InvalidArgument`), not damage, and logs nothing, on every put path. A read given the
+/// same hand-built reference is refused the same way: the reference is the caller's input (SPEC §9.6).
+#[test]
+fn a_reference_of_another_size_or_chunk_size_is_an_invalid_argument_and_logs_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path().join("a.persia")).unwrap();
+    let files = db
+        .create_collection_json(r#"{"name": "files", "fields": {}}"#)
+        .unwrap();
+    let ours = db
+        .put_blob(&b"0123456789"[..], &PutBlobOptions::default())
+        .unwrap();
+    for (size, chunk) in [
+        (ours.size() + 1, ours.chunk_size()),
+        (ours.size(), ours.chunk_size() + 1),
+    ] {
+        let wrong = BlobRef::new(
+            ours.blob_id(),
+            size,
+            ours.mime(),
+            chunk,
+            ours.user_meta().clone(),
+        )
+        .unwrap();
+        let err = files
+            .put_with_blob(&Document::new("x"), Blob::Stored(wrong.clone()))
+            .unwrap_err();
+        assert_eq!(err.code(), ErrorCode::InvalidArgument, "{err}");
+        let mut doc = Document::new("y");
+        doc.set_blob_ref(Some(wrong.clone()));
+        assert_eq!(
+            files.put(&doc).unwrap_err().code(),
+            ErrorCode::InvalidArgument
+        );
+        let err = files.put_batch(&[Document::new("first"), doc]).unwrap_err();
+        assert_eq!(err.code(), ErrorCode::InvalidArgument, "{err}");
+        for id in ["x", "y", "first"] {
+            assert!(files.get(id).unwrap().is_none(), "{id} was logged");
+        }
+        let err = db.get_blob(&wrong).unwrap_err();
+        assert_eq!(err.code(), ErrorCode::InvalidArgument, "{err}");
+        let err = db.get_blob_range(&wrong, 0..1).unwrap_err();
+        assert_eq!(err.code(), ErrorCode::InvalidArgument, "{err}");
+    }
+    // The reference the store returned is taken.
+    files
+        .put_with_blob(&Document::new("ok"), Blob::Stored(ours))
+        .unwrap();
+    assert!(files.get("ok").unwrap().is_some());
+}
+
 #[test]
 fn blob_options_are_checked() {
     let dir = tempfile::tempdir().unwrap();

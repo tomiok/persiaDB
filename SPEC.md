@@ -2784,8 +2784,9 @@ the records from there on may not be in a memtable yet. The records of that chun
 again by the next open, which is harmless (§8.2.1). Records replayed after the last such commit hold `wal_start` back
 until a later flush covers them, like records written after the open. An open that fails or crashes during these
 commits leaves a state from which the next open reaches the same documents. The compaction-only open (§4.6,
-ADR-0068) refuses such a flush while a collection whose analysis it skips holds a replayed record
-(`AnalysisSkipped`, before anything of that commit is written), and so fails; its other commits are these.
+ADR-0068) and the mark-only open (§9.5, ADR-0069), which share one open, refuse such a flush while a collection whose
+analysis they skip holds a replayed record (`AnalysisSkipped`, before anything of that commit is written), and so
+fail; their other commits are these.
 
 A **read-only open** (ROADMAP 6.6.2) runs the same sequence on a container opened read-only (§4.5.1): no lock, no
 write, so it opens beside a live writer, any number at once. It cannot flush, and it does not stop at the size
@@ -2890,7 +2891,10 @@ running one again is harmless. A crash leaves a prefix of the lines imported. `p
 <name> (--query <text> | --request <json>)` runs one search (§7.1.1 user text with every default, or a request
 JSON, §7.1.4) on a read-only open, without the lock; as any read-only handle of the embedded API, it takes a reader
 lease (§9.3). It prints each hit's rank, score and document, or with `--json` the response JSON of §7.5.2. Both have
-the built-in analyzers only: a schema that names a registered analyzer (§6.2.2) fails their open.
+the built-in analyzers only: a schema that names a registered analyzer (§6.2.2) fails their open. Both take their exit
+status from the embedded API's `ErrorCode` (ROADMAP 10.1.33): 3 for `Corrupt` (stored damage, also when a put or a
+read reaches it, such as a damaged blob manifest frame), 4 for a file that is not a container, and 1 for any other
+failure (a blob reference that names a stored blob with another size or chunk size is `InvalidArgument`, §9.6).
 
 ### 8.7 Manifest
 A manifest is the snapshot one commit publishes (ADR-0024): the commit's `seq`, the committing writer's
@@ -3099,8 +3103,8 @@ visible once a durable slot covers its `BlobIndex` frame; the writer shows a bin
 lookups) only after its slot sync returns. Chunk frames no committed `BlobIndex` names are staging or orphans. The
 open rebuilds the index by scanning the frames of `12288..log_end`; a read-write open then commits the longest fully
 valid frame run after `log_end` that ends in a complete `BlobIndex` whose chunk frames match its manifest (a cut
-bind, or one whose newer slot was damaged) and truncates the rest. A read checks the manifest it found against the `BlobRef` it reads by (`check_ref`: id, size, chunk
-size), then each chunk's length and CRC32C. A pack reader reads each chunk's `BlobChunk` frame in one read sized by the
+bind, or one whose newer slot was damaged) and truncates the rest. A read checks the manifest it found against the `BlobRef` it reads by (`check_given_ref`: id,
+size, chunk size; a size or chunk-size mismatch is the caller's error, §9.6), then each chunk's length and CRC32C. A pack reader reads each chunk's `BlobChunk` frame in one read sized by the
 manifest (`24 + pad8(32 + len) + 8`, bounded by the frames it knows; a frame that would run past them is corruption)
 and checks the frame (§4.4) and the chunk's CRC32C in one pass over its bytes (ROADMAP 9.2.9). A corruption error of
 the pack names the offset of the slot or frame it found damaged (the header: 0; ROADMAP 9.2.8).
@@ -3236,7 +3240,8 @@ only a reopen tells what was bound (ROADMAP 9.4.7). The writer never deletes the
 (an S3 conditional write still in flight may land later), leaving them to GC under that same grace floor.
 A backend without
 `conditional_put` cannot store blobs (`Unsupported`). A read gets the blob manifest, checks it against the `BlobRef`
-(`check_ref`; a manifest under the wrong key would otherwise serve another blob's bytes with every CRC valid), then
+(`check_given_ref`; a manifest under the wrong key would otherwise serve another blob's bytes with every CRC valid;
+a size or chunk-size mismatch is the caller's error, §9.6), then
 gets whole chunks and checks each chunk's length and CRC32C against it (a mismatch is `Corrupt`).
 **Resume** (ROADMAP 9.3.2). The resume token is the `upload_id` and the `chunk_size` the upload started with (chunk
 objects do not record it). The writer lists the staged chunks (their indices taken sorted and without duplicates, whatever order the backend
@@ -3316,10 +3321,18 @@ the same process that runs `put_blob`, and keeps a **pin set** with it:
   blob whose manifest was missing is not resolved, so a later pin still makes the sweep read it), and the pinned
   upload ids. GC runs only when the writer calls `gc`, never in the background, and between writes. `persia gc <path>`
   (ROADMAP 10.4.5) is such a writer: it opens the database read-write with its pack (the writer locks of both, so it
-  fails while another writer has it, and recovery runs first; built-in analyzers only, ROADMAP 10.4.7), runs one GC
-  with the default rewrite ratio and `--grace` (24 h by default; the GC refuses one below its floor), and reports the
-  mark, the sweep, the rewrite, the pack's size before and after and the reader leases (§9.3). A database without a
-  pack has nothing to collect.
+  fails while another writer has it, and recovery runs first), runs one GC with the default rewrite ratio and
+  `--grace` (24 h by default; the GC refuses one below its floor), and reports the mark, the sweep, the rewrite, the
+  pack's size before and after and the reader leases (§9.3). A database without a pack has nothing to collect. It has
+  the built-in analyzers only, so it opens with the **mark-only open** (ROADMAP 10.4.7, ADR-0069,
+  `MarkOnlyDatabase`): the compaction-only open's recovery (§4.6, §8.6, ADR-0068; one function), in which a `text`
+  field whose analyzer it lacks is indexed with a stand-in that emits no token and no commit may flush a non-empty
+  memtable of its collection (`AnalysisSkipped`, refused before anything of that commit is written, so the open fails,
+  status 1, and nothing is marked or swept). The mark reads no term: it lists the references of the stored documents
+  and of every WAL put from `wal_start` on, so a record of such a collection, which stays a WAL record, is marked as
+  in a writer's open, and the sweep and the pack rewrite need no analyzer. The handle offers the mark, the committed
+  seq and the writer proof the pack opens with, and nothing that writes a document, commits, merges, compacts or
+  changes a schema. With every analyzer it is the writer's open.
 - Sweep: unmarked blob manifests, then staged chunks of uploads no marked manifest names, each only once older than a
   grace period (default 24 h, and at least `2 * MAX_BIND_BUDGET`, §9.4; for staged chunks counted from the upload's
   newest chunk, so an idle upload stays
@@ -3391,7 +3404,7 @@ it logs or commits a document (it does not depend on `persia-blob`); the public 
 ### 9.6 API
 `put_blob(reader, &PutBlobOptions { mime, user_meta, expected_id, expected_size, chunk_size, bind_budget, resume }) -> BlobRef`,
 `get_blob(blob_ref) -> Stream`, `get_blob_range(blob_ref, range)` (by reference: a read checks the manifest against it,
-`check_ref`, and a stream reads by that manifest, looked up once), `delete` via document delete + GC.
+`check_given_ref`, and a stream reads by that manifest, looked up once), `delete` via document delete + GC.
 In the embedded API, `persia::PutBlobOptions` is a builder of those seven options (`PutBlobOptions::new().mime(..)
 .chunk_size(..)`; ROADMAP 10.1.15, ADR-0063 amended), checked when the blob is stored, and the token is a
 `persia::ResumeToken` (its `upload_id` and `chunk_size`), which `persia::Error::resume_token()` returns for an
@@ -3430,6 +3443,19 @@ carries references, not blob bytes, so it imports with its blobs only into the d
 its pack (§4.8), until `dump documents` exports blobs (ROADMAP 10.4.6). A dangling reference that reaches a
 database anyway (written below the public API, or by copying only the container, §4.8) is reported by `verify`
 (§9.5), and `get_blob` fails for it.
+
+**A caller's reference that does not match its blob** (ROADMAP 10.1.33). The rule: a reference the caller passes is
+input; a stored reference that disagrees with its manifest is damage. A `BlobRef` given to `put(doc, blob)`, to
+`get_blob` or to `get_blob_range` whose `blob_id` this store has bound, but whose `size` or `chunk_size` is not the
+bound manifest's, is refused (a put logs nothing, as for a reference it does not find). It is the caller's error,
+not corruption (`BlobRef::new` is public, and the same `blob_id` can hold another chunk size in another database):
+`BlobManifest::check_given_ref` reports `persia_blob::Error::BlobRefMismatch { blob_id, field, given, stored }` (the
+first of the size and the chunk size that differs), `ErrorCode::InvalidArgument` in the embedded API, and `persia
+import` exits 1 at its line (§8.6). The call site decides, never an error's text: `check_ref`, which reports the
+same mismatch as corruption, is used only where the reference is read out of stored data, by `verify` (a document of
+a segment or a WAL record: a dangling reference, §9.5). On every path a manifest bound under the id that names
+another blob is corruption, and so is any stored damage a put or a read reaches (a damaged blob manifest frame,
+`ErrorCode::Corrupt`).
 
 ---
 

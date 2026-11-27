@@ -26,7 +26,7 @@ use std::sync::Arc;
 use persia_format::frame::FrameKind;
 use persia_format::superblock::Superblock;
 use persia_storage::Storage;
-use persia_storage::container::{Container, ContainerFile, FrameRef};
+use persia_storage::container::{self, Container, ContainerFile, FrameRef, Mode};
 
 use super::read_only::{Analysis, skip_unregistered};
 use super::{
@@ -49,10 +49,32 @@ impl<F: ContainerFile + Sync> Database<F> {
         Self::recover_as(container, options, Analysis::Required)
     }
 
-    /// [`Database::recover`]; with [`Analysis::SkipUnregistered`] (a [`super::CompactOnlyDatabase`], ADR-0068), a
-    /// `text` field whose analyzer the registry lacks gets the no-token stand-in of a read-only open, and is recorded
-    /// before the replay, so that no commit, the replay's included, flushes its collection
-    /// ([`Database::plan_flushes`]).
+    /// The open of a [`super::CompactOnlyDatabase`] and of a [`super::MarkOnlyDatabase`] (ADR-0068, ADR-0069): the
+    /// writer's open of a read-write `container`, with a no-token stand-in for each `text` field's analyzer that
+    /// `options.registry` lacks ([`Analysis::SkipUnregistered`]), and the database's refusal to flush a memtable that
+    /// indexed one (`AnalysisSkipped`, checked by the flush planning itself). One function, so both handles refuse
+    /// exactly alike.
+    ///
+    /// # Errors
+    /// [`DatabaseError::Container`] with [`container::Error::ReadOnly`] for a container opened read-only; otherwise as
+    /// [`Database::recover_as`].
+    pub(super) fn open_skipping_analysis(
+        container: Container<F>,
+        options: DatabaseOptions,
+    ) -> Result<Self, DatabaseError> {
+        if container.mode() != Mode::ReadWrite {
+            return Err(container::Error::ReadOnly {
+                reason: container::ReadOnlyReason::OpenedReadOnly,
+            }
+            .into());
+        }
+        Self::recover_as(container, options, Analysis::SkipUnregistered)
+    }
+
+    /// [`Database::recover`]; with [`Analysis::SkipUnregistered`] (a [`super::CompactOnlyDatabase`] or a
+    /// [`super::MarkOnlyDatabase`], through [`Database::open_skipping_analysis`]; ADR-0068, ADR-0069), a `text` field
+    /// whose analyzer the registry lacks gets the no-token stand-in of a read-only open, and is recorded before the
+    /// replay, so that no commit, the replay's included, flushes its collection ([`Database::plan_flushes`]).
     pub(super) fn recover_as(
         container: Container<F>,
         options: DatabaseOptions,

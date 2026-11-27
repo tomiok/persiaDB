@@ -2,7 +2,8 @@
 
 - Status: accepted; amended 2026-11-07 after review (items 2–4, 6, 7: chunks never overwritten, unknown binding
   outcomes, read checks, GC pins); amended by ADR-0051 (item 3: an unknown binding outcome is retried within a time
-  budget, then `put_blob` fails)
+  budget, then `put_blob` fails); amended 2026-11-26 by ROADMAP 10.1.33 (SPEC §9.6: reads check a reference as caller
+  input)
 - Date: 2026-11-07
 - Related: SPEC §9.1–§9.6, §10.1, §10.4, §18.8; ROADMAP 9.1.0–9.1.3, 9.2, 9.3, 9.5; ADR-0002, ADR-0011, ADR-0024, ADR-0035
 
@@ -46,6 +47,7 @@ only atomic primitive; a blob can be larger than memory; uploads from servers ca
    A reader checks the manifest against what it looked it up by (`check_ref`: id, size, chunk size) before serving
    chunks: the manifest's CRCs cover only its own bytes, so a manifest under the wrong key would otherwise serve
    another blob's bytes.
+   Amended by ROADMAP 10.1.33 (SPEC §9.6): reads check a reference as caller input.
 4. **Dedup after hashing.** When the id is known: if it is already bound, `put_blob` decodes the bound manifest and
    checks it names the id (one that does not is `Corrupt`, reported by `verify`, never reused), then returns a
    `BlobRef` with the **bound** blob's `chunk_size` (two uploads of the same bytes with different chunk sizes are one

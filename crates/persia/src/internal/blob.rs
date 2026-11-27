@@ -336,11 +336,14 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     }
 
     /// Pins the blob `blob_ref` refers to, then checks that this store holds it ([`BlobStore::contains`]): what
-    /// `put(doc, blob)` does with a `BlobRef` it was given, before it logs the document (SPEC §9.6). `None` when the
-    /// store does not hold it (and nothing stays pinned).
+    /// `put(doc, blob)` does with a `BlobRef` it was given, before it logs the document, and what the embedded API's
+    /// `get_blob` does with the reference it is given (SPEC §9.6). `None` when the store does not hold it (and nothing
+    /// stays pinned). The reference is the caller's input, so it is checked with [`BlobManifest::check_given_ref`]
+    /// (ROADMAP 10.1.33).
     ///
     /// # Errors
-    /// As [`BlobStore::contains`]: [`Error::Corrupt`] when the manifest bound under the id does not match `blob_ref`.
+    /// As [`BlobStore::contains`]: [`Error::BlobRefMismatch`] when the manifest bound under the id has another size or
+    /// chunk size than `blob_ref`, [`Error::Corrupt`] when it names another blob.
     pub fn pin_contained(&self, blob_ref: &BlobRef) -> Result<Option<Pins>> {
         // Pinned before the lookup (SPEC §9.5), so GC cannot sweep it between the check and the document's log. The
         // lookup is `BlobStore::contains`'s (the manifest, checked against the reference), and pins the upload the
@@ -349,7 +352,7 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         let Some(manifest) = self.store.manifest(blob_ref.blob_id())? else {
             return Ok(None);
         };
-        manifest.check_ref(blob_ref)?;
+        manifest.check_given_ref(blob_ref)?;
         pins.add(Pinned::Upload(manifest.upload_id()));
         Ok(Some(pins))
     }
@@ -358,7 +361,8 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     /// blob is pinned while it is read, so a GC sweep cannot take it halfway (SPEC §9.5).
     ///
     /// # Errors
-    /// As [`read_range`]: [`Error::BlobNotFound`], [`Error::RangeOutOfBounds`], [`Error::Corrupt`], the store's.
+    /// As [`read_range`]: [`Error::BlobNotFound`], [`Error::BlobRefMismatch`], [`Error::RangeOutOfBounds`],
+    /// [`Error::Corrupt`], the store's.
     pub fn get_blob_range(&self, blob_ref: &BlobRef, range: Range<u64>) -> Result<Vec<u8>> {
         // A blob pin alone protects its chunks too: the sweep keeps an upload a pinned blob's manifest names
         // (ADR-0051 item 5).
@@ -373,8 +377,9 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     /// it is dropped, so a GC sweep never takes a blob mid-stream (SPEC §9.5).
     ///
     /// # Errors
-    /// [`Error::BlobNotFound`] when the id is not bound, [`Error::Corrupt`] when its manifest does not match
-    /// `blob_ref`, or the store's errors. Errors while reading come from [`Read::read`] as [`io::Error`]s whose
+    /// [`Error::BlobNotFound`] when the id is not bound, [`Error::BlobRefMismatch`] when its manifest has another
+    /// size or chunk size than `blob_ref` (the caller's, ROADMAP 10.1.33), [`Error::Corrupt`] when it names another
+    /// blob, or the store's errors. Errors while reading come from [`Read::read`] as [`io::Error`]s whose
     /// inner error is the [`Error`].
     pub fn get_blob(&self, blob_ref: &BlobRef) -> Result<BlobReader<'_, S>> {
         // Pinned before the lookup, and its upload after it, as `pin_contained` does (ADR-0051 item 5).
@@ -384,7 +389,7 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
                 blob_id: blob_ref.blob_id(),
             });
         };
-        manifest.check_ref(blob_ref)?;
+        manifest.check_given_ref(blob_ref)?;
         pins.add(Pinned::Upload(manifest.upload_id()));
         let chunk = u64::from(manifest.chunk_size().get());
         let window = chunk.saturating_mul(u64::from(window_chunk_count(manifest.chunk_size())));

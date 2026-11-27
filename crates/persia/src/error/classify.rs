@@ -353,7 +353,9 @@ impl Classified for persia_blob::Error {
             | Self::InvalidBlobRef(_)
             | Self::BindBudgetAboveMax { .. }
             | Self::ResumeUnchecked
-            | Self::BlobSizeMismatch { .. } => ErrorCode::InvalidArgument,
+            | Self::BlobSizeMismatch { .. }
+            // A caller's reference that names a stored blob with other attributes (ROADMAP 10.1.33).
+            | Self::BlobRefMismatch { .. } => ErrorCode::InvalidArgument,
             Self::Read(_) | Self::PackIo { .. } => ErrorCode::Io,
             Self::Corrupt { .. } | Self::CorruptAt { .. } => ErrorCode::Corrupt,
             Self::UnsupportedVersion { .. }

@@ -96,10 +96,14 @@
 //! (it has the built-in ones only; it compacts such a database otherwise, ROADMAP 10.4.4, ADR-0068), `import` and
 //! `search` exit 1 for a collection the database lacks (`import` creates it with `--schema`) and for a schema naming a
 //! registered analyzer, `import` exits 1 at the first bad line of its input (naming it, after committing the lines
-//! before it), `gc` exits 1 for a schema naming a registered analyzer and for a `--grace` below 2 h (2 for a malformed
-//! one) and 0 when reader leases held its sweep back (the report says so), the segment commands exit 3 for a corrupt
-//! segment file and 1 for a missing one or a `--schema` that is not the segment's, and the store commands exit 1 for a
-//! root that is not a directory.
+//! before it; a blob reference that names a stored blob with another size or chunk size is such a line, and a put
+//! that finds stored damage exits 3, ROADMAP 10.1.33), `import` and `search` read the embedded API's `ErrorCode` for
+//! their status after the not-a-container check, which comes first (4; then 3 for `Corrupt` only, else 1), `gc`
+//! exits 1 when its recovery would flush any collection while a collection whose schema names a registered analyzer
+//! holds a replayed record (it collects such a database otherwise, ROADMAP 10.4.7, ADR-0069) and for a `--grace`
+//! below 2 h (2 for a malformed one) and 0 when reader leases held its sweep back (the report says so), the segment
+//! commands exit 3 for a corrupt segment file and 1 for a missing one or a `--schema` that is not the segment's, and
+//! the store commands exit 1 for a root that is not a directory.
 //!
 //! `persia bench` (ROADMAP 10.4.3, module `bench`) is a quick micro-benchmark: it indexes a seeded synthetic corpus
 //! into a new database in a scratch directory it creates and removes, then runs a seeded query mix, and reports
@@ -203,9 +207,12 @@ enum Command {
     /// what it deleted, what it kept and why, the pack's size before and after, and the reader leases it found. Opens
     /// the database read-write, as a writer does, so it fails (status 1) while another writer has it open. A read-only
     /// handle of another process that has not refreshed since the last commit holds the sweep back: nothing is deleted,
-    /// and the report says so. A database without a pack has nothing to collect. It has the built-in analyzers only: a
-    /// schema naming an analyzer the application registered fails the open (status 1). Exits with status 3 on
-    /// corruption, 4 when the file is not a Persia container, and 1 on any other failure.
+    /// and the report says so. A database without a pack has nothing to collect.
+    /// It has the built-in analyzers only: a database whose schema names an analyzer the application registered is
+    /// collected without analyzing that field (its WAL records stay in the WAL, and their blobs are kept), unless
+    /// recovery would flush while such a collection holds a WAL record (status 1; open it with the application and
+    /// commit, then collect). Exits with status 3 on corruption, 4 when the file is not a Persia container, and 1 on
+    /// any other failure.
     Gc {
         /// The container file.
         path: PathBuf,
@@ -421,11 +428,23 @@ fn status_of(err: &anyhow::Error) -> u8 {
 }
 
 /// Whether `err` reports corrupt stored bytes: the outermost Persia error in its chain decides, since it knows
-/// what its sources mean (an I/O error reading a segment is not a corruption).
+/// what its sources mean (an I/O error reading a segment is not a corruption). A command of the embedded API
+/// (`import`, `search`) fails with its `persia::Error`, whose stable code decides (ROADMAP 10.1.33): a blob
+/// reference the caller passes that does not match its blob is `InvalidArgument` there, and not corruption below
+/// either. The code is read first so that the status follows the embedded API's classification, which no test
+/// pins against the lower layers' `is_corruption`. Checked against the arms of `persia`'s `error::classify`: the
+/// database's and the documents layer's codes are `Corrupt` whenever their `is_corruption` is (they ask it first).
+/// Where they differ: a segment's `ReadError::Tombstone` (a tombstone for a docid the segment lacks) is `Corrupt`
+/// by code and not by `ReadError::is_corruption` (also inside a `DatabaseError`), so `import` or `search` meeting
+/// one exits 3; and, from a remote blob store only (which no command opens), an interrupted upload whose cause is
+/// corruption and a storage backend's corruption under a blob error are `Corrupt` by code and not by
+/// `persia_blob::Error::is_corruption`.
 fn is_corruption(err: &anyhow::Error) -> bool {
     err.chain()
         .find_map(|c| {
-            if let Some(e) = c.downcast_ref::<DatabaseError>() {
+            if let Some(e) = c.downcast_ref::<persia::Error>() {
+                Some(e.code() == persia::ErrorCode::Corrupt)
+            } else if let Some(e) = c.downcast_ref::<DatabaseError>() {
                 Some(e.is_corruption())
             } else if let Some(e) = c.downcast_ref::<VerifyError>() {
                 Some(e.is_corruption())

@@ -1,6 +1,7 @@
 # ADR-0035: Blob manifest encoding
 
-- Status: accepted (amended by ADR-0041, ADR-0050)
+- Status: accepted (amended by ADR-0041, ADR-0050; amended 2026-11-26 by ROADMAP 10.1.33, SPEC §9.6: reads check a
+  reference as caller input)
 - Date: 2026-11-07
 - Related: SPEC §9.1.1, §9.2, §9.3, §9.4, §15; ROADMAP 9.1.3, 9.2.1, 9.3.1, 9.3.3; ADR-0002, ADR-0024, ADR-0030, ADR-0034
 
@@ -37,6 +38,7 @@ remotely as the object `blobs/<xx>/<id>`, which is not inside a frame. It is rea
 6. **Lookup checks.** A manifest's checksums cover only its own bytes, so a reader checks it against what it looked it
    up by: `check_blob_id` (the id of its key or `BlobIndex` entry) and `check_ref` (id, size and chunk size of the
    `BlobRef`), each a mismatch `Corrupt` (SPEC §9.3, §9.4).
+   Amended by ROADMAP 10.1.33 (SPEC §9.6): reads check a reference as caller input.
 7. **Golden files** live in `tests/fixtures/blob-manifest/v1/`, checked by `persia-blob`'s tests and written when
    missing with `PERSIA_WRITE_BLOB_MANIFEST_FIXTURES=1`, as for the other object encodings (SPEC §15). `cargo xtask
    fixtures` cannot write them: `xtask` may depend on `persia-format` only (CLAUDE.md "Architecture"), and the codec
