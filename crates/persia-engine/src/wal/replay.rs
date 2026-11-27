@@ -8,6 +8,7 @@ use persia_storage::container::{self, Container, ContainerFile};
 use super::chunk::{MAX_CHUNK_LEN, WalCorruption, WalError, WalOp, WalRecord, decode_chunk};
 use crate::document::{DecodeError, Document};
 use crate::memtable::{Memtable, MemtableError};
+use crate::schema::CollectionSchema;
 
 /// Why replay stopped. Every variant fails the open: the WAL from `wal_start` on is made of whole frames that
 /// passed their CRC, so nothing here is a torn write (SPEC §8.2.1).
@@ -158,6 +159,47 @@ pub fn replay_container<F: ContainerFile>(
     Ok(replay.finish())
 }
 
+/// A record as the replay applies it: a put's document, decoded with its collection's schema, or a delete's id.
+#[derive(Debug)]
+pub(crate) enum Operation<'r> {
+    /// An upsert of this document.
+    Put(Document),
+    /// A delete of this id.
+    Delete(&'r str),
+}
+
+/// Decodes one record, at `offset` in the chunk at position `chunk`, with its collection's `schema`, exactly as
+/// [`apply`] does before it changes anything: the one decoder of a replayed record, shared by the pre-scan of an open
+/// that skips analysis (ROADMAP 10.4.8), so that it fails on the same bytes with the same error.
+pub(crate) fn decode<'r>(
+    schema: &CollectionSchema,
+    chunk: u64,
+    offset: u64,
+    record: &WalRecord<'r>,
+) -> Result<Operation<'r>, ReplayError> {
+    match record.op() {
+        WalOp::Put => Document::decode(record.payload(), schema)
+            .map(Operation::Put)
+            .map_err(|error| ReplayError::Document {
+                chunk,
+                offset,
+                error,
+            }),
+        // Checked by the decoder; should that check ever regress, the record is corrupt, not a delete of the empty
+        // id.
+        WalOp::Delete => record
+            .deleted_id()
+            .map(Operation::Delete)
+            .ok_or(ReplayError::Chunk {
+                chunk,
+                error: WalError::Corrupt {
+                    offset,
+                    reason: WalCorruption::Id,
+                },
+            }),
+    }
+}
+
 /// Applies one record, at `offset` in the chunk at position `chunk`, to its collection's `memtable`: a put as an
 /// upsert, a delete as a delete (SPEC §8.2.1). On an error the memtable is as it was.
 pub(crate) fn apply(
@@ -171,27 +213,11 @@ pub(crate) fn apply(
         offset,
         error,
     };
-    match record.op() {
-        WalOp::Put => {
-            let doc = Document::decode(record.payload(), memtable.schema()).map_err(|error| {
-                ReplayError::Document {
-                    chunk,
-                    offset,
-                    error,
-                }
-            })?;
+    match decode(memtable.schema(), chunk, offset, record)? {
+        Operation::Put(doc) => {
             memtable.put(&doc).map_err(at_record)?;
         }
-        WalOp::Delete => {
-            // Checked by the decoder; should that check ever regress, the record is corrupt, not a delete of the
-            // empty id.
-            let id = record.deleted_id().ok_or(ReplayError::Chunk {
-                chunk,
-                error: WalError::Corrupt {
-                    offset,
-                    reason: WalCorruption::Id,
-                },
-            })?;
+        Operation::Delete(id) => {
             memtable.delete(id).map_err(at_record)?;
         }
     }

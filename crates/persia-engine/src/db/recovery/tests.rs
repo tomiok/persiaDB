@@ -297,3 +297,46 @@ fn only_a_replayed_memtable_counts_as_written_at_the_open() {
         "the replayed record is committed"
     );
 }
+
+/// ROADMAP 10.4.8: the flush guard of an open that skips analysis stays as a backstop behind its pre-scan. Should a
+/// skipped collection's memtable ever hold an operation, a commit that would flush it is refused before anything is
+/// written (no segment, no id, no commit), naming the first such field; a commit that skips that collection (its drop)
+/// is not.
+#[test]
+fn the_flush_guard_refuses_a_skipped_collections_memtable_before_writing() {
+    use crate::db::{DatabaseError, SkippedAnalysis};
+    let schema = |name: &str| {
+        SchemaBuilder::new(name)
+            .field("body", FieldKind::Text(TextOptions::default()))
+            .build()
+            .unwrap()
+    };
+    let file = SimFile::new();
+    let mut db = Database::create_on(file.clone(), [9; 16], options(None)).unwrap();
+    db.create_collection(schema("notes")).unwrap();
+    db.create_collection(schema("plain")).unwrap();
+    for name in ["notes", "plain"] {
+        db.put(name, &Document::new("a"), Durability::Fsync)
+            .unwrap();
+    }
+    let skipped = |collection: &str| SkippedAnalysis {
+        collection: collection.to_owned(),
+        field: "body".to_owned(),
+        analyzer: "standard@1".to_owned(),
+    };
+    db.skipped = vec![skipped("notes"), skipped("zzz")];
+    let (seq, bytes, mutations) = (db.seq(), file.bytes(), file.mutations());
+    let err = db.commit().unwrap_err();
+    assert!(
+        matches!(&err, DatabaseError::AnalysisSkipped { collection, field, analyzer }
+            if collection == "notes" && field == "body" && analyzer == "standard@1"),
+        "{err:?}"
+    );
+    assert_eq!(db.seq(), seq);
+    assert_eq!(file.mutations(), mutations, "nothing was written");
+    assert!(file.bytes() == bytes, "the same bytes");
+    assert!(db.usable().is_ok(), "refused before writing: not poisoned");
+    // Its drop flushes the other collections only.
+    db.drop_collection("notes").unwrap();
+    assert!(db.seq() > seq);
+}

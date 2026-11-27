@@ -40,19 +40,29 @@
 //!    default ratio (nothing deleted, every manifest kept: by design, SPEC §9.3, so an unreferenced manifest survives
 //!    only such a run).
 //! 5. **A registered analyzer** (`kill_9_of_persia_gc_on_a_registered_analyzer_database_loses_no_blob`, ROADMAP
-//!    10.4.7, ADR-0069): `persia gc` opens a database whose schema names an analyzer it lacks with the mark-only open,
-//!    and is killed at each kind of point above: `verify --deep` passes, the application reads every blob, the one only
-//!    an unflushed WAL record references included, that record is still a WAL record, and a rerun completes.
+//!    10.4.7, ADR-0069): `persia gc` opens a database whose schema names an analyzer it lacks with the mark-only open.
+//!    While an unflushed WAL record of such a collection is left, it is refused (ROADMAP 10.4.8: status 1, nothing
+//!    written) and the application reads that record's blob; once the application has closed the database, `persia
+//!    gc` is killed at each kind of point above: `verify --deep` passes, the application reads every blob, and a rerun
+//!    completes.
 //! 6. **A registered analyzer beside a plain collection** (ROADMAP 10.4.7): `notes` names `tags@1`, `plain` does not.
 //!    - Soak (`seeded_soak_of_application_sessions_with_a_registered_analyzer_interleaved_with_gc`): seeded application
 //!      sessions (puts, replacements, deletions with blobs in both, commits, or a drop with a synced, uncommitted
 //!      tail), each followed by `persia gc --grace 2h` or the internal mark-only open with a seeded small memtable
-//!      (which may flush `plain` or be refused). No live blob is deleted, `verify --deep` passes, `marked` equals the
-//!      references, the `notes` WAL records stay WAL records, and the real analyzer's terms find every note.
-//!    - A reader process with the application's analyzers holds a lease beside `persia gc`: judged current, behind
-//!      after the application's commit, current after its refresh; nothing it shows is swept while it shows it.
+//!      (which may flush `plain`). A session that leaves a `notes` record in the WAL refuses either (ROADMAP 10.4.8:
+//!      the container and the pack byte-identical); the application then closes the database and `persia gc`
+//!      collects. No live blob is deleted, `verify --deep` passes, `marked` equals the references, a GC that runs
+//!      leaves the `notes` memtable and segments as they were, and the real analyzer's terms find every note.
+//!    - A reader process with the application's analyzers holds a lease beside `persia gc`: a `notes` WAL record
+//!      refuses the run (nothing written, the reader reads on); after the application's commit the lease is behind,
+//!      current after its refresh, and stays current over uncommitted `plain` changes; nothing it shows is swept while
+//!      it shows it.
 //!    - `persia gc` killed (SIGKILL) while its open's replay flushes a `plain` backlog over the default memtable:
-//!      nothing is lost, the `notes` record stays a WAL record, and a rerun completes.
+//!      nothing is lost and a rerun completes.
+//!    - `persia gc` killed (SIGKILL) during its open's pre-scan of the same backlog with a `notes` record after it
+//!      (ROADMAP 10.4.8), at points observed in the bytes it has read: the container and the pack are byte-identical
+//!      after every kill and every refused rerun, the `notes` record is a WAL record, and once the application has
+//!      closed the database `persia gc` collects.
 //!
 //! Skipped (with the reason printed) where locks cannot be judged (`locks_per_handle`, ADR-0054 item 13): the reader
 //! scenarios need a reader's lock to be judged.
@@ -318,6 +328,36 @@ fn gc_report(out: &Output, ctx: &str) -> Json {
 /// `persia gc --json <path>`, which must succeed: its report.
 fn gc_ok(path: &Path, ctx: &str) -> Json {
     gc_report(&persia(&["gc", arg(path), "--json"]), ctx)
+}
+
+/// `persia gc --json <path>` exits 1, refused for a pending record of a collection whose analyzer it lacks (ROADMAP
+/// 10.4.8): it says so and what to do, writes no report, and leaves the container and the pack byte-identical.
+fn gc_refused(path: &Path, ctx: &str) {
+    let before = (std::fs::read(path).unwrap(), std::fs::read(pack(path)).ok());
+    let out = persia(&["gc", arg(path), "--json"]);
+    check_refused(&out, ctx);
+    let after = (std::fs::read(path).unwrap(), std::fs::read(pack(path)).ok());
+    assert!(
+        after == before,
+        "{ctx}: the refused persia gc wrote to the container or the pack"
+    );
+}
+
+/// The output of a `persia gc` refused for a pending record (ROADMAP 10.4.8): status 1, no report, the hint.
+fn check_refused(out: &Output, ctx: &str) {
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{ctx}: {err}");
+    assert!(out.stdout.is_empty(), "{ctx}: a report was written");
+    assert!(
+        err.contains("open the database with its application and close it, then retry"),
+        "{ctx}: {err}"
+    );
+}
+
+/// The application (with `tags@1`) opens the database at `path` and closes it, committing: what a refusal's hint asks.
+fn close_with_the_application(path: &Path) {
+    let mut db = BlobDatabase::open(path, tags_options()).unwrap();
+    db.commit().unwrap();
 }
 
 /// What `persia verify` reported about the blobs.
@@ -814,9 +854,9 @@ fn stats_json(path: &Path) -> Json {
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
-/// The application's read-only open (with `tags@1`) shows exactly `model`'s documents, `wal` still a WAL record, each
-/// blob byte-identical.
-fn check_app_reads(path: &Path, model: &Model, ctx: &str) {
+/// The application's read-only open (with `tags@1`) shows exactly `model`'s documents, `wal_documents` of them WAL
+/// records (`wal` before the application closed the database), each blob byte-identical.
+fn check_app_reads(path: &Path, model: &Model, wal_documents: u64, ctx: &str) {
     let ro = ReadOnlyBlobDatabase::open(path, &tags_options())
         .unwrap_or_else(|e| panic!("{ctx}: read-only open: {e}"));
     let snapshot = ro.database().snapshot();
@@ -825,8 +865,8 @@ fn check_app_reads(path: &Path, model: &Model, ctx: &str) {
     let c = snapshot.collection(COLLECTION).unwrap();
     let stats = stats_json(path);
     assert_eq!(
-        stats["collections"][0]["wal_documents"], 1,
-        "{ctx}: `wal` is no longer a WAL record: {stats}"
+        stats["collections"][0]["wal_documents"], wal_documents,
+        "{ctx}: the WAL records: {stats}"
     );
     for (id, &(size, cseed)) in model {
         let doc = c.get(id).unwrap().unwrap();
@@ -841,11 +881,12 @@ fn check_app_reads(path: &Path, model: &Model, ctx: &str) {
 }
 
 /// ROADMAP 10.4.7, ADR-0069 item 5: `persia gc` on a database whose schema names a registered analyzer (the mark-only
-/// open, with stand-ins), killed (SIGKILL) at each kind of point the parent observes on the file system, with no timer.
-/// After each kill `verify --deep` passes, a pack whose inode did not change is a prefix of the pack before the run
-/// (the rewrite is never in place), the application reads every document and blob, the WAL-only one included, and that
-/// record is still a WAL record (nothing was flushed with a stand-in); a rerun completes and leaves exactly the two
-/// referenced blobs.
+/// open, with stand-ins). Flipped by ROADMAP 10.4.8: while the `wal` record is left in the WAL, the run is refused
+/// (status 1, the container and the pack byte-identical) and the application reads that record's blob; once the
+/// application has closed the database, `persia gc` is killed (SIGKILL) at each kind of point the parent observes on
+/// the file system, with no timer. After each kill `verify --deep` passes, a pack whose inode did not change is a
+/// prefix of the pack before the run (the rewrite is never in place), the application reads every document and blob;
+/// a rerun completes and leaves exactly the two referenced blobs.
 #[test]
 fn kill_9_of_persia_gc_on_a_registered_analyzer_database_loses_no_blob() {
     if child_env().is_some() {
@@ -867,6 +908,9 @@ fn kill_9_of_persia_gc_on_a_registered_analyzer_database_loses_no_blob() {
         let ctx = format!("seed {seed} ({at:?})");
         let dir = KeptOnFailure::new();
         let (path, model) = registered_analyzer_database(dir.path());
+        gc_refused(&path, &ctx);
+        check_app_reads(&path, &model, 1, &format!("{ctx}: refused"));
+        close_with_the_application(&path);
         let pack_before = std::fs::read(pack(&path)).unwrap();
         let inode = pack_inode(&path);
         let ended = match run_gc_until(&path, at) {
@@ -892,7 +936,7 @@ fn kill_9_of_persia_gc_on_a_registered_analyzer_database_loses_no_blob() {
         } else {
             assert_eq!(v.bound, 2, "{ctx}: replaced pack {v:?}");
         }
-        check_app_reads(&path, &model, &ctx);
+        check_app_reads(&path, &model, 0, &ctx);
 
         let again = gc_ok(&path, &ctx);
         assert_eq!(again["marked"]["blobs"], 2, "{ctx}: rerun {again}");
@@ -901,7 +945,7 @@ fn kill_9_of_persia_gc_on_a_registered_analyzer_database_loses_no_blob() {
         let after = verify(&path, true, &ctx);
         assert_eq!((after.referenced, after.bound), (2, 2), "{ctx}: {after:?}");
         assert_eq!(after.orphan_chunks, 0, "{ctx}: {after:?}");
-        check_app_reads(&path, &model, &ctx);
+        check_app_reads(&path, &model, 0, &ctx);
     }
     assert!(
         killed_mid_rewrite > 0,
@@ -1749,7 +1793,6 @@ struct TwoStats {
     mark_only_runs: u64,
     mark_only_flushed: u64,
     refused: u64,
-    refused_after_flush: u64,
     rewrites: u64,
     below_ratio: u64,
     deleted: u64,
@@ -1900,11 +1943,38 @@ fn check_swept(
     }
 }
 
-/// `persia gc --grace 2h --json` on `path`, which must collect: its checks against `before`, the container
-/// byte-identical (with the default 64 MiB memtable nothing of these small sessions is due, and the handle is closed
-/// cleanly: the open writes nothing).
-fn cli_gc(path: &Path, before: Verified, ctx: &str, stats: &mut TwoStats) {
+/// Whether the WAL from `wal_start` holds a record of `notes` (a pending record, SPEC §8.6): what the application's
+/// read-only open replayed into `notes`' memtable (an operation of any kind).
+fn notes_pending(path: &Path) -> bool {
+    let ro = ReadOnlyDatabase::open(path, &tags_options().registry).unwrap();
+    ro.snapshot()
+        .collection(NOTES)
+        .unwrap()
+        .memtable()
+        .version()
+        > 0
+}
+
+/// `persia gc --grace 2h --json` on `path`. While `notes` has a pending record it is refused (ROADMAP 10.4.8: status
+/// 1, the container and the pack byte-identical), and the application closes the database; then it must collect:
+/// its checks against `persia verify` before it, the container byte-identical (with the default 64 MiB memtable
+/// nothing of these small sessions is due, and the handle is closed cleanly: the open writes nothing). Returns whether
+/// it was refused first.
+fn cli_gc(path: &Path, ctx: &str, stats: &mut TwoStats) -> bool {
     stats.cli_runs += 1;
+    let refused = notes_pending(path);
+    if refused {
+        stats.refused += 1;
+        let files = (std::fs::read(path).unwrap(), std::fs::read(pack(path)).ok());
+        let out = persia(&["gc", arg(path), "--grace", "2h", "--json"]);
+        check_refused(&out, ctx);
+        assert!(
+            (std::fs::read(path).unwrap(), std::fs::read(pack(path)).ok()) == files,
+            "{ctx}: the refused run wrote"
+        );
+        close_with_the_application(path);
+    }
+    let before = verify(path, false, &format!("{ctx}: before gc"));
     let container = std::fs::read(path).unwrap();
     let done = gc_report(&persia(&["gc", arg(path), "--grace", "2h", "--json"]), ctx);
     assert_eq!(done["held_back"], false, "{ctx}: {done}");
@@ -1931,12 +2001,14 @@ fn cli_gc(path: &Path, before: Verified, ctx: &str, stats: &mut TwoStats) {
         after,
         stats,
     );
+    refused
 }
 
-/// The internal API's mark-only open with a small memtable (`memtable_bytes`), so its replay may flush `plain` or be
-/// refused, and its GC with a 2 h grace. A refusal (`AnalysisSkipped`) is counted and followed by `persia gc`, which
-/// must collect.
-fn mark_only_gc(path: &Path, memtable_bytes: usize, ctx: &str, stats: &mut TwoStats) {
+/// The internal API's mark-only open with a small memtable (`memtable_bytes`), so its replay may flush `plain`, and
+/// its GC with a 2 h grace. It is refused (`AnalysisSkipped`) exactly when `notes` has a pending record (ROADMAP
+/// 10.4.8), writing nothing: counted and followed by [`cli_gc`] (refused too, then collecting once the application has
+/// closed the database). Returns whether it was refused.
+fn mark_only_gc(path: &Path, memtable_bytes: usize, ctx: &str, stats: &mut TwoStats) -> bool {
     use persia::internal::gc::{GcOptions, Rewrite};
     stats.mark_only_runs += 1;
     let mut options = DatabaseOptions::default();
@@ -1944,20 +2016,33 @@ fn mark_only_gc(path: &Path, memtable_bytes: usize, ctx: &str, stats: &mut TwoSt
     let seq = ReadOnlyDatabase::open(path, &tags_options().registry)
         .unwrap()
         .seq();
+    let pending = notes_pending(path);
+    let files = (std::fs::read(path).unwrap(), std::fs::read(pack(path)).ok());
     let db = match BlobDatabase::open_mark_only(path, options) {
         Ok(db) => db,
         Err(Error::Database(e)) if matches!(*e, DatabaseError::AnalysisSkipped { .. }) => {
+            assert!(pending, "{ctx}: refused without a pending notes record");
             stats.refused += 1;
-            if committed_seq(path) > seq {
-                stats.refused_after_flush += 1;
-            }
+            assert_eq!(
+                committed_seq(path),
+                seq,
+                "{ctx}: the refused open committed"
+            );
+            assert!(
+                (std::fs::read(path).unwrap(), std::fs::read(pack(path)).ok()) == files,
+                "{ctx}: the refused open wrote"
+            );
             eprintln!("{ctx}: the mark-only open was refused ({memtable_bytes} B memtable)");
             let ctx = format!("{ctx}: after the refusal");
-            let before = verify(path, false, &format!("{ctx}: before gc"));
-            return cli_gc(path, before, &ctx, stats);
+            assert!(
+                cli_gc(path, &ctx, stats),
+                "{ctx}: persia gc was not refused"
+            );
+            return true;
         }
         Err(e) => panic!("{ctx}: the mark-only open: {e}"),
     };
+    assert!(!pending, "{ctx}: opened with a pending notes record");
     assert_eq!(db.log().skipped_analysis().len(), 1, "{ctx}");
     // Counted after the open: a replay-time flush it committed drops the WAL puts of what it flushed replaced, so the
     // references may be fewer than before it. `persia verify` opens read-only beside the handle and exits (its lease
@@ -1994,6 +2079,7 @@ fn mark_only_gc(path: &Path, memtable_bytes: usize, ctx: &str, stats: &mut TwoSt
         after,
         stats,
     );
+    false
 }
 
 /// ROADMAP 10.4.7 soak: seeded application sessions on `notes` (a registered analyzer) and `plain`, each followed by a
@@ -2001,9 +2087,10 @@ fn mark_only_gc(path: &Path, memtable_bytes: usize, ctx: &str, stats: &mut TwoSt
 /// internal mark-only open with a seeded small memtable, whose replay may flush `plain` or be refused. After every
 /// run: no live blob is deleted (every document the sessions acknowledged reads back byte-identical through the
 /// application's open, and the report misses none), `verify --deep` passes, `marked` equals the blobs the references
-/// name, a rewritten pack holds exactly those, and the `notes` records that were WAL records are still WAL records
-/// (the memtable's documents and the segments of `notes` unchanged); `shared` finds every note, so none was flushed
-/// with the stand-in. A session that commits indexes them with the real analyzer.
+/// name, a rewritten pack holds exactly those, and a GC that ran left the `notes` memtable and segments unchanged;
+/// `shared` finds every note, so none was flushed with the stand-in. ROADMAP 10.4.8: a session that leaves a `notes`
+/// record in the WAL refuses the GC, writing nothing; the application then closes the database (indexing the records
+/// with the real analyzer) and `persia gc` collects.
 #[test]
 fn seeded_soak_of_application_sessions_with_a_registered_analyzer_interleaved_with_gc() {
     if child_env().is_some() {
@@ -2023,20 +2110,26 @@ fn seeded_soak_of_application_sessions_with_a_registered_analyzer_interleaved_wi
         app_session(&path, round, &mut rng, &mut docs, &mut stats);
         let wal = check_two(&path, &docs, &format!("{ctx}: before gc"));
         stats.notes_in_wal += u64::from(wal.doc_count > 0);
-        if round % 2 == 1 {
+        let refused = if round % 2 == 1 {
             // A 1-byte memtable flushes before every record; a seeded one now and then.
             let memtable_bytes = if round % 4 == 1 {
                 1
             } else {
                 usize::try_from(rng.range(2, 16 << 10)).unwrap()
             };
-            mark_only_gc(&path, memtable_bytes, &ctx, &mut stats);
+            mark_only_gc(&path, memtable_bytes, &ctx, &mut stats)
         } else {
-            let before = verify(&path, false, &format!("{ctx}: before gc"));
-            cli_gc(&path, before, &ctx, &mut stats);
-        }
+            cli_gc(&path, &ctx, &mut stats)
+        };
         let after = check_two(&path, &docs, &format!("{ctx}: after gc"));
-        assert_eq!(after, wal, "{ctx}: the notes WAL records and segments");
+        if refused {
+            assert_eq!(
+                after.doc_count, 0,
+                "{ctx}: the application's close flushed the notes"
+            );
+        } else {
+            assert_eq!(after, wal, "{ctx}: the notes WAL records and segments");
+        }
     }
     eprintln!(
         "{stats:?}, {} live documents, pack {} KiB, total {:.1?}",
@@ -2140,14 +2233,19 @@ fn committed_seq(path: &Path) -> u64 {
 }
 
 /// ROADMAP 10.4.7, ADR-0069 with a reader process: a `tags-reader` (the application's analyzers, so it sees the
-/// `notes` WAL records) holds a reader lease while `persia gc`, which skips `notes`' analyzer, collects.
-/// - At the committed seq the lease is current: the sweep runs, the orphans go and the pack is rewritten, and the
-///   reader reads every blob it shows, the WAL-only note's included, before and after a refresh.
-/// - An uncommitted, synced deletion of a committed note and a replacement of the WAL-only note move no seq: the lease
-///   stays current, the sweep runs and deletes nothing the reader shows (the deleted note's blob is still referenced by
-///   its segment, the replaced note's old blob by its WAL put), and the reader reads all of it.
-/// - The application's commit puts the reader behind: the sweep is held back, the pack is byte-identical, and the
-///   reader still reads the blobs it shows that the commit dropped. Once it refreshes, the sweep takes them.
+/// `notes` WAL records) holds a reader lease beside `persia gc`, which skips `notes`' analyzer. Flipped by ROADMAP
+/// 10.4.8, which refuses the run while a `notes` record is in the WAL:
+/// - With the WAL-only note `w1` (and the WAL-only `plain` document `pw`) the run is refused: status 1, the container
+///   and the pack byte-identical, and the reader reads every blob it shows, the WAL-only ones included.
+/// - The application closes the database (its commit): the reader is behind, the sweep is held back, the pack is
+///   byte-identical, and the reader still reads the blobs it shows.
+/// - Once it refreshes, the lease is current: the sweep runs, the orphans go and the pack is rewritten, and the
+///   reader reads every blob it shows, before and after a refresh.
+/// - An uncommitted, synced deletion of a committed `plain` document and a replacement of `pw` move no seq and leave
+///   no `notes` record: the lease stays current, the sweep runs and deletes nothing the reader shows (the deleted
+///   document's blob is still referenced by its segment, `pw`'s old blob by its segment too), and the reader reads
+///   all of it.
+/// - The application's commit puts the reader behind again; once it refreshes, the sweep takes those two blobs.
 #[test]
 fn a_reader_process_with_the_application_s_analyzers_beside_persia_gc_skipping_them() {
     if child_env().is_some() {
@@ -2161,19 +2259,21 @@ fn a_reader_process_with_the_application_s_analyzers_beside_persia_gc_skipping_t
     let path = create_two(dir.path());
     let mut docs = Docs::new();
     let small = |n: u64| (1000 + n, n);
+    // Sizes that put each sweep that drops blobs over the default rewrite ratio (half the frame bytes dropped).
+    let mid = |n: u64| (100 << 10, 300 + n);
     let big = |n: u64| (300 << 10, 100 + n);
     let huge = |n: u64| (600 << 10, 200 + n);
     {
         let mut db = BlobDatabase::open(&path, tags_options()).unwrap();
         for (id, blob) in [
             ("r1", small(1)),
-            ("r2", big(2)),
+            ("r2", mid(2)),
             ("r3", huge(3)),
             ("r4", huge(4)),
         ] {
             put_two!(db, docs, NOTES, id, blob, Durability::Fsync);
         }
-        put_two!(db, docs, PLAIN, "p1", small(5), Durability::Fsync);
+        put_two!(db, docs, PLAIN, "p1", big(5), Durability::Fsync);
         db.commit().unwrap();
         for id in ["r3", "r4"] {
             db.log_mut().delete(NOTES, id, Durability::Fsync).unwrap();
@@ -2182,7 +2282,7 @@ fn a_reader_process_with_the_application_s_analyzers_beside_persia_gc_skipping_t
         db.release_durable();
         db.commit().unwrap();
         // Logged and synced, never committed: only the WAL references these.
-        put_two!(db, docs, NOTES, "w1", big(6), Durability::Fsync);
+        put_two!(db, docs, NOTES, "w1", mid(6), Durability::Fsync);
         put_two!(db, docs, PLAIN, "pw", small(7), Durability::Fsync);
     }
     let seq = committed_seq(&path);
@@ -2194,54 +2294,18 @@ fn a_reader_process_with_the_application_s_analyzers_beside_persia_gc_skipping_t
         format!("read {}", expected_read(seq, &docs))
     );
 
-    // 1. Current: the sweep runs.
-    let swept = gc_ok(&path, "current");
-    assert_eq!(readers(&swept), (1, 1, 0, 0, 0, Some(seq)), "{swept}");
-    assert_eq!(swept["marked"]["blobs"], 5, "{swept}");
-    assert_eq!(swept["deleted"]["blobs"], 2, "{swept}");
-    assert_eq!(swept["rewrite"]["outcome"], "done", "{swept}");
+    // 1. `w1` is a pending record of `notes`: refused, nothing written.
+    gc_refused(&path, "w1 in the WAL");
     reader.send("read");
     assert_eq!(
         reader.expect("read 1"),
         format!("read {}", expected_read(seq, &docs))
     );
-    reader.send("refresh");
-    assert_eq!(
-        reader.expect("refresh 1"),
-        format!("refreshed {}", expected_read(seq, &docs))
-    );
 
-    // 2. Uncommitted changes: the seq does not move, the lease stays current.
-    let shown = docs.clone();
-    {
-        let mut db = BlobDatabase::open(&path, tags_options()).unwrap();
-        db.log_mut().delete(NOTES, "r2", Durability::Fsync).unwrap();
-        db.release_durable();
-        docs.remove(&(NOTES.to_owned(), "r2".to_owned()));
-        put_two!(db, docs, NOTES, "w1", small(8), Durability::Fsync);
-    }
-    assert_eq!(committed_seq(&path), seq);
-    let kept = gc_ok(&path, "uncommitted");
-    assert_eq!(readers(&kept), (1, 1, 0, 0, 0, Some(seq)), "{kept}");
-    assert_eq!(kept["held_back"], false, "{kept}");
-    // r1, r2 (its segment version), w1 twice (both WAL puts), p1, pw.
-    assert_eq!(kept["marked"]["blobs"], 6, "{kept}");
-    assert_eq!(kept["deleted"]["blobs"], 0, "{kept}");
-    reader.send("read");
-    assert_eq!(
-        reader.expect("read 2"),
-        format!("read {}", expected_read(seq, &shown))
-    );
-    let v = verify(&path, true, "uncommitted");
-    assert_eq!((v.referenced, v.bound), (6, 6), "{v:?}");
-
-    // 3. The application commits: the reader is behind.
-    {
-        let mut db = BlobDatabase::open(&path, tags_options()).unwrap();
-        db.commit().unwrap();
-    }
-    let committed = committed_seq(&path);
-    assert!(committed > seq);
+    // 2. The application closes the database: the reader is behind.
+    close_with_the_application(&path);
+    let closed = committed_seq(&path);
+    assert!(closed > seq);
     let pack_before = std::fs::read(pack(&path)).unwrap();
     let held = gc_ok(&path, "behind");
     assert_eq!(held["held_back"], true, "{held}");
@@ -2253,14 +2317,75 @@ fn a_reader_process_with_the_application_s_analyzers_beside_persia_gc_skipping_t
     );
     reader.send("read");
     assert_eq!(
-        reader.expect("read 3"),
-        format!("read {}", expected_read(seq, &shown))
+        reader.expect("read 2"),
+        format!("read {}", expected_read(seq, &docs))
     );
 
-    // 4. Refreshed: the sweep takes r2's blob and w1's first one.
+    // 3. Refreshed: current, the sweep runs.
+    reader.send("refresh");
+    assert_eq!(
+        reader.expect("refresh 1"),
+        format!("refreshed {}", expected_read(closed, &docs))
+    );
+    let swept = gc_ok(&path, "current");
+    assert_eq!(readers(&swept), (1, 1, 0, 0, 0, Some(closed)), "{swept}");
+    // r1, r2, w1, p1, pw.
+    assert_eq!(swept["marked"]["blobs"], 5, "{swept}");
+    assert_eq!(swept["deleted"]["blobs"], 2, "{swept}");
+    assert_eq!(swept["rewrite"]["outcome"], "done", "{swept}");
+    reader.send("read");
+    assert_eq!(
+        reader.expect("read 3"),
+        format!("read {}", expected_read(closed, &docs))
+    );
     reader.send("refresh");
     assert_eq!(
         reader.expect("refresh 2"),
+        format!("refreshed {}", expected_read(closed, &docs))
+    );
+
+    // 4. Uncommitted `plain` changes: the seq does not move, the lease stays current, nothing is refused.
+    let shown = docs.clone();
+    {
+        let mut db = BlobDatabase::open(&path, tags_options()).unwrap();
+        db.log_mut().delete(PLAIN, "p1", Durability::Fsync).unwrap();
+        db.release_durable();
+        docs.remove(&(PLAIN.to_owned(), "p1".to_owned()));
+        put_two!(db, docs, PLAIN, "pw", small(8), Durability::Fsync);
+    }
+    assert_eq!(committed_seq(&path), closed);
+    let kept = gc_ok(&path, "uncommitted");
+    assert_eq!(readers(&kept), (1, 1, 0, 0, 0, Some(closed)), "{kept}");
+    assert_eq!(kept["held_back"], false, "{kept}");
+    // r1, r2, w1, p1 (its segment version), pw twice (its segment version and its WAL put).
+    assert_eq!(kept["marked"]["blobs"], 6, "{kept}");
+    assert_eq!(kept["deleted"]["blobs"], 0, "{kept}");
+    reader.send("read");
+    assert_eq!(
+        reader.expect("read 4"),
+        format!("read {}", expected_read(closed, &shown))
+    );
+    let v = verify(&path, true, "uncommitted");
+    assert_eq!((v.referenced, v.bound), (6, 6), "{v:?}");
+
+    // 5. The application commits: the reader is behind; once it refreshes, the sweep takes p1's blob and pw's old one.
+    {
+        let mut db = BlobDatabase::open(&path, tags_options()).unwrap();
+        db.commit().unwrap();
+    }
+    let committed = committed_seq(&path);
+    assert!(committed > closed);
+    let held = gc_ok(&path, "behind again");
+    assert_eq!(held["held_back"], true, "{held}");
+    assert_eq!(readers(&held), (1, 0, 1, 0, 0, Some(closed)), "{held}");
+    reader.send("read");
+    assert_eq!(
+        reader.expect("read 5"),
+        format!("read {}", expected_read(closed, &shown))
+    );
+    reader.send("refresh");
+    assert_eq!(
+        reader.expect("refresh 3"),
         format!("refreshed {}", expected_read(committed, &docs))
     );
     let swept = gc_ok(&path, "refreshed");
@@ -2270,12 +2395,12 @@ fn a_reader_process_with_the_application_s_analyzers_beside_persia_gc_skipping_t
     assert_eq!(swept["rewrite"]["outcome"], "done", "{swept}");
     reader.send("read");
     assert_eq!(
-        reader.expect("read 4"),
+        reader.expect("read 6"),
         format!("read {}", expected_read(committed, &docs))
     );
     reader.send("refresh");
     assert_eq!(
-        reader.expect("refresh 3"),
+        reader.expect("refresh 4"),
         format!("refreshed {}", expected_read(committed, &docs))
     );
     reader.finish();
@@ -2298,10 +2423,11 @@ enum FlushKill {
 }
 
 /// A database whose WAL, after the last commit, holds a `plain` backlog over the default 64 MiB memtable (18
-/// documents of 4 MiB each, an extra stored field, each with a small blob) and then a `notes` record with its blob, so
-/// `persia gc`'s replay flushes `plain` (while `notes` holds nothing yet) and keeps the `notes` record a WAL record.
-/// The pack also holds three orphans (deleted, committed notes: 3 MiB), so the GC rewrites it.
-fn flushing_backlog_database(dir: &Path) -> (PathBuf, Docs) {
+/// documents of 4 MiB each, an extra stored field, each with a small blob) and then (`notes_tail`) a `notes` record
+/// with its blob, or else one more small `plain` document. Without the `notes` record `persia gc`'s replay flushes
+/// `plain`; with it, the open's pre-scan refuses the run before the replay (ROADMAP 10.4.8). The pack also holds three
+/// orphans (deleted, committed notes: 3 MiB), so a GC that runs rewrites it.
+fn flushing_backlog_database(dir: &Path, notes_tail: bool) -> (PathBuf, Docs) {
     let path = create_two(dir);
     let mut options = tags_options();
     options.policy.flush.memtable_bytes = 1 << 30;
@@ -2344,7 +2470,11 @@ fn flushing_backlog_database(dir: &Path) -> (PathBuf, Docs) {
         .unwrap();
         docs.insert((PLAIN.to_owned(), id), (1000 + i, 50 + i));
     }
-    put_two!(db, docs, NOTES, "wal", (100 << 10, 2), Durability::Fsync);
+    if notes_tail {
+        put_two!(db, docs, NOTES, "wal", (100 << 10, 2), Durability::Fsync);
+    } else {
+        put_two!(db, docs, PLAIN, "tail", (100 << 10, 2), Durability::Fsync);
+    }
     drop(db);
     (path, docs)
 }
@@ -2385,10 +2515,11 @@ fn run_gc_until_flush(path: &Path, at: FlushKill) -> Result<bool, Output> {
 
 /// ROADMAP 10.4.7, candidate 4 with real processes: `persia gc` killed (SIGKILL) while its mark-only open's replay
 /// flushes a `plain` backlog over the default memtable (the container growing by the flush's segment), at seeded
-/// points the parent observes on the file system. After each kill: `verify --deep` passes; the application's open
-/// shows every document with its blob byte-identical, and the `notes` record is still a WAL record; a rerun of
-/// `persia gc` completes, marks every referenced blob, misses none, and leaves the `notes` record as it was; once the
-/// application commits, `persia gc` collects and everything reads back.
+/// points the parent observes on the file system. Since ROADMAP 10.4.8 a `notes` record after the backlog refuses the
+/// run before the replay (the next test), so this WAL has none: `notes` holds nothing unflushed. After each kill:
+/// `verify --deep` passes; the application's open shows every document with its blob byte-identical, and `notes`
+/// holds no WAL record; a rerun of `persia gc` completes, marks every referenced blob, misses none, and leaves `notes`
+/// as it was; once the application commits, `persia gc` collects and everything reads back.
 #[test]
 fn kill_9_of_persia_gc_during_its_open_s_replay_time_flush_loses_nothing() {
     if child_env().is_some() {
@@ -2398,7 +2529,7 @@ fn kill_9_of_persia_gc_during_its_open_s_replay_time_flush_loses_nothing() {
     let seed = base_seed(0x5eed_1047_f1a5);
     let mut rng = Rng(seed);
     let template = KeptOnFailure::new();
-    let (source, docs) = flushing_backlog_database(template.path());
+    let (source, docs) = flushing_backlog_database(template.path(), false);
     let seq = committed_seq(&source);
     // How much a run that is not killed grows the container (the flush's segment and its commit), on a copy.
     let growth = {
@@ -2451,9 +2582,9 @@ fn kill_9_of_persia_gc_during_its_open_s_replay_time_flush_loses_nothing() {
         assert_eq!(v.referenced, docs.len() as u64, "{ctx}: {v:?}");
         let wal = check_two(&path, &docs, &ctx);
         assert_eq!(
-            wal.live,
-            [("wal".to_owned(), Some(content_id(&path, NOTES, "wal")))],
-            "{ctx}: the notes record is a WAL record"
+            (wal.live.len(), wal.doc_count),
+            (0, 0),
+            "{ctx}: notes holds no WAL record"
         );
         let again = gc_ok(&path, &format!("{ctx}: rerun"));
         assert_eq!(again["missing"], serde_json::json!([]), "{ctx}: {again}");
@@ -2502,4 +2633,170 @@ fn content_id(path: &Path, collection: &str, id: &str) -> String {
         .unwrap()
         .unwrap();
     doc.blob_ref().unwrap().blob_id().to_string()
+}
+
+/// When the parent kills a `persia gc` during its open's pre-scan (observed in what it has read, never timed).
+#[derive(Debug, Clone, Copy)]
+enum ScanKill {
+    /// Right after the spawn.
+    Spawned,
+    /// After this many polls.
+    Polls(u64),
+    /// Once the process has read at least this many bytes (`rchar` in `/proc/<pid>/io`; where the system does not say,
+    /// after as many polls as kibibytes).
+    Read(u64),
+    /// Not killed.
+    Never,
+}
+
+/// The bytes the process `pid` has read so far (`rchar` in `/proc/<pid>/io`), where the system says.
+fn bytes_read(pid: u32) -> Option<u64> {
+    let io = std::fs::read_to_string(format!("/proc/{pid}/io")).ok()?;
+    io.lines()
+        .find_map(|line| line.strip_prefix("rchar:"))
+        .and_then(|n| n.trim().parse().ok())
+}
+
+/// Runs `persia gc` on `path` and kills it at `at`, polling in a loop (no sleep) until then: `Err` with its output when
+/// it exited first, else `Ok` with the bytes it had read at the kill, if known. Also returns the most bytes it was
+/// seen to have read.
+fn run_gc_until_read(path: &Path, at: ScanKill) -> (Result<Option<u64>, Output>, u64) {
+    let mut guard = Reaped(Some(spawn_gc(path)));
+    let pid = guard.0.as_ref().unwrap().id();
+    let (mut polls, mut seen) = (0_u64, 0_u64);
+    loop {
+        let child = guard.0.as_mut().unwrap();
+        if child.try_wait().unwrap().is_some() {
+            let out = guard.0.take().unwrap().wait_with_output().unwrap();
+            return (Err(out), seen);
+        }
+        let read = bytes_read(pid);
+        seen = seen.max(read.unwrap_or(0));
+        let hit = match at {
+            ScanKill::Spawned => true,
+            ScanKill::Polls(n) => polls >= n,
+            ScanKill::Read(bytes) => read.map_or(polls >= bytes >> 10, |r| r >= bytes),
+            ScanKill::Never => false,
+        };
+        if hit {
+            let mut child = guard.0.take().unwrap();
+            child.kill().unwrap(); // SIGKILL; also succeeds on a child that exited but is not reaped yet.
+            let out = child.wait_with_output().unwrap();
+            if out.status.signal().is_none() {
+                return (Err(out), seen);
+            }
+            return (Ok(read), seen);
+        }
+        polls += 1;
+    }
+}
+
+/// A copy of the container at `source` and its pack in `dir`: the copy's container path.
+fn copy_database(source: &Path, dir: &Path) -> PathBuf {
+    let path = dir.join("app.persia");
+    std::fs::copy(source, &path).unwrap();
+    std::fs::copy(pack(source), pack(&path)).unwrap();
+    path
+}
+
+/// ROADMAP 10.4.8 with real processes: `persia gc` on a database whose WAL holds a `plain` backlog over the default
+/// memtable and then a `notes` record (a pending record of a collection whose analyzer the command lacks), killed
+/// (SIGKILL) during its open, before or during the pre-scan that refuses it, at seeded points observed in the bytes it
+/// has read. After each kill and after the refused rerun: the container and the pack are byte-identical (the
+/// pre-scan writes nothing: no flush of the backlog, no commit), `verify --deep` passes, the application's read-only
+/// open shows every document with its blob byte-identical and the `notes` record still a WAL record. Once the
+/// application has closed the database, `persia gc` collects the three orphans and everything reads back.
+#[test]
+fn kill_9_of_persia_gc_during_its_open_s_pre_scan_writes_nothing() {
+    if child_env().is_some() {
+        return;
+    }
+    let _serial = serial();
+    let seed = base_seed(0x5eed_1048_5ca7);
+    let mut rng = Rng(seed);
+    let template = KeptOnFailure::new();
+    let (source, docs) = flushing_backlog_database(template.path(), true);
+    let seq = committed_seq(&source);
+    // What a refused run that is not killed reads, on a copy: about the file once for the container's recovery (its
+    // frames' checksums), then the WAL range once more for the pre-scan.
+    let file_len = std::fs::metadata(&source).unwrap().len();
+    let total = {
+        let dir = tempfile::tempdir().unwrap();
+        let path = copy_database(&source, dir.path());
+        let (ended, most) = run_gc_until_read(&path, ScanKill::Never);
+        check_refused(&ended.unwrap_err(), "calibration");
+        most.max(2 * file_len)
+    };
+    eprintln!("seed {seed}: the file is {file_len} bytes, a refused run reads about {total}");
+    // Each point replays the 72 MiB backlog several times (debug builds are slow at it): the default run takes two
+    // points past the first read of the file (in the pre-scan) and the run that is not killed, `--features slow` also
+    // one in the recovery, right after the spawn and after seeded polls.
+    let scan = total.saturating_sub(file_len);
+    let early = ScanKill::Read(file_len + rng.range(1, scan / 2));
+    let late = ScanKill::Read(file_len + rng.range(scan / 2, scan));
+    let points = if cfg!(feature = "slow") {
+        vec![
+            ScanKill::Spawned,
+            ScanKill::Polls(rng.range(1, 2000)),
+            ScanKill::Read(rng.range(1, file_len)),
+            early,
+            late,
+            ScanKill::Never,
+        ]
+    } else {
+        vec![early, late, ScanKill::Never]
+    };
+    let mut in_scan = 0;
+    for at in points {
+        let ctx = format!("seed {seed} ({at:?})");
+        let dir = KeptOnFailure::new();
+        let path = copy_database(&source, dir.path());
+        let files = || {
+            (
+                std::fs::read(&path).unwrap(),
+                std::fs::read(pack(&path)).unwrap(),
+            )
+        };
+        let before = files();
+        let ended = match run_gc_until_read(&path, at).0 {
+            Err(out) => {
+                check_refused(&out, &ctx);
+                "exited, refused".to_owned()
+            }
+            Ok(read) => {
+                in_scan += u64::from(read.is_some_and(|r| r > file_len && r < total));
+                format!("killed after reading {read:?} bytes")
+            }
+        };
+        eprintln!("{ctx}: {ended}");
+        assert!(
+            files() == before,
+            "{ctx}: the run wrote to the container or the pack"
+        );
+        assert_eq!(committed_seq(&path), seq, "{ctx}: no commit");
+        let v = verify(&path, true, &ctx);
+        assert_eq!(v.referenced, docs.len() as u64, "{ctx}: {v:?}");
+        let wal = check_two(&path, &docs, &ctx);
+        assert_eq!(
+            wal.live,
+            [("wal".to_owned(), Some(content_id(&path, NOTES, "wal")))],
+            "{ctx}: the notes record is a WAL record"
+        );
+        gc_refused(&path, &format!("{ctx}: rerun"));
+        assert!(files() == before, "{ctx}: the rerun wrote");
+
+        close_with_the_application(&path);
+        let wal = check_two(&path, &docs, &format!("{ctx}: closed"));
+        assert_eq!(wal.doc_count, 0, "{ctx}: the application flushed the note");
+        let done = gc_ok(&path, &format!("{ctx}: after the close"));
+        assert_eq!(done["missing"], serde_json::json!([]), "{ctx}: {done}");
+        assert_eq!(done["marked"]["blobs"], docs.len(), "{ctx}: {done}");
+        assert_eq!(done["deleted"]["blobs"], 3, "{ctx}: {done}");
+        verify(&path, true, &format!("{ctx}: after the close"));
+        check_two(&path, &docs, &format!("{ctx}: end"));
+    }
+    // Where the system does not say what a process read, the kills land after polls instead, wherever they fall.
+    if bytes_read(std::process::id()).is_some() {
+        assert!(in_scan > 0, "seed {seed}: no kill landed in the pre-scan");
+    }
 }

@@ -3,16 +3,20 @@
 //!
 //! Invariants:
 //! 1. It compacts: dead frames are reclaimed, and the database reopened with the real analyzer holds every document,
-//!    the committed ones and the WAL's, and finds them by the registered field's terms (the WAL records were never
-//!    flushed with the stand-in, so the real analyzer indexes them at that reopen). A deletion in the WAL stays one.
-//! 2. It refuses, before writing anything, an open whose replay would flush a memtable of a collection whose analysis
-//!    it skips (a backlog over the memtable size), and lets a collection without a skipped field flush as a writer's
-//!    open does.
+//!    the committed ones and the WAL's, and finds them by the registered field's terms. A WAL that still holds a
+//!    record of the collection whose analysis it skips (a pending record, SPEC §8.6) refuses the open (ROADMAP
+//!    10.4.8) with every byte as it was; the application's open then shows every document, and once it has committed
+//!    the compaction runs. A deletion in the WAL stays one.
+//! 2. It refuses, before writing anything, an open whose WAL holds a pending record of a collection whose analysis
+//!    it skips, wherever a flush would be due (before or after that record, or never), and lets a collection without
+//!    a skipped field flush as a writer's open does.
 //! 3. Without a skipped field it is the writer's open: a backlog over the memtable size is flushed.
 //! 4. It takes the writer lock: a live writer makes it fail with `Locked`; a read-only container is refused.
 //! 5. A crash or a failed write at any point of its compaction leaves the old or the new database, with every
 //!    acknowledged write, found by the real analyzer.
-//! 6. A cut commit (a Manifest after `log_end`) is retired by its open, flushing nothing, as a writer's open does.
+//! 6. A cut commit (a Manifest after `log_end`) is retired by its open, flushing nothing, as a writer's open does,
+//!    when the WAL holds no pending record of a skipped collection; over such records the open is refused and leaves
+//!    the cut commit for the application's open to retire.
 
 #![allow(
     clippy::unwrap_used,
@@ -192,6 +196,27 @@ fn populated(fs: &SimFs) -> (Expected, Vec<String>) {
     (expected, vec!["n1".to_owned()])
 }
 
+/// [`populated`]'s database after the application opened it and committed (flushing the WAL's notes with the real
+/// analyzer), then logged `plain`'s `p1` again, unchanged and synced: the WAL from `wal_start` holds a `plain` record
+/// only, so a compaction-only open is not refused (ROADMAP 10.4.8) and its compaction copies a WAL.
+fn committed_by_app(fs: &SimFs) {
+    let mut db = open_app(fs).unwrap();
+    db.commit().unwrap();
+    db.put("plain", &plain_doc("p1"), Durability::Fsync)
+        .unwrap();
+}
+
+/// A compaction-only open of `fs` with `options` is refused (`AnalysisSkipped`, naming `notes`), and wrote nothing.
+fn assert_refused(fs: &SimFs, options: DatabaseOptions, ctx: &str) {
+    let before = fs.files();
+    let err = compact_only(fs, options).unwrap_err();
+    assert!(
+        matches!(&err, DatabaseError::AnalysisSkipped { collection, .. } if collection == "notes"),
+        "{ctx}: {err:?}"
+    );
+    assert!(fs.files() == before, "{ctx}: the refused open wrote");
+}
+
 /// The ids `text` finds in `collection`, analyzed with `registry`, sorted (a page of up to 1000 hits).
 fn search(
     snapshot: &Snapshot,
@@ -275,11 +300,20 @@ fn assert_holds(db: &Database<SimFsFile>, expected: &Expected, gone: &[String], 
     );
 }
 
-/// Invariant 1.
+/// Invariant 1. Flipped by ROADMAP 10.4.8: the WAL's `notes` records refuse the open, every byte kept; the
+/// application's open shows every document, and once it has committed the compaction runs and keeps them all.
 #[test]
 fn a_handle_without_the_registered_analyzer_compacts_and_keeps_every_document() {
     let fs = SimFs::new();
     let (expected, gone) = populated(&fs);
+    assert_refused(&fs, builtin(), "the WAL's notes records are pending");
+    assert_holds(
+        &open_app(&fs).unwrap(),
+        &expected,
+        &gone,
+        "the application's open after the refusal",
+    );
+    committed_by_app(&fs);
     let before_seq = open_app(&fs).unwrap().seq();
     let mut db = compact_only(&fs, builtin()).unwrap();
     let skipped = db.skipped_analysis();
@@ -292,7 +326,7 @@ fn a_handle_without_the_registered_analyzer_compacts_and_keeps_every_document() 
         ),
         ("notes", "tags", "tags@1")
     );
-    // Its open committed nothing: the WAL backlog is under the memtable size.
+    // Its open committed nothing: the WAL backlog (one `plain` record) is under the memtable size.
     assert_eq!(db.seq(), before_seq);
     let done = db.compact().unwrap();
     assert!(done.after.total < done.before.total, "{done:?}");
@@ -476,9 +510,12 @@ fn it_takes_the_writer_lock_and_needs_a_read_write_container() {
 /// failed), then a crash: the database reopens, with the real analyzer, holding every acknowledged document.
 #[test]
 fn a_crash_or_failure_at_any_write_of_its_compaction_keeps_every_document() {
+    // After the application's commit (ROADMAP 10.4.8: the WAL's notes records would refuse the open): the WAL the
+    // compaction copies holds a `plain` record.
     let calls = {
         let fs = SimFs::new();
         populated(&fs);
+        committed_by_app(&fs);
         let mut db = compact_only(&fs, builtin()).unwrap();
         let start = fs.mutations();
         db.compact().unwrap();
@@ -490,6 +527,7 @@ fn a_crash_or_failure_at_any_write_of_its_compaction_keeps_every_document() {
             let ctx = format!("call {n}, apply_first {apply_first}");
             let fs = SimFs::new();
             let (expected, gone) = populated(&fs);
+            committed_by_app(&fs);
             let mut db = compact_only(&fs, builtin()).unwrap();
             let at = fs.mutations() + n;
             fs.set_fault(Some(if apply_first {
@@ -521,52 +559,86 @@ fn has_cut_commit(fs: &SimFs) -> bool {
         .any(|f| f.kind == FrameKind::Manifest && f.offset >= log_end)
 }
 
-/// Invariant 6: a fault at each mutating call of a commit of the application, then a crash. Where that leaves a cut
-/// commit (a Manifest after `log_end`), the compaction-only open retires it with exactly one commit, which flushes
-/// nothing (the skipped collection's WAL records stay WAL records); and in every case it compacts, and the
-/// application's reopen holds every acknowledged document.
+/// Invariant 6: a fault at each mutating call of a commit of the application, then a crash. Over a WAL whose records
+/// are `plain`'s only ([`committed_by_app`]), where that leaves a cut commit (a Manifest after `log_end`), the
+/// compaction-only open retires it with exactly one commit, which flushes nothing. Over [`populated`]'s WAL, whose
+/// `notes` records stay pending unless that commit took effect, the open is refused (ROADMAP 10.4.8) with every byte
+/// as it was, the cut commit included; the application's open retires it and shows every document, and after its
+/// commit the compaction runs. In every case the application's reopen after the compaction holds every acknowledged
+/// document.
 #[test]
 fn a_cut_commit_is_retired_by_its_open_without_a_flush() {
-    let calls = {
+    let base = |over_notes: bool| {
         let fs = SimFs::new();
-        populated(&fs);
-        let mut db = open_app(&fs).unwrap();
-        let start = fs.mutations();
-        db.commit().unwrap();
-        fs.mutations() - start
+        let (expected, gone) = populated(&fs);
+        if !over_notes {
+            committed_by_app(&fs);
+        }
+        (fs, expected, gone)
     };
-    let mut cut = 0;
-    for n in 0..calls {
-        for loss in [CrashLoss::Nothing, CrashLoss::All] {
-            let ctx = format!("call {n}, {loss:?}");
-            let fs = SimFs::new();
-            let (expected, gone) = populated(&fs);
+    let (mut retired, mut refused) = (0, 0);
+    for over_notes in [false, true] {
+        let calls = {
+            let (fs, ..) = base(over_notes);
             let mut db = open_app(&fs).unwrap();
-            let seq = db.seq();
-            fs.set_fault(Some(SimFault::FailAt(fs.mutations() + n)));
-            assert!(db.commit().is_err(), "{ctx}: the fault fired");
-            fs.set_fault(None);
-            drop(db);
-            let crashed = fs.crash(loss);
-            let stray = has_cut_commit(&crashed);
-            let mut compacting =
-                compact_only(&crashed, builtin()).unwrap_or_else(|e| panic!("{ctx}: {e}"));
-            if stray {
-                cut += 1;
-                assert_eq!(compacting.seq(), seq + 1, "{ctx}: one retiring commit");
-                assert!(!has_cut_commit(&crashed), "{ctx}: retired");
+            let start = fs.mutations();
+            db.commit().unwrap();
+            fs.mutations() - start
+        };
+        for n in 0..calls {
+            for loss in [CrashLoss::Nothing, CrashLoss::All] {
+                let ctx = format!("over notes {over_notes}, call {n}, {loss:?}");
+                let (fs, expected, gone) = base(over_notes);
+                let mut db = open_app(&fs).unwrap();
+                let seq = db.seq();
+                fs.set_fault(Some(SimFault::FailAt(fs.mutations() + n)));
+                assert!(db.commit().is_err(), "{ctx}: the fault fired");
+                fs.set_fault(None);
+                drop(db);
+                let crashed = fs.crash(loss);
+                let stray = has_cut_commit(&crashed);
+                let took_effect = Container::open_in(vfs(&crashed), PATH, Mode::ReadOnly)
+                    .unwrap()
+                    .superblock()
+                    .seq
+                    > seq;
+                if over_notes && !took_effect {
+                    assert_refused(&crashed, builtin(), &ctx);
+                    assert_eq!(
+                        has_cut_commit(&crashed),
+                        stray,
+                        "{ctx}: the cut commit is left"
+                    );
+                    refused += u32::from(stray);
+                    let mut app_db = open_app(&crashed).unwrap_or_else(|e| panic!("{ctx}: {e}"));
+                    assert!(
+                        !has_cut_commit(&crashed),
+                        "{ctx}: the application retired it"
+                    );
+                    assert_holds(&app_db, &expected, &gone, &ctx);
+                    app_db.commit().unwrap();
+                }
+                let mut compacting =
+                    compact_only(&crashed, builtin()).unwrap_or_else(|e| panic!("{ctx}: {e}"));
+                if stray && !over_notes {
+                    retired += 1;
+                    assert_eq!(compacting.seq(), seq + 1, "{ctx}: one retiring commit");
+                    assert!(!has_cut_commit(&crashed), "{ctx}: retired");
+                }
+                compacting.compact().unwrap();
+                drop(compacting);
+                let reopened = open_app(&crashed).unwrap_or_else(|e| panic!("{ctx}: {e}"));
+                assert_holds(&reopened, &expected, &gone, &ctx);
             }
-            compacting.compact().unwrap();
-            drop(compacting);
-            let reopened = open_app(&crashed).unwrap_or_else(|e| panic!("{ctx}: {e}"));
-            assert_holds(&reopened, &expected, &gone, &ctx);
         }
     }
-    assert!(cut > 0, "no fault left a cut commit");
+    assert!(retired > 0, "no fault left a cut commit over plain records");
+    assert!(refused > 0, "no fault left a cut commit over notes records");
 }
 
-/// What [`mixed_wal`] leaves live: `notes` with its committed note replaced and four WAL notes, two committed notes
-/// deleted in the WAL, and 64 `plain` documents in the WAL.
+/// What [`mixed_wal`] leaves live: with its `notes` records, `notes` with its committed note replaced and four WAL
+/// notes, two committed notes deleted in the WAL; without them, the three committed notes. And 64 `plain` documents
+/// in the WAL.
 struct Mixed {
     notes: BTreeMap<String, String>,
     gone: Vec<String>,
@@ -615,27 +687,37 @@ fn mixed_sizes() -> (usize, usize) {
     (threshold, docs)
 }
 
-/// A closed database whose WAL, after the last commit, holds a `plain` backlog over 1 KiB, then `notes` puts, a
-/// replace and a delete in the same chunk (closed by a synced put), then more `notes` puts and a delete in a later
-/// chunk. The application had a 1 GiB memtable, so it flushed none of them.
-fn mixed_wal(fs: &SimFs) -> Mixed {
+/// A closed database whose WAL, after the last commit, holds a `plain` backlog over 1 KiB, then (`with_notes`)
+/// `notes` puts, a replace and a delete in the same chunk (closed by a synced put), then more `notes` puts and a
+/// delete in a later chunk. The application had a 1 GiB memtable, so it flushed none of them.
+fn mixed_wal(fs: &SimFs, with_notes: bool) -> Mixed {
     let (threshold, plain_docs) = mixed_sizes();
     let container = Container::create_in(vfs(fs), PATH).unwrap();
     let mut db = Database::create_container(container, options(registry(), 1 << 30)).unwrap();
     db.create_collection(notes()).unwrap();
     db.create_collection(plain()).unwrap();
+    let mut notes = BTreeMap::new();
     for id in ["committed", "gone1", "gone2"] {
         db.put("notes", &note(id, "Committed note"), Durability::Buffered)
             .unwrap();
+        notes.insert(id.to_owned(), "Committed note".to_owned());
     }
     db.commit().unwrap();
     for i in 0..plain_docs {
         let doc = plain_doc(&format!("p{i:03}"));
-        db.put("plain", &doc, Durability::Buffered).unwrap();
+        let last = i + 1 == plain_docs && !with_notes;
+        let durability = if last {
+            Durability::Fsync
+        } else {
+            Durability::Buffered
+        };
+        db.put("plain", &doc, durability).unwrap();
     }
-    let mut notes = BTreeMap::new();
     let mut gone = Vec::new();
     for (i, (id, tags)) in NOTE_OPS.into_iter().enumerate() {
+        if !with_notes {
+            break;
+        }
         // `w2` syncs and so closes the backlog's chunk: `w3`, `gone2` and `w4` are in a later one.
         let durability = if id == "w2" || i + 1 == NOTE_OPS.len() {
             Durability::Fsync
@@ -647,6 +729,7 @@ fn mixed_wal(fs: &SimFs) -> Mixed {
             notes.insert(id.to_owned(), tags.to_owned());
         } else {
             db.delete("notes", id, durability).unwrap();
+            notes.remove(id);
             gone.push(id.to_owned());
         }
     }
@@ -670,8 +753,8 @@ fn chunks_after_commit(fs: &SimFs) -> usize {
         .count()
 }
 
-/// `db` holds what [`mixed_wal`] wrote: the WAL notes by id and by their `tags` terms (the real analyzer indexed
-/// them), the deleted ones gone, every `plain` document.
+/// `db` holds what [`mixed_wal`] wrote: the notes by id and by their `tags` terms (the real analyzer indexed them),
+/// the deleted ones gone, every `plain` document.
 fn assert_mixed(db: &Database<SimFsFile>, mixed: &Mixed, ctx: &str) {
     let snapshot = db.snapshot();
     let notes = snapshot.collection("notes").unwrap();
@@ -691,15 +774,23 @@ fn assert_mixed(db: &Database<SimFsFile>, mixed: &Mixed, ctx: &str) {
         assert!(notes.get(id).unwrap().is_none(), "{ctx}: {id} came back");
     }
     let full = registry().with_builtins();
-    let found = search(&snapshot, "notes", &full, "walnote");
+    let holding = |prefix: &str| -> Vec<String> {
+        mixed
+            .notes
+            .iter()
+            .filter(|(_, text)| text.starts_with(prefix))
+            .map(|(id, _)| id.clone())
+            .collect()
+    };
     assert_eq!(
-        found,
-        mixed.notes.keys().cloned().collect::<Vec<_>>(),
+        search(&snapshot, "notes", &full, "walnote"),
+        holding("Walnote"),
         "{ctx}"
     );
-    assert!(
-        search(&snapshot, "notes", &full, "note").is_empty(),
-        "{ctx}: only deleted notes held \"note\""
+    assert_eq!(
+        search(&snapshot, "notes", &full, "note"),
+        holding("Committed note"),
+        "{ctx}: only the live committed notes hold \"note\""
     );
     assert_eq!(
         search(&snapshot, "plain", &full, "plain").len(),
@@ -708,32 +799,48 @@ fn assert_mixed(db: &Database<SimFsFile>, mixed: &Mixed, ctx: &str) {
     );
 }
 
-/// Review item 1: the replay flushes the `plain` backlog (no skipped field) while `notes` holds nothing yet, then
-/// replays the `notes` records after it, in that chunk and a later one, without flushing them. The open succeeds and
-/// commits (the flush); the compaction keeps the `notes` records as WAL records, which the application's open indexes
-/// with the real analyzer.
+/// Review item 1, flipped by ROADMAP 10.4.8 (the second ordering: the skipped records after a backlog that crosses
+/// the flush threshold): the pre-scan finds the `notes` records, in the backlog's chunk and a later one, and refuses
+/// the open before the replay flushes the `plain` backlog, so nothing is written: no segment, no commit. The
+/// application's open shows every document, the `notes` records still WAL records; after its commit, the open (with
+/// nothing pending) compacts, and the reopen indexes everything with the real analyzer.
 #[test]
 fn a_plain_flush_before_the_notes_records_keeps_them_in_the_wal() {
     let fs = SimFs::new();
-    let mixed = mixed_wal(&fs);
+    let mixed = mixed_wal(&fs, true);
     assert!(
         chunks_after_commit(&fs) >= 2,
         "the notes records span two chunks"
     );
-    let seq = open_app(&fs).map(|db| db.seq()).unwrap();
+    for n in 0..3 {
+        assert_refused(
+            &fs,
+            options(AnalyzerRegistry::builtin(), mixed.threshold),
+            &format!("refusal {n}"),
+        );
+    }
+    let mut app_db = open_app(&fs).unwrap();
+    assert_mixed(&app_db, &mixed, "the application's open after the refusals");
+    let snapshot = app_db.snapshot();
+    assert!(
+        snapshot
+            .collection("notes")
+            .unwrap()
+            .memtable()
+            .live_count()
+            >= 4,
+        "the WAL notes are still WAL records"
+    );
+    drop(snapshot);
+    app_db.commit().unwrap();
+    let seq = app_db.seq();
+    drop(app_db);
     let mut db = compact_only(&fs, options(AnalyzerRegistry::builtin(), mixed.threshold)).unwrap();
-    assert!(db.seq() > seq, "the replay flushed the plain backlog");
+    assert_eq!(db.seq(), seq, "nothing was left to replay");
     db.compact().unwrap();
     drop(db);
     let reopened = open_app(&fs).unwrap();
     assert_mixed(&reopened, &mixed, "after the compaction");
-    // The `notes` records are still WAL records: nothing of `notes` was flushed with the stand-in.
-    let snapshot = reopened.snapshot();
-    let notes = snapshot.collection("notes").unwrap();
-    assert!(
-        notes.memtable().live_count() >= 4,
-        "the WAL notes are in the memtable"
-    );
 }
 
 /// A fault at each mutating call of `open` (a failed write, or one applied then reported failed), on a copy of `base`,
@@ -783,11 +890,13 @@ fn sweep_the_open(
 }
 
 /// Review item 2 (b): a fault and a crash at every write of a compaction-only open whose replay flushes the `plain`
-/// backlog with `notes` WAL records after it.
+/// backlog. Since ROADMAP 10.4.8 the `notes` records after it refuse such an open before it writes anything (the
+/// flipped [`a_plain_flush_before_the_notes_records_keeps_them_in_the_wal`]), so the backlog here has none: `notes`
+/// holds only committed notes, and the open flushes `plain` several times.
 #[test]
 fn a_crash_at_any_write_of_its_open_flushing_plain_keeps_every_document() {
     let base = SimFs::new();
-    let mixed = mixed_wal(&base);
+    let mixed = mixed_wal(&base, false);
     let calls = sweep_the_open(
         &base,
         || options(AnalyzerRegistry::builtin(), mixed.threshold),
@@ -796,12 +905,14 @@ fn a_crash_at_any_write_of_its_open_flushing_plain_keeps_every_document() {
     assert!(calls > 3, "{calls}");
 }
 
-/// A file system holding [`populated`]'s database with a cut commit (a Manifest after `log_end`): the first fault
-/// point of an application commit that leaves one, then a crash that loses nothing.
+/// A file system holding [`populated`]'s database after [`committed_by_app`] (the WAL holds a `plain` record only, so
+/// the open is not refused, ROADMAP 10.4.8) with a cut commit (a Manifest after `log_end`): the first fault point of an
+/// application commit that leaves one, then a crash that loses nothing.
 fn with_a_cut_commit() -> (SimFs, Expected, Vec<String>) {
     for n in 0.. {
         let fs = SimFs::new();
         let (expected, gone) = populated(&fs);
+        committed_by_app(&fs);
         let mut db = open_app(&fs).unwrap();
         fs.set_fault(Some(SimFault::FailAt(fs.mutations() + n)));
         let committed = db.commit();
@@ -877,8 +988,8 @@ fn two_skipped(fs: &SimFs, collection: &str, backlog: usize) {
 }
 
 /// Review item 12: two collections naming the same registered analyzer. The second finds it already replaced by the
-/// stand-in (`skip_unregistered`'s `replaced` branch) and is skipped too; a flush of either is refused, naming it; and
-/// with small backlogs both compact and keep their WAL records.
+/// stand-in (`skip_unregistered`'s `replaced` branch) and is skipped too; a pending record of either refuses the open,
+/// naming the first such collection; with small backlogs too (ROADMAP 10.4.8), until the application commits.
 #[test]
 fn two_collections_sharing_a_skipped_analyzer_are_both_guarded() {
     for collection in ["notes", "notes2"] {
@@ -901,9 +1012,36 @@ fn two_collections_sharing_a_skipped_analyzer_are_both_guarded() {
         }
         assert_eq!(fs.files(), before, "{collection}: nothing was written");
     }
-    // Small backlogs: both skipped, nothing refused, every record kept for the application.
+    // Small backlogs, flipped by ROADMAP 10.4.8: both collections hold pending records, so the open is refused before
+    // it replays them (naming the first in collection order), with every byte kept. The application's open shows every
+    // record; after its commit both are still skipped, nothing is refused, and the compaction keeps every document.
     let fs = SimFs::new();
     two_skipped(&fs, "notes2", 3);
+    assert_refused(&fs, builtin(), "small backlogs");
+    let full = registry().with_builtins();
+    let mut app_db = open_app(&fs).unwrap();
+    assert_eq!(
+        search(&app_db.snapshot(), "notes", &full, "shared"),
+        ["committed", "single"]
+    );
+    assert_eq!(
+        search(&app_db.snapshot(), "notes2", &full, "shared").len(),
+        5
+    );
+    app_db.commit().unwrap();
+    // A pending record of the second collection only: the refusal names it.
+    app_db
+        .put("notes2", &note("late", "Shared late"), Durability::Fsync)
+        .unwrap();
+    drop(app_db);
+    let before = fs.files();
+    let err = compact_only(&fs, builtin()).unwrap_err();
+    assert!(
+        matches!(&err, DatabaseError::AnalysisSkipped { collection, .. } if collection == "notes2"),
+        "{err:?}"
+    );
+    assert!(fs.files() == before, "the refused open wrote");
+    open_app(&fs).unwrap().commit().unwrap();
     let mut db = compact_only(&fs, builtin()).unwrap();
     let skipped: Vec<(&str, &str, &str)> = db
         .skipped_analysis()
@@ -922,5 +1060,9 @@ fn two_collections_sharing_a_skipped_analyzer_are_both_guarded() {
         search(&db.snapshot(), "notes", &full, "shared"),
         ["committed", "single"]
     );
-    assert_eq!(search(&db.snapshot(), "notes2", &full, "shared").len(), 5);
+    assert_eq!(
+        search(&db.snapshot(), "notes2", &full, "shared").len(),
+        6,
+        "the late note too"
+    );
 }

@@ -91,16 +91,17 @@
 //! `gc` and `container sweep` open read-write and fail with status 1 while another writer has the database. `container
 //! files` opens nothing: it lists the files beside any existing file. `inspect container` reports damage after the
 //! last commit on its rows and still exits 0 (it is a debugging aid; `verify` is the check). Besides the table: `dump
-//! documents` exits 1 for a collection the database lacks, `compact` exits 1 when its recovery would flush any
-//! collection while a collection whose schema names an analyzer registered by the application holds a replayed record
-//! (it has the built-in ones only; it compacts such a database otherwise, ROADMAP 10.4.4, ADR-0068), `import` and
+//! documents` exits 1 for a collection the database lacks, `compact` exits 1 when the WAL holds a record (one left by
+//! an application that did not close cleanly) of a collection whose schema names an analyzer registered by the
+//! application (it has the built-in ones only; it compacts such a database otherwise, ROADMAP 10.4.4, 10.4.8,
+//! ADR-0068), `import` and
 //! `search` exit 1 for a collection the database lacks (`import` creates it with `--schema`) and for a schema naming a
 //! registered analyzer, `import` exits 1 at the first bad line of its input (naming it, after committing the lines
 //! before it; a blob reference that names a stored blob with another size or chunk size is such a line, and a put
 //! that finds stored damage exits 3, ROADMAP 10.1.33), `import` and `search` read the embedded API's `ErrorCode` for
 //! their status after the not-a-container check, which comes first (4; then 3 for `Corrupt` only, else 1), `gc`
-//! exits 1 when its recovery would flush any collection while a collection whose schema names a registered analyzer
-//! holds a replayed record (it collects such a database otherwise, ROADMAP 10.4.7, ADR-0069) and for a `--grace`
+//! exits 1 when the WAL holds such a record of a collection whose schema names a registered analyzer (it collects such
+//! a database otherwise, ROADMAP 10.4.7, 10.4.8, ADR-0069) and for a `--grace`
 //! below 2 h (2 for a malformed one) and 0 when reader leases held its sweep back (the report says so), the segment
 //! commands exit 3 for a corrupt segment file and 1 for a missing one or a `--schema` that is not the segment's, and
 //! the store commands exit 1 for a root that is not a directory.
@@ -189,8 +190,9 @@ enum Command {
     /// memtable or retire a cut commit (SPEC §8.6). The new file is renamed over the old one, so the path names a
     /// complete database at every instant.
     /// It has the built-in analyzers only: a database whose schema names an analyzer the application registered is
-    /// compacted without analyzing that field (its WAL records stay in the WAL), unless recovery would flush while such
-    /// a collection holds a WAL record (status 1; open it with the application and commit, then compact).
+    /// compacted without analyzing that field, unless the WAL still holds a write of such a collection (left by an
+    /// application that did not close cleanly): then it fails with status 1 before writing anything; open the
+    /// database with its application and close it, then retry.
     /// The blob pack (`<name>.persia.blobs`) is not touched. Do not run it during a copy of the files taken with the
     /// database in use (SPEC §4.8). Read-only handles of other processes keep reading the old file until they
     /// refresh, which holds a writer's blob garbage collection back meanwhile (SPEC §9.5). Exits with status 3 on
@@ -209,10 +211,10 @@ enum Command {
     /// handle of another process that has not refreshed since the last commit holds the sweep back: nothing is deleted,
     /// and the report says so. A database without a pack has nothing to collect.
     /// It has the built-in analyzers only: a database whose schema names an analyzer the application registered is
-    /// collected without analyzing that field (its WAL records stay in the WAL, and their blobs are kept), unless
-    /// recovery would flush while such a collection holds a WAL record (status 1; open it with the application and
-    /// commit, then collect). Exits with status 3 on corruption, 4 when the file is not a Persia container, and 1 on
-    /// any other failure.
+    /// collected without analyzing that field, unless the WAL still holds a write of such a collection (left by an
+    /// application that did not close cleanly): then it fails with status 1 before marking, sweeping or writing
+    /// anything; open the database with its application and close it, then retry. Exits with status 3 on corruption,
+    /// 4 when the file is not a Persia container, and 1 on any other failure.
     Gc {
         /// The container file.
         path: PathBuf,

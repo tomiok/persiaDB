@@ -916,15 +916,48 @@ fn tags_registry() -> AnalyzerRegistry {
 }
 
 /// ROADMAP 10.4.4: the command has the built-in analyzers only, and compacts a database whose schema names a
-/// registered one anyway (ADR-0068). The WAL record of that collection is not flushed with a stand-in: it stays a WAL
-/// record, and the application's open, with the analyzer, still finds both documents, by id and by the field's
-/// terms (the WAL one indexed by that open's replay).
+/// registered one anyway (ADR-0068). Flipped by ROADMAP 10.4.8: the WAL record of that collection, which only the
+/// analyzer can index, refuses the open (status 1, the hint to open and close the database with its application),
+/// leaving the file byte-identical and the record a WAL record; the application's open finds both documents, and once
+/// it has closed the database (committing the record) the command compacts, and the application still finds both,
+/// by id and by the field's terms (indexed with the real analyzer).
 #[test]
 fn compact_compacts_a_schema_naming_a_registered_analyzer_and_keeps_its_wal() {
     let _serial = serial();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("app.persia");
     registered_analyzer_database(&path);
+    let file = std::fs::read(&path).unwrap();
+    let out = persia(&["compact", path_arg(&path), "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(out.stdout, b"");
+    assert!(
+        stderr(&out).contains("open the database with its application and close it, then retry"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        std::fs::read(&path).unwrap() == file,
+        "the refused compaction wrote"
+    );
+    let stats = json(&persia(&["stats", path_arg(&path), "--json"]));
+    assert_eq!(
+        stats["collections"][0]["wal_documents"], 1,
+        "the WAL record stays one: {stats}"
+    );
+
+    let options = || DatabaseOptions {
+        registry: tags_registry(),
+        ..DatabaseOptions::default()
+    };
+    {
+        let mut app = Database::open(&path, options()).unwrap();
+        let snapshot = app.snapshot();
+        let c = snapshot.collection("notes").unwrap();
+        assert!(c.get("n1").unwrap().is_some() && c.get("n2").unwrap().is_some());
+        drop(snapshot);
+        app.commit().unwrap();
+    }
     let before = json(&persia(&["stats", path_arg(&path), "--json"]));
     let done = json(&persia(&["compact", path_arg(&path), "--json"]));
     assert_eq!(done["seq"], before["seq"].as_u64().unwrap() + 1, "{done}");
@@ -932,23 +965,19 @@ fn compact_compacts_a_schema_naming_a_registered_analyzer_and_keeps_its_wal() {
     let notes = &after["collections"][0];
     assert_eq!(notes["documents"], 2, "{after}");
     assert_eq!(
-        notes["wal_documents"], 1,
-        "the WAL record stays one: {after}"
+        notes["wal_documents"], 0,
+        "the application committed it: {after}"
     );
     assert_eq!(after["container"]["dead_bytes"], 0, "{after}");
 
-    let options = DatabaseOptions {
-        registry: tags_registry(),
-        ..DatabaseOptions::default()
-    };
-    let db = Database::open(&path, options).unwrap();
+    let db = Database::open(&path, options()).unwrap();
     let snapshot = db.snapshot();
     let c = snapshot.collection("notes").unwrap();
     for id in ["n1", "n2"] {
         assert!(c.get(id).unwrap().is_some(), "{id}");
     }
-    // By the registered field's terms: `n1` from its segment, `n2` from the WAL, indexed by this open's replay with the
-    // real analyzer (a stand-in would have left it without terms).
+    // By the registered field's terms: both from segments the application flushed with the real analyzer (a stand-in
+    // would have left them without terms).
     let registry = tags_registry();
     let compiler = QueryCompiler::new(c.schema(), &registry).unwrap();
     let query = compiler
@@ -973,8 +1002,8 @@ fn compact_compacts_a_schema_naming_a_registered_analyzer_and_keeps_its_wal() {
     assert!(verified.status.success(), "{}", stderr(&verified));
 }
 
-/// ROADMAP 10.4.4, the refusal: a WAL backlog of such a collection larger than the default memtable would have to be
-/// flushed, which needs the analyzer. The command fails (status 1), names the collection, field and analyzer, and
+/// ROADMAP 10.4.4, the refusal (since ROADMAP 10.4.8 by the open's pre-scan, whatever the backlog's size): a WAL
+/// backlog of such a collection larger than the default memtable, which only the analyzer can index. The command fails (status 1), names the collection, field and analyzer, and
 /// leaves the file as it was; the application flushes the backlog, after which the command compacts.
 #[test]
 fn compact_refuses_to_flush_a_backlog_that_needs_a_registered_analyzer() {
@@ -1011,7 +1040,7 @@ fn compact_refuses_to_flush_a_backlog_that_needs_a_registered_analyzer() {
     assert_eq!(out.stdout, b"");
     let err = stderr(&out);
     assert!(
-        err.contains(r#"collection "notes": its unflushed writes would have to be flushed, which needs the analyzer tags@1 of field "tags" that this open lacks (an open that skips analysis never flushes them without it); open the database with its application, commit (closing a `persia::Db` does), then retry"#),
+        err.contains(r#"collection "notes" has writes in the WAL that only the analyzer tags@1 of field "tags" can index, and this open lacks it (it refuses before replaying them, writing nothing); open the database with its application and close it (closing a `persia::Db` commits them), then retry"#),
         "{err}"
     );
     assert!(

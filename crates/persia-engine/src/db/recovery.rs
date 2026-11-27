@@ -19,8 +19,13 @@
 //! a memtable. Such a commit keeps `wal_start` at the chunk being replayed, since its later records are not in a
 //! memtable yet; a crash after it replays that chunk again, which is harmless (replay is idempotent, SPEC §8.2.1).
 //! So an open that is interrupted and repeated reaches the same documents.
+//!
+//! An open that skips analysis (a [`super::CompactOnlyDatabase`] or a [`super::MarkOnlyDatabase`], ADR-0068,
+//! ADR-0069) first pre-scans the chunks step 4 replays, decoding without applying ([`refuse_pending_skipped`],
+//! ROADMAP 10.4.8): a record the replay would apply to a collection whose analysis it skips refuses the open before
+//! step 4 writes anything. So its replay only ever holds records of the other collections.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use persia_format::frame::FrameKind;
@@ -28,7 +33,7 @@ use persia_format::superblock::Superblock;
 use persia_storage::Storage;
 use persia_storage::container::{self, Container, ContainerFile, FrameRef, Mode};
 
-use super::read_only::{Analysis, skip_unregistered};
+use super::read_only::{Analysis, SkippedAnalysis, skip_unregistered};
 use super::{
     Collection, ContainerObjects, Database, DatabaseError, DatabaseOptions, LiveSegment,
     Structural, check_analyzers, objects, open_source,
@@ -38,7 +43,7 @@ use crate::memtable::{Memtable, MemtableError};
 use crate::schema::CollectionSchema;
 use crate::segment::{BlockCache, SegmentError};
 use crate::tombstone::TombstoneSidecar;
-use crate::wal::{MAX_CHUNK_LEN, ReplayError, WalRecord, WalWriter, apply, decode_chunk};
+use crate::wal::{MAX_CHUNK_LEN, ReplayError, WalRecord, WalWriter, apply, decode, decode_chunk};
 
 impl<F: ContainerFile + Sync> Database<F> {
     /// Steps 2 to 5 of the open sequence (module docs) on a container opened read-write.
@@ -51,9 +56,10 @@ impl<F: ContainerFile + Sync> Database<F> {
 
     /// The open of a [`super::CompactOnlyDatabase`] and of a [`super::MarkOnlyDatabase`] (ADR-0068, ADR-0069): the
     /// writer's open of a read-write `container`, with a no-token stand-in for each `text` field's analyzer that
-    /// `options.registry` lacks ([`Analysis::SkipUnregistered`]), and the database's refusal to flush a memtable that
-    /// indexed one (`AnalysisSkipped`, checked by the flush planning itself). One function, so both handles refuse
-    /// exactly alike.
+    /// `options.registry` lacks ([`Analysis::SkipUnregistered`]), refused (`AnalysisSkipped`) by its pre-scan when the
+    /// WAL holds a record the replay would apply to such a field's collection ([`refuse_pending_skipped`], ROADMAP
+    /// 10.4.8), and, as a backstop, by the flush planning for any flush of a memtable that indexed one. One function,
+    /// so both handles refuse exactly alike.
     ///
     /// # Errors
     /// [`DatabaseError::Container`] with [`container::Error::ReadOnly`] for a container opened read-only; otherwise as
@@ -74,7 +80,9 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// [`Database::recover`]; with [`Analysis::SkipUnregistered`] (a [`super::CompactOnlyDatabase`] or a
     /// [`super::MarkOnlyDatabase`], through [`Database::open_skipping_analysis`]; ADR-0068, ADR-0069), a `text` field
     /// whose analyzer the registry lacks gets the no-token stand-in of a read-only open, and is recorded before the
-    /// replay, so that no commit, the replay's included, flushes its collection ([`Database::plan_flushes`]).
+    /// replay; the pre-scan ([`refuse_pending_skipped`]) then refuses the open, before anything is replayed or
+    /// written, if the WAL holds a record of its collection, and the flush planning refuses any commit that would
+    /// flush its collection ([`Database::plan_flushes`], a backstop).
     pub(super) fn recover_as(
         container: Container<F>,
         options: DatabaseOptions,
@@ -94,6 +102,14 @@ impl<F: ContainerFile + Sync> Database<F> {
             .with_chunk_target(options.wal_chunk_target);
         let mut db = Self::assemble(wal, manifest, collections, options, block_cache);
         db.skipped = skipped;
+        // Before the replay: a refused open takes no segment id, flushes nothing and retires no cut commit (ROADMAP
+        // 10.4.8). Without a skipped field there is nothing to look for, and the open is the writer's, unchanged.
+        refuse_pending_skipped(
+            db.wal.log(),
+            db.manifest.seq(),
+            &db.collections,
+            &db.skipped,
+        )?;
         db.replay()?;
         db.retire_uncommitted_manifest()?;
         // Replayed operations count as written at the open: their age is not logged (SPEC §8.2).
@@ -178,6 +194,84 @@ impl<F: ContainerFile + Sync> Database<F> {
         self.wal.replayed(name, chunk);
         Ok(())
     }
+}
+
+/// The pre-scan of an open that skips analysis (ROADMAP 10.4.8, ADR-0068 and ADR-0069 amendments, SPEC §8.6): refuses
+/// it with [`DatabaseError::AnalysisSkipped`] when the WAL from `wal_start` holds a **pending record** of a collection
+/// with a field in `skipped`: a record the replay would apply to that collection, so one that decodes (with its
+/// collection's schema, as the replay decodes it) before the first record that does not. It reads every chunk the
+/// replay reads ([`wal_chunks`], a writer's: those after a cut commit's Manifest included) once, decoding and never
+/// applying, so it writes nothing and runs before any replay-time flush, segment id or retiring commit.
+///
+/// Where the scan meets a record the replay could not apply (corrupt or newer bytes, a collection the manifest lacks,
+/// an unreadable chunk), that error is the replay's for those bytes ([`decode`], [`for_each_record`]). After a pending
+/// record it fails the open at once, before anything is written: the writer's open, which has the analyzer, fails on
+/// the same bytes, so retrying there would not help. With no pending record before it, nothing is refused and the
+/// replay runs as in any writer's open, failing on it as before.
+///
+/// The collection named is the first of `skipped` (collection, then field order) with a pending record, as the flush
+/// guard ([`Database::check_no_skipped_flush`]) names it.
+fn refuse_pending_skipped<F: ContainerFile>(
+    container: &Container<F>,
+    seq: u64,
+    collections: &BTreeMap<String, Collection>,
+    skipped: &[SkippedAnalysis],
+) -> Result<(), DatabaseError> {
+    if skipped.is_empty() {
+        return Ok(());
+    }
+    let mut pending = BTreeSet::new();
+    let scanned = scan_wal(container, seq, collections, |name| {
+        if skipped.iter().any(|s| s.collection == name) {
+            pending.insert(name.to_owned());
+        }
+    });
+    if pending.is_empty() {
+        return Ok(());
+    }
+    scanned?;
+    let s = skipped
+        .iter()
+        .find(|s| pending.contains(&s.collection))
+        .ok_or(DatabaseError::Internal {
+            what: "a pending record of a collection without a skipped field",
+        })?;
+    Err(DatabaseError::AnalysisSkipped {
+        collection: s.collection.clone(),
+        field: s.field.clone(),
+        analyzer: s.analyzer.clone(),
+    })
+}
+
+/// Decodes every record of the chunks the writer's replay reads, in log order, as it decodes them, applying none, and
+/// calls `decoded` with the collection of each that decodes. Stops at the first that does not, with the replay's
+/// error for it.
+fn scan_wal<F: ContainerFile>(
+    container: &Container<F>,
+    seq: u64,
+    collections: &BTreeMap<String, Collection>,
+    mut decoded: impl FnMut(&str),
+) -> Result<(), DatabaseError> {
+    for chunk in wal_chunks(container, seq, true)? {
+        let chunk = chunk.offset;
+        let frame = container
+            .read_frame_source(chunk, MAX_CHUNK_LEN)
+            .map_err(ReplayError::from)?;
+        for_each_record(chunk, &frame.payload, |offset, record| {
+            let name = record.collection();
+            let c = collections
+                .get(name)
+                .ok_or_else(|| ReplayError::UnknownCollection {
+                    chunk,
+                    offset,
+                    collection: name.to_owned(),
+                })?;
+            decode(c.memtable.schema(), chunk, offset, record)?;
+            decoded(name);
+            Ok(())
+        })?;
+    }
+    Ok(())
 }
 
 /// Whether a memtable rejected an operation only because it is full: an empty one would take it.

@@ -383,15 +383,16 @@ prints the space before and after (`--json` for one JSON object, keys in the REA
 the built-in analyzers only, so it opens with the **compaction-only open** (ROADMAP 10.4.4, ADR-0068,
 `CompactOnlyDatabase`): the writer's open above, except that a `text` field whose analyzer it lacks (a registered one,
 §6.2.2) is indexed with the stand-in of a read-only open that skips analysis (§8.6, one that emits no token), and
-that no commit may flush a non-empty memtable of a collection with such a field. Such a commit is refused before
-anything is written (`AnalysisSkipped`), so the open fails (status 1) when its replay would flush any collection
-(every flush flushes every memtable, §8.2) while such a collection holds a replayed record: a memtable at the
-default size (for such a collection, the stand-in's, which holds none of the skipped field's terms) or out of
-docids. The application then opens the database with its analyzer and commits (closing a `persia::Db` does; an open
-alone may flush nothing), and the command compacts after it. Otherwise that collection's WAL records stay WAL
-records, which the compaction copies (above) and the next writer's open replays and indexes with the real
-analyzer: nothing is lost, resurrected, or committed without its terms. The handle has no call that writes a
-document, commits, merges or changes a schema; when its registry has every analyzer it is exactly the writer's open.
+that its pre-scan (§8.6, ROADMAP 10.4.8) refuses the open (`AnalysisSkipped`, status 1) when the WAL from
+`wal_start` holds a *pending record* of a collection with such a field, one the replay would apply to it: such
+records can only be indexed, and flushed, with the analyzer. The refusal comes before the replay, wherever a flush
+would be due, so the refused command writes nothing but the container's tail repair: no segment, no commit, and it
+compacts nothing. It follows a crash of the application (or a handle dropped without a commit) that left such
+records; the application then opens the database with its analyzer and closes it (closing a `persia::Db` commits,
+which flushes every memtable), and the command compacts after it. Otherwise no record of such a collection is
+replayed: its committed segments are copied (above) and nothing is lost, resurrected, or committed without its
+terms. The handle has no call that writes a document, commits, merges or changes a schema; when its registry has
+every analyzer it is exactly the writer's open.
 It never opens the blob pack (§9.3), whose space blob GC reclaims (§9.5). `persia stats` reports whether a
 compaction is due by the default thresholds only, and says so: the application's own are not in the file. Like every compaction it puts the read-only
 handles of other processes behind until they refresh (§9.5), and it must not run during a copy taken with the files
@@ -990,7 +991,8 @@ A stored schema (§8.7) is read without a registry, and its `analyzer` is:
   (unsupported), since the name has built-in shape. Two opens are the exception, for a tool that has the built-ins
   only: a read-only open that skips analysis (`ReadOnlyDatabase::open_skipping_analysis`, ROADMAP 6.6.8, §8.6) and
   the compaction-only open (`CompactOnlyDatabase`, §4.6, ADR-0068) index such a field with a stand-in that emits no
-  token, and the latter never commits a memtable so indexed;
+  token, and the latter never commits a memtable so indexed (it refuses a WAL with a record of such a collection,
+  §8.6);
 - a malformed one (`es@01`, `ES@1`): corruption.
 
 #### 6.2.3 Ranking and relaxation
@@ -2783,10 +2785,39 @@ an empty memtable would not report) it commits and applies the record again. Suc
 the records from there on may not be in a memtable yet. The records of that chunk before the flush are then replayed
 again by the next open, which is harmless (§8.2.1). Records replayed after the last such commit hold `wal_start` back
 until a later flush covers them, like records written after the open. An open that fails or crashes during these
-commits leaves a state from which the next open reaches the same documents. The compaction-only open (§4.6,
-ADR-0068) and the mark-only open (§9.5, ADR-0069), which share one open, refuse such a flush while a collection whose
-analysis they skip holds a replayed record (`AnalysisSkipped`, before anything of that commit is written), and so
-fail; their other commits are these.
+commits leaves a state from which the next open reaches the same documents.
+
+An **open that skips analysis** (the compaction-only open, §4.6, ADR-0068, and the mark-only open, §9.5, ADR-0069,
+which share one open; a `text` field whose analyzer the registry lacks is indexed with a stand-in that emits no
+token) **pre-scans** the WAL between steps 3 and 4 (ROADMAP 10.4.8): it reads the `WalChunk` frames step 4 replays
+(a writer's: every one from `wal_start`, those after `log_end` and after a cut commit's Manifest included) once, and
+decodes each record as the replay does (its chunk, its collection in the loaded manifest, a put's document with
+that collection's schema), applying none. A **pending record** of a collection is a record the replay would apply
+to it: a put or a delete of that collection (of any id, one no document has included) among those records, before
+the first one the replay cannot apply. If a collection with a skipped field has a pending record, the open fails
+with `AnalysisSkipped`, naming the first such field (collection, then field order), before step 4: it writes nothing
+but the container's tail repair (§4.4), so no segment, no segment id, no commit and no retiring commit, wherever a
+flush would have been due. A collection with a skipped field therefore never holds a replayed record, and its
+memtable is never flushed (the flush planning also refuses such a flush, as a backstop that the pre-scan leaves
+unreachable). Without a pending record the open is exactly the writer's: its replay applies the other collections'
+records and may flush and retire as above. The cases:
+- Records in chunks before `wal_start` are not replayed, so not pending. A record a segment already holds (a chunk
+  replayed again after a replay-time flush, above) is pending: the replay applies it again.
+- A drop or a schema change of the collection commits after flushing every other memtable, so its `wal_start` is the
+  end of the log (§8.2.1): no record before it is replayed, so none is pending. A collection created by a commit is
+  in the loaded manifest, and its records after that commit are pending like any other. A record that names a
+  collection the manifest lacks is corruption (§8.2.1), not pending.
+- A cut commit (a Manifest after `log_end`) never took effect: the records before and after it are replayed onto the
+  loaded manifest, so they are pending, whatever the cut commit flushed, dropped or changed. A refused open leaves
+  the cut commit for the next writer's open to retire.
+- A record after the first one the replay cannot apply (a chunk or record that does not decode, a document that does
+  not decode with its schema, an unknown collection, an unreadable frame) is never applied, so not pending, and a
+  record of such a collection that does not decode is not pending either. When the pre-scan meets such a record
+  after a pending one, the open fails at once with that record's error, the replay's for those bytes (corruption, or
+  a newer encoding), which the writer's open, with the analyzer, gives too; before any pending record nothing is
+  refused, and the replay runs and fails on it as in any writer's open.
+
+The pre-scan costs one more read of the WAL range, only in an open that skips a field.
 
 A **read-only open** (ROADMAP 6.6.2) runs the same sequence on a container opened read-only (§4.5.1): no lock, no
 write, so it opens beside a live writer, any number at once. It cannot flush, and it does not stop at the size
@@ -3326,11 +3357,13 @@ the same process that runs `put_blob`, and keeps a **pin set** with it:
   pack's size before and after and the reader leases (§9.3). A database without a pack has nothing to collect. It has
   the built-in analyzers only, so it opens with the **mark-only open** (ROADMAP 10.4.7, ADR-0069,
   `MarkOnlyDatabase`): the compaction-only open's recovery (§4.6, §8.6, ADR-0068; one function), in which a `text`
-  field whose analyzer it lacks is indexed with a stand-in that emits no token and no commit may flush a non-empty
-  memtable of its collection (`AnalysisSkipped`, refused before anything of that commit is written, so the open fails,
-  status 1, and nothing is marked or swept). The mark reads no term: it lists the references of the stored documents
-  and of every WAL put from `wal_start` on, so a record of such a collection, which stays a WAL record, is marked as
-  in a writer's open, and the sweep and the pack rewrite need no analyzer. The handle offers the mark, the committed
+  field whose analyzer it lacks is indexed with a stand-in that emits no token, and whose pre-scan refuses the open
+  (`AnalysisSkipped`, status 1) when the WAL from `wal_start` holds a pending record of its collection (§8.6, ROADMAP
+  10.4.8): before the replay, so nothing is marked, swept or written but the container's tail repair, and the blobs
+  of those records stay as they are. The application then opens the database and closes it (closing a `persia::Db`
+  commits), and the command collects after it. The mark reads no term: it lists the references of the stored
+  documents and of every WAL put from `wal_start` on (of collections without a skipped field only, after the
+  pre-scan), and the sweep and the pack rewrite need no analyzer. The handle offers the mark, the committed
   seq and the writer proof the pack opens with, and nothing that writes a document, commits, merges, compacts or
   changes a schema. With every analyzer it is the writer's open.
 - Sweep: unmarked blob manifests, then staged chunks of uploads no marked manifest names, each only once older than a
