@@ -109,3 +109,37 @@ facade's JSON comes from one facade type, not from hand-built strings:
    `relax: false`, `effective` is L0's text, as the JSON states it, instead of `None`.
 
 The C ABI (ADR-0018) and the server (M11) pass the facade's text through.
+
+## Amendment (2026-11-27): a hit's typed sort values, step and rank score (ROADMAP 10.1.30)
+
+`persia::Hit` kept, privately, what the response JSON writes beside its public fields (its sort values and keys, and
+for a relaxed search its step and rank score), so a caller of the typed response could not read them. They are now
+public getters, each documented with what `SearchResponse::to_json` writes for the same hit:
+
+1. **A facade type, `persia::SortValue`**, not the engine's `TypedSortValue` re-exported. `TypedSortValue::of` names
+   the engine's raw `SortValue` (the column key the cursor compares, on no list of ADR-0063) and returns
+   `ResponseJsonError` (an engine error, which ADR-0063 item 3 keeps out of the facade's signatures), and its `Number`
+   does not tell the score from an `f64` field. `SortValue` is a facade value of ADR-0063 item 1 (the allow-list of
+   item 2 is unchanged), `#[non_exhaustive]`, with one variant per kind of key: `Score(f64)`, `I64(i64)`, `F64(f64)`,
+   `Datetime(i64)`, `Bool(bool)`, `Keyword(Vec<u8>)` and `Missing`. A `datetime` is its microseconds, as
+   `Value::Datetime` holds a document's, so a sort value compares with the document's value; the JSON writes it as
+   SPEC §6.4.1's text. A keyword is the bytes the index sorts (the JSON's string, or `{"base64url": ...}` for bytes
+   that are not UTF-8, item 6).
+2. **One formatter of a `datetime`.** The engine's `TypedSortValue::Datetime` now carries the microseconds too (checked
+   in range by `TypedSortValue::of`, as before), and both writers format them with the new shared primitive
+   `persia_engine::document::datetime_text`, the function `Document::to_json` writes a `datetime` field with (beside
+   `base64url_text`, amendment of 2026-11-26 item 2). The engine's response JSON is unchanged, byte for byte.
+3. **Typed when the response is made.** `SearchResponse`'s hits hold the typed values, made from the engine's hit and
+   the snapshot's schema when the search returns; the raw values and sort keys are not kept, and the JSON is written
+   from the typed values. A hit whose values do not fit its sort keys (a count other than the keys', a value of
+   another type than its key's field) is the broken invariant of item 9, `IO` (ADR-0063 item 8), now from the search
+   rather than from `to_json`; a search never returns one.
+4. **`Hit::sort_values() -> &[SortValue]`**, one per key of the request's sort in its order (the score alone for a
+   request without a sort), written as the hit's `"sort"` array; **`Hit::step() -> Option<usize>`** and
+   **`Hit::rank_score() -> Option<f64>`**, `Some` exactly for a relaxed search's hits, written as `"step"` and
+   `"rank_score"` (with `"level"`, the public field) only then: a plain search's hits have none of the three keys
+   (item 8).
+5. **Tested against the JSON**: `crates/persia/tests/hit_getters.rs` parses `to_json` and compares every getter of
+   every hit, for a table of requests (plain and relaxed, every sort type, missing sort values, L5, an empty page)
+   and 64 seeded random requests; the 10.1.25 differential tests (facade JSON against the engine's, byte for byte)
+   are unchanged.

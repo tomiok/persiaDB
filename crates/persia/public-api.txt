@@ -12,6 +12,7 @@
 #[non_exhaustive] pub enum persia::Level
 #[non_exhaustive] pub enum persia::RankFn
 #[non_exhaustive] pub enum persia::RelaxLevel
+#[non_exhaustive] pub enum persia::SortValue
 #[non_exhaustive] pub struct persia::BlockCacheStats
 #[non_exhaustive] pub struct persia::Correction
 #[non_exhaustive] pub struct persia::FieldExplanation
@@ -94,6 +95,7 @@ impl core::clone::Clone for persia::SearchRequest
 impl core::clone::Clone for persia::SearchResponse
 impl core::clone::Clone for persia::Sort
 impl core::clone::Clone for persia::SortKey
+impl core::clone::Clone for persia::SortValue
 impl core::clone::Clone for persia::StaticRank
 impl core::clone::Clone for persia::TextOptions
 impl core::clone::Clone for persia::Value
@@ -176,6 +178,7 @@ impl core::cmp::PartialEq for persia::RelaxedExplanation
 impl core::cmp::PartialEq for persia::ResumeToken
 impl core::cmp::PartialEq for persia::Sort
 impl core::cmp::PartialEq for persia::SortKey
+impl core::cmp::PartialEq for persia::SortValue
 impl core::cmp::PartialEq for persia::StaticRank
 impl core::cmp::PartialEq for persia::TextOptions
 impl core::cmp::PartialEq for persia::Value
@@ -258,6 +261,7 @@ impl core::fmt::Debug for persia::SearchRequest
 impl core::fmt::Debug for persia::SearchResponse
 impl core::fmt::Debug for persia::Sort
 impl core::fmt::Debug for persia::SortKey
+impl core::fmt::Debug for persia::SortValue
 impl core::fmt::Debug for persia::StaticRank
 impl core::fmt::Debug for persia::TextOptions
 impl core::fmt::Debug for persia::Value
@@ -358,6 +362,7 @@ impl core::marker::Send for persia::SearchRequest
 impl core::marker::Send for persia::SearchResponse
 impl core::marker::Send for persia::Sort
 impl core::marker::Send for persia::SortKey
+impl core::marker::Send for persia::SortValue
 impl core::marker::Send for persia::StaticRank
 impl core::marker::Send for persia::TextOptions
 impl core::marker::Send for persia::Value
@@ -416,6 +421,7 @@ impl core::marker::Sync for persia::SearchRequest
 impl core::marker::Sync for persia::SearchResponse
 impl core::marker::Sync for persia::Sort
 impl core::marker::Sync for persia::SortKey
+impl core::marker::Sync for persia::SortValue
 impl core::marker::Sync for persia::StaticRank
 impl core::marker::Sync for persia::TextOptions
 impl core::marker::Sync for persia::Value
@@ -474,6 +480,7 @@ impl core::marker::Unpin for persia::SearchRequest
 impl core::marker::Unpin for persia::SearchResponse
 impl core::marker::Unpin for persia::Sort
 impl core::marker::Unpin for persia::SortKey
+impl core::marker::Unpin for persia::SortValue
 impl core::marker::Unpin for persia::StaticRank
 impl core::marker::Unpin for persia::TextOptions
 impl core::marker::Unpin for persia::Value
@@ -527,6 +534,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for persia::SearchRequest
 impl core::panic::unwind_safe::RefUnwindSafe for persia::SearchResponse
 impl core::panic::unwind_safe::RefUnwindSafe for persia::Sort
 impl core::panic::unwind_safe::RefUnwindSafe for persia::SortKey
+impl core::panic::unwind_safe::RefUnwindSafe for persia::SortValue
 impl core::panic::unwind_safe::RefUnwindSafe for persia::StaticRank
 impl core::panic::unwind_safe::RefUnwindSafe for persia::TextOptions
 impl core::panic::unwind_safe::RefUnwindSafe for persia::Value
@@ -578,6 +586,7 @@ impl core::panic::unwind_safe::UnwindSafe for persia::SearchRequest
 impl core::panic::unwind_safe::UnwindSafe for persia::SearchResponse
 impl core::panic::unwind_safe::UnwindSafe for persia::Sort
 impl core::panic::unwind_safe::UnwindSafe for persia::SortKey
+impl core::panic::unwind_safe::UnwindSafe for persia::SortValue
 impl core::panic::unwind_safe::UnwindSafe for persia::StaticRank
 impl core::panic::unwind_safe::UnwindSafe for persia::TextOptions
 impl core::panic::unwind_safe::UnwindSafe for persia::Value
@@ -851,6 +860,9 @@ pub fn persia::Field::field_type(&self) -> persia::FieldType
 pub fn persia::Field::id(&self) -> persia::FieldId
 pub fn persia::Field::kind(&self) -> &persia::FieldKind
 pub fn persia::Field::name(&self) -> &str
+pub fn persia::Hit::rank_score(&self) -> core::option::Option<f64>
+pub fn persia::Hit::sort_values(&self) -> &[persia::SortValue]
+pub fn persia::Hit::step(&self) -> core::option::Option<usize>
 pub fn persia::Levels::resolve(&self) -> &[persia::Level]
 pub fn persia::OpenOptions::block_cache_bytes(self, bytes: u64) -> Self
 pub fn persia::OpenOptions::commit_interval(self, interval: core::time::Duration) -> Self
@@ -1041,6 +1053,13 @@ pub variant persia::RelaxLevel::Prefix
 pub variant persia::RelaxLevel::Synonyms
 pub variant persia::SortKey::Field { .. }
 pub variant persia::SortKey::Score { .. }
+pub variant persia::SortValue::Bool(bool)
+pub variant persia::SortValue::Datetime(i64)
+pub variant persia::SortValue::F64(f64)
+pub variant persia::SortValue::I64(i64)
+pub variant persia::SortValue::Keyword(alloc::vec::Vec<u8>)
+pub variant persia::SortValue::Missing
+pub variant persia::SortValue::Score(f64)
 pub variant persia::Value::Bool(bool)
 pub variant persia::Value::Datetime(i64)
 pub variant persia::Value::F64(f64)

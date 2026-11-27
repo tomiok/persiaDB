@@ -1922,7 +1922,8 @@ request's JSON it is the key `projection` (§7.1.4).
 A response is one JSON object (ROADMAP 10.1.13, ADR-0065), written by the engine beside the request JSON it answers
 (§7.1.4), so the embedded API, its bindings and the server write the same text. The embedded API writes it from its own
 response (`persia::SearchResponse::to_json`, also its `serde::Serialize` impl; ROADMAP 10.1.25, ADR-0065 amended), the
-same text as the engine's for the same search. Its keys come in this order, and so do
+same text as the engine's for the same search; a hit's typed getters (`Hit::sort_values`, `step`, `rank_score`; ROADMAP
+10.1.30, ADR-0065 amended) return what its JSON states. Its keys come in this order, and so do
 the keys of each object in it; a value that is absent is left out, never `null`:
 ```jsonc
 {"hits": [{"document": {"id": "a", "title": "red shoes", "price": 80.5},   // §6.4.1's output form, projected (§7.5.1)

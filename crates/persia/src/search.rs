@@ -14,13 +14,17 @@ use persia_engine::query::{DefaultFields, Filter, QueryLimits};
 use persia_engine::relax::{Correction, FallbackOrder, RelaxLevel, RelaxOptions};
 use persia_engine::schema::CollectionSchema;
 use persia_engine::search::request::{QueryRequest, QueryResponse, QueryResults, RunOptions};
-use persia_engine::search::{Explanation, FacetCounts, FacetRequest, Sort, SortKey, SortValue};
+use persia_engine::search::{Explanation, FacetCounts, FacetRequest, Sort};
 
 use crate::collection::Collection;
 use crate::{Error, Result};
 
 // The response JSON (ROADMAP 10.1.25): `SearchResponse` is `Serialize`, and `to_json` writes it.
 mod json;
+// A hit's typed sort values (ROADMAP 10.1.30).
+mod sort_value;
+
+pub use sort_value::SortValue;
 
 /// A search request (SPEC §7.1): the user text `q`, and what narrows, orders and pages its hits. Build it with
 /// [`SearchRequest::new`] and the setters; [`Collection::search`] runs it. Field ids come from the collection's
@@ -348,18 +352,99 @@ pub struct Hit {
     pub document: Document,
     /// Its score (SPEC §7.2).
     pub score: f64,
-    /// The relaxation level whose step matched it first (SPEC §7.6); `exact` for a search that ran L0 alone.
+    /// The relaxation level whose step matched it first (SPEC §7.6); `exact` for a search that ran L0 alone. The
+    /// response JSON states it (`"level"`) for a relaxed search's hit only, beside [`Self::step`] and
+    /// [`Self::rank_score`].
     pub level: RelaxLevel,
     /// How its score adds up, when the request asked ([`SearchRequest::explain`]).
     pub explanation: Option<Explanation>,
     /// The cursor token of the page after this hit (SPEC §7.4), for [`SearchRequest::after`].
     pub cursor: String,
-    /// Its values for the sort keys, as the engine ranks them, typed by the schema in the response JSON.
+    /// Its values for the sort keys, typed by the keys' fields.
     sort: Vec<SortValue>,
-    /// The keys of the sort that ranked it, one per value.
-    sort_keys: Vec<SortKey>,
     /// Its step and rank score, for a hit of a relaxed search (SPEC §7.6).
     relaxed: Option<RelaxedStep>,
+}
+
+impl Hit {
+    /// Its values for the keys of the sort that ranked it (SPEC §7.4), one per key in the sort's order, typed by the
+    /// key ([`SortValue`]); a request without a sort is sorted by score, so each hit has one value, its
+    /// [`SortValue::Score`]. [`SearchResponse::to_json`] writes them as the hit's `"sort"` array, always present, with
+    /// one element per value in this order: the score and an `f64` as numbers, an `i64` as an integer, a `datetime` as
+    /// SPEC §6.4.1's output text, a `bool`, a keyword as a string (or `{"base64url": ...}` for bytes that are not
+    /// UTF-8), and [`SortValue::Missing`] as `null`.
+    ///
+    /// ```
+    /// use persia::{SearchRequest, SortValue};
+    ///
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// # let db = persia::Db::open(dir.path().join("app.persia"))?;
+    /// let notes = db.create_collection_json(r#"{"name": "notes", "fields": {"body": {"type": "text"}}}"#)?;
+    /// notes.put_json(r#"{"id": "n1", "body": "hello world"}"#)?;
+    /// let response = notes.search(&SearchRequest::new("hello"))?;
+    /// let hit = &response.hits[0];
+    /// assert_eq!(hit.sort_values(), [SortValue::Score(hit.score)]);
+    /// let json: serde_json::Value = serde_json::from_str(&response.to_json()?)?;
+    /// assert_eq!(json["hits"][0]["sort"], serde_json::json!([hit.score]));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn sort_values(&self) -> &[SortValue] {
+        &self.sort
+    }
+
+    /// The index of the relaxation cascade's step that matched it first (SPEC §7.6), 0 being L0's query, for a hit of
+    /// a relaxed search; `None` for a hit of a plain search (one that ran L0 alone: `relax: false`, or a collection
+    /// whose cascade is disabled). [`SearchResponse::to_json`] writes it as the hit's `"step"`, an integer, only when
+    /// it is `Some`, beside `"level"` ([`Self::level`]) and `"rank_score"` ([`Self::rank_score`]); a plain search's
+    /// hits have none of the three keys (never `null`).
+    ///
+    /// ```
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// # let db = persia::Db::open(dir.path().join("app.persia"))?;
+    /// let notes = db.create_collection_json(r#"{"name": "notes", "fields": {"body": {"type": "text"}}}"#)?;
+    /// notes.put_json(r#"{"id": "n1", "body": "hello world"}"#)?;
+    /// let relaxed = notes.search_json(r#"{"q": "hello zebra"}"#)?; // L0 finds nothing: a later step does
+    /// let json: serde_json::Value = serde_json::from_str(&relaxed.to_json()?)?;
+    /// let step = relaxed.hits[0].step().ok_or("a relaxed hit has a step")?;
+    /// assert!(step > 0);
+    /// assert_eq!(json["hits"][0]["step"], step);
+    /// let plain = notes.search_json(r#"{"q": "hello", "relax": false}"#)?;
+    /// let json: serde_json::Value = serde_json::from_str(&plain.to_json()?)?;
+    /// assert_eq!(plain.hits[0].step(), None);
+    /// assert!(json["hits"][0].get("step").is_none());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn step(&self) -> Option<usize> {
+        self.relaxed.map(|r| r.step)
+    }
+
+    /// Its rank score, for a hit of a relaxed search (SPEC §7.6): its step's rank combined with its score, the order
+    /// the cascade ranks hits of different steps in (never below a hit's of a later step); `None` for a hit of a plain
+    /// search. [`SearchResponse::to_json`] writes it as the hit's `"rank_score"`, a finite number, only when it is
+    /// `Some`, as [`Self::step`] says.
+    ///
+    /// ```
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// # let db = persia::Db::open(dir.path().join("app.persia"))?;
+    /// let notes = db.create_collection_json(r#"{"name": "notes", "fields": {"body": {"type": "text"}}}"#)?;
+    /// notes.put_json(r#"{"id": "n1", "body": "hello world"}"#)?;
+    /// let response = notes.search_json(r#"{"q": "hello"}"#)?; // relaxed by default: L0 has the hit
+    /// let json: serde_json::Value = serde_json::from_str(&response.to_json()?)?;
+    /// let rank_score = response.hits[0].rank_score().ok_or("a relaxed hit has a rank score")?;
+    /// assert_eq!(json["hits"][0]["rank_score"].as_f64(), Some(rank_score));
+    /// let plain = notes.search_json(r#"{"q": "hello", "relax": false}"#)?;
+    /// assert_eq!(plain.hits[0].rank_score(), None);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn rank_score(&self) -> Option<f64> {
+        self.relaxed.map(|r| r.rank_score)
+    }
 }
 
 /// The step that matched a relaxed search's hit, and its rank score (SPEC §7.6): what the response JSON states beside
@@ -466,30 +551,30 @@ impl Relaxation {
     }
 }
 
-fn plain_hit(hit: SearchHit) -> Hit {
-    let sort_keys = hit.sort_keys().to_vec();
-    Hit {
+/// The facade's hit of `hit`, a hit of a search of the collection of `schema`: its sort values typed by their keys.
+fn plain_hit(hit: SearchHit, schema: &CollectionSchema) -> Result<Hit> {
+    let sort = SortValue::of_hit(&hit, schema)?;
+    Ok(Hit {
         cursor: hit.cursor().to_token(),
         document: hit.document,
         score: hit.score,
         level: RelaxLevel::Exact,
         explanation: hit.explanation,
-        sort: hit.sort,
-        sort_keys,
+        sort,
         relaxed: None,
-    }
+    })
 }
 
-fn relaxed_hit(hit: RelaxedHit) -> Hit {
+fn relaxed_hit(hit: RelaxedHit, schema: &CollectionSchema) -> Result<Hit> {
     let relaxed = Some(RelaxedStep {
         step: hit.step,
         rank_score: hit.rank_score,
     });
-    Hit {
+    Ok(Hit {
         level: hit.level,
         relaxed,
-        ..plain_hit(hit.hit)
-    }
+        ..plain_hit(hit.hit, schema)?
+    })
 }
 
 /// The facade's response for `response`, a search of the collection of `schema`.
@@ -499,14 +584,22 @@ fn response(response: QueryResponse, schema: Arc<CollectionSchema>) -> Result<Se
     let relaxation = Relaxation::of(response.relaxation());
     match response.results {
         QueryResults::Plain(results) => Ok(SearchResponse {
-            hits: results.hits.into_iter().map(plain_hit).collect(),
+            hits: results
+                .hits
+                .into_iter()
+                .map(|hit| plain_hit(hit, &schema))
+                .collect::<Result<_>>()?,
             facets: results.facets,
             relaxation,
             query_truncated,
             schema,
         }),
         QueryResults::Relaxed(results) => Ok(SearchResponse {
-            hits: results.hits.into_iter().map(relaxed_hit).collect(),
+            hits: results
+                .hits
+                .into_iter()
+                .map(|hit| relaxed_hit(hit, &schema))
+                .collect::<Result<_>>()?,
             facets: results.facets,
             relaxation,
             query_truncated,

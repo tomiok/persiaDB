@@ -211,6 +211,9 @@ fn the_committed_snapshot_lists_only_what_is_kept_on_purpose() {
         "persia::Filter::validate(",
         "persia_format::",
         "QueryLimits",
+        // ROADMAP 10.1.30: a hit's sort values are the facade's type, not the engine's.
+        "TypedSortValue",
+        "persia_engine::search::SortValue",
     ] {
         assert!(!snapshot.contains(hidden), "{hidden} is in {SNAPSHOT}");
     }
@@ -221,6 +224,11 @@ fn the_committed_snapshot_lists_only_what_is_kept_on_purpose() {
         "pub fn persia::blob_ref(",
         "pub const persia::BlobRef::MAX_CHUNK_SIZE: u32",
         "pub fn persia::BlobRef::chunk_count(&self) -> u32",
+        // ROADMAP 10.1.30: a hit's typed sort values, step and rank score.
+        "#[non_exhaustive] pub enum persia::SortValue",
+        "pub fn persia::Hit::sort_values(&self) -> &[persia::SortValue]",
+        "pub fn persia::Hit::step(&self) -> core::option::Option<usize>",
+        "pub fn persia::Hit::rank_score(&self) -> core::option::Option<f64>",
         "#[non_exhaustive] pub struct persia::TextOptions",
         "#[non_exhaustive] pub enum persia::FieldType",
         "pub struct persia::AsyncDb",

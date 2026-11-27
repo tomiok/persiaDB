@@ -11,7 +11,7 @@ use serde_json::{Number, Value as J};
 use super::base64url;
 use super::query::{QueryResponse, QueryResults};
 use crate::db::{Relaxation, RelaxedHit, SearchHit};
-use crate::document::{DocumentError, datetime};
+use crate::document::{DocumentError, MAX_DATETIME, MIN_DATETIME, datetime_text};
 use crate::schema::{CollectionSchema, FieldId, FieldType};
 use crate::search::{
     Explanation, FacetCounts, FieldExplanation, PhraseExplanation, ProximityExplanation,
@@ -118,9 +118,10 @@ impl QueryResponse {
 }
 
 /// A sort value as the response JSON types it (SPEC §7.4, §7.5.2): by its key's field, the score and an `f64` as a
-/// number, an `i64` as an integer, a `datetime` in the document's output form, a `bool`, and a keyword's bytes. What
-/// [`QueryResponse::to_json`] writes, and what another writer of the response JSON (the embedded API's, ROADMAP
-/// 10.1.25) types a hit's sort values with.
+/// number, an `i64` as an integer, a `datetime` (its microseconds) in the document's output form, a `bool`, and a
+/// keyword's bytes. What [`QueryResponse::to_json`] writes, and what another writer of the response JSON (the embedded
+/// API's, ROADMAP 10.1.25) types a hit's sort values with: the embedded API's typed sort values (ROADMAP 10.1.30) are
+/// made from it.
 ///
 /// ```
 /// use persia_engine::schema::SchemaBuilder;
@@ -142,8 +143,9 @@ pub enum TypedSortValue {
     Number(f64),
     /// An `i64` field's value.
     Integer(i64),
-    /// A `datetime` field's value, in the document's output form (SPEC §6.4.1).
-    Datetime(String),
+    /// A `datetime` field's value: microseconds in [`MIN_DATETIME`]`..=`[`MAX_DATETIME`], written in the document's
+    /// output form (SPEC §6.4.1, [`datetime_text`]).
+    Datetime(i64),
     /// A `bool` field's value.
     Bool(bool),
     /// A `keyword` field's bytes: a string when they are UTF-8, else `{"base64url": ...}` ([`base64url_text`]).
@@ -175,9 +177,13 @@ impl TypedSortValue {
             (None, SortValue::Score(score)) => Self::Number(*score),
             (Some(FieldType::I64), SortValue::Key(key)) => Self::Integer(key_to_i64(*key)),
             (Some(FieldType::F64), SortValue::Key(key)) => Self::Number(key_to_f64(*key)),
-            (Some(FieldType::Datetime), SortValue::Key(key)) => Self::Datetime(
-                datetime::format(key_to_i64(*key)).ok_or(ResponseJsonError::SortValue)?,
-            ),
+            (Some(FieldType::Datetime), SortValue::Key(key)) => {
+                let micros = key_to_i64(*key);
+                if !(MIN_DATETIME..=MAX_DATETIME).contains(&micros) {
+                    return Err(ResponseJsonError::SortValue);
+                }
+                Self::Datetime(micros)
+            }
             (Some(FieldType::Bool), SortValue::Key(0)) => Self::Bool(false),
             (Some(FieldType::Bool), SortValue::Key(1)) => Self::Bool(true),
             (Some(FieldType::Keyword), SortValue::Keyword(bytes)) => Self::Keyword(bytes.clone()),
@@ -269,7 +275,12 @@ impl Writer<'_> {
                 number(out, n, what)?;
             }
             TypedSortValue::Integer(i) => out.push_str(&i.to_string()),
-            TypedSortValue::Datetime(text) => string(out, &text),
+            TypedSortValue::Datetime(micros) => {
+                string(
+                    out,
+                    &datetime_text(micros).ok_or(ResponseJsonError::SortValue)?,
+                );
+            }
             TypedSortValue::Bool(b) => out.push_str(bool_text(b)),
             TypedSortValue::Keyword(bytes) => keyword(out, &bytes),
         }

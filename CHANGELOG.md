@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia::Hit::sort_values()`, `step()` and `rank_score()` (ROADMAP 10.1.30, ADR-0065 amended; SPEC §7.4, §7.5.2,
+  §7.6): a hit's values for the request's sort keys as the new `#[non_exhaustive]` `persia::SortValue` (`Score`,
+  `I64`, `F64`, `Datetime` in microseconds, `Bool`, `Keyword` bytes, `Missing`), and for a relaxed search's hit its
+  cascade step and rank score (`None` for a plain search). Each states what `SearchResponse::to_json` writes for the
+  hit: the `"sort"` array, and `"step"`, `"rank_score"` and `"level"` only for a relaxed search's hits. Underneath,
+  `persia_engine::document::datetime_text` formats a `datetime` as SPEC §6.4.1 writes it, and the engine's
+  `TypedSortValue::Datetime` holds the microseconds (it held the text).
 - `persia::blob_ref(blob_id, size, mime, chunk_size, user_meta) -> persia::Result<BlobRef>` (ROADMAP 10.1.29,
   ADR-0063 amended; SPEC §9.6): builds a blob reference from its fields (one a program kept outside the database),
   checking the value rules of SPEC §9.1; a rule that does not hold is `InvalidArgument`. A put checks the reference
