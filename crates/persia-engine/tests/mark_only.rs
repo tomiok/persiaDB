@@ -18,8 +18,8 @@
 //! 6. A refusal before the replay would flush another collection writes nothing and loses nothing: a second open is
 //!    refused alike, and the application reaches every document and marks every blob.
 //! 7. A fault and a crash at every write of its open (the replay-time flushes of a collection without a skipped field,
-//!    or the commit retiring a cut commit) lose nothing, and the next mark-only open succeeds and marks exactly what the
-//!    writer marks, every live blob included.
+//!    or the commit retiring a cut commit) lose nothing, and the next mark-only open succeeds and marks exactly what
+//!    the writer marks, every live blob included.
 //! 8. Repeated refusals (ROADMAP 10.4.8: none flushes the replayed `plain` records any more) write nothing, lose and
 //!    resurrect nothing and write no segment; the application's commit, merges and compaction then leave the same
 //!    documents, the WAL `notes` indexed by the real analyzer, and no dead byte.

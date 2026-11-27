@@ -246,8 +246,8 @@ pub enum DatabaseError {
     },
     /// An open that skips the analysis of a `text` field whose analyzer its registry lacks (a [`CompactOnlyDatabase`]
     /// or a [`MarkOnlyDatabase`], ADR-0068, ADR-0069) refuses a database whose WAL, from `wal_start` on, holds a
-    /// record its replay would apply to that field's collection (a *pending record*, SPEC §8.6): such records can only
-    /// be indexed, and flushed, with the analyzer. Its pre-scan finds one before the replay (ROADMAP 10.4.8), so the
+    /// *pending record* (as SPEC §8.6 defines it) of that field's collection: such records can only be indexed, and
+    /// flushed, with the analyzer. Its pre-scan finds one before the replay (ROADMAP 10.4.8), so the
     /// refused open writes nothing but the container's tail repair: no segment, no segment id, no commit. Open the
     /// database with its application (a registry that has the analyzer) and close it (closing a `persia::Db` commits,
     /// which flushes every memtable; with the engine, commit), then retry. Not corruption. (The same error also guards
@@ -1314,7 +1314,7 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// flushes every memtable with operations (but `skip`'s).
     ///
     /// A backstop (defence in depth, ROADMAP 10.4.8): such an open is refused by its pre-scan when the WAL holds a
-    /// record its replay would apply to such a collection (`recovery::refuse_pending_skipped`), and nothing else
+    /// pending record (SPEC §8.6) of such a collection (`recovery::refuse_pending_skipped`), and nothing else
     /// writes to these handles' memtables, so this never fires unless that rule is broken.
     fn check_no_skipped_flush(&self, skip: Option<&str>) -> Result<(), DatabaseError> {
         let flushed = |s: &&SkippedAnalysis| {

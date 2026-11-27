@@ -99,27 +99,34 @@ decided:
    *pending record* (below) belongs to a collection with a skipped field, the open fails with
    `DatabaseError::AnalysisSkipped` at once, naming the first such field in collection then field order. Where that
    record sits relative to a flush threshold does not matter.
-2. **A pending record** of a collection is a record the replay would apply to it: a put or a delete of that
-   collection, of any id, from `wal_start` on (after `log_end` and after a cut commit's Manifest included), before
-   the first record the replay cannot apply. So records a segment already holds (a chunk replayed again after a
-   replay-time flush) are pending; records before `wal_start` are not; a drop or schema change is a commit after
-   which no earlier record is replayed; a cut commit never took effect, so the records around it are pending; a
-   record of a collection the manifest lacks is corruption, not pending. Where in doubt, the rule refuses: an
-   accepted open never replays a record of a skipped collection, so no replay can need to flush its memtable.
+2. **A pending record** of a collection is a put or a delete of that collection, of any id, from `wal_start` on
+   (after `log_end` and after a cut commit's Manifest included), that decodes, before the first record that does not
+   (SPEC §8.6). That is every record the replay would apply to it, and possibly more: a record that decodes but that
+   a memtable rejects does not stop the pre-scan, so a later record of a skipped collection still refuses the open.
+   So records a segment already holds (a chunk replayed again after a replay-time flush) are pending; records before
+   `wal_start` are not; a drop or schema change is a commit after which no earlier record is replayed; a cut commit
+   never took effect, so the records around it are pending; a record of a collection the manifest lacks is
+   corruption, not pending. Where in doubt, the rule refuses: an accepted open never replays a record of a skipped
+   collection, so no replay can need to flush its memtable.
 3. **A refused open writes nothing** but the container's tail repair, as any writer's open: no segment, no segment id,
    no commit, and no retiring commit of a cut commit (item 1's retiring commit happens only in an accepted open).
    N refusals in a row leave the container byte-identical.
-4. **Damaged bytes.** A record the pre-scan cannot decode gives the replay's error for it (corruption, or a newer
-   encoding). After a pending record the open fails with that error at once, before anything is written: the
-   application's open, with the analyzer, fails on the same bytes, so the refusal's remedy would not help. Before any
-   pending record nothing is refused, and the replay runs and fails on it exactly as in a writer's open. One extra read
-   of the WAL range, only when a field is skipped; no speed claim.
+4. **Damaged bytes.** A chunk the pre-scan cannot read (an I/O error, or a frame that does not decode) fails the open
+   at once, whatever came before, writing nothing: the read may succeed when the replay repeats it, and the replay
+   would then apply the chunk's records to a stand-in memtable (found in review). A record the pre-scan cannot decode
+   gives the replay's error for it (corruption, or a newer encoding), the same at every read. After a pending record
+   the open fails with that error at once, before anything is written: the application's open, with the analyzer,
+   fails on the same bytes, so the refusal's remedy would not help. Before any pending record nothing is refused, and
+   the replay runs and fails on it exactly as in a writer's open. One extra read of the WAL range, only when a field
+   is skipped; no speed claim.
 5. **Item 2's flush guard stays**, as a backstop (defence in depth): `Database::plan_flushes` still refuses a commit
    that would flush a non-empty memtable of a collection with a skipped field, before any segment is built or id
    taken. After the pre-scan no such memtable holds a record, so it never fires unless the rule above is broken.
-6. **Without a skipped field**, and with skipped fields whose collections have no pending record, the open is exactly
-   the writer's, as item 5 says: its replay applies the other collections' records and may flush them and retire a
-   cut commit.
+6. **Without a skipped field** the open is exactly the writer's, as item 5 of the decision says. With skipped fields
+   whose collections have no pending record, and with every chunk read, it is the writer's too: its replay applies
+   the other collections' records and may flush them and retire a cut commit. Where a chunk cannot be read (item 4)
+   it differs on the safer side: it fails at once and writes nothing, where the writer's open may flush first or
+   report an earlier memtable error.
 
 Consequences: item 2's "the refusal comes from the open's replay, when a replay-time flush is due" and item 4's "the
 replayed records of a skipped collection are never flushed, so they stay in the WAL" now read: no record of a skipped

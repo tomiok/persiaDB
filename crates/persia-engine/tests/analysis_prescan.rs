@@ -5,11 +5,11 @@
 //!
 //! Invariants:
 //! 1. (property) Over generated sessions of the application (puts and deletes in two collections naming the registered
-//!    `tags@1` and in `plain`, commits, a drop and re-creation, and an end that is clean or a commit cut by a fault and
-//!    a crash), each open is refused iff the model holds an operation on a skipped collection after the last commit
-//!    that took effect, whatever the open's flush threshold; the refusal names the first such collection. A refused
-//!    open leaves every file as a bare read-write open of the container leaves it (its tail repair only); and the
-//!    application's next open shows exactly the model's documents.
+//!    `tags@1` and in `plain`, commits, a drop and re-creation, a schema evolution, and an end that is clean or a
+//!    commit cut by a fault and a crash), each open is refused iff the model holds an operation on a skipped
+//!    collection after the last commit that took effect, whatever the open's flush threshold; the refusal names the
+//!    first such collection. A refused open leaves every file as a bare read-write open of the container leaves it
+//!    (its tail repair only); and the application's next open shows exactly the model's documents.
 //! 2. Both orderings (a skipped record before, or after, a `plain` backlog that crosses the open's flush threshold):
 //!    `N` refused opens in a row write nothing, so no segment and no commit; the application's next open shows every
 //!    document; once it has committed, the open succeeds.
@@ -20,6 +20,10 @@
 //!    and fails as it does. A skipped collection's put that does not decode is not pending.
 //! 5. Without a pending record the open is the writer's: the files are byte-identical to the application's open,
 //!    a replay-time flush of `plain` and a retired cut commit included.
+//! 6. Review cases: a pending record, a due flush and then damage report the damage; damage before any pending record
+//!    fails as the writer's open; a pending record a segment already holds refuses the open; a read failure, or a
+//!    frame that does not decode, in the pre-scan fails the open at once, writing nothing; a collection with two
+//!    skipped fields names the first in field order.
 
 #![allow(
     clippy::unwrap_used,
@@ -31,8 +35,10 @@
 )]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use persia_analysis::{Analyzer, AnalyzerRegistry, LowercaseFilter, WhitespaceTokenizer};
 use persia_engine::db::{
@@ -46,7 +52,7 @@ use persia_engine::schema::CollectionSchema;
 use persia_engine::wal::{Durability, ReplayError, WalRecord, WalWriter};
 use persia_format::block::Compression;
 use persia_format::frame::FrameKind;
-use persia_storage::container::sim::{CrashLoss, SimFault};
+use persia_storage::container::sim::{CrashLoss, SimFault, SimFile};
 use persia_storage::container::{Container, ContainerFile, Mode};
 use persia_storage::vfs::Vfs;
 use persia_storage::vfs::sim::{SimFs, SimFsFile};
@@ -80,6 +86,20 @@ fn schema(name: &str) -> CollectionSchema {
         )
         .unwrap()
     }
+}
+
+/// [`schema`]`(name)` with `strict` set: a query-time change, which an evolution commits (SPEC §6.2.4).
+fn schema_strict(name: &str, strict: bool) -> CollectionSchema {
+    let fields = if name == "plain" {
+        r#"{"body": {"type": "text"}}"#
+    } else {
+        r#"{"tags": {"type": "text", "analyzer": "tags"}, "body": {"type": "text"}}"#
+    };
+    CollectionSchema::from_json_in(
+        &format!(r#"{{"name": "{name}", "strict": {strict}, "fields": {fields}}}"#),
+        &registry().with_builtins(),
+    )
+    .unwrap()
 }
 
 fn is_skipped(collection: &str) -> bool {
@@ -230,6 +250,10 @@ enum Step {
     Recreate {
         c: usize,
     },
+    /// Evolves the collection's schema (flips `strict`): a commit that flushes every memtable (SPEC §8.2.1).
+    Evolve {
+        c: usize,
+    },
 }
 
 fn step() -> impl Strategy<Value = Step> {
@@ -238,6 +262,7 @@ fn step() -> impl Strategy<Value = Step> {
         3 => (0..3_usize, 0..5_u8, any::<bool>()).prop_map(|(c, id, fsync)| Step::Delete { c, id, fsync }),
         1 => Just(Step::Commit),
         1 => (0..3_usize).prop_map(|c| Step::Recreate { c }),
+        1 => (0..3_usize).prop_map(|c| Step::Evolve { c }),
     ]
 }
 
@@ -307,6 +332,13 @@ fn session(steps: &[Step], end: &End) -> (SimFs, Docs, BTreeSet<String>) {
                 db.drop_collection(name).unwrap();
                 db.create_collection(schema(name)).unwrap();
                 docs.retain(|(collection, _), _| collection != name);
+                pending.clear();
+            }
+            Step::Evolve { c } => {
+                let name = COLLECTIONS[c];
+                let strict = db.snapshot().collection(name).unwrap().schema().strict();
+                let seq = db.seq();
+                assert!(db.evolve_collection(&schema_strict(name, !strict)).unwrap() > seq);
                 pending.clear();
             }
         }
@@ -749,5 +781,411 @@ fn without_a_pending_record_the_files_are_the_writers_byte_for_byte() {
             );
         }
         assert!(!has_cut_commit(&writer), "{name}: retired");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// 6. Review cases (ROADMAP 10.4.8 review)
+// ---------------------------------------------------------------------------------------------------------------
+
+/// The behaviour change SPEC §8.6 documents: a pending record, a `plain` backlog that crosses the open's (small) flush
+/// threshold, then damage. Before the pre-scan the replay flushed `plain` (in the second order, after committing an
+/// earlier flush) and was refused (`AnalysisSkipped`); now the open fails with the damage's error, at the position
+/// the application's open reports, and writes nothing.
+#[test]
+fn damage_after_a_pending_record_and_a_due_flush_is_reported_as_the_damage() {
+    let threshold = plain_threshold(8);
+    for plain_first in [false, true] {
+        for handle in [Handle::Compact, Handle::Mark] {
+            let ctx = format!("plain first {plain_first}, {handle:?}");
+            let fs = SimFs::new();
+            let mut db = create_app(&fs);
+            db.put("notes", &doc("notes", "committed", 1), Durability::Buffered)
+                .unwrap();
+            db.commit().unwrap();
+            let backlog = |db: &mut Database<SimFsFile>, prefix: &str| {
+                for i in 0..32 {
+                    let id = format!("{prefix}{i:03}");
+                    db.put("plain", &doc("plain", &id, 1), Durability::Buffered)
+                        .unwrap();
+                }
+            };
+            if plain_first {
+                backlog(&mut db, "a");
+            }
+            db.put("notes", &doc("notes", "w", 1), Durability::Buffered)
+                .unwrap();
+            backlog(&mut db, "b");
+            db.put("plain", &doc("plain", "last", 1), Durability::Fsync)
+                .unwrap();
+            drop(db);
+            damage_wal(&fs, Damage::UnknownCollection);
+            let app_err = open_app(&fs.crash(CrashLoss::Nothing), threshold).unwrap_err();
+            assert!(app_err.is_corruption(), "{ctx}: {app_err:?}");
+            let before = fs.files();
+            let err = open_skipping(&fs, handle, threshold).unwrap_err();
+            assert!(err.is_corruption(), "{ctx}: {err:?}");
+            assert_eq!(replay_error(&err), replay_error(&app_err), "{ctx}");
+            assert!(fs.files() == before, "{ctx}: the refused open wrote");
+        }
+    }
+}
+
+/// A pending record a segment already holds: one chunk holds a `plain` backlog that crosses the threshold, the `notes`
+/// record and a second such backlog. The application's open replays it with a small memtable, flushes in the first
+/// backlog and again in the second (the `notes` record included), and is dropped without a commit, so `wal_start`
+/// stays at that chunk (SPEC §8.6). Its records are replayed again by every open, so they are pending: the open is
+/// refused with the bytes a bare open leaves. A pre-scan that took the segment-held record for flushed would let the
+/// replay commit the first backlog's flush before the flush guard refused, and the bytes would differ. Once the
+/// application has opened and closed the database, the open is accepted.
+#[test]
+fn a_pending_record_a_segment_already_holds_refuses_the_open() {
+    let threshold = plain_threshold(8);
+    let fs = SimFs::new();
+    let mut db = create_app(&fs);
+    db.put("notes", &doc("notes", "committed", 1), Durability::Buffered)
+        .unwrap();
+    db.commit().unwrap();
+    for i in 0..24 {
+        let id = format!("a{i:03}");
+        db.put("plain", &doc("plain", &id, 1), Durability::Buffered)
+            .unwrap();
+    }
+    db.put("notes", &doc("notes", "w", 1), Durability::Buffered)
+        .unwrap();
+    for i in 0..24 {
+        let id = format!("b{i:03}");
+        db.put("plain", &doc("plain", &id, 1), Durability::Buffered)
+            .unwrap();
+    }
+    db.put("plain", &doc("plain", "last", 1), Durability::Fsync)
+        .unwrap();
+    let seq = db.seq();
+    drop(db);
+    {
+        let container = Container::open_in(vfs(&fs), PATH, Mode::ReadOnly).unwrap();
+        let chunks = container
+            .frames()
+            .iter()
+            .filter(|f| {
+                f.kind == FrameKind::WalChunk && f.offset >= container.superblock().wal_start
+            })
+            .count();
+        assert_eq!(chunks, 1, "one chunk holds the backlogs and the note");
+    }
+    let flushed = open_app(&fs, threshold).unwrap();
+    assert!(
+        flushed.seq() >= seq + 2,
+        "the application's replay flushed in both backlogs"
+    );
+    drop(flushed);
+    {
+        let container = Container::open_in(vfs(&fs), PATH, Mode::ReadOnly).unwrap();
+        let ro = ReadOnlyDatabase::open_container(container, &registry().with_builtins()).unwrap();
+        let snapshot = ro.snapshot();
+        let notes = snapshot.collection("notes").unwrap();
+        let in_segments = notes
+            .segments()
+            .iter()
+            .any(|s| (0..s.doc_count()).any(|d| s.id_of(d).unwrap() == "w"));
+        assert!(in_segments, "a segment holds the note");
+        assert!(
+            notes.memtable().version() > 0,
+            "and the replay applies it again"
+        );
+    }
+    for handle in [Handle::Compact, Handle::Mark] {
+        let bare = after_bare_open(&fs);
+        assert_eq!(
+            refused(open_skipping(&fs, handle, threshold)),
+            Ok("notes".to_owned()),
+            "{handle:?}"
+        );
+        assert!(fs.files() == bare, "{handle:?}: only a bare open's bytes");
+    }
+    open_app(&fs, APP_MEMTABLE).unwrap().commit().unwrap();
+    for handle in [Handle::Compact, Handle::Mark] {
+        open_skipping(&fs, handle, threshold).unwrap_or_else(|e| panic!("{handle:?}: {e}"));
+    }
+}
+
+/// A file that fails one read: the first whose offset lies in the range it is armed with, once.
+#[derive(Debug, Clone)]
+struct FailOneRead {
+    inner: SimFile,
+    armed: Arc<Mutex<Option<Range<u64>>>>,
+}
+
+impl FailOneRead {
+    fn arm(&self, range: Range<u64>) {
+        *self.armed.lock().unwrap() = Some(range);
+    }
+
+    /// Whether the armed read is still to come.
+    fn armed(&self) -> bool {
+        self.armed.lock().unwrap().is_some()
+    }
+}
+
+impl ContainerFile for FailOneRead {
+    fn file_len(&self) -> io::Result<u64> {
+        self.inner.file_len()
+    }
+
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        let mut armed = self.armed.lock().unwrap();
+        if armed.as_ref().is_some_and(|r| r.contains(&offset)) {
+            *armed = None;
+            return Err(io::Error::other("an injected read failure"));
+        }
+        drop(armed);
+        self.inner.read_exact_at(buf, offset)
+    }
+
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+        self.inner.write_all_at(buf, offset)
+    }
+
+    fn sync_data(&self) -> io::Result<()> {
+        self.inner.sync_data()
+    }
+
+    fn sync_all(&self) -> io::Result<()> {
+        self.inner.sync_all()
+    }
+
+    fn set_len(&self, len: u64) -> io::Result<()> {
+        self.inner.set_len(len)
+    }
+
+    fn try_lock(&self) -> io::Result<bool> {
+        self.inner.try_lock()
+    }
+}
+
+/// Item 1 of the review: a transient read failure inside the pre-scan. The WAL holds a `plain` chunk, then a chunk
+/// with the pending `notes` record. A read of the first chunk fails once, after the container's own recovery read it:
+/// the open fails with that I/O error (it does not go on to a replay that would read the chunk again and apply the
+/// note to a stand-in memtable), writing nothing; a retry, the failure gone, is refused as usual.
+#[test]
+fn a_read_failure_in_the_pre_scan_fails_the_open_and_writes_nothing() {
+    for handle in [Handle::Compact, Handle::Mark] {
+        let file = SimFile::new();
+        let mut db =
+            Database::create_on(file.clone(), [3; 16], options(registry(), APP_MEMTABLE)).unwrap();
+        for name in COLLECTIONS {
+            db.create_collection(schema(name)).unwrap();
+        }
+        // `Fsync` closes the chunk: the note is in a later one.
+        db.put("plain", &doc("plain", "p", 1), Durability::Fsync)
+            .unwrap();
+        db.put("notes", &doc("notes", "w", 1), Durability::Fsync)
+            .unwrap();
+        drop(db);
+        let flaky = FailOneRead {
+            inner: file.clone(),
+            armed: Arc::default(),
+        };
+        let open = |f: FailOneRead| -> Result<(), DatabaseError> {
+            let options = options(AnalyzerRegistry::builtin(), APP_MEMTABLE);
+            let container = Container::open_on(f, Mode::ReadWrite)?;
+            match handle {
+                Handle::Compact => {
+                    CompactOnlyDatabase::open_container(container, options).map(drop)
+                }
+                Handle::Mark => MarkOnlyDatabase::open_container(container, options).map(drop),
+            }
+        };
+        let before = file.bytes();
+        let container = Container::open_on(flaky.clone(), Mode::ReadWrite).unwrap();
+        let chunks: Vec<_> = container
+            .frames()
+            .iter()
+            .filter(|f| f.kind == FrameKind::WalChunk)
+            .copied()
+            .collect();
+        assert!(chunks.len() >= 2, "{handle:?}: {chunks:?}");
+        // Armed once the container's recovery has read the chunk: the next read of it is the pre-scan's.
+        flaky.arm(chunks[0].offset..chunks[0].end());
+        let options = options(AnalyzerRegistry::builtin(), APP_MEMTABLE);
+        let err = match handle {
+            Handle::Compact => CompactOnlyDatabase::open_container(container, options).map(drop),
+            Handle::Mark => MarkOnlyDatabase::open_container(container, options).map(drop),
+        }
+        .unwrap_err();
+        assert!(!flaky.armed(), "{handle:?}: the read failed");
+        assert!(
+            matches!(
+                &err,
+                DatabaseError::Replay(ReplayError::Container(
+                    persia_storage::container::Error::Io { .. }
+                ))
+            ),
+            "{handle:?}: {err:?}"
+        );
+        assert!(file.bytes() == before, "{handle:?}: nothing was written");
+        // The retry reads the chunk.
+        assert_eq!(
+            refused(open(flaky.clone())),
+            Ok("notes".to_owned()),
+            "{handle:?}"
+        );
+        assert!(
+            file.bytes() == before,
+            "{handle:?}: the refusal wrote nothing"
+        );
+    }
+}
+
+/// A collection with two skipped fields: the refusal names the first in field order (id order: `zeta` has
+/// id 0, `alpha` id 1), not in name order.
+#[test]
+fn the_refusal_names_the_first_skipped_field() {
+    let two = CollectionSchema::from_json_in(
+        r#"{"name": "two", "fields": {"zeta": {"type": "text", "id": 0, "analyzer": "tags"}, "alpha": {"type": "text", "id": 1, "analyzer": "tags"}}}"#,
+        &registry(),
+    )
+    .unwrap();
+    let alpha = two.field("alpha").unwrap().id();
+    let fs = SimFs::new();
+    let mut db = create_app(&fs);
+    db.create_collection(two).unwrap();
+    db.put(
+        "two",
+        &Document::new("x").with(alpha, Value::String("a".into())),
+        Durability::Fsync,
+    )
+    .unwrap();
+    drop(db);
+    for handle in [Handle::Compact, Handle::Mark] {
+        let before = fs.files();
+        match open_skipping(&fs, handle, APP_MEMTABLE) {
+            Err(DatabaseError::AnalysisSkipped {
+                collection,
+                field,
+                analyzer,
+            }) => assert_eq!(
+                (collection.as_str(), field.as_str(), analyzer.as_str()),
+                ("two", "zeta", "tags@1"),
+                "{handle:?}"
+            ),
+            other => panic!("{handle:?}: {other:?}"),
+        }
+        assert!(fs.files() == before, "{handle:?}");
+    }
+}
+
+/// Damage before any pending record: nothing is refused, and the open is the writer's to the byte. Its replay flushes
+/// the `plain` backlog before the damage, as the application's does, then fails on the damage with the same error; the
+/// `notes` record after the damage is never applied.
+#[test]
+fn damage_before_any_pending_record_fails_as_the_writers_open_byte_for_byte() {
+    let threshold = plain_threshold(8);
+    let base = SimFs::new();
+    let mut db = create_app(&base);
+    db.put("notes", &doc("notes", "committed", 1), Durability::Buffered)
+        .unwrap();
+    db.commit().unwrap();
+    for i in 0..32 {
+        let id = format!("p{i:03}");
+        db.put("plain", &doc("plain", &id, 1), Durability::Buffered)
+            .unwrap();
+    }
+    db.put("plain", &doc("plain", "last", 1), Durability::Fsync)
+        .unwrap();
+    drop(db);
+    damage_wal(&base, Damage::UnknownCollection);
+    let mut wal = WalWriter::resume(
+        Container::open_in(vfs(&base), PATH, Mode::ReadWrite).unwrap(),
+        BTreeMap::new(),
+    );
+    let bytes = doc("notes", "late", 1)
+        .encode(&schema("notes"), persia_engine::document::FieldSet::All)
+        .unwrap();
+    wal.append_batch(
+        &[WalRecord::put("notes", &bytes).unwrap()],
+        Durability::Fsync,
+    )
+    .unwrap();
+    drop(wal);
+    let writer = base.crash(CrashLoss::Nothing);
+    let app_err = open_app(&writer, threshold).unwrap_err();
+    assert!(app_err.is_corruption(), "{app_err:?}");
+    assert!(
+        writer.files() != base.files(),
+        "the writer's replay flushed before the damage"
+    );
+    for handle in [Handle::Compact, Handle::Mark] {
+        let copy = base.crash(CrashLoss::Nothing);
+        let err = open_skipping(&copy, handle, threshold).unwrap_err();
+        assert_eq!(replay_error(&err), replay_error(&app_err), "{handle:?}");
+        assert!(
+            copy.files() == writer.files(),
+            "{handle:?}: other bytes than the writer's open"
+        );
+    }
+}
+
+/// The frame half of a chunk the pre-scan cannot read: after a `plain` backlog that crosses the threshold, a
+/// `WalChunk` frame whose checksum holds but whose zstd payload decompresses past `MAX_CHUNK_LEN`, so it fails in the
+/// frame read, then a pending `notes` record. The skipping open fails at once with the frame read's error and writes
+/// nothing; the application's open fails with the same kind of error, after its replay flushed the backlog (the
+/// safer side, SPEC §8.6).
+#[test]
+fn a_chunk_frame_that_does_not_decode_fails_the_open_at_once() {
+    let threshold = plain_threshold(8);
+    let base = SimFs::new();
+    let mut db = create_app(&base);
+    db.put("notes", &doc("notes", "committed", 1), Durability::Buffered)
+        .unwrap();
+    db.commit().unwrap();
+    for i in 0..32 {
+        let id = format!("p{i:03}");
+        db.put("plain", &doc("plain", &id, 1), Durability::Buffered)
+            .unwrap();
+    }
+    db.put("plain", &doc("plain", "last", 1), Durability::Fsync)
+        .unwrap();
+    drop(db);
+    {
+        let mut container = Container::open_in(vfs(&base), PATH, Mode::ReadWrite).unwrap();
+        let oversized = vec![0_u8; persia_engine::wal::MAX_CHUNK_LEN + 1];
+        container
+            .append(
+                FrameKind::WalChunk,
+                &oversized,
+                Compression::Zstd { level: 1 },
+            )
+            .unwrap();
+        container.sync().unwrap();
+        let mut wal = WalWriter::resume(container, BTreeMap::new());
+        let bytes = doc("notes", "late", 1)
+            .encode(&schema("notes"), persia_engine::document::FieldSet::All)
+            .unwrap();
+        wal.append_batch(
+            &[WalRecord::put("notes", &bytes).unwrap()],
+            Durability::Fsync,
+        )
+        .unwrap();
+    }
+    let writer = base.crash(CrashLoss::Nothing);
+    let app_err = open_app(&writer, threshold).unwrap_err();
+    assert!(
+        matches!(app_err, DatabaseError::Replay(ReplayError::Container(_))),
+        "{app_err:?}"
+    );
+    assert!(
+        writer.files() != base.files(),
+        "the writer's replay flushed first"
+    );
+    for handle in [Handle::Compact, Handle::Mark] {
+        let copy = base.crash(CrashLoss::Nothing);
+        let before = copy.files();
+        let err = open_skipping(&copy, handle, threshold).unwrap_err();
+        assert!(
+            matches!(err, DatabaseError::Replay(ReplayError::Container(_))),
+            "{handle:?}: {err:?}"
+        );
+        assert!(copy.files() == before, "{handle:?}: the open wrote");
     }
 }

@@ -2,8 +2,8 @@
 //! against the superblock and the frames, segment opens and WAL replay, on one input, never panic. A database that
 //! opens also commits what it replayed and opens again. The compaction-only open (ADR-0068) runs on a copy of the same
 //! bytes too: an edit that makes a schema name an analyzer the built-ins lack has it skip that field and pre-scan the
-//! WAL (ROADMAP 10.4.8), which never panics either; where the writer's open succeeds nothing is skipped, and it
-//! succeeds too.
+//! WAL (ROADMAP 10.4.8), which never panics either; a refusal (`AnalysisSkipped`) leaves the bytes a bare read-write
+//! open of the container leaves, and where the writer's open succeeds nothing is skipped, and it succeeds too.
 //!
 //! The first input byte picks the mode. Even: the rest is the container file. Odd: the rest is a list of edits
 //! (`u16` offset from the first frame, then a byte to XOR) applied to the golden database
@@ -12,7 +12,9 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use persia_engine::db::{CompactOnlyDatabase, Database, DatabaseOptions, ManualClock, SegmentIds};
+use persia_engine::db::{
+    CompactOnlyDatabase, Database, DatabaseError, DatabaseOptions, ManualClock, SegmentIds,
+};
 use persia_format::checksum::crc32c;
 use persia_storage::container::sim::SimFile;
 use persia_storage::container::{Container, Mode};
@@ -70,11 +72,26 @@ fuzz_target!(|data: &[u8]| {
         file
     };
     // The compaction-only open's error, if any, in debug form.
-    let compact_only = match Container::open_on(SimFile::from_bytes(bytes.clone()), Mode::ReadWrite)
-    {
-        Ok(container) => CompactOnlyDatabase::open_container(container, options())
-            .err()
-            .map(|e| format!("{e:?}")),
+    let skipping = SimFile::from_bytes(bytes.clone());
+    let compact_only = match Container::open_on(skipping.clone(), Mode::ReadWrite) {
+        Ok(container) => match CompactOnlyDatabase::open_container(container, options()) {
+            Ok(_) => None,
+            Err(e) => {
+                if matches!(e, DatabaseError::AnalysisSkipped { .. }) {
+                    // A refusal writes what a bare read-write open writes (its tail repair), nothing more.
+                    let bare = SimFile::from_bytes(bytes.clone());
+                    drop(
+                        Container::open_on(bare.clone(), Mode::ReadWrite)
+                            .expect("a container the refused open opened opens bare"),
+                    );
+                    assert!(
+                        skipping.bytes() == bare.bytes(),
+                        "the refused compaction-only open wrote more than a bare open"
+                    );
+                }
+                Some(format!("{e:?}"))
+            }
+        },
         Err(e) => Some(format!("{e:?}")),
     };
     let file = SimFile::from_bytes(bytes);

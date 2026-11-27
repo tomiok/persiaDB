@@ -22,7 +22,7 @@
 //!
 //! An open that skips analysis (a [`super::CompactOnlyDatabase`] or a [`super::MarkOnlyDatabase`], ADR-0068,
 //! ADR-0069) first pre-scans the chunks step 4 replays, decoding without applying ([`refuse_pending_skipped`],
-//! ROADMAP 10.4.8): a record the replay would apply to a collection whose analysis it skips refuses the open before
+//! ROADMAP 10.4.8): a pending record (SPEC §8.6) of a collection whose analysis it skips refuses the open before
 //! step 4 writes anything. So its replay only ever holds records of the other collections.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -57,7 +57,7 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// The open of a [`super::CompactOnlyDatabase`] and of a [`super::MarkOnlyDatabase`] (ADR-0068, ADR-0069): the
     /// writer's open of a read-write `container`, with a no-token stand-in for each `text` field's analyzer that
     /// `options.registry` lacks ([`Analysis::SkipUnregistered`]), refused (`AnalysisSkipped`) by its pre-scan when the
-    /// WAL holds a record the replay would apply to such a field's collection ([`refuse_pending_skipped`], ROADMAP
+    /// WAL holds a pending record (SPEC §8.6) of such a field's collection ([`refuse_pending_skipped`], ROADMAP
     /// 10.4.8), and, as a backstop, by the flush planning for any flush of a memtable that indexed one. One function,
     /// so both handles refuse exactly alike.
     ///
@@ -198,16 +198,19 @@ impl<F: ContainerFile + Sync> Database<F> {
 
 /// The pre-scan of an open that skips analysis (ROADMAP 10.4.8, ADR-0068 and ADR-0069 amendments, SPEC §8.6): refuses
 /// it with [`DatabaseError::AnalysisSkipped`] when the WAL from `wal_start` holds a **pending record** of a collection
-/// with a field in `skipped`: a record the replay would apply to that collection, so one that decodes (with its
-/// collection's schema, as the replay decodes it) before the first record that does not. It reads every chunk the
-/// replay reads ([`wal_chunks`], a writer's: those after a cut commit's Manifest included) once, decoding and never
-/// applying, so it writes nothing and runs before any replay-time flush, segment id or retiring commit.
+/// with a field in `skipped`: a record of that collection that decodes (with its collection's schema, as the replay
+/// decodes it) before the first record that does not. It reads every chunk the replay reads ([`wal_chunks`], a
+/// writer's: those after a cut commit's Manifest included) once, decoding and never applying, so it writes nothing and
+/// runs before any replay-time flush, segment id or retiring commit. A record that decodes but that a memtable would
+/// reject does not stop it: the records after it count, which can only refuse more.
 ///
-/// Where the scan meets a record the replay could not apply (corrupt or newer bytes, a collection the manifest lacks,
-/// an unreadable chunk), that error is the replay's for those bytes ([`decode`], [`for_each_record`]). After a pending
-/// record it fails the open at once, before anything is written: the writer's open, which has the analyzer, fails on
-/// the same bytes, so retrying there would not help. With no pending record before it, nothing is refused and the
-/// replay runs as in any writer's open, failing on it as before.
+/// A chunk it cannot read (an I/O error, or a frame that does not decode: [`Stopped::Unread`]) fails the open at once,
+/// whatever came before: the replay might read that chunk on a second try and apply what it holds. A record it cannot
+/// decode ([`Stopped::Undecoded`]: corrupt or newer bytes, a collection the manifest lacks) gives the replay's error
+/// for those bytes ([`decode`], [`for_each_record`]), which reading again does not change. After a pending record that
+/// fails the open at once, before anything is written: the writer's open, which has the analyzer, fails on the same
+/// bytes, so retrying there would not help. With no pending record before it, nothing is refused and the replay runs
+/// as in any writer's open, failing on it as before.
 ///
 /// The collection named is the first of `skipped` (collection, then field order) with a pending record, as the flush
 /// guard ([`Database::check_no_skipped_flush`]) names it.
@@ -222,14 +225,18 @@ fn refuse_pending_skipped<F: ContainerFile>(
     }
     let mut pending = BTreeSet::new();
     let scanned = scan_wal(container, seq, collections, |name| {
-        if skipped.iter().any(|s| s.collection == name) {
+        if !pending.contains(name) && skipped.iter().any(|s| s.collection == name) {
             pending.insert(name.to_owned());
         }
     });
+    match scanned {
+        Err(Stopped::Unread(e)) => return Err(*e),
+        Err(Stopped::Undecoded(e)) if !pending.is_empty() => return Err(*e),
+        Ok(()) | Err(Stopped::Undecoded(_)) => {}
+    }
     if pending.is_empty() {
         return Ok(());
     }
-    scanned?;
     let s = skipped
         .iter()
         .find(|s| pending.contains(&s.collection))
@@ -243,20 +250,30 @@ fn refuse_pending_skipped<F: ContainerFile>(
     })
 }
 
+/// Why [`scan_wal`] stopped short.
+#[derive(Debug)]
+enum Stopped {
+    /// The chunks could not be listed or one could not be read: maybe transient, so it fails the open whatever came
+    /// before.
+    Unread(Box<DatabaseError>),
+    /// A record does not decode: the replay's error for bytes that reading again does not change.
+    Undecoded(Box<DatabaseError>),
+}
+
 /// Decodes every record of the chunks the writer's replay reads, in log order, as it decodes them, applying none, and
-/// calls `decoded` with the collection of each that decodes. Stops at the first that does not, with the replay's
-/// error for it.
+/// calls `decoded` with the collection of each that decodes. Stops at the first chunk it cannot read or record it
+/// cannot decode, with the replay's error for it.
 fn scan_wal<F: ContainerFile>(
     container: &Container<F>,
     seq: u64,
     collections: &BTreeMap<String, Collection>,
     mut decoded: impl FnMut(&str),
-) -> Result<(), DatabaseError> {
-    for chunk in wal_chunks(container, seq, true)? {
+) -> Result<(), Stopped> {
+    for chunk in wal_chunks(container, seq, true).map_err(|e| Stopped::Unread(Box::new(e)))? {
         let chunk = chunk.offset;
         let frame = container
             .read_frame_source(chunk, MAX_CHUNK_LEN)
-            .map_err(ReplayError::from)?;
+            .map_err(|e| Stopped::Unread(Box::new(ReplayError::from(e).into())))?;
         for_each_record(chunk, &frame.payload, |offset, record| {
             let name = record.collection();
             let c = collections
@@ -269,7 +286,8 @@ fn scan_wal<F: ContainerFile>(
             decode(c.memtable.schema(), chunk, offset, record)?;
             decoded(name);
             Ok(())
-        })?;
+        })
+        .map_err(|e| Stopped::Undecoded(Box::new(e)))?;
     }
     Ok(())
 }

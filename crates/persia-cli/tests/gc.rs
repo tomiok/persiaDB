@@ -848,10 +848,10 @@ fn assert_app_reads(path: &Path, docs: &[(&str, String, Vec<u8>)], ctx: &str) {
     }
 }
 
-/// ROADMAP 10.4.8, in both orders (the `notes` record before or after a `plain` backlog that a writer's replay flushes):
-/// `REFUSALS` runs of `persia gc` and of `persia compact` in a row each exit 1 and leave the container and the pack
-/// byte-identical, so they add no segment, duplicate or not; the application's next open shows every document and
-/// blob; once it has closed the database, both commands succeed, `persia gc` dropping exactly the three orphans.
+/// ROADMAP 10.4.8, in both orders (the `notes` record before or after a `plain` backlog that a writer's replay
+/// flushes): `REFUSALS` runs of `persia gc` and of `persia compact` in a row each exit 1 and leave the container and
+/// the pack byte-identical, so they add no segment, duplicate or not; the application's next open shows every document
+/// and blob; once it has closed the database, both commands succeed, `persia gc` dropping exactly the three orphans.
 #[test]
 fn repeated_refused_gc_and_compact_runs_write_nothing_in_either_order() {
     const REFUSALS: usize = 3;

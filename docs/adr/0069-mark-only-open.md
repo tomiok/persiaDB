@@ -77,8 +77,8 @@ The question is whether GC is safe on such an open. What GC reads and writes:
 ## Amendment (2026-11-27, ROADMAP 10.4.8): records of a skipped collection refuse the open
 
 The open of item 1 is ADR-0068's, and so is its amendment of the same date: before the replay, a pre-scan refuses the
-open (`AnalysisSkipped`) when the WAL from `wal_start` holds a *pending record* of a collection with a skipped field (a
-record the replay would apply to it), writing nothing but the container's tail repair. This changes what the Context
+open (`AnalysisSkipped`) when the WAL from `wal_start` holds a *pending record* of a collection with a skipped field (as
+SPEC §8.6 defines it), writing nothing but the container's tail repair. This changes what the Context
 and item 4 say of such records:
 
 1. "The records of a collection whose analysis is skipped are replayed into its memtable and never flushed: they stay

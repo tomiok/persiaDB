@@ -2642,11 +2642,18 @@ enum ScanKill {
     Spawned,
     /// After this many polls.
     Polls(u64),
-    /// Once the process has read at least this many bytes (`rchar` in `/proc/<pid>/io`; where the system does not say,
-    /// after as many polls as kibibytes).
+    /// Once the process has read at least this many bytes (`rchar` in `/proc/<pid>/io`, so only where
+    /// [`reads_reported`]; elsewhere after as many polls as kibibytes).
     Read(u64),
     /// Not killed.
     Never,
+}
+
+/// Whether this system says what a process has read ([`bytes_read`] of this one: Linux's `/proc/<pid>/io`; not
+/// macOS). `PERSIA_TEST_NO_READ_COUNTS` set forces `false`, to run the poll-based fallback where it would be `true`.
+fn reads_reported() -> bool {
+    std::env::var_os("PERSIA_TEST_NO_READ_COUNTS").is_none()
+        && bytes_read(std::process::id()).is_some()
 }
 
 /// The bytes the process `pid` has read so far (`rchar` in `/proc/<pid>/io`), where the system says.
@@ -2701,11 +2708,14 @@ fn copy_database(source: &Path, dir: &Path) -> PathBuf {
 
 /// ROADMAP 10.4.8 with real processes: `persia gc` on a database whose WAL holds a `plain` backlog over the default
 /// memtable and then a `notes` record (a pending record of a collection whose analyzer the command lacks), killed
-/// (SIGKILL) during its open, before or during the pre-scan that refuses it, at seeded points observed in the bytes it
-/// has read. After each kill and after the refused rerun: the container and the pack are byte-identical (the
-/// pre-scan writes nothing: no flush of the backlog, no commit), `verify --deep` passes, the application's read-only
-/// open shows every document with its blob byte-identical and the `notes` record still a WAL record. Once the
-/// application has closed the database, `persia gc` collects the three orphans and everything reads back.
+/// (SIGKILL) during its open, before or during the pre-scan that refuses it. Where the system says what a process
+/// read ([`reads_reported`], Linux), the points are seeded byte counts calibrated inside the pre-scan, and the test
+/// fails unless a kill landed there; elsewhere (macOS) they are seeded poll counts, wherever they land, and the
+/// output says so. On both, after each kill and after the refused rerun: the container and the pack are
+/// byte-identical (the pre-scan writes nothing: no flush of the backlog, no commit), `verify --deep` passes, the
+/// application's read-only open shows every document with its blob byte-identical and the `notes` record still a WAL
+/// record. Once the application has closed the database, `persia gc` collects the three orphans and everything reads
+/// back.
 #[test]
 fn kill_9_of_persia_gc_during_its_open_s_pre_scan_writes_nothing() {
     if child_env().is_some() {
@@ -2717,34 +2727,74 @@ fn kill_9_of_persia_gc_during_its_open_s_pre_scan_writes_nothing() {
     let template = KeptOnFailure::new();
     let (source, docs) = flushing_backlog_database(template.path(), true);
     let seq = committed_seq(&source);
-    // What a refused run that is not killed reads, on a copy: about the file once for the container's recovery (its
-    // frames' checksums), then the WAL range once more for the pre-scan.
-    let file_len = std::fs::metadata(&source).unwrap().len();
-    let total = {
-        let dir = tempfile::tempdir().unwrap();
-        let path = copy_database(&source, dir.path());
-        let (ended, most) = run_gc_until_read(&path, ScanKill::Never);
-        check_refused(&ended.unwrap_err(), "calibration");
-        most.max(2 * file_len)
-    };
-    eprintln!("seed {seed}: the file is {file_len} bytes, a refused run reads about {total}");
-    // Each point replays the 72 MiB backlog several times (debug builds are slow at it): the default run takes two
-    // points past the first read of the file (in the pre-scan) and the run that is not killed, `--features slow` also
-    // one in the recovery, right after the spawn and after seeded polls.
-    let scan = total.saturating_sub(file_len);
-    let early = ScanKill::Read(file_len + rng.range(1, scan / 2));
-    let late = ScanKill::Read(file_len + rng.range(scan / 2, scan));
-    let points = if cfg!(feature = "slow") {
-        vec![
+    let reports_reads = reads_reported();
+    // `(scan_start, scan, total)`: where the pre-scan's reads start, how many it makes, and what a whole run reads.
+    let (points, measured) = if reports_reads {
+        // What the pre-scan reads: the `WalChunk` frames from `wal_start` on.
+        let scan: u64 = {
+            let container = persia_storage::container::Container::open(
+                &source,
+                persia_storage::container::Mode::ReadOnly,
+            )
+            .unwrap();
+            let wal_start = container.superblock().wal_start;
+            container
+                .frames()
+                .iter()
+                .filter(|f| {
+                    f.kind == persia_format::frame::FrameKind::WalChunk && f.offset >= wal_start
+                })
+                .map(|f| f.len)
+                .sum()
+        };
+        // What a refused run that is not killed reads, measured on a copy: the container's recovery and the load,
+        // then the pre-scan, the last thing the run reads before it exits. So the pre-scan's reads start about `scan`
+        // bytes before the end.
+        let total = {
+            let dir = tempfile::tempdir().unwrap();
+            let path = copy_database(&source, dir.path());
+            let (ended, most) = run_gc_until_read(&path, ScanKill::Never);
+            check_refused(&ended.unwrap_err(), "calibration");
+            most
+        };
+        let scan_start = total.saturating_sub(scan);
+        eprintln!(
+            "seed {seed}: the file is {} bytes, the WAL chunks {scan}; a refused run read {total}, the pre-scan from \
+             about {scan_start}",
+            std::fs::metadata(&source).unwrap().len()
+        );
+        // Each point replays the 72 MiB backlog several times (debug builds are slow at it): the default run takes
+        // two points inside the pre-scan (an eighth of it past its estimated start, so not in the recovery's last
+        // reads, and before the run's end) and the run that is not killed, `--features slow` also one in the
+        // recovery, right after the spawn and after seeded polls.
+        assert!(scan > 1 << 20 && scan_start > scan / 2, "{scan} of {total}");
+        let early = ScanKill::Read(scan_start + rng.range(scan / 8, scan / 2));
+        let late = ScanKill::Read(scan_start + rng.range(scan / 2, scan - scan / 8));
+        let points = if cfg!(feature = "slow") {
+            vec![
+                ScanKill::Spawned,
+                ScanKill::Polls(rng.range(1, 2000)),
+                ScanKill::Read(rng.range(1, scan_start - scan / 8)),
+                early,
+                late,
+                ScanKill::Never,
+            ]
+        } else {
+            vec![early, late, ScanKill::Never]
+        };
+        (points, Some((scan_start, scan, total)))
+    } else {
+        eprintln!(
+            "seed {seed}: this system does not say what a process read (no /proc/<pid>/io, or \
+             PERSIA_TEST_NO_READ_COUNTS set): kills after seeded polls, wherever they land"
+        );
+        let points = vec![
             ScanKill::Spawned,
             ScanKill::Polls(rng.range(1, 2000)),
-            ScanKill::Read(rng.range(1, file_len)),
-            early,
-            late,
+            ScanKill::Polls(rng.range(2000, 50_000)),
             ScanKill::Never,
-        ]
-    } else {
-        vec![early, late, ScanKill::Never]
+        ];
+        (points, None)
     };
     let mut in_scan = 0;
     for at in points {
@@ -2764,7 +2814,9 @@ fn kill_9_of_persia_gc_during_its_open_s_pre_scan_writes_nothing() {
                 "exited, refused".to_owned()
             }
             Ok(read) => {
-                in_scan += u64::from(read.is_some_and(|r| r > file_len && r < total));
+                in_scan += u64::from(measured.is_some_and(|(start, scan, total)| {
+                    read.is_some_and(|r| r > start + scan / 16 && r < total)
+                }));
                 format!("killed after reading {read:?} bytes")
             }
         };
@@ -2796,7 +2848,7 @@ fn kill_9_of_persia_gc_during_its_open_s_pre_scan_writes_nothing() {
         check_two(&path, &docs, &format!("{ctx}: end"));
     }
     // Where the system does not say what a process read, the kills land after polls instead, wherever they fall.
-    if bytes_read(std::process::id()).is_some() {
+    if reports_reads {
         assert!(in_scan > 0, "seed {seed}: no kill landed in the pre-scan");
     }
 }

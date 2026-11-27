@@ -384,8 +384,8 @@ the built-in analyzers only, so it opens with the **compaction-only open** (ROAD
 `CompactOnlyDatabase`): the writer's open above, except that a `text` field whose analyzer it lacks (a registered one,
 §6.2.2) is indexed with the stand-in of a read-only open that skips analysis (§8.6, one that emits no token), and
 that its pre-scan (§8.6, ROADMAP 10.4.8) refuses the open (`AnalysisSkipped`, status 1) when the WAL from
-`wal_start` holds a *pending record* of a collection with such a field, one the replay would apply to it: such
-records can only be indexed, and flushed, with the analyzer. The refusal comes before the replay, wherever a flush
+`wal_start` holds a *pending record* of a collection with such a field (as §8.6 defines it): such records can only
+be indexed, and flushed, with the analyzer. The refusal comes before the replay, wherever a flush
 would be due, so the refused command writes nothing but the container's tail repair: no segment, no commit, and it
 compacts nothing. It follows a crash of the application (or a handle dropped without a commit) that left such
 records; the application then opens the database with its analyzer and closes it (closing a `persia::Db` commits,
@@ -2792,15 +2792,20 @@ which share one open; a `text` field whose analyzer the registry lacks is indexe
 token) **pre-scans** the WAL between steps 3 and 4 (ROADMAP 10.4.8): it reads the `WalChunk` frames step 4 replays
 (a writer's: every one from `wal_start`, those after `log_end` and after a cut commit's Manifest included) once, and
 decodes each record as the replay does (its chunk, its collection in the loaded manifest, a put's document with
-that collection's schema), applying none. A **pending record** of a collection is a record the replay would apply
-to it: a put or a delete of that collection (of any id, one no document has included) among those records, before
-the first one the replay cannot apply. If a collection with a skipped field has a pending record, the open fails
-with `AnalysisSkipped`, naming the first such field (collection, then field order), before step 4: it writes nothing
-but the container's tail repair (§4.4), so no segment, no segment id, no commit and no retiring commit, wherever a
-flush would have been due. A collection with a skipped field therefore never holds a replayed record, and its
-memtable is never flushed (the flush planning also refuses such a flush, as a backstop that the pre-scan leaves
-unreachable). Without a pending record the open is exactly the writer's: its replay applies the other collections'
-records and may flush and retire as above. The cases:
+that collection's schema), applying none. A **pending record** of a collection is a put or a delete of that
+collection (of any id, one no document has included) among those records that decodes, before the first record that
+does not. So it is every record the replay would apply to the collection, and possibly more: a record that decodes
+but that a memtable rejects (an id too long for it, or a term too long with the real analyzer) fails the writer's
+replay there, yet does not stop the pre-scan, so a later record of a skipped collection still counts as pending and
+refuses the open. That errs on the refusing side. If a collection with a skipped field has a pending record, the open
+fails with `AnalysisSkipped`, naming the first such field (collection, then field order), before step 4: it writes
+nothing but the container's tail repair (§4.4), so no segment, no segment id, no commit and no retiring commit,
+wherever a flush would have been due. A collection with a skipped field therefore never holds a replayed record, and
+its memtable is never flushed (the flush planning also refuses such a flush, as a backstop that the pre-scan leaves
+unreachable). Without a pending record, and with every chunk read, the open is exactly the writer's: its replay
+applies the other collections' records and may flush and retire as above. A chunk the pre-scan cannot read (below)
+fails it at once and writes nothing, where the writer's open may flush first or report an earlier memtable error:
+the safer side. The cases:
 - Records in chunks before `wal_start` are not replayed, so not pending. A record a segment already holds (a chunk
   replayed again after a replay-time flush, above) is pending: the replay applies it again.
 - A drop or a schema change of the collection commits after flushing every other memtable, so its `wal_start` is the
@@ -2810,12 +2815,15 @@ records and may flush and retire as above. The cases:
 - A cut commit (a Manifest after `log_end`) never took effect: the records before and after it are replayed onto the
   loaded manifest, so they are pending, whatever the cut commit flushed, dropped or changed. A refused open leaves
   the cut commit for the next writer's open to retire.
-- A record after the first one the replay cannot apply (a chunk or record that does not decode, a document that does
-  not decode with its schema, an unknown collection, an unreadable frame) is never applied, so not pending, and a
-  record of such a collection that does not decode is not pending either. When the pre-scan meets such a record
-  after a pending one, the open fails at once with that record's error, the replay's for those bytes (corruption, or
-  a newer encoding), which the writer's open, with the analyzer, gives too; before any pending record nothing is
-  refused, and the replay runs and fails on it as in any writer's open.
+- A chunk the pre-scan cannot read (an I/O error, or a frame that does not decode) fails the open at once with that
+  error, whatever came before and before anything is written: a read can fail once and succeed when the replay
+  repeats it, and the replay would then apply what the chunk holds.
+- A record after the first one that does not decode (a chunk or record that does not decode, a document that does not
+  decode with its schema, an unknown collection) is never applied, so not pending, and a record of such a collection
+  that does not decode is not pending either. Such an error is the same at every read of the same bytes. When the
+  pre-scan meets it after a pending record, the open fails at once with that record's error, the replay's for those
+  bytes (corruption, or a newer encoding), which the writer's open, with the analyzer, gives too; before any pending
+  record nothing is refused, and the replay runs and fails on it as in any writer's open.
 
 The pre-scan costs one more read of the WAL range, only in an open that skips a field.
 

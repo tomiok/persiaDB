@@ -7,7 +7,7 @@
 //! of [`ReadOnlyDatabase::open_skipping_analysis`](super::ReadOnlyDatabase::open_skipping_analysis), and listed by
 //! [`CompactOnlyDatabase::skipped_analysis`]. Such a collection's records can only be indexed, and flushed, with the
 //! analyzer, so before its replay the open pre-scans the WAL from `wal_start` (ROADMAP 10.4.8, SPEC §8.6): a *pending
-//! record* of such a collection (one the replay would apply to it) fails the open with
+//! record* of such a collection (as SPEC §8.6 defines it) fails the open with
 //! [`DatabaseError::AnalysisSkipped`] before anything is written but the container's tail repair (no segment, no
 //! segment id, no commit, no retiring commit), wherever a flush would be due. So the replay only applies records of
 //! the other collections, which flush as in any writer's open. As a backstop, a commit that would flush a non-empty
@@ -90,9 +90,10 @@ impl<F: ContainerFile + Sync> CompactOnlyDatabase<F> {
     /// # Errors
     /// [`DatabaseError::Container`] with [`persia_storage::container::Error::ReadOnly`] for a container opened
     /// read-only;
-    /// [`DatabaseError::AnalysisSkipped`] when the WAL from `wal_start` holds a record the replay would apply to a
-    /// collection with a skipped field (a pending record), before the replay and anything but the tail repair is
-    /// written; the replay's error (corruption) when the pre-scan finds a record it cannot decode after such a one;
+    /// [`DatabaseError::AnalysisSkipped`] when the WAL from `wal_start` holds a pending record (SPEC §8.6) of a
+    /// collection with a skipped field, before the replay and anything but the tail repair is written; the replay's
+    /// error (corruption) when the pre-scan finds a record it cannot decode after such a one; the pre-scan's error, at
+    /// once and with nothing written, for a WAL chunk it cannot read (an I/O error, or a frame that does not decode);
     /// [`DatabaseError::Manifest`] with [`crate::manifest::ManifestError::UnsupportedAnalyzer`] for a version of a
     /// built-in analyzer this build lacks (the manifest's decode refuses it);
     /// [`DatabaseError::UnregisteredAnalyzer`] when the stand-in cannot be registered under the analyzer's name (the

@@ -5,14 +5,14 @@
 //! ([`Database::open`]), in which a `text` field whose analyzer the registry lacks is indexed with a no-token stand-in
 //! and listed by [`MarkOnlyDatabase::skipped_analysis`], and whose pre-scan refuses the open with
 //! [`DatabaseError::AnalysisSkipped`], before the replay and before anything but the tail repair is written, when the
-//! WAL from `wal_start` holds a record the replay would apply to such a field's collection (a pending record, ROADMAP
-//! 10.4.8, SPEC §8.6). So such a collection's memtable stays empty, and every record it replays is of another
+//! WAL from `wal_start` holds a *pending record* of such a field's collection (as SPEC §8.6 defines it; ROADMAP
+//! 10.4.8). So such a collection's memtable stays empty, and every record it replays is of another
 //! collection.
 //!
 //! The mark needs no analysis: [`MarkOnlyDatabase::referenced_blobs`] lists the blob references of the stored
-//! documents (segments, memtables whole) and of every WAL put from `wal_start` on. The handle offers the mark, the committed seq, and the
-//! writer proof with which the blob pack opens read-write for the sweep (ADR-0053), and nothing that writes a
-//! document, commits, merges, compacts or changes a schema.
+//! documents (segments, memtables whole) and of every WAL put from `wal_start` on. The handle offers the mark, the
+//! committed seq, and the writer proof with which the blob pack opens read-write for the sweep (ADR-0053), and nothing
+//! that writes a document, commits, merges, compacts or changes a schema.
 //!
 //! ```compile_fail
 //! use persia_engine::db::{DatabaseOptions, MarkOnlyDatabase};
@@ -85,8 +85,10 @@ impl<F: ContainerFile + Sync> MarkOnlyDatabase<F> {
     ///
     /// # Errors
     /// As [`CompactOnlyDatabase::open_container`](super::CompactOnlyDatabase::open_container), whose open this is:
-    /// [`DatabaseError::AnalysisSkipped`] when the WAL holds a record the replay would apply to a collection with a
-    /// skipped field, before the replay and anything but the tail repair is written; a container opened read-only.
+    /// [`DatabaseError::AnalysisSkipped`] when the WAL holds a pending record (SPEC §8.6) of a collection with a
+    /// skipped field, before the replay and anything but the tail repair is written; the pre-scan's error, at once and
+    /// with nothing written, for a WAL chunk it cannot read (an I/O error, or a frame that does not decode); a
+    /// container opened read-only.
     pub fn open_container(
         container: Container<F>,
         options: DatabaseOptions,

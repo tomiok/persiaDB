@@ -1003,8 +1003,9 @@ fn compact_compacts_a_schema_naming_a_registered_analyzer_and_keeps_its_wal() {
 }
 
 /// ROADMAP 10.4.4, the refusal (since ROADMAP 10.4.8 by the open's pre-scan, whatever the backlog's size): a WAL
-/// backlog of such a collection larger than the default memtable, which only the analyzer can index. The command fails (status 1), names the collection, field and analyzer, and
-/// leaves the file as it was; the application flushes the backlog, after which the command compacts.
+/// backlog of such a collection larger than the default memtable, which only the analyzer can index. The command
+/// fails (status 1), names the collection, field and analyzer, and leaves the file as it was; the application flushes
+/// the backlog, after which the command compacts.
 #[test]
 fn compact_refuses_to_flush_a_backlog_that_needs_a_registered_analyzer() {
     let _serial = serial();
