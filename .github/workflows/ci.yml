@@ -68,6 +68,10 @@ jobs:
       # Fast suite only (< 2 min, CLAUDE.md); `--features slow` runs nightly (ROADMAP 0.2.3.1).
       # Feature-gated code still compiles in the lint job's `clippy --all-features`.
       - run: cargo test --workspace
+      # The guide doctests and docs/ checks again, alone (ROADMAP 10.1.42): `--workspace` unifies persia's features
+      # across every member it builds (persia-cli's `internal`), so only this run links the doctests to the `persia` a
+      # user gets, where `persia::internal` does not compile (crates/persia-docs/src/guides.rs).
+      - run: cargo test -p persia-docs
       # ADR-0025: a dependency or toolchain change that moves a built-in analyzer's output must fail its PR, not a
       # nightly run after the merge. Seconds in release (only persia-analysis is built).
       - name: Analyzer fingerprints

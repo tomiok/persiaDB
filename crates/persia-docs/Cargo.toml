@@ -1,0 +1,26 @@
+[package]
+name = "persia-docs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# Never published, also once `persia` is (ROADMAP 10.1.42): it reads the website and docs/ from outside its
+# directory, which `cargo package` cannot ship. So `false` here, not `publish.workspace = true`.
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+# The pages' doctests and the tests see `persia` with the features a user can enable and rely on (ADR-0063's
+# public-API snapshot amendment, item 4): the default and `async`. Nothing else: no `internal`, no `test-hooks`, no
+# engine crate.
+persia = { workspace = true, features = ["async"] }
+# The guides open their database in a temporary directory, as their prose says.
+tempfile.workspace = true
+
+[features]
+# Extended property tests: gate them with #[cfg(feature = "slow")]; nightly CI runs them.
+slow = []
+
+[lints]
+workspace = true

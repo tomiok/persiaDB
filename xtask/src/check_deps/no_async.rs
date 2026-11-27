@@ -25,6 +25,9 @@ pub(crate) const EMBEDDED: &[&str] = &[
     "persia-format",
     "persia-analysis",
     "persia-cli",
+    // Not embedded, but it links `persia` into the guides' doctests: a runtime among its dev-dependencies would
+    // be one a guide sample can use (ROADMAP 10.1.42).
+    "persia-docs",
 ];
 
 /// Async runtimes, and the executors and reactors they are built from: a crate here schedules futures or drives

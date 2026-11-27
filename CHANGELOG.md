@@ -522,7 +522,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   API (ROADMAP 10.1.34): search through `Collection::search` and `search_json`, filters by
   `SearchRequest::filter_json` or a typed `Filter` (no `Filter::from_json`), hard and soft filters, and only the
   `soft_filter` dropped by the last-resort step. Their Rust samples are whole programs that `cargo test` runs as
-  doctests of `persia` (`crates/persia/src/guides.rs`), so a sample that stops compiling fails CI. The L6
+  doctests (`crates/persia-docs/src/guides.rs`, a crate that is never published, so `persia` ships no file from
+  outside its directory; ROADMAP 10.1.42), so a sample that stops compiling fails CI. The L6
   descriptions of the feature reference, getting-started, fuzzy-search and faceted-search pages say the same.
 - `persia::JobFuture<T>`'s auto traits are documented in public terms (ROADMAP 10.1.36, ADR-0064 amended), with no
   change of when they hold: `Send` and `Sync` exactly when `T: Send`, `Unpin` for every `T` (now an explicit impl),

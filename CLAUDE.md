@@ -36,6 +36,7 @@ crates/
   persia-server/    # gRPC + HTTP server binary (Docker image)
   persia-cli/       # `persia` CLI: inspect, dump, verify, compact, bench
   persia-testutil/  # dev-only: shared proptest strategies, synthetic generators, test helpers (never a normal dependency)
+  persia-docs/      # never published: website guide doctests + docs/ tables checked against persia's public API
 sdk/
   rust/             # persia-client, network client (SPEC §13.2). Not created yet.
   go/               # persia-go, network client (SPEC §13.2). Not created yet.
@@ -135,10 +136,10 @@ Always run fmt, clippy and tests before declaring a task done.
   declared there, and `deny.toml` bans engines and checks licenses/advisories for the whole graph. See ADR-0001.
 - **No async runtime in the embedded stack** (ADR-0064, ROADMAP 0.6.11): `cargo xtask check-deps` also walks the
   resolved dependency graph (normal, build and dev edges) of `persia`, `persia-engine`, `persia-blob`,
-  `persia-storage`, `persia-format`, `persia-analysis` and `persia-cli`, and fails if it reaches `tokio`, `async-std`,
-  `smol` or an executor they are built from (`ASYNC_RUNTIMES` in `xtask/src/check_deps/no_async.rs`), also
-  transitively and as a dev-dependency. `tokio`, `tonic` and `axum` are for `persia-server`; `object_store` needs a
-  runtime, so it cannot be a dependency of an embedded crate either.
+  `persia-storage`, `persia-format`, `persia-analysis`, `persia-cli` and `persia-docs` (the guides' doctests), and
+  fails if it reaches `tokio`, `async-std`, `smol` or an executor they are built from (`ASYNC_RUNTIMES` in
+  `xtask/src/check_deps/no_async.rs`), also transitively and as a dev-dependency. `tokio`, `tonic` and `axum` are for
+  `persia-server`; `object_store` needs a runtime, so it cannot be a dependency of an embedded crate either.
 - Anything else: justify in the PR. Banned: `tantivy`, `rusqlite`, `rocksdb`, `sled`, any search/KV engine.
 - Prefer writing the 100-line primitive (varint, bitpacking, delta coding) over adding a crate.
 - **No `build.rs`** (ADR-0003). Generated code (e.g. gRPC stubs for `persia-proto`) is produced by `cargo xtask`, committed, and

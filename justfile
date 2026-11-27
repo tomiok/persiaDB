@@ -26,6 +26,8 @@ lint:
 # Unit + property tests (fast suite)
 test:
     cargo test --workspace
+    # The guide doctests with persia's public features only; see the test job in .github/workflows/ci.yml
+    cargo test -p persia-docs
 
 # Extended property tests (what nightly CI runs)
 test-slow:

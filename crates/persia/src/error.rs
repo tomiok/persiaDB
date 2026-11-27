@@ -441,7 +441,9 @@ mod tests {
         codes
     }
 
-    /// The stable table (`docs/sdk/c-abi.md`): append-only. Editing a row here is an ABI break.
+    /// The stable table (`docs/sdk/c-abi.md`, which `crates/persia-docs/tests/c_abi_codes.rs` checks against
+    /// `ErrorCode::ALL`, outside this crate so it ships no file it does not hold): append-only. Editing a row here is
+    /// an ABI break.
     const SNAPSHOT: &[(i32, &str)] = &[
         (1, "PERSIA_NOT_FOUND"),
         (2, "PERSIA_ALREADY_EXISTS"),
@@ -484,22 +486,6 @@ mod tests {
         for number in [i32::MIN, -1, 0, 16, i32::MAX] {
             assert_eq!(ErrorCode::from_number(number), None);
         }
-    }
-
-    #[test]
-    fn the_c_abi_table_lists_the_same_codes() {
-        // The document is the contract of the language bindings: it must not drift from the enum.
-        let doc = include_str!("../../../docs/sdk/c-abi.md");
-        for (number, name) in SNAPSHOT {
-            let row = format!("| {number} | `{name}` |");
-            assert!(doc.contains(&row), "docs/sdk/c-abi.md lacks the row {row}");
-        }
-        assert!(doc.contains("| 0 | `PERSIA_OK` |"));
-        let rows = doc
-            .lines()
-            .filter(|line| line.starts_with("| ") && line.contains("| `PERSIA_"))
-            .count();
-        assert_eq!(rows, SNAPSHOT.len() + 1, "a code the enum does not have");
     }
 
     #[test]

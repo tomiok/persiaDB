@@ -1,7 +1,10 @@
 //! Repository invariants checked as tests (`cargo test -p xtask`): toolchain pinning, fuzz target naming,
 //! `.gitignore`/`.gitattributes` behavior (verified through git itself rather than by parsing the files),
 //! digest-pinned docker-compose images, dependencies pinned to the version a module was audited against, and the
-//! website guide samples that run as doctests.
+//! website guides and the include paths of `persia`'s sources (`repo_checks/guides.rs`).
+
+#[cfg(test)]
+mod guides;
 
 #[cfg(test)]
 mod tests {
@@ -435,70 +438,6 @@ mod tests {
             current == expected,
             "README.md's progress blocks are stale. Run: cargo xtask progress --record"
         );
-    }
-
-    // --- Guide samples (ROADMAP 10.1.34) ---
-
-    /// The website guides `crates/persia/src/guides.rs` runs as doctests are wired (`mod guides` under
-    /// `#[cfg(doctest)]` in `lib.rs`, every listed page present, each with a Rust sample), and their samples do not
-    /// name what a guide has reached for outside the documented API. A doctest of `persia` builds with its
-    /// dev-dependency features (`test-hooks` turns on `internal`) and every dependency as an `--extern`, so
-    /// `persia_engine::...`, `persia::internal::...` and `#[doc(hidden)]` items (`Filter::from_json`, which takes the
-    /// engine's `QueryLimits`) compile in a sample: rustdoc alone does not catch them.
-    #[test]
-    fn guide_samples_are_doctests_of_the_public_api() {
-        let read = |rel: &str| std::fs::read_to_string(root().join(rel)).unwrap();
-        let lib = read("crates/persia/src/lib.rs");
-        assert!(
-            lib.contains("#[cfg(doctest)]\nmod guides;"),
-            "crates/persia/src/lib.rs: `#[cfg(doctest)] mod guides;` is missing, so no guide sample runs"
-        );
-        let guides = read("crates/persia/src/guides.rs");
-        let pages: Vec<&str> = guides
-            .split("include_str!(\"")
-            .skip(1)
-            .filter_map(|rest| rest.split_once("\")").map(|(path, _)| path))
-            .collect();
-        assert!(!pages.is_empty(), "crates/persia/src/guides.rs: no page");
-        for page in pages {
-            let text = std::fs::read_to_string(root().join("crates/persia/src").join(page))
-                .unwrap_or_else(|e| panic!("guides.rs lists {page}, which cannot be read: {e}"));
-            // rustdoc runs a fence with no tag or a `rust` one (`rust,no_run`), not `json`, `text` and the like.
-            let mut samples = 0;
-            let mut in_fence: Option<bool> = None;
-            for (n, line) in text.lines().enumerate() {
-                match (line.trim_start().strip_prefix("```"), in_fence) {
-                    (Some(_), Some(_)) => in_fence = None,
-                    (Some(tag), None) => {
-                        let tag = tag.trim();
-                        let rust = tag.is_empty()
-                            || tag.split(|c: char| c == ',' || c.is_whitespace()).next()
-                                == Some("rust");
-                        samples += usize::from(rust);
-                        in_fence = Some(rust);
-                    }
-                    (None, Some(true)) => {
-                        for refused in [
-                            "persia_engine",
-                            "persia::internal",
-                            "QueryLimits",
-                            "Filter::from_json",
-                        ] {
-                            assert!(
-                                !line.contains(refused),
-                                "{page}:{}: a guide sample names `{refused}`, which is not the documented API",
-                                n + 1
-                            );
-                        }
-                    }
-                    (None, _) => {}
-                }
-            }
-            assert!(
-                samples > 0,
-                "{page}: no Rust sample, so guides.rs checks nothing of it"
-            );
-        }
     }
 
     /// The README quickstart is exactly the code `readme_quickstart.rs` runs, so the README cannot show calls, or a
