@@ -655,10 +655,11 @@ impl BlobDatabase<PackStore> {
 
 impl BlobDatabase<PackStore, MarkOnlyDatabase> {
     /// Opens the database at `path` for the blob GC only (ROADMAP 10.4.7, ADR-0069): [`MarkOnlyDatabase::open`], the
-    /// writer's open with a no-token stand-in for each `text` field's analyzer `options.registry` lacks and no flush
-    /// of what such a stand-in indexed, then its pack read-write with its writer proof, as [`BlobDatabase::open`]
-    /// does. The handle marks and sweeps ([`BlobDatabase::gc`]) and does nothing else: a [`MarkOnlyDatabase`] is no
-    /// [`DocumentLog`], so nothing can be put, stored or committed through it.
+    /// writer's open with a no-token stand-in for each `text` field's analyzer `options.registry` lacks, refused before
+    /// its replay when the WAL holds a record of such a field's collection (ROADMAP 10.4.8), then its pack read-write
+    /// with its writer proof, as [`BlobDatabase::open`] does. The handle marks and sweeps ([`BlobDatabase::gc`]) and
+    /// does nothing else: a [`MarkOnlyDatabase`] is no [`DocumentLog`], so nothing can be put, stored or committed
+    /// through it.
     ///
     /// ```
     /// use persia::internal::documents::{Blob, BlobDatabase};
@@ -682,6 +683,7 @@ impl BlobDatabase<PackStore, MarkOnlyDatabase> {
     /// let mut app = BlobDatabase::create(&path, app_options())?;
     /// app.log_mut().create_collection(schema)?;
     /// let kept = app.put("notes", &Document::new("n"), Blob::from_reader(&b"kept"[..]), Durability::Fsync)?;
+    /// app.commit()?; // closed cleanly: no record of `notes` is left in the WAL
     /// drop(app);
     /// // A tool with the built-in analyzers only collects it.
     /// let db = BlobDatabase::open_mark_only(&path, DatabaseOptions::default())?;
@@ -722,7 +724,8 @@ impl BlobDatabase<PackStore, MarkOnlyDatabase> {
     ///
     /// # Errors
     /// [`Error::Database`] as [`MarkOnlyDatabase::open`] (another writer holds the lock; `AnalysisSkipped` when the
-    /// replay would have to flush a skipped field's collection); [`Error::Blob`] as [`PackStore::open_writer`].
+    /// WAL holds a record of a skipped field's collection, refused before the replay, ROADMAP 10.4.8); [`Error::Blob`]
+    /// as [`PackStore::open_writer`].
     pub fn open_mark_only(path: impl AsRef<Path>, options: DatabaseOptions) -> Result<Self, Error> {
         let path = path.as_ref();
         let db = MarkOnlyDatabase::open(path, options)?;

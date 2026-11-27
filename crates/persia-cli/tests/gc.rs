@@ -2,8 +2,9 @@
 //! blobs kept and `verify --deep` clean after it, the local pack's lack of ages (no grace-young object kept), a reader
 //! lease behind the committed seq holding the sweep back, a database without a pack, dangling references reported,
 //! the `--grace` checks, the `--json` keys and the text rows, a writer holding the database, and a schema naming a
-//! registered analyzer (ROADMAP 10.4.7, ADR-0069: collected, a blob only an unflushed WAL record of such a collection
-//! references kept, and the refusal of a backlog the open would have to flush). The exit status of
+//! registered analyzer (ROADMAP 10.4.7, ADR-0069: collected; ROADMAP 10.4.8: refused, writing nothing, while the WAL
+//! holds a record of such a collection, in either order with a backlog of another collection that crosses the
+//! memtable size, N times in a row, and collected once the application has closed it). The exit status of
 //! `gc` for a sound, missing, non-container and damaged file is in `tests/commands.rs`'s table.
 
 #![allow(
@@ -531,9 +532,11 @@ fn gc_collects_a_schema_naming_a_registered_analyzer() {
     assert!(verified.status.success(), "{}", stderr(&verified));
 }
 
-/// ROADMAP 10.4.7, ADR-0069: a blob referenced only by a WAL record of a collection whose analysis the open skips
-/// (never flushed: it stays in the WAL) is marked, so the sweep keeps it while it drops the orphans. The record is
-/// still a WAL record after the run, and the application reads the document and its blob.
+/// ROADMAP 10.4.7, ADR-0069, flipped by ROADMAP 10.4.8: a blob referenced only by a WAL record of a collection whose
+/// analysis the open skips. That record refuses the open (status 1, the hint to open and close the database with its
+/// application): nothing is marked, swept or written, so the blob survives, the record is still a WAL record, and the
+/// application reads the document and its blob. Once the application has closed it (committing the record), the
+/// command collects: the sweep keeps the blob while it drops the orphans.
 #[test]
 fn a_blob_only_an_unflushed_record_of_a_skipped_collection_references_survives_gc() {
     let _serial = serial();
@@ -571,23 +574,27 @@ fn a_blob_only_an_unflushed_record_of_a_skipped_collection_references_survives_g
     let stats = json(&persia(&["stats", arg(&path), "--json"]));
     assert_eq!(stats["collections"][0]["wal_documents"], 1, "{stats}");
 
-    let done = gc_json(&path);
-    assert_eq!(done["marked"]["blobs"], 1, "{done}");
-    assert_eq!(done["deleted"]["blobs"], 3, "{done}");
-    assert_eq!(done["rewrite"]["outcome"], "done", "{done}");
+    assert_gc_refused(&path, "the WAL record is pending");
     let stats = json(&persia(&["stats", arg(&path), "--json"]));
     assert_eq!(
         stats["collections"][0]["wal_documents"], 1,
         "still a WAL record: {stats}"
     );
     assert_eq!(app_blob(&path, "wal"), wal_bytes);
+
+    close_with_the_application(&path);
+    let done = gc_json(&path);
+    assert_eq!(done["marked"]["blobs"], 1, "{done}");
+    assert_eq!(done["deleted"]["blobs"], 3, "{done}");
+    assert_eq!(done["rewrite"]["outcome"], "done", "{done}");
+    assert_eq!(app_blob(&path, "wal"), wal_bytes);
     let verified = persia(&["verify", "--deep", arg(&path)]);
     assert!(verified.status.success(), "{}", stderr(&verified));
 }
 
-/// ROADMAP 10.4.7, the refusal (ADR-0069 item 4, ADR-0068 item 2): a WAL backlog of such a collection larger than the
-/// default memtable would have to be flushed by the open's replay, which needs the analyzer. The command fails with
-/// status 1 before it marks or sweeps anything, says why and what to do, and leaves the container and the pack as
+/// ROADMAP 10.4.7, the refusal (ADR-0069 item 4, ADR-0068 item 2; since ROADMAP 10.4.8 by the open's pre-scan): a WAL
+/// backlog of such a collection larger than the default memtable, which only the analyzer can index. The command fails
+/// with status 1 before it marks or sweeps anything, says why and what to do, and leaves the container and the pack as
 /// they were; once the application has flushed the backlog, it collects.
 #[test]
 fn gc_refuses_to_flush_a_backlog_that_needs_a_registered_analyzer() {
@@ -630,11 +637,11 @@ fn gc_refuses_to_flush_a_backlog_that_needs_a_registered_analyzer() {
     assert_eq!(out.stdout, b"");
     let err = stderr(&out);
     assert!(
-        err.contains(r#"collection "notes": its unflushed writes would have to be flushed, which needs the analyzer tags@1 of field "tags" that this open lacks (an open that skips analysis never flushes them without it); open the database with its application, commit (closing a `persia::Db` does), then retry"#),
+        err.contains(r#"collection "notes" has writes in the WAL that only the analyzer tags@1 of field "tags" can index, and this open lacks it (it refuses before replaying them, writing nothing); open the database with its application and close it (closing a `persia::Db` commits them), then retry"#),
         "{err}"
     );
     assert!(
-        err.contains("open the database with its application and commit"),
+        err.contains("open the database with its application and close it, then retry"),
         "{err}"
     );
     let after = (
@@ -649,6 +656,239 @@ fn gc_refuses_to_flush_a_backlog_that_needs_a_registered_analyzer() {
     let done = gc_json(&path);
     assert_eq!(done["marked"]["blobs"], 1, "{done}");
 }
+/// `persia gc` exits 1 on `path` for a pending record of `notes` (ROADMAP 10.4.8), says what to do, writes no report,
+/// and leaves the container and the pack byte-identical.
+fn assert_gc_refused(path: &Path, ctx: &str) {
+    let before = (
+        std::fs::read(path).unwrap(),
+        std::fs::read(pack(path)).unwrap(),
+    );
+    let out = persia(&["gc", arg(path), "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{ctx}: {}", stderr(&out));
+    assert_eq!(out.stdout, b"", "{ctx}");
+    let err = stderr(&out);
+    assert!(
+        err.contains("open the database with its application and close it, then retry"),
+        "{ctx}: {err}"
+    );
+    assert!(err.contains(r#"collection "notes""#), "{ctx}: {err}");
+    let after = (
+        std::fs::read(path).unwrap(),
+        std::fs::read(pack(path)).unwrap(),
+    );
+    assert!(
+        after == before,
+        "{ctx}: persia gc wrote to the container or the pack"
+    );
+}
+
+/// `persia compact` exits 1 on `path` for a pending record of `notes` (ROADMAP 10.4.8), says what to do, writes no
+/// report, and leaves the container and the pack byte-identical.
+fn assert_compact_refused(path: &Path, ctx: &str) {
+    let before = (
+        std::fs::read(path).unwrap(),
+        std::fs::read(pack(path)).unwrap(),
+    );
+    let out = persia(&["compact", arg(path), "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{ctx}: {}", stderr(&out));
+    assert_eq!(out.stdout, b"", "{ctx}");
+    let err = stderr(&out);
+    assert!(
+        err.contains("open the database with its application and close it, then retry"),
+        "{ctx}: {err}"
+    );
+    let after = (
+        std::fs::read(path).unwrap(),
+        std::fs::read(pack(path)).unwrap(),
+    );
+    assert!(
+        after == before,
+        "{ctx}: persia compact wrote to the container or the pack"
+    );
+}
+
+/// The application (with `tags@1`) opens the database at `path` and closes it, committing: what the refusal's hint
+/// asks for.
+fn close_with_the_application(path: &Path) {
+    let mut db = BlobDatabase::open(path, tags_options()).unwrap();
+    db.commit().unwrap();
+}
+
+/// The first 100 bytes of [`bytes_of`]`(n)`: a small blob, distinct per `n`, so the three 64 KiB orphans of
+/// [`with_a_backlog_and_a_note`] are over the default rewrite ratio.
+fn small_bytes(n: u8) -> Vec<u8> {
+    bytes_of(n)[..100].to_vec()
+}
+
+/// Where the `notes` record sits relative to the `plain` backlog.
+#[derive(Debug, Clone, Copy)]
+enum Order {
+    Before,
+    After,
+}
+
+/// A closed database with `notes` (naming `tags@1`) and `plain` (built-in analyzers only): committed, `kept` with its
+/// blob and three orphans (their documents deleted and committed); then, never committed, one `notes` document with
+/// its blob and a `plain` backlog of 18 documents of 4 MiB each (an extra stored field, each with a small blob, 72
+/// MiB: over the default 64 MiB memtable, so a writer's replay flushes it), the note before or after the backlog
+/// (`order`). Returns the ids each collection holds and the blob every document references, by id.
+fn with_a_backlog_and_a_note(path: &Path, order: Order) -> Vec<(&'static str, String, Vec<u8>)> {
+    let mut options = tags_options();
+    let notes = tags_schema(&options);
+    options.policy.flush.memtable_bytes = 1 << 30;
+    let mut db = BlobDatabase::create(path, options).unwrap();
+    db.log_mut().create_collection(notes.clone()).unwrap();
+    db.log_mut()
+        .create_collection(SchemaBuilder::new("plain").strict(false).build().unwrap())
+        .unwrap();
+    let mut docs = Vec::new();
+    let mut put = |db: &mut BlobDatabase<_>,
+                   collection: &'static str,
+                   doc: Document,
+                   bytes: Vec<u8>,
+                   durability| {
+        let id = doc.id().to_owned();
+        db.put(collection, &doc, Blob::from_reader(&bytes[..]), durability)
+            .unwrap();
+        docs.push((collection, id, bytes));
+    };
+    put(
+        &mut db,
+        "notes",
+        tagged(&notes, "kept"),
+        bytes_of(1),
+        Durability::Fsync,
+    );
+    for (n, id) in [(2, "g1"), (3, "g2"), (4, "g3")] {
+        let bytes = bytes_of(n);
+        db.put(
+            "notes",
+            &tagged(&notes, id),
+            Blob::from_reader(&bytes[..]),
+            Durability::Fsync,
+        )
+        .unwrap();
+    }
+    db.commit().unwrap();
+    for id in ["g1", "g2", "g3"] {
+        db.log_mut().delete("notes", id, Durability::Fsync).unwrap();
+    }
+    db.release_durable();
+    db.commit().unwrap();
+    if let Order::Before = order {
+        put(
+            &mut db,
+            "notes",
+            tagged(&notes, "wal"),
+            small_bytes(5),
+            Durability::Buffered,
+        );
+    }
+    let pad = Json::String("p".repeat(4 << 20));
+    for i in 0..18_u8 {
+        let mut doc = Document::new(format!("big{i:02}"));
+        doc.insert_extra("pad", pad.clone());
+        put(
+            &mut db,
+            "plain",
+            doc,
+            small_bytes(20 + i),
+            Durability::Buffered,
+        );
+    }
+    if let Order::After = order {
+        put(
+            &mut db,
+            "notes",
+            tagged(&notes, "wal"),
+            small_bytes(5),
+            Durability::Buffered,
+        );
+    }
+    put(
+        &mut db,
+        "plain",
+        Document::new("last"),
+        small_bytes(50),
+        Durability::Fsync,
+    );
+    drop(db);
+    docs
+}
+
+/// The application's read-only open (with `tags@1`) shows exactly `docs`, each blob read whole and byte-identical.
+fn assert_app_reads(path: &Path, docs: &[(&str, String, Vec<u8>)], ctx: &str) {
+    let ro = ReadOnlyBlobDatabase::open(path, &tags_options()).unwrap();
+    let snapshot = ro.database().snapshot();
+    for collection in ["notes", "plain"] {
+        let c = snapshot.collection(collection).unwrap();
+        let expected: BTreeSet<&str> = docs
+            .iter()
+            .filter(|(name, ..)| *name == collection)
+            .map(|(_, id, _)| id.as_str())
+            .collect();
+        let mut live = BTreeSet::new();
+        for (_, id, bytes) in docs.iter().filter(|(name, ..)| *name == collection) {
+            let doc = c
+                .get(id)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{ctx}: {collection}/{id} is gone"));
+            let blob = doc.blob_ref().unwrap().clone();
+            assert!(
+                ro.get_blob_range(&blob, 0..blob.size()).unwrap() == *bytes,
+                "{ctx}: {collection}/{id}: other bytes"
+            );
+            live.insert(id.as_str());
+        }
+        assert_eq!(live, expected, "{ctx}");
+        assert!(
+            c.get("g1").unwrap().is_none(),
+            "{ctx}: a deleted note came back"
+        );
+    }
+}
+
+/// ROADMAP 10.4.8, in both orders (the `notes` record before or after a `plain` backlog that a writer's replay
+/// flushes): `REFUSALS` runs of `persia gc` and of `persia compact` in a row each exit 1 and leave the container and
+/// the pack byte-identical, so they add no segment, duplicate or not; the application's next open shows every document
+/// and blob; once it has closed the database, both commands succeed, `persia gc` dropping exactly the three orphans.
+#[test]
+fn repeated_refused_gc_and_compact_runs_write_nothing_in_either_order() {
+    const REFUSALS: usize = 3;
+    let _serial = serial();
+    for order in [Order::Before, Order::After] {
+        let ctx = format!("{order:?}");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.persia");
+        let docs = with_a_backlog_and_a_note(&path, order);
+        let before = (
+            std::fs::read(&path).unwrap(),
+            std::fs::read(pack(&path)).unwrap(),
+        );
+        for n in 0..REFUSALS {
+            assert_gc_refused(&path, &format!("{ctx}, gc {n}"));
+            assert_compact_refused(&path, &format!("{ctx}, compact {n}"));
+        }
+        let after = (
+            std::fs::read(&path).unwrap(),
+            std::fs::read(pack(&path)).unwrap(),
+        );
+        assert!(after == before, "{ctx}: the refusals changed a byte");
+        assert_app_reads(&path, &docs, &format!("{ctx}: after the refusals"));
+
+        close_with_the_application(&path);
+        let done = gc_json(&path);
+        assert_eq!(done["deleted"]["blobs"], 3, "{ctx}: {done}");
+        assert_eq!(done["missing"], serde_json::json!([]), "{ctx}: {done}");
+        assert_eq!(done["marked"]["blobs"], docs.len(), "{ctx}: {done}");
+        let compacted = json(&persia(&["compact", arg(&path), "--json"]));
+        assert_eq!(compacted["after"]["dead_bytes"], 0, "{ctx}: {compacted}");
+        assert_app_reads(&path, &docs, &format!("{ctx}: after gc and compact"));
+        let verified = persia(&["verify", "--deep", arg(&path)]);
+        assert!(verified.status.success(), "{ctx}: {}", stderr(&verified));
+    }
+}
+
 /// Review item M1: a refused grace costs no open. The database's WAL holds a backlog over the default 64 MiB memtable,
 /// which a writer's open flushes into a commit (SPEC §8.6), and its pack's lock file is gone (a lock file is never
 /// needed beforehand): `--grace 1h` exits 1 with the container and the pack byte-identical and no lock file created,

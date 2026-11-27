@@ -14,11 +14,12 @@
 //! **Analyzers.** The command has the built-in analyzers only, and collects a database whose schema names an analyzer
 //! its application registered (SPEC §6.2.2; ROADMAP 10.4.7, ADR-0069): as `persia compact` (ADR-0068), its open
 //! indexes such a `text` field with a stand-in that emits no token, and the mark reads no term (it lists the blob
-//! references of the stored documents and of every WAL put from `wal_start` on, so a WAL record of such a collection is
-//! marked). What the open cannot do is flush such a collection: when its recovery would flush any collection (every
-//! flush flushes every memtable) while such a collection holds a replayed record (a memtable at the default 64 MiB, the
-//! stand-in's, or out of docids), it fails with status 1 before flushing any of them, and nothing is marked or swept.
-//! Open the database with its application and commit (closing a `persia::Db` commits), then collect.
+//! references of the stored documents and of every WAL put from `wal_start` on). What the open cannot do is replay a
+//! record of such a collection, which only its analyzer can index (and so flush): when the WAL from `wal_start` holds
+//! one (a *pending record*, SPEC §8.6, ROADMAP 10.4.8: left by an application that did not close cleanly), its
+//! pre-scan refuses the open before the replay, with status 1, and nothing is marked or swept and nothing is written
+//! (no segment, no commit; only the container's tail repair, as any writer's open). Open the database with its
+//! application and close it (closing a `persia::Db` commits, which flushes every memtable), then collect.
 //!
 //! **The grace period.** `--grace <N>{s,m,h,d}`, 24 h by default (SPEC §9.5), is checked by the GC's own rule
 //! (`GcOptions::validate`), which refuses one below its floor, twice the longest bind budget (2 h, SPEC §9.4): before
@@ -175,8 +176,8 @@ fn opening(path: &Path, err: BlobDatabaseError) -> anyhow::Error {
             path.display()
         ),
         Some(DatabaseError::AnalysisSkipped { .. }) => format!(
-            "opening {} (persia gc has the built-in analyzers only and cannot flush that collection: open the \
-             database with its application and commit, then collect it)",
+            "opening {} (persia gc has the built-in analyzers only and cannot replay that collection's writes: open \
+             the database with its application and close it, then retry)",
             path.display()
         ),
         _ => format!("opening {}", path.display()),
@@ -450,6 +451,21 @@ mod tests {
             "{shown}"
         );
         assert!(!shown.contains("newer build"), "{shown}");
+        // ROADMAP 10.4.8: a pending record of a skipped collection says to open and close with the application.
+        let skipped = BlobDatabaseError::Database(Box::new(DatabaseError::AnalysisSkipped {
+            collection: "notes".into(),
+            field: "tags".into(),
+            analyzer: "tags@1".into(),
+        }));
+        let shown = format!("{:#}", opening(path, skipped));
+        assert!(
+            shown.starts_with(
+                "opening app.persia (persia gc has the built-in analyzers only and cannot replay that collection's \
+                 writes: open the database with its application and close it, then retry)"
+            ),
+            "{shown}"
+        );
+        assert!(shown.contains("tags@1"), "{shown}");
     }
     #[test]
     fn a_grace_is_a_whole_number_and_a_unit() {

@@ -245,14 +245,15 @@ pub enum DatabaseError {
         analyzer: String,
     },
     /// An open that skips the analysis of a `text` field whose analyzer its registry lacks (a [`CompactOnlyDatabase`]
-    /// or a [`MarkOnlyDatabase`], ADR-0068, ADR-0069) refuses a commit that would flush that collection's unflushed
-    /// writes, which a segment would then hold without the field's terms. Refused before anything is written; in
-    /// practice at its open, when its replay would flush (any collection: every flush flushes every memtable) while
-    /// such a collection holds a replayed record. Open the database with its application (a registry that has the
-    /// analyzer) and commit (closing a `persia::Db` commits): a reopen alone may flush nothing. Then retry. Not
-    /// corruption.
+    /// or a [`MarkOnlyDatabase`], ADR-0068, ADR-0069) refuses a database whose WAL, from `wal_start` on, holds a
+    /// *pending record* (as SPEC §8.6 defines it) of that field's collection: such records can only be indexed, and
+    /// flushed, with the analyzer. Its pre-scan finds one before the replay (ROADMAP 10.4.8), so the
+    /// refused open writes nothing but the container's tail repair: no segment, no segment id, no commit. Open the
+    /// database with its application (a registry that has the analyzer) and close it (closing a `persia::Db` commits,
+    /// which flushes every memtable; with the engine, commit), then retry. Not corruption. (The same error also guards
+    /// any commit of such a handle that would flush such a collection, as defence in depth: none can happen.)
     #[error(
-        "collection {collection:?}: its unflushed writes would have to be flushed, which needs the analyzer {analyzer} of field {field:?} that this open lacks (an open that skips analysis never flushes them without it); open the database with its application, commit (closing a `persia::Db` does), then retry"
+        "collection {collection:?} has writes in the WAL that only the analyzer {analyzer} of field {field:?} can index, and this open lacks it (it refuses before replaying them, writing nothing); open the database with its application and close it (closing a `persia::Db` commits them), then retry"
     )]
     AnalysisSkipped {
         /// The collection.
@@ -654,8 +655,8 @@ pub struct Database<F = File> {
     /// [`Database::relaxation_stats`] never goes down.
     relaxation_dropped: RelaxationStats,
     /// The `text` fields whose analysis a [`CompactOnlyDatabase`]'s or [`MarkOnlyDatabase`]'s open skips (ADR-0068,
-    /// ADR-0069): their collections' memtables are never flushed ([`Database::plan_flushes`]). Empty for every other
-    /// open.
+    /// ADR-0069): their collections' memtables stay empty (the open's pre-scan refuses a WAL with a record for them,
+    /// ROADMAP 10.4.8) and are never flushed ([`Database::plan_flushes`], a backstop). Empty for every other open.
     skipped: Vec<SkippedAnalysis>,
 }
 
@@ -1311,6 +1312,10 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// [`MarkOnlyDatabase`], ADR-0068, ADR-0069): such a memtable never becomes a segment. Checked before
     /// [`Self::plan_flushes`] builds any segment or takes a segment id, and for the whole commit, since every flush
     /// flushes every memtable with operations (but `skip`'s).
+    ///
+    /// A backstop (defence in depth, ROADMAP 10.4.8): such an open is refused by its pre-scan when the WAL holds a
+    /// pending record (SPEC §8.6) of such a collection (`recovery::refuse_pending_skipped`), and nothing else
+    /// writes to these handles' memtables, so this never fires unless that rule is broken.
     fn check_no_skipped_flush(&self, skip: Option<&str>) -> Result<(), DatabaseError> {
         let flushed = |s: &&SkippedAnalysis| {
             skip != Some(s.collection.as_str())

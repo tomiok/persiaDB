@@ -3,24 +3,26 @@
 //!
 //! Invariants:
 //! 1. Its mark is the writer's: `referenced_blobs` equals the application's (`Database::open` with the analyzer), every
-//!    reference of the segments and of the skipped collection's WAL records (put, replaced, in a later chunk) included,
-//!    and the open writes nothing to a cleanly closed database.
-//! 2. It refuses, before writing anything, an open whose replay would flush a memtable of a collection whose analysis
-//!    it skips (the same refusal as the compaction-only open: one function).
+//!    reference of the segments and of the WAL's records of a collection without a skipped field included, and the
+//!    open writes nothing to a cleanly closed database. WAL records of the skipped collection (pending records, SPEC
+//!    §8.6) refuse the open (ROADMAP 10.4.8) with every byte kept, and the application's mark then keeps all of their
+//!    blobs.
+//! 2. It refuses, before writing anything, an open whose WAL holds a pending record of a collection whose analysis it
+//!    skips, whatever the memtable size (the same refusal as the compaction-only open: one function).
 //! 3. Without a skipped field it is the writer's open: a backlog over the memtable size is flushed.
 //! 4. It takes the writer lock (a live writer makes it fail with `Locked`), needs a read-write container, and gives
 //!    the writer proof of the container it holds.
-//! 5. A cut commit with skipped records in the WAL is retired with one commit that flushes nothing and is not refused;
-//!    the records stay WAL records and their blobs are marked.
-//! 6. A refusal after the replay committed flushes of another collection loses nothing: a second open is refused alike,
-//!    and the application reaches every document and marks every blob.
+//! 5. A cut commit over a WAL without pending records is retired with one commit that flushes nothing; over pending
+//!    records of the skipped collection the open is refused and leaves it, the records stay WAL records, and the
+//!    application's open retires it and marks their blobs.
+//! 6. A refusal before the replay would flush another collection writes nothing and loses nothing: a second open is
+//!    refused alike, and the application reaches every document and marks every blob.
 //! 7. A fault and a crash at every write of its open (the replay-time flushes of a collection without a skipped field,
-//!    or the commit retiring a cut commit) lose nothing: the skipped records stay WAL records, and the next mark-only
-//!    open succeeds and marks exactly what the writer marks, every live blob included.
-//! 8. Repeated refusals (each re-flushing the replayed `plain` records of the chunk `wal_start` stayed at) lose and
-//!    resurrect nothing and write no `notes` segment; the application's commit, merges and compaction then leave the
-//!    same documents, the WAL `notes` indexed by the real analyzer, and no dead byte. The growth per refusal is
-//!    printed (with `--nocapture`).
+//!    or the commit retiring a cut commit) lose nothing, and the next mark-only open succeeds and marks exactly what
+//!    the writer marks, every live blob included.
+//! 8. Repeated refusals (ROADMAP 10.4.8: none flushes the replayed `plain` records any more) write nothing, lose and
+//!    resurrect nothing and write no segment; the application's commit, merges and compaction then leave the same
+//!    documents, the WAL `notes` indexed by the real analyzer, and no dead byte.
 
 #![allow(
     clippy::unwrap_used,
@@ -163,11 +165,46 @@ fn populated(fs: &SimFs) {
         .unwrap();
 }
 
-/// Invariant 1.
+/// [`populated`]'s database after the application opened it and committed (flushing the WAL's notes with the real
+/// analyzer), then logged `plain`'s `p2` again, unchanged and synced: the WAL from `wal_start` holds a `plain` put
+/// only, which a mark-only open replays and marks (ROADMAP 10.4.8: not refused).
+fn committed_by_app(fs: &SimFs) {
+    let mut db = open_app(fs);
+    db.commit().unwrap();
+    db.put("plain", &plain_doc("p2", 13), Durability::Fsync)
+        .unwrap();
+}
+
+/// A mark-only open of `fs` with `options` is refused (`AnalysisSkipped`, naming `notes`), and wrote nothing.
+fn assert_refused(fs: &SimFs, options: DatabaseOptions, ctx: &str) {
+    let before = fs.files();
+    let err = mark_only(fs, options).unwrap_err();
+    assert!(
+        matches!(&err, DatabaseError::AnalysisSkipped { collection, .. } if collection == "notes"),
+        "{ctx}: {err:?}"
+    );
+    assert!(!err.is_corruption(), "{ctx}");
+    assert!(fs.files() == before, "{ctx}: the refused open wrote");
+}
+
+/// Invariant 1. Flipped by ROADMAP 10.4.8: [`populated`]'s WAL holds `notes` records, which refuse the open with every
+/// byte kept, and the application's mark then keeps each of their blobs; once it has committed, the mark-only open
+/// writes nothing and marks what the writer marks, the WAL's `plain` put included.
 #[test]
 fn its_mark_is_the_writers_and_its_open_writes_nothing() {
     let fs = SimFs::new();
     populated(&fs);
+    assert_refused(&fs, builtin(), "the WAL's notes records are pending");
+    // Every reference a writer's view can still show: the WAL's records of `notes` (w1 twice, w2, and n1's segment
+    // version, deleted only in the WAL), the replaced and deleted segment documents' sidecars applied.
+    let expected: HashSet<BlobId> = [1, 5, 4, 10, 11, 12, 13]
+        .into_iter()
+        .map(|n| blob(n).blob_id())
+        .collect();
+    let writer = open_app(&fs).referenced_blobs().unwrap();
+    assert!(writer.is_superset(&expected), "{writer:?}");
+
+    committed_by_app(&fs);
     let before = fs.files();
     let db = mark_only(&fs, options(AnalyzerRegistry::builtin(), 64 << 20)).unwrap();
     let skipped = db.skipped_analysis();
@@ -180,9 +217,8 @@ fn its_mark_is_the_writers_and_its_open_writes_nothing() {
     let seq = db.seq();
     drop(db);
     assert_eq!(fs.files(), before, "the open wrote nothing");
-    // Every reference a writer's view can still show: the WAL's records of `notes` (w1 twice, w2, and n1's segment
-    // version, deleted only in the WAL), the replaced and deleted segment documents' sidecars applied.
-    let expected: HashSet<BlobId> = [1, 5, 4, 10, 11, 12, 13]
+    // After the commit: w1's first version and n1 are gone; p2's put is still a WAL record.
+    let expected: HashSet<BlobId> = [5, 4, 11, 12, 13]
         .into_iter()
         .map(|n| blob(n).blob_id())
         .collect();
@@ -242,8 +278,23 @@ fn an_open_that_would_flush_a_skipped_collection_is_refused_before_writing() {
     }
     assert!(!err.is_corruption());
     assert_eq!(fs.files(), before, "nothing was written");
-    // With the default memtable size nothing is due, and the backlog's references are all marked.
-    let db = mark_only(&fs, options(AnalyzerRegistry::builtin(), 64 << 20)).unwrap();
+    // With the default memtable size no flush is due, and the open is refused all the same (ROADMAP 10.4.8: the
+    // records are pending, wherever a flush would be due). The application's mark keeps the backlog's blobs, and once
+    // it has committed the mark-only open marks them, writing nothing.
+    assert_refused(&fs, builtin(), "no flush due");
+    assert_eq!(fs.files(), before, "nothing was written");
+    let mut app = open_app(&fs);
+    let marked = app.referenced_blobs().unwrap();
+    assert!(
+        [1, 2, 3]
+            .iter()
+            .all(|&n| marked.contains(&blob(n).blob_id())),
+        "{marked:?}"
+    );
+    app.commit().unwrap();
+    drop(app);
+    let before = fs.files();
+    let db = mark_only(&fs, options(AnalyzerRegistry::builtin(), 1024)).unwrap();
     let marked = db.referenced_blobs().unwrap();
     assert!(
         [1, 2, 3]
@@ -331,63 +382,113 @@ fn has_cut_commit(fs: &SimFs) -> bool {
         .any(|f| f.kind == FrameKind::Manifest && f.offset >= log_end)
 }
 
-/// Invariant 5: a fault at each mutating call of a commit of the application, then a crash. Where that leaves a cut
-/// commit (a Manifest after `log_end`) while the WAL holds records of the skipped collection, the mark-only open
-/// retires it with one commit, which flushes nothing and is not refused: those records stay WAL records (the
-/// application's reopen finds them in its memtable), and their blobs are marked.
+/// Invariant 5: a fault at each mutating call of a commit of the application, then a crash. Over a WAL that holds a
+/// `plain` put only ([`committed_by_app`]), where that leaves a cut commit (a Manifest after `log_end`), the mark-only
+/// open retires it with one commit, which flushes nothing, and marks the put's blob. Over [`populated`]'s WAL, whose
+/// `notes` records stay pending unless that commit took effect, the open is refused (ROADMAP 10.4.8) with every byte
+/// as it was, the cut commit included; those records stay WAL records, which the application's open retires, finds in
+/// its memtable and marks. After its commit the mark-only open marks what it marks.
 #[test]
 fn a_cut_commit_is_retired_without_a_flush_and_the_skipped_records_stay_marked() {
-    let calls = {
+    let base = |over_notes: bool| {
         let fs = SimFs::new();
         populated(&fs);
-        let mut db = open_app(&fs);
-        let start = fs.mutations();
-        db.commit().unwrap();
-        fs.mutations() - start
+        if !over_notes {
+            committed_by_app(&fs);
+        }
+        fs
     };
-    let mut cut = 0;
-    for n in 0..calls {
-        for loss in [CrashLoss::Nothing, CrashLoss::All] {
-            let ctx = format!("call {n}, {loss:?}");
-            let fs = SimFs::new();
-            populated(&fs);
+    let (mut retired, mut refused) = (0, 0);
+    for over_notes in [false, true] {
+        let calls = {
+            let fs = base(over_notes);
             let mut db = open_app(&fs);
-            let seq = db.seq();
-            fs.set_fault(Some(SimFault::FailAt(fs.mutations() + n)));
-            assert!(db.commit().is_err(), "{ctx}: the fault fired");
-            fs.set_fault(None);
-            drop(db);
-            let crashed = fs.crash(loss);
-            if !has_cut_commit(&crashed) {
-                continue;
+            let start = fs.mutations();
+            db.commit().unwrap();
+            fs.mutations() - start
+        };
+        for n in 0..calls {
+            for loss in [CrashLoss::Nothing, CrashLoss::All] {
+                let ctx = format!("over notes {over_notes}, call {n}, {loss:?}");
+                let fs = base(over_notes);
+                let mut db = open_app(&fs);
+                let seq = db.seq();
+                fs.set_fault(Some(SimFault::FailAt(fs.mutations() + n)));
+                assert!(db.commit().is_err(), "{ctx}: the fault fired");
+                fs.set_fault(None);
+                drop(db);
+                let crashed = fs.crash(loss);
+                if !has_cut_commit(&crashed) {
+                    continue;
+                }
+                if over_notes {
+                    refused += 1;
+                    assert_refused(&crashed, builtin(), &ctx);
+                    assert!(has_cut_commit(&crashed), "{ctx}: the cut commit is left");
+                    let mut app = open_app(&crashed);
+                    assert!(
+                        !has_cut_commit(&crashed),
+                        "{ctx}: the application retired it"
+                    );
+                    let snapshot = app.snapshot();
+                    let notes = snapshot.collection("notes").unwrap();
+                    assert_eq!(
+                        notes.memtable().live_count(),
+                        2,
+                        "{ctx}: w1 and w2 are still WAL records"
+                    );
+                    assert!(
+                        notes.get("w1").unwrap().is_some() && notes.get("w2").unwrap().is_some()
+                    );
+                    drop(snapshot);
+                    let marked = app.referenced_blobs().unwrap();
+                    for n in [10, 11, 12, 13] {
+                        assert!(marked.contains(&blob(n).blob_id()), "{ctx}: blob {n}");
+                    }
+                    app.commit().unwrap();
+                    drop(app);
+                    let db =
+                        mark_only(&crashed, builtin()).unwrap_or_else(|e| panic!("{ctx}: {e}"));
+                    let marked = db.referenced_blobs().unwrap();
+                    drop(db);
+                    assert_eq!(
+                        marked,
+                        open_app(&crashed).referenced_blobs().unwrap(),
+                        "{ctx}"
+                    );
+                } else {
+                    retired += 1;
+                    let db =
+                        mark_only(&crashed, builtin()).unwrap_or_else(|e| panic!("{ctx}: {e}"));
+                    assert_eq!(db.seq(), seq + 1, "{ctx}: one retiring commit");
+                    assert!(!has_cut_commit(&crashed), "{ctx}: retired");
+                    let marked = db.referenced_blobs().unwrap();
+                    assert!(marked.contains(&blob(13).blob_id()), "{ctx}: the WAL put");
+                    drop(db);
+                    let app = open_app(&crashed);
+                    assert_eq!(marked, app.referenced_blobs().unwrap(), "{ctx}");
+                    let snapshot = app.snapshot();
+                    let plain_c = snapshot.collection("plain").unwrap();
+                    assert_eq!(
+                        plain_c.memtable().live_count(),
+                        1,
+                        "{ctx}: p2 is still a WAL record"
+                    );
+                }
             }
-            cut += 1;
-            let db = mark_only(&crashed, builtin()).unwrap_or_else(|e| panic!("{ctx}: {e}"));
-            assert_eq!(db.seq(), seq + 1, "{ctx}: one retiring commit");
-            assert!(!has_cut_commit(&crashed), "{ctx}: retired");
-            let marked = db.referenced_blobs().unwrap();
-            for n in [10, 11, 12, 13] {
-                assert!(marked.contains(&blob(n).blob_id()), "{ctx}: blob {n}");
-            }
-            drop(db);
-            let app = open_app(&crashed);
-            let snapshot = app.snapshot();
-            let notes = snapshot.collection("notes").unwrap();
-            assert_eq!(
-                notes.memtable().live_count(),
-                2,
-                "{ctx}: w1 and w2 are still WAL records"
-            );
-            assert!(notes.get("w1").unwrap().is_some() && notes.get("w2").unwrap().is_some());
         }
     }
-    assert!(cut > 0, "no fault left a cut commit");
+    assert!(
+        retired > 0,
+        "no fault left a cut commit over a plain record"
+    );
+    assert!(refused > 0, "no fault left a cut commit over notes records");
 }
 
-/// Invariant 6: a refusal after part of the open committed. The replay flushes a `plain` backlog over the (small)
-/// memtable size while `notes` holds nothing, then the `notes` records go past it and the open is refused. What the
-/// flushes committed stays, a second mark-only open is refused the same way, and the application's open reaches every
-/// document, and its mark every blob.
+/// Invariant 6, flipped by ROADMAP 10.4.8: a `plain` backlog over the (small) memtable size, then `notes` records.
+/// Before 10.4.8 the replay flushed `plain` and was then refused, part of the open committed; now the pre-scan refuses
+/// the open before that flush, so nothing is written and a second mark-only open is refused the same way, on the same
+/// bytes. The application's open reaches every document, and its mark every blob.
 #[test]
 fn a_refusal_after_a_flush_of_another_collection_loses_nothing() {
     let fs = SimFs::new();
@@ -416,25 +517,20 @@ fn a_refusal_after_a_flush_of_another_collection_loses_nothing() {
         .unwrap();
     drop(db);
     let before = open_app(&fs).seq();
-    let refused = |ctx: &str| {
-        let err = mark_only(&fs, options(AnalyzerRegistry::builtin(), 1024)).unwrap_err();
-        assert!(
-            matches!(&err, DatabaseError::AnalysisSkipped { collection, .. } if collection == "notes"),
-            "{ctx}: {err:?}"
-        );
-    };
-    refused("first open");
-    let after = open_app(&fs).seq();
-    assert!(
-        after > before,
-        "the replay committed the plain flushes: {before} -> {after}"
+    // ROADMAP 10.4.8: the pre-scan finds the `notes` records before the replay reaches the `plain` backlog's flush, so
+    // each refusal writes nothing: no `plain` segment, no commit, the same bytes for the next one.
+    assert_refused(
+        &fs,
+        options(AnalyzerRegistry::builtin(), 1024),
+        "first open",
     );
-    refused("second open");
-    // Not `==`: the WAL chunk the first open was replaying when it flushed stays from `wal_start` on (SPEC §8.6), so the
-    // second open replays its `plain` records again and flushes them again before it is refused (the same documents,
-    // in new segments). Nothing goes back and nothing is lost (below).
-    let again = open_app(&fs).seq();
-    assert!(again >= after, "{after} -> {again}");
+    assert_eq!(open_app(&fs).seq(), before, "the refusal committed nothing");
+    assert_refused(
+        &fs,
+        options(AnalyzerRegistry::builtin(), 1024),
+        "second open",
+    );
+    assert_eq!(open_app(&fs).seq(), before, "neither did the second");
 
     let app = open_app(&fs);
     let snapshot = app.snapshot();
@@ -551,11 +647,12 @@ fn expect_put(expected: &mut Docs, collection: &str, doc: &Document) {
 }
 
 /// A closed database whose WAL, after the last commit, holds: a `plain` block (puts, replacements of WAL and committed
-/// documents, deletions of both), then `notes` puts and the deletion of the committed note, then a second `plain`
-/// block over the flush threshold. A mark-only open with that threshold flushes `plain` during the first block (no
-/// `notes` record yet) and is refused in the second (the `notes` records are replayed). The application's memtable
-/// was 1 GiB: it flushed none of them. Returns the live documents.
-fn refusal_base(fs: &SimFs, chunk_target: usize, refuse: bool) -> Docs {
+/// documents, deletions of both), then (`with_notes`) `notes` puts and the deletion of the committed note, then
+/// (`refuse`) a second `plain` block over the flush threshold. Before ROADMAP 10.4.8 a mark-only open with that
+/// threshold flushed `plain` during the first block (no `notes` record yet) and was refused in the second; now the
+/// `notes` records refuse it before it replays anything, and without them it flushes `plain` during the first block.
+/// The application's memtable was 1 GiB: it flushed none of them. Returns the live documents.
+fn refusal_base(fs: &SimFs, chunk_target: usize, refuse: bool, with_notes: bool) -> Docs {
     let container = Container::create_in(vfs(fs), PATH).unwrap();
     let mut app = options(registry(), 1 << 30);
     app.wal_chunk_target = chunk_target;
@@ -589,19 +686,22 @@ fn refusal_base(fs: &SimFs, chunk_target: usize, refuse: bool) -> Docs {
         db.delete("plain", &id, Durability::Buffered).unwrap();
         gone.push(("plain".to_owned(), id));
     }
-    for i in 0..16_u8 {
-        put(&mut db, "notes", note(&format!("n{i:03}"), 30 + i % 8));
+    if with_notes {
+        for i in 0..16_u8 {
+            put(&mut db, "notes", note(&format!("n{i:03}"), 30 + i % 8));
+        }
+        db.delete("notes", "committed", Durability::Buffered)
+            .unwrap();
+        gone.push(("notes".to_owned(), "committed".to_owned()));
     }
-    db.delete("notes", "committed", Durability::Buffered)
-        .unwrap();
-    gone.push(("notes".to_owned(), "committed".to_owned()));
     if refuse {
         for i in 0..32 {
             put(&mut db, "plain", plain_doc(&format!("q{i:03}"), 70));
         }
     }
-    // The last record syncs the rest: in `plain` over the threshold (refused), else in `notes` (no flush is due).
-    let (collection, last) = if refuse {
+    // The last record syncs the rest: in `plain` over the threshold (refused) or without notes, else in `notes` (no
+    // flush is due).
+    let (collection, last) = if refuse || !with_notes {
         ("plain", plain_doc("last", 71))
     } else {
         ("notes", note("last", 72))
@@ -677,14 +777,15 @@ fn commit_merge_compact(fs: &SimFs, expected: &Docs, ctx: &str) -> (usize, u64, 
     (segments, docs, file_len(fs))
 }
 
-/// Candidate 3 of the 10.4.7 integration plan: `REFUSALS` refused mark-only opens in a row. Each replays the `plain`
-/// block again from the chunk `wal_start` stayed at and flushes it again into new segments before the `notes` records
-/// make the next flush refused (SPEC §8.6: harmless, the same documents). After every refusal a read-only open shows
-/// exactly the documents the application wrote (none lost, no deleted or replaced one back), the `notes` records are
-/// still WAL records and the `notes` segment is untouched. Then the application commits, merges and compacts: the
-/// documents are the same, the real analyzer indexed the `notes` records, no dead byte is left, and the merged `plain`
-/// segments hold at most a quarter more documents than are live (the policy's 20% deletion rewrite). A second
-/// database, the same writes with no refusal, gives the baseline the growth is printed against.
+/// Candidate 3 of the 10.4.7 integration plan, tightened by ROADMAP 10.4.8: `REFUSALS` refused mark-only opens in a
+/// row. Before 10.4.8 each replayed the `plain` block again from the chunk `wal_start` stayed at and flushed it again
+/// into new segments before the `notes` records made the next flush refused; now the pre-scan refuses each before the
+/// replay, so every file is byte-identical after each refusal: no commit, no segment, no growth. After every refusal
+/// a read-only open shows exactly the documents the application wrote (none lost, no deleted or replaced one back),
+/// the `notes` records are still WAL records and the `notes` segment is untouched. Then the application commits,
+/// merges and compacts: the documents are the same, the real analyzer indexed the `notes` records, no dead byte is
+/// left, the merged `plain` segments hold at most a quarter more documents than are live (the policy's 20% deletion
+/// rewrite), and the result is exactly that of a second database with the same writes and no refusal.
 #[test]
 fn repeated_refusals_lose_and_resurrect_nothing_and_their_segments_are_reclaimable() {
     const REFUSALS: usize = 6;
@@ -692,12 +793,12 @@ fn repeated_refusals_lose_and_resurrect_nothing_and_their_segments_are_reclaimab
     for chunk_target in [DatabaseOptions::default().wal_chunk_target, 512] {
         let ctx = format!("chunk target {chunk_target}");
         let baseline = SimFs::new();
-        let expected = refusal_base(&baseline, chunk_target, true);
+        let expected = refusal_base(&baseline, chunk_target, true, true);
         let reclaimed_baseline =
             commit_merge_compact(&baseline, &expected, &format!("{ctx}, baseline"));
 
         let fs = SimFs::new();
-        assert_eq!(refusal_base(&fs, chunk_target, true), expected);
+        assert_eq!(refusal_base(&fs, chunk_target, true, true), expected);
         let notes_segments: Vec<_> = {
             let ro = read_only(&fs);
             ro.manifest()
@@ -708,6 +809,7 @@ fn repeated_refusals_lose_and_resurrect_nothing_and_their_segments_are_reclaimab
                 .map(|s| s.id)
                 .collect()
         };
+        let initial = fs.files();
         let mut rows = vec![(
             read_only(&fs).seq(),
             segment_counts(&read_only(&fs).manifest(), "plain"),
@@ -738,6 +840,7 @@ fn repeated_refusals_lose_and_resurrect_nothing_and_their_segments_are_reclaimab
                 .map(|s| s.id)
                 .collect();
             assert_eq!(ids, notes_segments, "{ctx}: no notes segment was written");
+            assert!(fs.files() == initial, "{ctx}: the refusal wrote");
             rows.push((
                 ro.seq(),
                 segment_counts(&ro.manifest(), "plain"),
@@ -747,9 +850,10 @@ fn repeated_refusals_lose_and_resurrect_nothing_and_their_segments_are_reclaimab
         for (n, pair) in rows.windows(2).enumerate() {
             let ((seq_before, segments_before, len_before), (seq_after, segments_after, len_after)) =
                 (pair[0], pair[1]);
-            assert!(
-                seq_after >= seq_before && len_after >= len_before,
-                "{ctx}: nothing goes back"
+            assert_eq!(
+                (seq_after, segments_after, len_after),
+                (seq_before, segments_before, len_before),
+                "{ctx}: the refusal wrote nothing"
             );
             eprintln!(
                 "{ctx}: refusal {}: +{} commits, plain (segments, segment documents) {segments_before:?} -> \
@@ -774,9 +878,10 @@ fn repeated_refusals_lose_and_resurrect_nothing_and_their_segments_are_reclaimab
             4 * docs <= 5 * live_plain,
             "{ctx}: the merges left {docs} segment documents for {live_plain} live"
         );
-        assert!(
-            len < rows.last().unwrap().2,
-            "{ctx}: the compaction reclaimed the refusals' segments"
+        assert_eq!(
+            (segments, docs, len),
+            reclaimed_baseline,
+            "{ctx}: the refusals left nothing to reclaim"
         );
         // The mark-only open now opens (nothing of `notes` is left to flush) and marks what the application marks.
         let db = mark_only(&fs, options(AnalyzerRegistry::builtin(), threshold)).unwrap();
@@ -878,13 +983,14 @@ fn sweep_the_mark_only_open(
 }
 
 /// Candidate 4 of the 10.4.7 integration plan, in the simulated file system: a crash at every write of a mark-only
-/// open whose replay flushes `plain` (twice or more) while `notes` holds nothing, then replays the `notes` records
-/// without flushing them. Nothing is lost, the `notes` records stay WAL records, and the next mark-only open marks
-/// exactly what the writer marks.
+/// open whose replay flushes `plain` (twice or more) while `notes` holds nothing. Since ROADMAP 10.4.8 `notes` records
+/// after the backlog refuse the open before it writes anything (invariant 6, and `tests/analysis_prescan.rs` for a
+/// fault at the only writes such an open makes, its tail repair), so the WAL here holds none. Nothing is lost, and the
+/// next mark-only open marks exactly what the writer marks.
 #[test]
 fn a_crash_at_any_write_of_its_replay_time_flushes_keeps_the_mark_the_writers() {
     let base = SimFs::new();
-    let expected = refusal_base(&base, 512, false);
+    let expected = refusal_base(&base, 512, false, false);
     let threshold = flushing_threshold();
     let seq = read_only(&base).seq();
     let flushed = {
@@ -900,7 +1006,7 @@ fn a_crash_at_any_write_of_its_replay_time_flushes_keeps_the_mark_the_writers() 
         &base,
         || options(AnalyzerRegistry::builtin(), threshold),
         &expected,
-        17,
+        0,
     );
     eprintln!(
         "{calls} mutating calls in the open, {} commits",
@@ -911,13 +1017,14 @@ fn a_crash_at_any_write_of_its_replay_time_flushes_keeps_the_mark_the_writers() 
 
 /// Candidate 4, the retiring commit: an application commit cut before its superblock slot (the first fault point
 /// that leaves a Manifest after `log_end`, then a crash that loses nothing), then a crash at every write of the
-/// mark-only open that retires it (one commit, which flushes nothing).
+/// mark-only open that retires it (one commit, which flushes nothing). Over a WAL without `notes` records (ROADMAP
+/// 10.4.8: over pending ones the open is refused and leaves the cut commit, invariant 5).
 #[test]
 fn a_crash_at_any_write_of_its_retiring_commit_keeps_the_mark_the_writers() {
     let (base, expected) = (0..)
         .find_map(|n| {
             let fs = SimFs::new();
-            let expected = refusal_base(&fs, 512, false);
+            let expected = refusal_base(&fs, 512, false, false);
             let mut db = open_app(&fs);
             fs.set_fault(Some(SimFault::FailAt(fs.mutations() + n)));
             let committed = db.commit();
@@ -932,7 +1039,7 @@ fn a_crash_at_any_write_of_its_retiring_commit_keeps_the_mark_the_writers() {
         })
         .unwrap();
     let seq = read_only(&base).seq();
-    let calls = sweep_the_mark_only_open(&base, builtin, &expected, 17);
+    let calls = sweep_the_mark_only_open(&base, builtin, &expected, 0);
     let copy = base.crash(CrashLoss::Nothing);
     drop(mark_only(&copy, builtin()).unwrap());
     assert_eq!(read_only(&copy).seq(), seq + 1, "one retiring commit");

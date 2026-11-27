@@ -1,6 +1,7 @@
 # ADR-0069: A mark-only open: GC's mark and sweep from the compaction-only open's recovery
 
-- Status: proposed
+- Status: proposed; amended 2026-11-27 (ROADMAP 10.4.8: records of a skipped collection in the WAL refuse the open
+  before its replay, so no such record is replayed or marked by an accepted open)
 - Date: 2026-11-26
 - Related: SPEC §8.6, §9.5; ROADMAP 10.4.5, 10.4.7, 10.4.4; ADR-0052, ADR-0053, ADR-0054, ADR-0068
 
@@ -72,3 +73,23 @@ The question is whether GC is safe on such an open. What GC reads and writes:
   Rejected: **a read-only open for the mark** (`ReadOnlyDatabase::open_skipping_analysis`): a read-only handle takes
   no writer lock, so a writer could log a reference between the mark and the sweep, and the pack's writer lock needs
   the container's (ADR-0053).
+
+## Amendment (2026-11-27, ROADMAP 10.4.8): records of a skipped collection refuse the open
+
+The open of item 1 is ADR-0068's, and so is its amendment of the same date: before the replay, a pre-scan refuses the
+open (`AnalysisSkipped`) when the WAL from `wal_start` holds a *pending record* of a collection with a skipped field (as
+SPEC §8.6 defines it), writing nothing but the container's tail repair. This changes what the Context
+and item 4 say of such records:
+
+1. "The records of a collection whose analysis is skipped are replayed into its memtable and never flushed: they stay
+   WAL records, and the mark sees each of their references twice" no longer applies. An accepted mark-only open has
+   replayed no record of a skipped collection; there is none to mark in its memtable, and its mark is the writer's
+   view of the segments and of the other collections' records. A refused open marks and sweeps nothing, so the blobs
+   such records reference stay as they are: nothing of theirs can be swept.
+2. Item 4's refusal is the pre-scan's, wherever a flush would be due. `persia gc` exits 1 after any crash (or handle
+   dropped without a commit) of the application that left such a record, until the application opens the database
+   and closes it (closing a `persia::Db` commits, flushing every memtable); the hint says so. N refusals in a row leave
+   the container and the pack byte-identical, so repeated refusals add no segment, duplicate or not.
+3. Item 5 is unchanged for an accepted open. A refused one, killed at any point, leaves what a writer's open killed
+   before its replay leaves: the container's tail repair, at most.
+4. The flush guard of ADR-0068 item 2 (`check_no_skipped_flush`) stays in the shared open as a backstop.

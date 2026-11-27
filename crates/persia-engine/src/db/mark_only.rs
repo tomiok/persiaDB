@@ -3,16 +3,16 @@
 //!
 //! The open is [`CompactOnlyDatabase`](super::CompactOnlyDatabase)'s, the same function (ADR-0068): the writer's open
 //! ([`Database::open`]), in which a `text` field whose analyzer the registry lacks is indexed with a no-token stand-in
-//! and listed by [`MarkOnlyDatabase::skipped_analysis`], and a commit that would flush a non-empty memtable of such a
-//! field's collection fails with [`DatabaseError::AnalysisSkipped`] before anything is written. So the open fails when
-//! its replay would flush any collection while such a collection holds a replayed record; otherwise those records stay
-//! WAL records, for the next writer to replay with the analyzer.
+//! and listed by [`MarkOnlyDatabase::skipped_analysis`], and whose pre-scan refuses the open with
+//! [`DatabaseError::AnalysisSkipped`], before the replay and before anything but the tail repair is written, when the
+//! WAL from `wal_start` holds a *pending record* of such a field's collection (as SPEC §8.6 defines it; ROADMAP
+//! 10.4.8). So such a collection's memtable stays empty, and every record it replays is of another
+//! collection.
 //!
 //! The mark needs no analysis: [`MarkOnlyDatabase::referenced_blobs`] lists the blob references of the stored
-//! documents (segments, memtables whole) and of every WAL put from `wal_start` on, so the records of a skipped
-//! collection, in its memtable and in the WAL, are marked. The handle offers the mark, the committed seq, and the
-//! writer proof with which the blob pack opens read-write for the sweep (ADR-0053), and nothing that writes a
-//! document, commits, merges, compacts or changes a schema.
+//! documents (segments, memtables whole) and of every WAL put from `wal_start` on. The handle offers the mark, the
+//! committed seq, and the writer proof with which the blob pack opens read-write for the sweep (ADR-0053), and nothing
+//! that writes a document, commits, merges, compacts or changes a schema.
 //!
 //! ```compile_fail
 //! use persia_engine::db::{DatabaseOptions, MarkOnlyDatabase};
@@ -85,8 +85,10 @@ impl<F: ContainerFile + Sync> MarkOnlyDatabase<F> {
     ///
     /// # Errors
     /// As [`CompactOnlyDatabase::open_container`](super::CompactOnlyDatabase::open_container), whose open this is:
-    /// [`DatabaseError::AnalysisSkipped`] when the replay would flush (any collection) while a collection with a
-    /// skipped field holds a replayed record, before that commit writes anything; a container opened read-only.
+    /// [`DatabaseError::AnalysisSkipped`] when the WAL holds a pending record (SPEC §8.6) of a collection with a
+    /// skipped field, before the replay and anything but the tail repair is written; the pre-scan's error, at once and
+    /// with nothing written, for a WAL chunk it cannot read (an I/O error, or a frame that does not decode); a
+    /// container opened read-only.
     pub fn open_container(
         container: Container<F>,
         options: DatabaseOptions,
@@ -127,11 +129,11 @@ impl<F: ContainerFile + Sync> MarkOnlyDatabase<F> {
     }
 
     /// GC's mark of the engine's view: [`Database::referenced_blobs`]. It reads the stored documents and the WAL's
-    /// puts, never a term, so a skipped collection's replayed records are marked like any other.
+    /// puts, never a term.
     ///
     /// ```
     /// use persia_engine::analysis::{Analyzer, AnalyzerRegistry, WhitespaceTokenizer};
-    /// use persia_engine::db::{Database, DatabaseOptions, MarkOnlyDatabase};
+    /// use persia_engine::db::{Database, DatabaseError, DatabaseOptions, MarkOnlyDatabase};
     /// use persia_engine::document::{Document, Value};
     /// use persia_engine::schema::CollectionSchema;
     /// use persia_engine::wal::Durability;
@@ -146,13 +148,19 @@ impl<F: ContainerFile + Sync> MarkOnlyDatabase<F> {
     ///     &registry,
     /// )?;
     /// let tags = schema.field("tags").ok_or("no tags")?.id();
-    /// let mut app = Database::create(&path, DatabaseOptions { registry, ..DatabaseOptions::default() })?;
+    /// let app_options = || DatabaseOptions { registry: registry.clone(), ..DatabaseOptions::default() };
+    /// let mut app = Database::create(&path, app_options())?;
     /// app.create_collection(schema)?;
     /// let blob = BlobRef::new(BlobId::from_bytes([7; 32]), 3, "text/plain", 1 << 20, Default::default())?;
     /// let mut doc = Document::new("n").with(tags, Value::String("a b".into()));
     /// doc.set_blob_ref(Some(blob.clone()));
     /// app.put("notes", &doc, Durability::Fsync)?; // in the WAL only
     /// drop(app);
+    /// // A record of `notes` in the WAL needs `tags@1` to be replayed: the open is refused, writing nothing.
+    /// let refused = MarkOnlyDatabase::open(&path, DatabaseOptions::default());
+    /// assert!(matches!(refused, Err(DatabaseError::AnalysisSkipped { .. })));
+    /// // The application opens and commits; then the mark-only open marks the document's blob.
+    /// Database::open(&path, app_options())?.commit()?;
     /// let db = MarkOnlyDatabase::open(&path, DatabaseOptions::default())?;
     /// assert!(db.referenced_blobs()?.contains(&blob.blob_id()));
     /// # Ok::<(), Box<dyn std::error::Error>>(())

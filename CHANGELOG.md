@@ -482,6 +482,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- `persia gc` and `persia compact` on a database whose schema names an analyzer registered by its application
+  (ROADMAP 10.4.8; SPEC §8.6, ADR-0068 and ADR-0069 amendments) now exit 1 whenever the WAL from `wal_start` still
+  holds a record of such a collection (a *pending record*: left by an application that crashed or dropped its handle
+  without a commit), wherever a flush would have been due; before, they ran unless the open's replay had to flush.
+  The refusal comes from a pre-scan of the WAL before the replay, so a refused run writes nothing but the container's
+  tail repair: no segment, no commit, and repeated refusals no longer add segments that the application's commit,
+  merges and compaction had to reclaim. The hint says to open the database with its application and close it
+  (closing a `persia::Db` commits), then retry. A damaged record after a pending one is reported as the corruption it
+  is (status 3), as the application's open reports it. `DatabaseError::AnalysisSkipped`'s message says the same; the
+  error and its embedded `Unsupported` code are unchanged. `CompactOnlyDatabase` and `MarkOnlyDatabase` refuse alike
+  (one shared open); without such a record, or without a skipped field, their open is the writer's, unchanged.
 - `persia`: a `BlobRef` the caller passes that names a stored blob with another `size` or `chunk_size` than the blob's
   now fails with `ErrorCode::InvalidArgument` instead of `ErrorCode::Corrupt` (ROADMAP 10.1.33; SPEC §9.6), on a put
   (`Collection::put`, `put_batch`, `put_with_blob` with `Blob::Stored`; nothing is logged, as before) and on a read

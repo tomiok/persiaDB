@@ -21,12 +21,13 @@
 //! **Registered analyzers.** The command has the built-in analyzers only, and opens with [`CompactOnlyDatabase`]
 //! (ROADMAP 10.4.4, ADR-0068): the writer's open, in which a `text` field whose analyzer the application registered
 //! (SPEC §6.2.2) is not analyzed. The compaction copies frames without reading them, so it needs no analyzer, and such
-//! a collection's WAL records stay in the WAL, for the application to replay with its analyzer. What the command
-//! cannot do is flush them: when its recovery would flush any collection (every flush flushes every memtable) while
-//! such a collection holds a replayed record (a memtable at the default 64 MiB, the stand-in's for such a collection,
-//! or out of docids), it fails with status 1 before flushing any of them (and compacts nothing). Open the database
-//! with its application and commit (closing a `persia::Db` commits; an open alone may flush nothing), then compact. A
-//! database whose schemas name built-in analyzers only opens exactly as any writer's open.
+//! a collection's committed segments are copied as they are. What the command cannot do is replay a WAL record of
+//! such a collection, which only its analyzer can index (and so flush): when the WAL from `wal_start` holds one (a
+//! *pending record*, SPEC §8.6, ROADMAP 10.4.8: left by an application that did not close cleanly), its pre-scan
+//! refuses the open before the replay, with status 1: nothing is compacted and nothing is written (no segment, no
+//! commit; only the container's tail repair, as any writer's open). Open the database with its application and close
+//! it (closing a `persia::Db` commits, which flushes every memtable), then compact. A database whose schemas name
+//! built-in analyzers only opens exactly as any writer's open.
 //!
 //! The text output is `key  value` rows. `--json` writes one object on one line, with these keys and no others:
 //! `{"seq": .., "before": {"bytes": .., "live_bytes": .., "dead_bytes": ..}, "after": {..}, "reclaimed_bytes": ..}`,
@@ -35,7 +36,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use persia_engine::db::{CompactOnlyDatabase, Compacted, DatabaseError, DatabaseOptions};
 use persia_storage::container::{Error as ContainerError, SpaceUsage};
 use serde_json::{Value, json};
@@ -65,9 +66,24 @@ fn run(path: &Path) -> Result<Compacted> {
                 path.display()
             )
         }
-        Err(err) => return Err(err).with_context(|| format!("opening {}", path.display())),
+        Err(err) => return Err(opening(path, err)),
     };
     db.compact().map_err(|err| failed(path, err))
+}
+
+/// The error of a failed open of `path` other than a held lock: a pending record of a collection whose analyzer this
+/// command lacks (ROADMAP 10.4.8) says what to do.
+fn opening(path: &Path, err: DatabaseError) -> anyhow::Error {
+    let context = if matches!(err, DatabaseError::AnalysisSkipped { .. }) {
+        format!(
+            "opening {} (persia compact has the built-in analyzers only and cannot replay that collection's writes: \
+             open the database with its application and close it, then retry)",
+            path.display()
+        )
+    } else {
+        format!("opening {}", path.display())
+    };
+    anyhow::Error::new(err).context(context)
 }
 
 /// The error of a failed [`Database::compact`](persia_engine::db::Database::compact) of `path`. When only the
@@ -156,6 +172,29 @@ mod tests {
              after             3200 bytes (3200 live, 0 dead)\n\
              reclaimed         1800 bytes\n"
         );
+    }
+
+    /// ROADMAP 10.4.8: a refusal for a pending record of a skipped collection says to open and close the database with
+    /// its application; any other open failure says only what was opened.
+    #[test]
+    fn a_refused_open_says_what_to_do() {
+        let path = Path::new("app.persia");
+        let skipped = DatabaseError::AnalysisSkipped {
+            collection: "notes".into(),
+            field: "tags".into(),
+            analyzer: "tags@1".into(),
+        };
+        let shown = format!("{:#}", opening(path, skipped));
+        assert!(
+            shown.starts_with(
+                "opening app.persia (persia compact has the built-in analyzers only and cannot replay that \
+                 collection's writes: open the database with its application and close it, then retry): "
+            ),
+            "{shown}"
+        );
+        assert!(shown.contains("tags@1"), "{shown}");
+        let other = DatabaseError::Internal { what: "x" };
+        assert!(format!("{:#}", opening(path, other)).starts_with("opening app.persia: "));
     }
 
     /// A compacted file that is not smaller (its new Manifest frame outweighs the dead bytes) reads as nothing
