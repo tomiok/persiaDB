@@ -19,6 +19,7 @@ tracing.workspace = true
 persia = { workspace = true, features = ["test-hooks", "async"] }
 persia-blob = { workspace = true, features = ["testing"] }
 persia-storage.workspace = true
+criterion.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 
@@ -34,3 +35,7 @@ test-hooks = ["internal"]
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "response_json"
+harness = false

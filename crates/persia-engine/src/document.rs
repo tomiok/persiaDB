@@ -33,6 +33,23 @@ use crate::schema::{CollectionSchema, FieldId, NameProblem};
 
 pub use codec::{DecodeError, DocumentCorruption};
 pub use datetime::{MAX_DATETIME, MIN_DATETIME};
+pub use json::DocumentJson;
+
+/// A `datetime` value, microseconds since the Unix epoch (UTC), in the output form of SPEC §6.4.1: RFC 3339 in UTC,
+/// `YYYY-MM-DDTHH:MM:SSZ`, with `.ffffff` when the microseconds are not zero. `None` outside
+/// [`MIN_DATETIME`]`..=`[`MAX_DATETIME`]. What [`Document::to_json`] writes for a `datetime` field, and the response
+/// JSON for a `datetime` sort value (SPEC §7.5.2).
+///
+/// ```
+/// use persia_engine::document::datetime_text;
+///
+/// assert_eq!(datetime_text(0).as_deref(), Some("1970-01-01T00:00:00Z"));
+/// assert_eq!(datetime_text(1).as_deref(), Some("1970-01-01T00:00:00.000001Z"));
+/// assert_eq!(datetime_text(i64::MAX), None);
+/// ```
+pub fn datetime_text(micros: i64) -> Option<String> {
+    datetime::format(micros)
+}
 
 /// Longest document id, in bytes (SPEC §6.1).
 pub const MAX_ID_LEN: usize = 512;
@@ -266,7 +283,8 @@ impl Document {
         json::from_json(json, schema)
     }
 
-    /// The document as JSON (SPEC §6.4.1, "Output").
+    /// The document as JSON (SPEC §6.4.1, "Output"): `serde_json`'s text of its [`DocumentJson`], the one writer of a
+    /// document's JSON form.
     ///
     /// # Errors
     /// [`DocumentError::UnknownFieldId`] if a field is not in `schema`, [`DocumentError::WrongType`] if a value

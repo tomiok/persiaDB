@@ -18,8 +18,8 @@ use super::{MAX_SHOWN, QueryError, shown_name};
 /// Longest filter JSON [`Filter::from_json`] reads, in bytes (SPEC §7.1.2).
 pub const MAX_FILTER_JSON_LEN: usize = 1 << 20;
 
-/// A filter (SPEC §7.1.2). Built by [`Filter::from_json`], which validates it, or by hand and checked with
-/// [`Filter::validate`].
+/// A filter (SPEC §7.1.2): built by hand, or read from the `filter` or `soft_filter` of a request's JSON. A search
+/// checks it against the collection's schema and the query limits (SPEC §7.1.3) before it runs.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Filter {
@@ -39,8 +39,8 @@ pub enum Filter {
     },
     /// Documents whose field's value lies within the bounds. Fields: `i64`, `f64`, `datetime`.
     ///
-    /// [`Filter::validate`] rejects a range with no bound and an empty one (the lower bound above the upper, or
-    /// equal bounds with either side exclusive).
+    /// A range with no bound, and an empty one (the lower bound above the upper, or equal bounds with either side
+    /// exclusive), is refused when the filter is checked.
     Range {
         /// The field.
         field: FieldId,
@@ -94,6 +94,9 @@ impl Filter {
     /// # Errors
     /// [`QueryError::FilterSyntax`] for JSON that is malformed, has duplicate keys or is not of the DSL's shape;
     /// otherwise the errors of [`Filter::validate`] and of values that do not fit their field.
+    // Engine detail, hidden from the public API of `persia`, which re-exports this type: `QueryLimits` is the engine's
+    // (ROADMAP 10.1.29, ADR-0063). A search checks the filters of its request.
+    #[doc(hidden)]
     pub fn from_json(
         json: &str,
         schema: &CollectionSchema,
@@ -126,6 +129,9 @@ impl Filter {
     ///
     /// # Errors
     /// The first problem found, depth first.
+    // Engine detail, hidden from the public API of `persia`, which re-exports this type: `QueryLimits` is the engine's
+    // (ROADMAP 10.1.29, ADR-0063). A search checks the filters of its request.
+    #[doc(hidden)]
     pub fn validate(
         &self,
         schema: &CollectionSchema,

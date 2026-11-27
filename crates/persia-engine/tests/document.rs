@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use persia_engine::document::{
-    DecodeError, Document, DocumentCorruption, DocumentError, FieldSet, MAX_DATETIME,
+    DecodeError, Document, DocumentCorruption, DocumentError, DocumentJson, FieldSet, MAX_DATETIME,
     MAX_DOCUMENT_FIELDS, MAX_DOCUMENT_JSON_LEN, MAX_DOCUMENT_VALUES, MAX_ID_LEN, MAX_KEYWORD_LEN,
     MAX_STORED_DEPTH, MIN_DATETIME, Value,
 };
@@ -1167,5 +1167,214 @@ proptest! {
     #[test]
     fn arbitrary_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..256)) {
         let _ = Document::decode(&bytes, &all_types(false));
+    }
+}
+
+/// The top-level keys of the JSON object `text`, in the order the text has them.
+fn keys_in_order(text: &str) -> Vec<String> {
+    struct Keys(Vec<String>);
+    impl<'de> serde::Deserialize<'de> for Keys {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct V;
+            impl<'de> serde::de::Visitor<'de> for V {
+                type Value = Keys;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("an object")
+                }
+                fn visit_map<A: serde::de::MapAccess<'de>>(
+                    self,
+                    mut map: A,
+                ) -> Result<Keys, A::Error> {
+                    let mut keys = Vec::new();
+                    while let Some(key) = map.next_key::<String>()? {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        keys.push(key);
+                    }
+                    Ok(Keys(keys))
+                }
+            }
+            d.deserialize_map(V)
+        }
+    }
+    serde_json::from_str::<Keys>(text).unwrap().0
+}
+
+proptest! {
+    /// ROADMAP 10.1.31, SPEC §6.4.1: `DocumentJson` is the one writer of a document's JSON form. Serialized alone it
+    /// is `Document::to_json`'s text, and serialized inside another value it is that text in place; its keys are `id`,
+    /// then `blob` when the document has one, then the field and extra field names in ascending byte order.
+    #[test]
+    fn the_json_view_is_the_documents_json_form_in_place((schema, doc) in schema_and_doc()) {
+        let view = DocumentJson::new(&doc, &schema).unwrap();
+        let text = doc.to_json(&schema).unwrap();
+        prop_assert_eq!(&serde_json::to_string(&view).unwrap(), &text);
+        prop_assert_eq!(serde_json::to_string(&(1, &view)).unwrap(), format!("[1,{text}]"));
+        let mut names: Vec<String> = doc
+            .fields()
+            .map(|(id, _)| schema.field_by_id(id).unwrap().name().to_owned())
+            .chain(doc.extra().keys().cloned())
+            .collect();
+        names.sort_unstable();
+        let mut expected = vec!["id".to_owned()];
+        if doc.blob_ref().is_some() {
+            expected.push("blob".to_owned());
+        }
+        expected.extend(names);
+        prop_assert_eq!(keys_in_order(&text), expected);
+    }
+
+    /// A value `DocumentJson::new` must refuse is refused with the error of its case, naming the field (a NaN `f64`
+    /// or a `datetime` out of range is out of range; a value of another type is the wrong type), and
+    /// `Document::to_json` refuses it the same way.
+    #[test]
+    fn the_json_view_refuses_what_to_json_refuses((schema, doc) in schema_and_doc_with_field(), pick in any::<prop::sample::Index>()) {
+        let field = &schema.fields()[pick.index(schema.fields().len())];
+        let name = field.name().to_owned();
+        let mut bad = doc.clone();
+        let wrong = match field.field_type() {
+            FieldType::F64 => Value::F64(f64::NAN),
+            FieldType::Datetime => Value::Datetime(MAX_DATETIME + 1),
+            FieldType::I64 => Value::Bool(true),
+            _ => Value::I64(1),
+        };
+        let found = wrong.kind();
+        bad.insert(field.id(), wrong);
+        let err = DocumentJson::new(&bad, &schema).unwrap_err();
+        match field.field_type() {
+            FieldType::F64 | FieldType::Datetime => prop_assert!(
+                matches!(&err, DocumentError::OutOfRange { field, .. } if *field == name),
+                "{}: {:?}", name, err
+            ),
+            _ => prop_assert!(
+                matches!(&err, DocumentError::WrongType { field, found: f, .. } if *field == name && *f == found),
+                "{}: {:?}", name, err
+            ),
+        }
+        prop_assert_eq!(bad.to_json(&schema).unwrap_err(), err);
+    }
+
+    /// The JSON form is byte for byte what the hand-written writer of SPEC §6.4.1 the engine had before
+    /// `DocumentJson` (ROADMAP 10.1.31; [`reference_json`]) writes, for documents with blob references that carry
+    /// `user_meta`, extra fields and any Unicode.
+    #[test]
+    fn to_json_is_the_reference_writers_text((schema, doc) in schema_and_doc_with_meta()) {
+        prop_assert_eq!(doc.to_json(&schema).unwrap(), reference_json(&doc, &schema));
+    }
+}
+
+/// [`schema_and_doc`], with a blob reference carrying `user_meta` (Unicode values) on some documents.
+fn schema_and_doc_with_meta() -> impl Strategy<Value = (CollectionSchema, Document)> {
+    let meta = prop::collection::btree_map("[ -~]{1,16}", "\\PC{0,20}", 1..5);
+    let blob = prop::option::of((any::<[u8; 32]>(), 0..1u64 << 40, "[ -~]{1,20}", meta));
+    (schema_and_doc(), blob).prop_map(|((schema, mut doc), blob)| {
+        if let Some((id, size, mime, meta)) = blob {
+            let blob = BlobRef::new(BlobId::from_bytes(id), size, mime, 1 << 20, meta).unwrap();
+            doc.set_blob_ref(Some(blob));
+        }
+        (schema, doc)
+    })
+}
+
+/// The JSON form of SPEC §6.4.1 as the engine wrote it before `DocumentJson` (ROADMAP 10.1.31; the writer of
+/// 0450215, kept as a test reference): each value made a `serde_json::Value` and written, the blob reference an object
+/// with sorted keys, the names sorted by bytes, the order (`id`, `blob`, names) written by hand. Datetimes are
+/// formatted here, independently of the engine. For a valid document only.
+fn reference_json(doc: &Document, schema: &CollectionSchema) -> String {
+    use serde_json::{Map, Number, Value as J};
+
+    let value_json = |field: &persia_engine::schema::Field, value: &Value| -> J {
+        match (field.field_type(), value) {
+            (FieldType::Text | FieldType::Keyword, Value::String(s)) => J::String(s.clone()),
+            (FieldType::Text | FieldType::Keyword, Value::Strings(list)) => {
+                J::Array(list.iter().cloned().map(J::String).collect())
+            }
+            (FieldType::I64, Value::I64(v)) => J::from(*v),
+            (FieldType::F64, Value::F64(v)) => J::Number(Number::from_f64(*v).unwrap()),
+            (FieldType::Bool, Value::Bool(v)) => J::Bool(*v),
+            (FieldType::Datetime, Value::Datetime(v)) => J::String(rfc3339(*v)),
+            (FieldType::Stored, Value::Json(v)) => v.clone(),
+            other => panic!("not a valid document: {other:?}"),
+        }
+    };
+    let blob_json = |blob: &BlobRef| -> J {
+        let mut map = Map::new();
+        map.insert("blob_id".to_owned(), J::String(blob.blob_id().to_string()));
+        map.insert("size".to_owned(), J::from(blob.size()));
+        map.insert("mime".to_owned(), J::String(blob.mime().to_owned()));
+        map.insert("chunk_size".to_owned(), J::from(blob.chunk_size()));
+        if !blob.user_meta().is_empty() {
+            let meta = blob
+                .user_meta()
+                .iter()
+                .map(|(k, v)| (k.clone(), J::String(v.clone())));
+            map.insert("user_meta".to_owned(), J::Object(meta.collect()));
+        }
+        J::Object(map)
+    };
+    let mut entries: Vec<(&str, J)> = Vec::new();
+    for (id, value) in doc.fields() {
+        let field = schema.field_by_id(id).unwrap();
+        entries.push((field.name(), value_json(field, value)));
+    }
+    for (name, value) in doc.extra() {
+        entries.push((name, value.clone()));
+    }
+    entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    let mut out = String::from("{\"id\":");
+    out.push_str(&J::String(doc.id().to_owned()).to_string());
+    if let Some(blob) = doc.blob_ref() {
+        out.push_str(",\"blob\":");
+        out.push_str(&blob_json(blob).to_string());
+    }
+    for (name, value) in entries {
+        out.push(',');
+        out.push_str(&J::String(name.to_owned()).to_string());
+        out.push(':');
+        out.push_str(&value.to_string());
+    }
+    out.push('}');
+    out
+}
+
+/// `micros` since the Unix epoch as SPEC §6.4.1 writes a `datetime`: `YYYY-MM-DDTHH:MM:SSZ`, with `.ffffff` when the
+/// microseconds are not zero (days to a civil date by H. Hinnant's `civil_from_days`).
+fn rfc3339(micros: i64) -> String {
+    let secs = micros.div_euclid(1_000_000);
+    let frac = micros.rem_euclid(1_000_000);
+    let days = secs.div_euclid(86_400);
+    let sod = secs.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    let mut text = format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}",
+        sod / 3600,
+        sod / 60 % 60,
+        sod % 60
+    );
+    if frac != 0 {
+        std::fmt::Write::write_fmt(&mut text, format_args!(".{frac:06}")).unwrap();
+    }
+    text.push('Z');
+    text
+}
+
+#[test]
+fn the_reference_datetime_text_is_spec_6_4_1s() {
+    for (micros, text) in [
+        (0, "1970-01-01T00:00:00Z"),
+        (1, "1970-01-01T00:00:00.000001Z"),
+        (-1, "1969-12-31T23:59:59.999999Z"),
+        (1_700_000_000_000_000, "2023-11-14T22:13:20Z"),
+        (MIN_DATETIME, "0000-01-01T00:00:00Z"),
+        (MAX_DATETIME, "9999-12-31T23:59:59.999999Z"),
+    ] {
+        assert_eq!(rfc3339(micros), text, "{micros}");
     }
 }

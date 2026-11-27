@@ -199,12 +199,36 @@ fn the_committed_snapshot_lists_only_what_is_kept_on_purpose() {
         "DetachedSlot",
         "ChunkSize",
         "persia_blob::",
+        // ROADMAP 10.1.29: the binary encoding of a blob reference, the format layer's constructor and its error, and
+        // the filter methods that take the engine's query limits.
+        "persia::BlobRef::new(",
+        "persia::BlobRef::encode(",
+        "persia::BlobRef::decode(",
+        "persia::BlobRef::encoded_len(",
+        "persia::BlobRef::VERSION",
+        "persia::BlobRef::MAX_ENCODED_LEN",
+        "persia::Filter::from_json(",
+        "persia::Filter::validate(",
+        "persia_format::",
+        "QueryLimits",
+        // ROADMAP 10.1.30: a hit's sort values are the facade's type, not the engine's.
+        "TypedSortValue",
+        "persia_engine::search::SortValue",
     ] {
         assert!(!snapshot.contains(hidden), "{hidden} is in {SNAPSHOT}");
     }
     for kept in [
         "pub fn persia::Document::extra(",
         "pub fn persia::Document::insert_extra(",
+        // ROADMAP 10.1.29: the facade's way to build a reference, and the value rules it checks.
+        "pub fn persia::blob_ref(",
+        "pub const persia::BlobRef::MAX_CHUNK_SIZE: u32",
+        "pub fn persia::BlobRef::chunk_count(&self) -> u32",
+        // ROADMAP 10.1.30: a hit's typed sort values, step and rank score.
+        "#[non_exhaustive] pub enum persia::SortValue",
+        "pub fn persia::Hit::sort_values(&self) -> &[persia::SortValue]",
+        "pub fn persia::Hit::step(&self) -> core::option::Option<usize>",
+        "pub fn persia::Hit::rank_score(&self) -> core::option::Option<f64>",
         "#[non_exhaustive] pub struct persia::TextOptions",
         "#[non_exhaustive] pub enum persia::FieldType",
         "pub struct persia::AsyncDb",

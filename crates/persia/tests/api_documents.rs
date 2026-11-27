@@ -334,7 +334,7 @@ fn a_reference_of_another_size_or_chunk_size_is_an_invalid_argument_and_logs_not
         (ours.size() + 1, ours.chunk_size()),
         (ours.size(), ours.chunk_size() + 1),
     ] {
-        let wrong = BlobRef::new(
+        let wrong = persia::blob_ref(
             ours.blob_id(),
             size,
             ours.mime(),
@@ -463,4 +463,169 @@ fn a_blob_reader_serves_nothing_once_closed_even_from_its_window() {
         .downcast_ref::<persia::Error>()
         .unwrap();
     assert_eq!(inner.code(), ErrorCode::Closed);
+}
+
+/// ROADMAP 10.1.29, SPEC §9.6: `persia::blob_ref` builds again the reference `put_blob` returned from its fields,
+/// which a put then takes as the stored one; one it builds to a blob this database does not hold is refused by a put
+/// as any other (`NotFound`) and logs nothing.
+#[test]
+fn blob_ref_rebuilds_a_stored_reference_that_a_put_takes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path().join("a.persia")).unwrap();
+    let files = db
+        .create_collection_json(r#"{"name": "files", "fields": {}}"#)
+        .unwrap();
+    let options = PutBlobOptions::new()
+        .mime("text/plain")
+        .user_meta("filename", "a.txt");
+    let ours = db.put_blob(&b"0123456789"[..], &options).unwrap();
+    let rebuilt = persia::blob_ref(
+        ours.blob_id(),
+        ours.size(),
+        ours.mime(),
+        ours.chunk_size(),
+        ours.user_meta().clone(),
+    )
+    .unwrap();
+    assert_eq!(rebuilt, ours);
+    files
+        .put_with_blob(&Document::new("ok"), Blob::Stored(rebuilt))
+        .unwrap();
+    assert_eq!(
+        files.get("ok").unwrap().unwrap().blob_ref(),
+        Some(&ours),
+        "the rebuilt reference is the stored one"
+    );
+    let missing = persia::blob_ref(
+        persia::BlobId::from_bytes([0x42; 32]),
+        5,
+        "text/plain",
+        64 << 10,
+        std::collections::BTreeMap::new(),
+    )
+    .unwrap();
+    let err = files
+        .put_with_blob(&Document::new("x"), Blob::Stored(missing))
+        .unwrap_err();
+    assert_eq!(err.code(), ErrorCode::NotFound, "{err}");
+    assert!(files.get("x").unwrap().is_none());
+}
+
+/// ROADMAP 10.1.29, SPEC §9.1: each value rule `persia::blob_ref` checks is `InvalidArgument` one past its bound, with
+/// the format layer's error as the source, and holds at the bound.
+#[test]
+#[allow(clippy::too_many_lines)] // one table of cases, each rule one past its bound and at it
+fn blob_ref_checks_each_value_rule_at_its_bound() {
+    use std::collections::BTreeMap;
+
+    let id = persia::BlobId::from_bytes([7; 32]);
+    let s = |n: usize| "k".repeat(n);
+    let meta = |k: String, v: String| BTreeMap::from([(k, v)]);
+    let entries = |n: usize| -> BTreeMap<String, String> {
+        (0..n).map(|i| (format!("k{i}"), String::new())).collect()
+    };
+    let none = BTreeMap::new;
+    let max_chunk = BlobRef::MAX_CHUNK_SIZE;
+    // (what, size, mime, chunk size, user_meta) one past a bound.
+    let refused = [
+        ("chunk size 0", 1, s(1), 0, none()),
+        (
+            "chunk size above the maximum",
+            1,
+            s(1),
+            max_chunk + 1,
+            none(),
+        ),
+        (
+            "more than u32::MAX chunks",
+            u64::from(u32::MAX) + 1,
+            s(1),
+            1,
+            none(),
+        ),
+        ("an empty mime", 1, String::new(), 1, none()),
+        (
+            "a mime too long",
+            1,
+            s(BlobRef::MAX_MIME_LEN + 1),
+            1,
+            none(),
+        ),
+        ("a mime byte not printable", 1, "a\nb".to_owned(), 1, none()),
+        (
+            "too many annotations",
+            1,
+            s(1),
+            1,
+            entries(BlobRef::MAX_META_ENTRIES + 1),
+        ),
+        ("an empty key", 1, s(1), 1, meta(String::new(), s(1))),
+        (
+            "a key too long",
+            1,
+            s(1),
+            1,
+            meta(s(BlobRef::MAX_META_KEY_LEN + 1), s(1)),
+        ),
+        (
+            "a value too long",
+            1,
+            s(1),
+            1,
+            meta(s(1), s(BlobRef::MAX_META_VALUE_LEN + 1)),
+        ),
+    ];
+    for (what, size, mime, chunk_size, user_meta) in refused {
+        let err = persia::blob_ref(id, size, mime, chunk_size, user_meta).unwrap_err();
+        assert_eq!(err.code(), ErrorCode::InvalidArgument, "{what}: {err}");
+        assert!(
+            std::error::Error::source(&err).is_some(),
+            "{what}: the format layer's error is the source"
+        );
+    }
+    // At each bound, the rule holds.
+    let held = [
+        (
+            "chunk size 1, u32::MAX chunks",
+            u64::from(u32::MAX),
+            s(1),
+            1,
+            none(),
+        ),
+        (
+            "the largest chunk size and mime",
+            0,
+            s(BlobRef::MAX_MIME_LEN),
+            max_chunk,
+            none(),
+        ),
+        (
+            "the most annotations",
+            1,
+            s(1),
+            1,
+            entries(BlobRef::MAX_META_ENTRIES),
+        ),
+        (
+            "the longest key and value",
+            1,
+            s(1),
+            1,
+            meta(s(BlobRef::MAX_META_KEY_LEN), s(BlobRef::MAX_META_VALUE_LEN)),
+        ),
+    ];
+    for (what, size, mime, chunk_size, user_meta) in held {
+        let built = persia::blob_ref(id, size, mime.clone(), chunk_size, user_meta.clone());
+        let built = built.unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert_eq!(
+            (
+                built.size(),
+                built.mime(),
+                built.chunk_size(),
+                built.user_meta()
+            ),
+            (size, mime.as_str(), chunk_size, &user_meta),
+            "{what}"
+        );
+    }
 }

@@ -1,11 +1,15 @@
 //! The response JSON of the embedded API (SPEC §7.5.2; ROADMAP 10.1.25; ADR-0065, amended): [`SearchResponse`] is its
 //! one source. Its `Serialize` impl writes the object the engine's `QueryResponse::to_json` writes, through `serde`
 //! (no JSON is assembled from strings here), so the C ABI (ADR-0018) and the server (M11) can pass the facade's text
-//! through. A value that is absent is left out, never `null`; the only `null` is a missing sort value.
+//! through. A value that is absent is left out, never `null`; the only `null` is a missing sort value. A hit's
+//! document is the engine's `DocumentJson` (SPEC §6.4.1), serialized in place (ROADMAP 10.1.31).
 
+// `Document` for the tests below, which name it through `super::*` as they did when this module rendered documents.
+#[cfg(test)]
 use persia_engine::document::Document;
+use persia_engine::document::{DocumentJson, datetime_text};
 use persia_engine::schema::{CollectionSchema, FieldId};
-use persia_engine::search::request::{TypedSortValue, base64url_text};
+use persia_engine::search::request::base64url_text;
 use persia_engine::search::{
     Explanation, FacetCounts, FieldExplanation, PairExplanation, PhraseExplanation,
     ProximityExplanation, RelaxedExplanation, WordExplanation,
@@ -13,7 +17,7 @@ use persia_engine::search::{
 use serde::ser::{Error as _, SerializeMap, SerializeSeq, SerializeStruct};
 use serde::{Serialize, Serializer};
 
-use super::{Hit, Relaxation, SearchResponse};
+use super::{Hit, Relaxation, SearchResponse, SortValue};
 use crate::{Error, Result};
 
 impl SearchResponse {
@@ -136,41 +140,6 @@ impl Serialize for Keyword<'_> {
     }
 }
 
-/// A document in its JSON form (SPEC §6.4.1), as the engine renders it.
-struct DocumentJson<'a> {
-    w: Writer<'a>,
-    document: &'a Document,
-}
-
-/// The keys a document's JSON form starts with, in this order (SPEC §6.4.1); its fields follow, by name.
-const FIRST: [&str; 2] = ["id", "blob"];
-
-impl Serialize for DocumentJson<'_> {
-    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
-        let text = self
-            .document
-            .to_json(self.w.schema)
-            .map_err(|e| S::Error::custom(format_args!("hit {:?}: {e}", self.document.id())))?;
-        // The document's JSON form is the engine's (SPEC §6.4.1): carried as a value, not as text, with `id` and `blob`
-        // first and the fields after them in order, as the engine writes it.
-        let value: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(&text).map_err(S::Error::custom)?;
-        let mut out = s.serialize_map(Some(value.len()))?;
-        for key in FIRST {
-            if let Some(v) = value.get(key) {
-                out.serialize_entry(key, v)?;
-            }
-        }
-        for (key, v) in value
-            .iter()
-            .filter(|(key, _)| !FIRST.contains(&key.as_str()))
-        {
-            out.serialize_entry(key, v)?;
-        }
-        out.end()
-    }
-}
-
 struct HitJson<'a> {
     w: Writer<'a>,
     hit: &'a Hit,
@@ -179,28 +148,14 @@ struct HitJson<'a> {
 impl Serialize for HitJson<'_> {
     fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
         let hit = self.hit;
-        if hit.sort.len() != hit.sort_keys.len() {
-            return Err(S::Error::custom(
-                "a sort value that is not of its key's type",
-            ));
-        }
-        let sort = hit
-            .sort_keys
-            .iter()
-            .zip(&hit.sort)
-            .map(|(key, value)| TypedSortValue::of(*key, value, self.w.schema))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(S::Error::custom)?;
+        // The document's JSON form is the engine's one writer of it (SPEC §6.4.1; ROADMAP 10.1.31), serialized in
+        // place: `id`, `blob`, then the fields by name.
+        let document = DocumentJson::new(&hit.document, self.w.schema)
+            .map_err(|e| S::Error::custom(format_args!("hit {:?}: {e}", hit.document.id())))?;
         let mut out = s.serialize_map(None)?;
-        out.serialize_entry(
-            "document",
-            &DocumentJson {
-                w: self.w,
-                document: &hit.document,
-            },
-        )?;
+        out.serialize_entry("document", &document)?;
         out.serialize_entry("score", &Finite(hit.score, "a score"))?;
-        out.serialize_entry("sort", &List(&sort, SortJson))?;
+        out.serialize_entry("sort", &List(hit.sort_values(), SortJson))?;
         out.serialize_entry("cursor", &hit.cursor)?;
         if let Some(explanation) = &hit.explanation {
             out.serialize_entry(
@@ -220,22 +175,23 @@ impl Serialize for HitJson<'_> {
     }
 }
 
-/// A sort value as its key's field types it (SPEC §7.4, §7.5.2).
-struct SortJson<'a>(&'a TypedSortValue);
+/// A sort value as its key's field types it (SPEC §7.4, §7.5.2), as [`SortValue`] documents it.
+struct SortJson<'a>(&'a SortValue);
 
 impl Serialize for SortJson<'_> {
     fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
         match self.0 {
-            TypedSortValue::Missing => s.serialize_unit(),
-            TypedSortValue::Number(n) => Finite(*n, "a sort value").serialize(s),
-            TypedSortValue::Integer(i) => s.serialize_i64(*i),
-            TypedSortValue::Datetime(text) => s.serialize_str(text),
-            TypedSortValue::Bool(b) => s.serialize_bool(*b),
-            TypedSortValue::Keyword(bytes) => Keyword(bytes).serialize(s),
-            // `#[non_exhaustive]`: a type of sort value this build does not write.
-            _ => Err(S::Error::custom(
-                "a sort value of a type this build does not write",
-            )),
+            SortValue::Missing => s.serialize_unit(),
+            SortValue::Score(n) => Finite(*n, "a score").serialize(s),
+            SortValue::F64(n) => Finite(*n, "a sort value").serialize(s),
+            SortValue::I64(i) => s.serialize_i64(*i),
+            SortValue::Datetime(micros) => {
+                s.serialize_str(&datetime_text(*micros).ok_or_else(|| {
+                    S::Error::custom(format_args!("datetime {micros} is out of range"))
+                })?)
+            }
+            SortValue::Bool(b) => s.serialize_bool(*b),
+            SortValue::Keyword(bytes) => Keyword(bytes).serialize(s),
         }
     }
 }

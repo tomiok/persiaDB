@@ -182,3 +182,23 @@ to install, in the repo tooling that already reads JSON (`serde_json`, allowed i
 (`&[Correction]`), `fallback()` (`Option<FallbackOrder>`) and `filters_dropped()`. The two engine types they name are
 plain values of the relaxation cascade, re-exported under `persia::` beside `RelaxLevel`; `Correction` is now
 `#[non_exhaustive]`, so its fields can grow. `persia::Blob` is `#[non_exhaustive]` too.
+
+## Amendment (2026-11-27): the rest of the engine and format detail on the re-exported types (ROADMAP 10.1.29)
+
+The public-API snapshot (`crates/persia/public-api.txt`) showed engine and format detail beyond the 10.1.16 list. Each
+item is now hidden, wrapped or kept; "hidden" is `#[doc(hidden)]` as in the 10.1.16 amendment (callable, outside the
+documented surface and the snapshot, no stability promise):
+
+| Item | Decision |
+|---|---|
+| `BlobRef::new`, which returns `persia_format::error::EncodeError` | **Hidden and wrapped.** Callers do build references by hand (a reference kept outside the database, item 5; the mismatched references of ROADMAP 10.1.33), so hiding it alone would leave no typed way to build one. The facade's wrap is the free function `persia::blob_ref(blob_id, size, mime, chunk_size, user_meta) -> persia::Result<BlobRef>`, with the same value rules (SPEC §9.1) and `INVALID_ARGUMENT` when one does not hold (the format layer's error is its `source()`). A free function, not a method: `BlobRef` is another crate's type, so `persia` cannot add an inherent constructor, and a facade wrapper type of `BlobRef` would be the parallel value model this ADR's alternatives turned down. Keeping `new` would have left a format-layer error type in a public signature, which item 3 rules out for every type but the re-exported values' own methods of item 4. |
+| `BlobRef::encode`, `decode`, `encoded_len` (naming `persia_format::writer::Writer`, `reader::Reader` and `error::Result`) | **Hidden**: the binary encoding of SPEC §9.1 is the format layer's, as `Document::encode` is the engine's (10.1.16). A caller has the getters and the reference's JSON form in a document (`blob`, SPEC §6.4.1). |
+| `BlobRef::VERSION`, `MAX_ENCODED_LEN` | **Hidden** with the encoding they describe. The value-rule constants `MAX_CHUNK_SIZE`, `MAX_MIME_LEN`, `MAX_META_ENTRIES`, `MAX_META_KEY_LEN` and `MAX_META_VALUE_LEN` are **kept**: they are the limits `persia::blob_ref` checks. |
+| `Filter::from_json`, `Filter::validate`, which take `persia_engine::query::limits::QueryLimits` (and return `QueryError`) | **Hidden**: `persia` does not export `QueryLimits`, so a program that depends on `persia` alone could not call them. A search checks its request's filters (`Collection::search`), and `Collection::search_json` reads them from a request's JSON. If a caller needs a filter parsed from JSON on its own, a facade method that applies the default limits can be added. |
+| The engine error types the re-exported values' methods return: `SchemaError` (`CollectionSchema::from_json`, `to_json`, `SchemaBuilder::build`), `EvolutionError` (`CollectionSchema::evolve`), `DocumentError` (`Document::from_json`, `to_json`, `validate`), `RequestError` (`FacetRequest::new`, `Sort::new`), `RelaxError` (`RelaxOptions::from_json`, `validate`) | **Kept**, as item 4 decided: they are the values' own methods, named by their canonical path and not re-exported; a caller uses them through `?` into `Box<dyn Error>` and prints them, and the facade offers a `persia::Result` path beside each one a caller needs (`Db::create_collection_json`, `Collection::put_json`, `get_json`, `search_json`). |
+| `persia_format::blob::ParseBlobIdError`, the `Err` of `BlobId`'s `FromStr` | **Kept**, as item 4's errors are. The snapshot does not show it: the renderer lists a trait impl, not its associated types. |
+
+No public signature in the snapshot names a `persia_format` type now; the engine types it names are the errors of
+the last two rows. The snapshot test (`the_committed_snapshot_lists_only_what_is_kept_on_purpose` in
+`xtask/src/public_api/tests.rs`) checks that none of the hidden items, `persia_format::` or `QueryLimits` is listed,
+and that `persia::blob_ref` is.

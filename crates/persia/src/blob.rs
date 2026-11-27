@@ -52,6 +52,49 @@ fn not_stored(blob_ref: &BlobRef) -> Error {
     })
 }
 
+/// The reference to the blob `blob_id` of `size` bytes, stored in chunks of `chunk_size` bytes, with the media type
+/// `mime` and the client annotations `user_meta` (SPEC §9.1): a reference a program kept outside the database (its
+/// fields, as [`BlobRef`]'s getters return them), built again. A [`Db::put_blob`] returns the reference it stored;
+/// this one is checked against the blob's manifest when it is used (SPEC §9.6): a `put` of a document that carries it
+/// fails with [`ErrorCode::NotFound`] when this database does not hold the blob, and with
+/// [`ErrorCode::InvalidArgument`] when it holds `blob_id` with another `size` or `chunk_size`.
+///
+/// ```
+/// use std::collections::BTreeMap;
+///
+/// let id: persia::BlobId = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".parse()?;
+/// let meta = BTreeMap::from([("filename".to_owned(), "cat.jpg".to_owned())]);
+/// let reference = persia::blob_ref(id, 10 << 20, "image/jpeg", 4 << 20, meta)?;
+/// assert_eq!((reference.size(), reference.chunk_count()), (10 << 20, 3));
+///
+/// let err = persia::blob_ref(id, 1, "", 4 << 20, BTreeMap::new()).unwrap_err(); // no mime
+/// assert_eq!(err.code(), persia::ErrorCode::InvalidArgument);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// # Errors
+/// [`ErrorCode::InvalidArgument`] when a value rule of SPEC §9.1 does not hold: `chunk_size` outside
+/// `1..=`[`BlobRef::MAX_CHUNK_SIZE`] or more than `u32::MAX` chunks, `mime` outside `1..=`[`BlobRef::MAX_MIME_LEN`]
+/// bytes or not printable ASCII, more than [`BlobRef::MAX_META_ENTRIES`] annotations, a key outside
+/// `1..=`[`BlobRef::MAX_META_KEY_LEN`] bytes, or a value longer than [`BlobRef::MAX_META_VALUE_LEN`].
+pub fn blob_ref(
+    blob_id: persia_blob::BlobId,
+    size: u64,
+    mime: impl Into<String>,
+    chunk_size: u32,
+    user_meta: std::collections::BTreeMap<String, String>,
+) -> Result<BlobRef> {
+    // The format layer's constructor is hidden from this crate's surface (ROADMAP 10.1.29, ADR-0063): its error type is
+    // that layer's, and this one returns the facade's.
+    BlobRef::new(blob_id, size, mime, chunk_size, user_meta).map_err(|e| {
+        Error::with_source(
+            ErrorCode::InvalidArgument,
+            "cannot build the blob reference",
+            e,
+        )
+    })
+}
+
 impl Db {
     /// Stores the bytes `reader` yields as a blob (SPEC §9.6) and returns its reference, once the blob is durable.
     /// A blob no document references is collected by a later garbage collection: put the reference in a document

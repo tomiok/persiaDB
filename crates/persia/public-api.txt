@@ -12,6 +12,7 @@
 #[non_exhaustive] pub enum persia::Level
 #[non_exhaustive] pub enum persia::RankFn
 #[non_exhaustive] pub enum persia::RelaxLevel
+#[non_exhaustive] pub enum persia::SortValue
 #[non_exhaustive] pub struct persia::BlockCacheStats
 #[non_exhaustive] pub struct persia::Correction
 #[non_exhaustive] pub struct persia::FieldExplanation
@@ -94,6 +95,7 @@ impl core::clone::Clone for persia::SearchRequest
 impl core::clone::Clone for persia::SearchResponse
 impl core::clone::Clone for persia::Sort
 impl core::clone::Clone for persia::SortKey
+impl core::clone::Clone for persia::SortValue
 impl core::clone::Clone for persia::StaticRank
 impl core::clone::Clone for persia::TextOptions
 impl core::clone::Clone for persia::Value
@@ -176,6 +178,7 @@ impl core::cmp::PartialEq for persia::RelaxedExplanation
 impl core::cmp::PartialEq for persia::ResumeToken
 impl core::cmp::PartialEq for persia::Sort
 impl core::cmp::PartialEq for persia::SortKey
+impl core::cmp::PartialEq for persia::SortValue
 impl core::cmp::PartialEq for persia::StaticRank
 impl core::cmp::PartialEq for persia::TextOptions
 impl core::cmp::PartialEq for persia::Value
@@ -258,6 +261,7 @@ impl core::fmt::Debug for persia::SearchRequest
 impl core::fmt::Debug for persia::SearchResponse
 impl core::fmt::Debug for persia::Sort
 impl core::fmt::Debug for persia::SortKey
+impl core::fmt::Debug for persia::SortValue
 impl core::fmt::Debug for persia::StaticRank
 impl core::fmt::Debug for persia::TextOptions
 impl core::fmt::Debug for persia::Value
@@ -358,6 +362,7 @@ impl core::marker::Send for persia::SearchRequest
 impl core::marker::Send for persia::SearchResponse
 impl core::marker::Send for persia::Sort
 impl core::marker::Send for persia::SortKey
+impl core::marker::Send for persia::SortValue
 impl core::marker::Send for persia::StaticRank
 impl core::marker::Send for persia::TextOptions
 impl core::marker::Send for persia::Value
@@ -416,6 +421,7 @@ impl core::marker::Sync for persia::SearchRequest
 impl core::marker::Sync for persia::SearchResponse
 impl core::marker::Sync for persia::Sort
 impl core::marker::Sync for persia::SortKey
+impl core::marker::Sync for persia::SortValue
 impl core::marker::Sync for persia::StaticRank
 impl core::marker::Sync for persia::TextOptions
 impl core::marker::Sync for persia::Value
@@ -474,6 +480,7 @@ impl core::marker::Unpin for persia::SearchRequest
 impl core::marker::Unpin for persia::SearchResponse
 impl core::marker::Unpin for persia::Sort
 impl core::marker::Unpin for persia::SortKey
+impl core::marker::Unpin for persia::SortValue
 impl core::marker::Unpin for persia::StaticRank
 impl core::marker::Unpin for persia::TextOptions
 impl core::marker::Unpin for persia::Value
@@ -527,6 +534,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for persia::SearchRequest
 impl core::panic::unwind_safe::RefUnwindSafe for persia::SearchResponse
 impl core::panic::unwind_safe::RefUnwindSafe for persia::Sort
 impl core::panic::unwind_safe::RefUnwindSafe for persia::SortKey
+impl core::panic::unwind_safe::RefUnwindSafe for persia::SortValue
 impl core::panic::unwind_safe::RefUnwindSafe for persia::StaticRank
 impl core::panic::unwind_safe::RefUnwindSafe for persia::TextOptions
 impl core::panic::unwind_safe::RefUnwindSafe for persia::Value
@@ -578,6 +586,7 @@ impl core::panic::unwind_safe::UnwindSafe for persia::SearchRequest
 impl core::panic::unwind_safe::UnwindSafe for persia::SearchResponse
 impl core::panic::unwind_safe::UnwindSafe for persia::Sort
 impl core::panic::unwind_safe::UnwindSafe for persia::SortKey
+impl core::panic::unwind_safe::UnwindSafe for persia::SortValue
 impl core::panic::unwind_safe::UnwindSafe for persia::StaticRank
 impl core::panic::unwind_safe::UnwindSafe for persia::TextOptions
 impl core::panic::unwind_safe::UnwindSafe for persia::Value
@@ -651,12 +660,10 @@ pub const fn persia::Value::kind(&self) -> &'static str
 pub const persia::BlobId::HEX_LEN: usize
 pub const persia::BlobId::LEN: usize
 pub const persia::BlobRef::MAX_CHUNK_SIZE: u32
-pub const persia::BlobRef::MAX_ENCODED_LEN: usize
 pub const persia::BlobRef::MAX_META_ENTRIES: usize
 pub const persia::BlobRef::MAX_META_KEY_LEN: usize
 pub const persia::BlobRef::MAX_META_VALUE_LEN: usize
 pub const persia::BlobRef::MAX_MIME_LEN: usize
-pub const persia::BlobRef::VERSION: u8
 pub const persia::ErrorCode::ALL: &'static [Self]
 pub const persia::Level::ALL: [Self; 4]
 pub const persia::RelaxOptions::MAX_JSON_LEN: usize
@@ -779,11 +786,7 @@ pub fn persia::Blob::from_reader(reader: impl alloc::io::read::Read + 'r) -> Sel
 pub fn persia::Blob::with_options(self, options: persia::PutBlobOptions) -> Self
 pub fn persia::BlobReader::blob_ref(&self) -> &persia::BlobRef
 pub fn persia::BlobRef::chunk_count(&self) -> u32
-pub fn persia::BlobRef::decode(r: &mut persia_format::reader::Reader<'_>) -> persia_format::error::Result<Self>
-pub fn persia::BlobRef::encode(&self, w: &mut persia_format::writer::Writer)
-pub fn persia::BlobRef::encoded_len(&self) -> usize
 pub fn persia::BlobRef::mime(&self) -> &str
-pub fn persia::BlobRef::new(blob_id: persia::BlobId, size: u64, mime: impl core::convert::Into<alloc::string::String>, chunk_size: u32, user_meta: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>) -> persia_format::error::Result<Self, persia_format::error::EncodeError>
 pub fn persia::Collection::commit(&self) -> persia::Result<()>
 pub fn persia::Collection::delete(&self, id: &str) -> persia::Result<()>
 pub fn persia::Collection::durability(&self) -> persia::Durability
@@ -857,8 +860,9 @@ pub fn persia::Field::field_type(&self) -> persia::FieldType
 pub fn persia::Field::id(&self) -> persia::FieldId
 pub fn persia::Field::kind(&self) -> &persia::FieldKind
 pub fn persia::Field::name(&self) -> &str
-pub fn persia::Filter::from_json(json: &str, schema: &persia::CollectionSchema, limits: &persia_engine::query::limits::QueryLimits) -> core::result::Result<Self, persia_engine::query::QueryError>
-pub fn persia::Filter::validate(&self, schema: &persia::CollectionSchema, limits: &persia_engine::query::limits::QueryLimits) -> core::result::Result<(), persia_engine::query::QueryError>
+pub fn persia::Hit::rank_score(&self) -> core::option::Option<f64>
+pub fn persia::Hit::sort_values(&self) -> &[persia::SortValue]
+pub fn persia::Hit::step(&self) -> core::option::Option<usize>
 pub fn persia::Levels::resolve(&self) -> &[persia::Level]
 pub fn persia::OpenOptions::block_cache_bytes(self, bytes: u64) -> Self
 pub fn persia::OpenOptions::commit_interval(self, interval: core::time::Duration) -> Self
@@ -914,6 +918,7 @@ pub fn persia::Sort::new(keys: impl core::iter::traits::collect::IntoIterator<It
 pub fn persia::Sort::score() -> Self
 pub fn persia::StaticRank::new(field: impl core::convert::Into<alloc::string::String>) -> Self
 pub fn persia::TextOptions::analyzer(self, analyzer: persia::AnalyzerRef) -> Self
+pub fn persia::blob_ref(blob_id: persia::BlobId, size: u64, mime: impl core::convert::Into<alloc::string::String>, chunk_size: u32, user_meta: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>) -> persia::Result<persia::BlobRef>
 pub struct persia::AnalyzerRef
 pub struct persia::AsyncCollection
 pub struct persia::AsyncDb
@@ -1048,6 +1053,13 @@ pub variant persia::RelaxLevel::Prefix
 pub variant persia::RelaxLevel::Synonyms
 pub variant persia::SortKey::Field { .. }
 pub variant persia::SortKey::Score { .. }
+pub variant persia::SortValue::Bool(bool)
+pub variant persia::SortValue::Datetime(i64)
+pub variant persia::SortValue::F64(f64)
+pub variant persia::SortValue::I64(i64)
+pub variant persia::SortValue::Keyword(alloc::vec::Vec<u8>)
+pub variant persia::SortValue::Missing
+pub variant persia::SortValue::Score(f64)
 pub variant persia::Value::Bool(bool)
 pub variant persia::Value::Datetime(i64)
 pub variant persia::Value::F64(f64)

@@ -109,3 +109,72 @@ facade's JSON comes from one facade type, not from hand-built strings:
    `relax: false`, `effective` is L0's text, as the JSON states it, instead of `None`.
 
 The C ABI (ADR-0018) and the server (M11) pass the facade's text through.
+
+## Amendment (2026-11-27): a hit's typed sort values, step and rank score (ROADMAP 10.1.30)
+
+`persia::Hit` kept, privately, what the response JSON writes beside its public fields (its sort values and keys, and
+for a relaxed search its step and rank score), so a caller of the typed response could not read them. They are now
+public getters, each documented with what `SearchResponse::to_json` writes for the same hit:
+
+1. **A facade type, `persia::SortValue`**, not the engine's `TypedSortValue` re-exported. `TypedSortValue::of` names
+   the engine's raw `SortValue` (the column key the cursor compares, on no list of ADR-0063) and returns
+   `ResponseJsonError` (an engine error, which ADR-0063 item 3 keeps out of the facade's signatures), and its `Number`
+   does not tell the score from an `f64` field. `SortValue` is a facade value of ADR-0063 item 1 (the allow-list of
+   item 2 is unchanged), `#[non_exhaustive]`, with one variant per kind of key: `Score(f64)`, `I64(i64)`, `F64(f64)`,
+   `Datetime(i64)`, `Bool(bool)`, `Keyword(Vec<u8>)` and `Missing`. A `datetime` is its microseconds, as
+   `Value::Datetime` holds a document's, so a sort value compares with the document's value; the JSON writes it as
+   SPEC §6.4.1's text. A keyword is the bytes the index sorts (the JSON's string, or `{"base64url": ...}` for bytes
+   that are not UTF-8, item 6).
+2. **One formatter of a `datetime`.** The engine's `TypedSortValue::Datetime` now carries the microseconds too (checked
+   in range by `TypedSortValue::of`, as before), and both writers format them with the new shared primitive
+   `persia_engine::document::datetime_text`, the function `Document::to_json` writes a `datetime` field with (beside
+   `base64url_text`, amendment of 2026-11-26 item 2). The engine's response JSON is unchanged, byte for byte.
+3. **Typed when the response is made.** `SearchResponse`'s hits hold the typed values, made from the engine's hit and
+   the snapshot's schema when the search returns (`TypedSortValue::of_owned`, which moves a keyword's bytes out of the
+   engine's hit instead of copying them); the raw values and sort keys are not kept, and the JSON is written from the
+   typed values. Stored damage never reaches this step: a sorted search checks each column key it states (a `bool`
+   other than 0 or 1, a `datetime` out of range, an `f64` that is NaN, infinite or `-0.0`; SPEC §5.2.1, amended) and
+   fails as the corruption of the column at the hit's docid, `CORRUPT` in the embedded API. What is left, a hit whose
+   values do not fit its sort keys (a count other than the keys', a value of another kind than its key's field, a
+   kind of value this build does not know), is a disagreement of the engine and the facade: the broken invariant of
+   item 9, `IO` (ADR-0063 item 8), from the search rather than from `to_json`; a search never returns one.
+4. **`Hit::sort_values() -> &[SortValue]`**, one per key of the request's sort in its order (the score alone for a
+   request without a sort), written as the hit's `"sort"` array; **`Hit::step() -> Option<usize>`** and
+   **`Hit::rank_score() -> Option<f64>`**, `Some` exactly for a relaxed search's hits, written as `"step"` and
+   `"rank_score"` (with `"level"`, the public field) only then: a plain search's hits have none of the three keys
+   (item 8).
+5. **Tested against the JSON**: `crates/persia/tests/hit_getters.rs` parses `to_json` and compares every getter of
+   every hit, for a table of requests (plain and relaxed, every sort type, missing sort values, L5, an empty page)
+   and 64 seeded random requests; the 10.1.25 differential tests (facade JSON against the engine's, byte for byte)
+   are unchanged.
+
+## Amendment (2026-11-27): one writer of a document's JSON form (ROADMAP 10.1.31)
+
+Item 2 of the 2026-11-26 amendment carried a hit's document into the facade's JSON as a value: the facade rendered it
+with `Document::to_json` and parsed the text back into a `serde_json` map, so every document of a page was written,
+read and written again. The engine now has one writer of the JSON form of SPEC §6.4.1, a `serde::Serialize` view:
+
+1. **`persia_engine::document::DocumentJson`**: `DocumentJson::new(&document, &schema)` checks the document against its
+   schema (the errors `Document::to_json` reports, unchanged) and borrows its values; its `Serialize` impl writes the
+   object with `id`, then `blob` when there is one (its keys in byte order: `blob_id`, `chunk_size`, `mime`, `size`,
+   `user_meta` when not empty), then the field and extra field names in ascending byte order. Serializing it cannot
+   fail on the document's account: every check is in `new`. Values are borrowed, not cloned into a `serde_json::Value`
+   first, as the hand-written writer did.
+2. **Both writers use it.** `Document::to_json` is `serde_json::to_string` of the view, and the facade's response JSON
+   (`crates/persia/src/search/json.rs`) serializes the view in place as a hit's `document`; the engine's
+   `QueryResponse::to_json` embeds `Document::to_json`'s text as before. The text is unchanged, byte for byte: the
+   golden documents and responses, and the 10.1.25 differential tests (the facade's JSON against the engine's), pass
+   untouched; a property checks that the view's text is `to_json`'s, alone and inside another value, in that key
+   order. Both writers now write a document with the view, so the differential no longer checks a document's text on
+   its own: a property compares `Document::to_json` byte for byte with a reference writer in the engine's tests
+   (`reference_json` in `crates/persia-engine/tests/document.rs`, the hand-written writer of 0450215 on the public
+   API, with its own `datetime` formatter), for documents with blob references that carry `user_meta`, extra fields
+   and any Unicode.
+3. **Measured** (`cargo bench -p persia --bench response_json`, a page of 20 hits of about 64 KiB each, and one such
+   document; criterion medians on the development machine, one run each). The bench was written first and run on the
+   code before this change (0450215's writer, with 10.1.30's typed hits), then on this one: `SearchResponse::to_json`
+   3.77 ms before, 1.06 ms after; `Document::to_json` 83.5 µs before, 50.9 µs after. After the batch review (the
+   keyword bytes moved, not copied, when a hit is typed: outside what the bench times) 1.06 ms and 50.5 µs.
+
+The `DocumentJson` type is the engine's, not on ADR-0063's allow-list: `persia` uses it inside, and its public
+surface (the snapshot) is unchanged.

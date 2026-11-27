@@ -752,6 +752,9 @@ bit pattern round-trips exactly. Writers never key `-0.0`, NaN or an infinity in
 decodes to one is corruption. A reader that decodes one value at a time need not check it; a check of the whole segment
 (every column read in full, as `persia inspect segment --verify` does) must report it. A document without a value
 holds an unspecified key (§5.3.5), which is not checked.
+*Amendment (2026-11-27, review of ROADMAP 10.1.29–10.1.31):* a sorted search checks each key it states as a hit's sort
+value (§7.4, the value its cursor holds): a key no document can hold (a `bool` other than 0 or 1, and the keys above) is
+the corruption of the column at the hit's docid, never a value of the response.
 
 ### 5.3 Sections (per segment)
 | Section | `section_kind` | Per | Framed | Content | Encoding |
@@ -1298,6 +1301,9 @@ A document is an `id`, an optional `blob` reference (§9.1) and a value per fiel
   16 MiB, and so is the binary encoding (§6.4.2) of the whole document.
 - **Output.** `get` writes an object with `id`, then `blob` if present, then the fields and extra fields in
   ascending byte order of their names; values in the forms above.
+  *Amendment (2026-11-27, ROADMAP 10.1.31):* the `blob` object's keys come in byte order, `blob_id`, `chunk_size`,
+  `mime`, `size`, then `user_meta` when it is not empty (its keys in byte order too), as the output has always
+  written them; the engine's one writer of this form is `persia_engine::document::DocumentJson`.
 - **Typed values** (ROADMAP 10.1.4). The embedded API's `put_struct(&value)` is exactly `put` of the document this
   JSON form reads from `serde_json`'s text of the value, and `get_struct` / `to_struct` read the output above with
   `serde_json`: these rules are the only mapping between a Rust type and a document.
@@ -1922,7 +1928,8 @@ request's JSON it is the key `projection` (§7.1.4).
 A response is one JSON object (ROADMAP 10.1.13, ADR-0065), written by the engine beside the request JSON it answers
 (§7.1.4), so the embedded API, its bindings and the server write the same text. The embedded API writes it from its own
 response (`persia::SearchResponse::to_json`, also its `serde::Serialize` impl; ROADMAP 10.1.25, ADR-0065 amended), the
-same text as the engine's for the same search. Its keys come in this order, and so do
+same text as the engine's for the same search; a hit's typed getters (`Hit::sort_values`, `step`, `rank_score`; ROADMAP
+10.1.30, ADR-0065 amended) return what its JSON states. Its keys come in this order, and so do
 the keys of each object in it; a value that is absent is left out, never `null`:
 ```jsonc
 {"hits": [{"document": {"id": "a", "title": "red shoes", "price": 80.5},   // §6.4.1's output form, projected (§7.5.1)
@@ -3449,7 +3456,9 @@ it logs or commits a document (it does not depend on `persia-blob`); the public 
 In the embedded API, `persia::PutBlobOptions` is a builder of those seven options (`PutBlobOptions::new().mime(..)
 .chunk_size(..)`; ROADMAP 10.1.15, ADR-0063 amended), checked when the blob is stored, and the token is a
 `persia::ResumeToken` (its `upload_id` and `chunk_size`), which `persia::Error::resume_token()` returns for an
-interrupted upload.
+interrupted upload. A reference a program kept outside the database is built again with `persia::blob_ref(blob_id,
+size, mime, chunk_size, user_meta)`, which checks the value rules of §9.1 (`InvalidArgument` otherwise; ROADMAP
+10.1.29, ADR-0063 amended); a put checks it against the store as any reference it is given (below).
 `expected_id` (optional) is checked against the computed id when the reader ends; a mismatch is
 `BlobIdMismatch { expected, actual }` (a caller error, not corruption) and binds nothing (ADR-0034). Over gRPC it is
 `expected_blob_id` (32 bytes) in the first message of the `PutBlob` stream; over HTTP the `Repr-Digest:
@@ -3489,7 +3498,8 @@ database anyway (written below the public API, or by copying only the container,
 input; a stored reference that disagrees with its manifest is damage. A `BlobRef` given to `put(doc, blob)`, to
 `get_blob` or to `get_blob_range` whose `blob_id` this store has bound, but whose `size` or `chunk_size` is not the
 bound manifest's, is refused (a put logs nothing, as for a reference it does not find). It is the caller's error,
-not corruption (`BlobRef::new` is public, and the same `blob_id` can hold another chunk size in another database):
+not corruption (a caller builds any reference, with `persia::blob_ref`, and the same `blob_id` can hold another chunk
+size in another database):
 `BlobManifest::check_given_ref` reports `persia_blob::Error::BlobRefMismatch { blob_id, field, given, stored }` (the
 first of the size and the chunk size that differs), `ErrorCode::InvalidArgument` in the embedded API, and `persia
 import` exits 1 at its line (§8.6). The call site decides, never an error's text: `check_ref`, which reports the

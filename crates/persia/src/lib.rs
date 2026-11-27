@@ -58,7 +58,7 @@ pub use asynchronous::{JobEvent, JobHook, JobKind};
 #[cfg(feature = "test-hooks")]
 #[doc(hidden)]
 pub use backup::{BackupHook, BackupStep};
-pub use blob::{Blob, BlobReader, PutBlobOptions, ResumeToken};
+pub use blob::{Blob, BlobReader, PutBlobOptions, ResumeToken, blob_ref};
 pub use collection::Collection;
 pub use db::{BlockCacheStats, Db};
 pub use error::{Error, ErrorCode, Result};
@@ -79,7 +79,7 @@ pub use persia_engine::search::{
     PairExplanation, PhraseExplanation, ProximityExplanation, RelaxedExplanation, Sort, SortKey,
     WordExplanation,
 };
-pub use search::{Hit, Relaxation, SearchRequest, SearchResponse};
+pub use search::{Hit, Relaxation, SearchRequest, SearchResponse, SortValue};
 // Blob references (SPEC §9.1): plain values (ADR-0063 item 2).
 #[doc(inline)]
 pub use persia_blob::{BlobId, BlobRef};
