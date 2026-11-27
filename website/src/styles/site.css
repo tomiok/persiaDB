@@ -232,6 +232,25 @@ button.sl-menu-button {
     line-height: 1.55;
 }
 
+/* The line under the pitch: where the project is headed, kept apart from what works today. */
+.pitch-planned {
+    max-width: 42rem;
+    color: var(--muted);
+    font-size: 0.9375rem;
+    border-left: 1px solid var(--line);
+    padding-left: 0.75rem;
+}
+
+/*
+ * Homepage column. Starlight's 45rem article fits prose; the landing page has no
+ * "On this page" rail (tableOfContents: false), so it takes a little of that room
+ * for the code sample and the video. Prose blocks keep their own 42rem measure.
+ * Narrow viewports are unaffected: the column is already the full width there.
+ */
+html:not([data-has-toc]):has(.home-pitch) {
+    --sl-content-width: 54rem;
+}
+
 .sl-markdown-content table {
     width: 100%;
     border-collapse: collapse;
@@ -345,7 +364,8 @@ button.sl-menu-button {
     margin: 1.25rem 0 1.75rem;
 }
 
-.action {
+.action,
+.sl-markdown-content .action {
     display: inline-block;
     background: transparent;
     color: var(--accent);
@@ -356,20 +376,46 @@ button.sl-menu-button {
     border-radius: 0;
 }
 
+/*
+ * Hover and visited rules carry `.sl-markdown-content` so they outrank the
+ * prose link hover above (a wash background), which would otherwise leave
+ * paper-coloured text on the wash.
+ */
 .action:hover,
-.action:focus-visible {
+.action:focus-visible,
+.sl-markdown-content .action:hover,
+.sl-markdown-content .action:focus-visible {
     background: var(--accent);
     color: var(--paper);
     text-decoration: none;
 }
 
-.action:visited {
+.action:visited,
+.sl-markdown-content .action:visited {
     color: var(--accent);
 }
 
 .action:hover:visited,
-.action:focus-visible:visited {
+.action:focus-visible:visited,
+.sl-markdown-content .action:hover:visited,
+.sl-markdown-content .action:focus-visible:visited {
     color: var(--paper);
+}
+
+/* The one main call to action: filled; hover inverts it to the outline. */
+.sl-markdown-content .action.action-primary,
+.sl-markdown-content .action.action-primary:visited {
+    background: var(--accent);
+    color: var(--paper);
+    font-weight: 600;
+}
+
+.sl-markdown-content .action.action-primary:hover,
+.sl-markdown-content .action.action-primary:focus-visible,
+.sl-markdown-content .action.action-primary:hover:visited,
+.sl-markdown-content .action.action-primary:focus-visible:visited {
+    background: transparent;
+    color: var(--accent);
 }
 
 .ascii {

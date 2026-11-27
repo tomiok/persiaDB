@@ -1,11 +1,13 @@
 ---
 interface Props {
     href: string;
+    /** The one main call to action of a group: filled instead of outlined. */
+    primary?: boolean;
 }
 
-const { href } = Astro.props;
+const { href, primary = false } = Astro.props;
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
 const url = href.startsWith('http') ? href : `${base}${href}`;
 ---
 
-<a class="action" href={url}><slot /></a>
+<a class:list={['action', { 'action-primary': primary }]} href={url}><slot /></a>

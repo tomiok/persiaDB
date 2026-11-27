@@ -1,6 +1,6 @@
 ---
 title: Persia DB
-description: An embedded, single-file, cloud-native search database, written in Rust. Pre-alpha. Think SQLite for search.
+description: An embedded, single-file search database for Rust, with relaxed queries that by default never come back empty. Pre-alpha. Think SQLite for search.
 # The visible heading stays "Persia DB". This replaces Starlight's "<title> | Persia DB",
 # which would otherwise render as "Persia DB | Persia DB".
 head:
@@ -10,23 +10,60 @@ head:
     attrs:
       property: og:title
       content: Persia DB – embedded search database for Rust
+# The page is short and its sections are signposted in the body. The freed rail widens the column (site.css).
+tableOfContents: false
 ---
 
-import ArchitectureDiagram from '../../components/ArchitectureDiagram.astro';
 import HeroVideo from '../../components/HeroVideo.astro';
 import PreAlpha from '../../components/PreAlpha.astro';
-import WaitlistForm from '../../components/WaitlistForm.astro';
 import WinButton from '../../components/WinButton.astro';
 
-<p class="pitch">
-    Persia DB is an embedded, single-file, cloud-native search database, written in Rust.
-    Think "SQLite for search": open a file, index documents, and get ranked results that, by default,
-    never come back empty. The same segment bytes can live in a local file or in object storage
-    (S3, GCS, or Azure Blob) and can be served by stateless query nodes on Kubernetes.
+<div class="pitch home-pitch">
+    Persia DB is an embedded search database for Rust. Think "SQLite for search": it runs inside your
+    process and keeps an index in one <code>.persia</code> file. Open the file, index documents, and get
+    ranked results that, by default, never come back empty. A query that matches nothing is relaxed
+    step by step, and the response says what changed.
+</div>
+
+<div class="pitch-planned">
+    Planned: the same segment bytes in object storage (S3, GCS, or Azure Blob), served by a gRPC and
+    HTTP server and by stateless query nodes on Kubernetes.
+</div>
+
+<p class="actions">
+    <WinButton href="/guide/getting-started/" primary>Getting started</WinButton>
+    <WinButton href="https://github.com/tomiok/persiaDB">GitHub</WinButton>
+    <WinButton href="/architecture/">How it works</WinButton>
 </p>
 
+```toml title="Cargo.toml"
+[dependencies]
+persia = { git = "https://github.com/tomiok/persiaDB" } # not on crates.io yet
+```
+
+```rust title="src/main.rs"
+use persia::{Db, SearchRequest};
+
+fn main() -> persia::Result<()> {
+    let db = Db::open("app.persia")?; // one file, created if missing
+    let notes = db.create_collection_json(
+        r#"{"name": "notes", "fields": {"body": {"type": "text"}}}"#,
+    )?;
+    notes.put_json(r#"{"id": "n1", "body": "hello, world"}"#)?;
+    notes.commit()?;
+
+    // A typo still finds n1, and the response names the step that relaxed it.
+    let page = notes.search(&SearchRequest::new("helo"))?;
+    assert_eq!(page.hits[0].document.id(), "n1");
+    println!("{:?}", page.relaxation.level); // Fuzzy
+
+    db.close()
+}
+```
+
 <PreAlpha>
-    Nothing works end to end yet, and the on-disk format is unstable until v1.0.
+    The embedded `persia::Db` API, the engine, query relaxation, the blob store, and the `persia` CLI
+    work on `main`. There is no release yet, and the on-disk format is unstable until v1.0.
     There is no compatibility promise
     ([SPEC §15](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#15-versioning-and-compatibility)).
     The live counter is [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md):
@@ -36,29 +73,11 @@ import WinButton from '../../components/WinButton.astro';
 
 <HeroVideo />
 
-<ArchitectureDiagram hero />
-
-<p class="actions">
-    <WinButton href="/guide/getting-started/">Getting started</WinButton>
-    <WinButton href="/guide/overview/">Read the guide</WinButton>
-    <WinButton href="/features/">Features</WinButton>
-    <WinButton href="/architecture/">How it works</WinButton>
-    <WinButton href="/roadmap/">Roadmap</WinButton>
-    <WinButton href="https://github.com/tomiok/persiaDB">GitHub</WinButton>
-</p>
-
-## Waitlist
-
-Nothing here is ready to run. Leave an email if you want a note when that changes.
-What the form stores is described on the [waitlist](/waitlist/) page.
-
-<WaitlistForm />
-
 ## Why this exists
 
 | Property | What it means | Status |
 |---|---|---|
-| Zero friction | `Db::open("app.persia")` just works. No daemon and no config file for the embedded library. | Planned (M10) |
+| Zero friction | `Db::open("app.persia")` just works. No daemon and no config file for the embedded library. | Works: `persia::Db`, `OpenOptions`, and `Collection`. |
 | Own engine | Index format, analysis, BM25F scoring, and query execution are written in this repository. | %%PILLAR_ENGINE%% |
 | Never zero results | A query that matches nothing is relaxed step by step, and the response says what changed. | %%RELAXATION_CELL%% [Query relaxation and zero results](/guide/typo-tolerant-search/). |
 | Cloud-native | Immutable segments. The same bytes locally and in object storage. Stateless query nodes. | %%PILLAR_CLOUD%% |
@@ -69,14 +88,8 @@ When this site and the SPEC disagree, the SPEC wins.
 
 ## Where to go next
 
-- [Getting started](/guide/getting-started/) separates the codecs you can call from the database API, which is still illustrative.
-- [What is an embedded search database?](/guide/embedded-search/) explains in-process, single-file full-text search, and which parts of that design exist in the repository.
-- [Typo-tolerant search](/guide/typo-tolerant-search/) explains query relaxation and zero results. L1 synonyms, L2 `drop_terms`, L3 prefix, L4 fuzzy, and L5 fallback run as library code. So does the opt-in filter step (`last_resort`, ROADMAP 8.2.6).
-- [Fuzzy search and did-you-mean](/guide/fuzzy-search/) explains the edit-distance step, the correction the caller sees, the flagged fallback, and filter relaxation.
-- [Synonym and prefix search](/guide/synonym-and-prefix-search/) explains how those two steps expand a query.
-- [BM25F ranking](/guide/ranking/) explains how a hit is scored: field weights, collection statistics, static rank, score-led pruning, and proximity off by default.
-- [Faceted search](/guide/faceted-search/) explains filters, facets, sort, cursor pages, deadlines, and explain: library code on a collection snapshot.
-- [Comparison](/guide/comparison/) places the design next to SQLite FTS5, Tantivy, and Meilisearch. Persia DB has no `persia::Db` search API yet (M10); the engine library code can search.
-- [Guide overview](/guide/overview/) is the full narrative, split from the repository guide.
-- [For AI agents](/guide/for-agents/) is the short list of constraints. [llms.txt](/llms.txt) indexes the pages.
-- [About](/about/) covers license, conduct, and how to contribute.
+- [Getting started](/guide/getting-started/): add the dependency, open a file, index documents, and search them.
+- [How it works](/architecture/): the crate layers, the write path, the query path, and segment storage.
+- [Comparison](/guide/comparison/): the design next to SQLite FTS5, Tantivy, and Meilisearch.
+- [Guide](/guide/overview/): the full narrative, page by page.
+- [For AI agents](/guide/for-agents/): the short list of constraints. [llms.txt](/llms.txt) indexes every page.
