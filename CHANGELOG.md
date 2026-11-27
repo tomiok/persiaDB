@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia::SearchRequest::filter_json` and `soft_filter_json` (ROADMAP 10.1.35, ADR-0063 amended; SPEC §7.1.4): a
+  hard or soft filter in its JSON form (SPEC §7.1.2, fields by name) on a request built in code, parsed when the
+  search runs as `Collection::search_json` parses `filter` and `soft_filter`: the same parser, the schema of the
+  snapshot searched, the database's query limits. The same filter in either form gives the same response. Text that
+  is not a filter is `ErrorCode::InvalidArgument`, a filter past a query limit `ErrorCode::Limit`. Each takes the
+  request's one hard or soft filter with `filter` and `soft_filter`: the later call is kept.
 - `persia`'s async API covers the rest of the embedded API (feature `async`; ROADMAP 10.1.26, ADR-0064 amended), on
   the same per-database pool: `AsyncDb::create_collection`, `create_collection_json`, `drop_collection`, `refresh`,
   `backup`, `put_blob` and `get_blob_range`, and `AsyncCollection::put_json`, `get_json`, `put_struct`, `get_struct`,
@@ -512,6 +518,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- Docs site: the guides "Filtered full-text search" and "Typo-tolerant search" are rewritten against the embedded
+  API (ROADMAP 10.1.34): search through `Collection::search` and `search_json`, filters by
+  `SearchRequest::filter_json` or a typed `Filter` (no `Filter::from_json`), hard and soft filters, and only the
+  `soft_filter` dropped by the last-resort step. Their Rust samples are whole programs that `cargo test` runs as
+  doctests of `persia` (`crates/persia/src/guides.rs`), so a sample that stops compiling fails CI. The L6
+  descriptions of the feature reference, getting-started, fuzzy-search and faceted-search pages say the same.
+- `persia::JobFuture<T>`'s auto traits are documented in public terms (ROADMAP 10.1.36, ADR-0064 amended), with no
+  change of when they hold: `Send` and `Sync` exactly when `T: Send`, `Unpin` for every `T` (now an explicit impl),
+  never `UnwindSafe`. The public-API snapshot no longer names the private slot type in their bounds, and
+  `cargo xtask public-api` fails on a synthesized auto-trait impl whose bounds name a private type it has no stated
+  bounds for.
 - **Breaking** (`persia-engine`): `persia_engine::search::request::TypedSortValue::Datetime` holds the value's
   microseconds (`i64`) instead of its text (ROADMAP 10.1.30, ADR-0065 amended); `persia_engine::document::datetime_text`
   gives the text SPEC §6.4.1 writes. The response JSON is unchanged.

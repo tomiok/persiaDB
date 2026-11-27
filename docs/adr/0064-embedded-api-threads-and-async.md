@@ -253,3 +253,49 @@ Why:
     write side of the state lock is taken only at close. On a read-only database a running `refresh` holds it while it
     refreshes the pack, so these calls can wait for that I/O. Item 16 above says `collection` "takes no lock": read it
     with this correction. Moving the pack refresh out from under the write side is not part of this change.
+
+## Amendment (2026-11-27): `JobFuture`'s auto traits in public terms (ROADMAP 10.1.36)
+
+The public-API snapshot (`crates/persia/public-api.txt`, ADR-0063) listed `JobFuture<T>`'s auto-trait impls as
+`where alloc::rcs::arc::Arc<Slot<T>>: Send` (and `Sync`, `Unpin`), naming the facade's private `Slot<T>`. The rustdoc
+of the dated nightly writes a synthesized auto-trait impl's bounds as the types of the fields that carry the type
+parameters, without reducing them to the parameters (a scratch crate shows it for any field: `Mutex<Option<T>>`,
+`PhantomData<T>` and a private wrapper are written as they are; only a field of type `T` reads `T: Send`).
+
+**What the conditions are** (unchanged by this amendment, derived from the fields): `JobFuture<T>` holds
+`Arc<Slot<T>>`, `Option<JoinHandle<()>>` and a `bool`; the last two are `Send`, `Sync` and `Unpin` for every `T`.
+`Arc<X>` is `Send` and `Sync` exactly when `X: Send + Sync`. `Slot<T>` holds `Mutex<State<T>>` and
+`Option<CancelToken>` (`Arc<AtomicBool>`: both always). `Mutex<S>` is `Send` when `S: Send` and `Sync` when `S: Send`;
+`State<T>` holds a `Phase`, an `Option<Waker>` and an `Option<Result<T, persia::Error>>`, whose error is `Send + Sync`,
+so `State<T>: Send` exactly when `T: Send`. Therefore:
+
+- `JobFuture<T>: Send` exactly when `T: Send`;
+- `JobFuture<T>: Sync` exactly when `T: Send` (not `T: Sync`: the result crosses threads through the mutex, and a
+  shared `&JobFuture` gives no access to it);
+- `JobFuture<T>: Unpin` for every `T` (`Arc` is always `Unpin`; `poll` already relies on it through `Pin::get_mut`);
+- `UnwindSafe` and `RefUnwindSafe`: never, as before (the snapshot's `!` lines are unchanged).
+
+**Decision.** `Unpin` is stated in code, `impl<T> Unpin for JobFuture<T> {}`: a safe trait, so a plain impl, exactly
+today's condition, and the snapshot reads `impl<T> core::marker::Unpin for persia::JobFuture<T>`. `Send` and `Sync` are
+unsafe traits: an explicit impl needs `unsafe`, which this crate forbids (CLAUDE.md), so they stay derived by the
+compiler, and the snapshot's renderer states their bounds: `STATED_AUTO_TRAIT_BOUNDS` in
+`xtask/src/public_api/render.rs` holds `(persia::JobFuture<T>, Send, T: core::marker::Send)` and the same for `Sync`,
+and a synthesized auto-trait impl whose bounds name a type rustdoc's `paths` does not list is rendered with its entry,
+or fails the rendering without one (so a new private name in such bounds cannot reach the snapshot unnoticed). The
+entries are not computed by the renderer; what keeps them true is `crates/persia/tests/job_future_auto_traits.rs`:
+generic functions the compiler checks for every `T: Send` (`Send` and `Sync`) and every `T` (`Unpin`), and
+compile-time probes (an inherent associated constant behind a `Send` or `Sync` bound, with a trait's constant of the
+same name standing in when the bound does not hold, checked against `u8`, `Rc`, `Cell` and `MutexGuard` first) that
+`JobFuture<Rc<u8>>` and `JobFuture<MutexGuard<'static, u8>>` are neither `Send` nor `Sync` and `JobFuture<Cell<u8>>`
+is both. A change of the fields that changes a condition fails that test to compile, and the entry is updated with it.
+
+**Alternatives turned down.** Restructuring the fields so rustdoc writes public bounds: only a field of type `T` does,
+which a shared slot cannot be; a field of public std types (`Arc<Mutex<(..)>>`) would still be written whole, would
+need the slot's phase and waker in std types too, and would bend the code to the renderer. A type-erased slot
+(`Arc<dyn Any + Send + Sync>` and a marker) needs `T: 'static` and a downcast at every poll. Renderer rules that compute
+auto traits would reimplement the trait solver.
+
+Snapshot change: the three lines `where alloc::rcs::arc::Arc<Slot<T>>: ...` became
+`impl<T> core::marker::Send for persia::JobFuture<T> where T: core::marker::Send`, the same for `Sync`, and
+`impl<T> core::marker::Unpin for persia::JobFuture<T>`. The snapshot test now checks that no line names `Slot<` and
+that the three lines are listed.

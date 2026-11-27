@@ -214,6 +214,8 @@ fn the_committed_snapshot_lists_only_what_is_kept_on_purpose() {
         // ROADMAP 10.1.30: a hit's sort values are the facade's type, not the engine's.
         "TypedSortValue",
         "persia_engine::search::SortValue",
+        // ROADMAP 10.1.36: the private slot type `JobFuture`'s auto-trait bounds named.
+        "Slot<",
     ] {
         assert!(!snapshot.contains(hidden), "{hidden} is in {SNAPSHOT}");
     }
@@ -234,6 +236,10 @@ fn the_committed_snapshot_lists_only_what_is_kept_on_purpose() {
         "pub struct persia::AsyncDb",
         "pub fn persia::SearchResponse::to_json(&self) -> persia::Result<alloc::string::String>",
         "impl serde_core::ser::Serialize for persia::SearchResponse",
+        // ROADMAP 10.1.36: `JobFuture`'s auto traits in public terms.
+        "impl<T> core::marker::Send for persia::JobFuture<T> where T: core::marker::Send\n",
+        "impl<T> core::marker::Sync for persia::JobFuture<T> where T: core::marker::Send\n",
+        "impl<T> core::marker::Unpin for persia::JobFuture<T>\n",
     ] {
         assert!(snapshot.contains(kept), "{kept} is not in {SNAPSHOT}");
     }
@@ -441,6 +447,63 @@ fn every_form_of_a_signature_renders_as_rust_writes_it() {
     // The listing is sorted by line.
     expected.sort_unstable();
     assert_eq!(text, format!("{}\n", expected.join("\n")), "{text}");
+}
+
+/// ROADMAP 10.1.36: a synthesized auto-trait impl whose bounds name a type `paths` does not list (a private field
+/// type, as rustdoc writes them) is not rendered with that name: without a stated entry, rendering fails and names the
+/// impl and the table.
+#[test]
+fn an_auto_trait_impl_whose_bounds_name_a_private_type_needs_stated_bounds() {
+    let mut fix = rich();
+    let private = json!({"resolved_path": path("Slot", 99, &[json!({"generic": "T"})])});
+    *fix.pointer_mut("/index/10/inner/impl/generics/where_predicates/0/bound_predicate/type")
+        .unwrap() = private;
+    let crates = Crates::new(
+        Crate::parse(&fix.to_string()).unwrap(),
+        vec![Crate::parse(&other().to_string()).unwrap()],
+    )
+    .unwrap();
+    let err = render(&crates).unwrap_err().to_string();
+    assert!(err.contains("`Send` impl of `fix::Gen<T>`"), "{err}");
+    assert!(err.contains("STATED_AUTO_TRAIT_BOUNDS"), "{err}");
+}
+
+#[test]
+fn stated_bounds_are_looked_up_by_type_and_trait() {
+    use super::render::stated_bounds;
+    let table = [
+        ("fix::Gen<T>", "Send", "T: core::marker::Send"),
+        ("fix::Gen<T>", "Sync", "T: core::marker::Send"),
+    ];
+    let send = stated_bounds(&table, "fix::Gen<T>", "Send").unwrap();
+    assert_eq!(send, " where T: core::marker::Send");
+    assert_eq!(stated_bounds(&table, "fix::Gen<T>", "Sync").unwrap(), send);
+    assert!(stated_bounds(&table, "fix::Gen<T>", "Unpin").is_err());
+    assert!(stated_bounds(&table, "fix::Other<T>", "Send").is_err());
+}
+
+/// A stated entry for a type of the rendered crate that no impl used is stale and fails the rendering; entries of
+/// other crates are left alone.
+#[test]
+fn a_stated_bounds_entry_no_impl_uses_is_an_error() {
+    use super::render::stated_bounds_all_used;
+    use std::collections::BTreeSet;
+    let table = [
+        ("fix::Gen<T>", "Send", "T: core::marker::Send"),
+        ("fix::Gen<T>", "Sync", "T: core::marker::Send"),
+        ("other::Gen<T>", "Send", "T: core::marker::Send"),
+    ];
+    let pair = |ty: &str, t: &str| (ty.to_owned(), t.to_owned());
+    let both: BTreeSet<_> = [pair("fix::Gen<T>", "Send"), pair("fix::Gen<T>", "Sync")].into();
+    assert!(stated_bounds_all_used(&table, "fix", &both).is_ok());
+    let send: BTreeSet<_> = [pair("fix::Gen<T>", "Send")].into();
+    let err = stated_bounds_all_used(&table, "fix", &send)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("`Sync` bounds of `fix::Gen<T>`"), "{err}");
+    // `fix_extra::` is another crate, not a path under `fix`.
+    assert!(stated_bounds_all_used(&table, "fix_extra", &BTreeSet::new()).is_ok());
+    assert!(stated_bounds_all_used(&table, "other", &BTreeSet::new()).is_err());
 }
 
 #[test]

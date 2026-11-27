@@ -124,7 +124,7 @@ A `SearchResponse` has `hits` (each with `document`, `score`, the relaxation `le
 | L3 | `prefix` | Prefix-expand the last term, and other analyzed terms of length at least 3 |
 | L4 | `fuzzy` | Edit distance 1 (length 4–7) or 2 (length 8 or more). Report a correction when this step found the hits |
 | L5 | `fallback` | Static rank, then index-location recency, flagged with `fallback`. `none` builds no step |
-| L6 | `filters` | Only with `relax.filters: "last_resort"`, after every enabled earlier level: L0's words without the request's filters. A query that searches no word does not build it. `"filters_dropped": true` only when this step found the hits |
+| L6 | `filters` | Only with `relax.filters: "last_resort"`, after every enabled earlier level: L0's words without the request's `soft_filter` (the hard `filter` stays). A query that searches no word does not build it. `"filters_dropped": true` only when this step found the hits |
 
 Filters are not relaxed unless the caller sets `relax.filters` to `"last_resort"`. `relax: false` on a request turns the cascade off.
 

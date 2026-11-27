@@ -6,7 +6,8 @@
 //! Left out on purpose, so the listing changes only when the surface does: blanket impls (`impl<T> From<T> for T`),
 //! auto-trait impls other than `Send`, `Sync`, `Unpin`, `UnwindSafe` and `RefUnwindSafe`, the unstable
 //! `StructuralPartialEq` marker, doc comments, spans and attributes other than `#[non_exhaustive]`. Items hidden with
-//! `#[doc(hidden)]` are not in rustdoc's JSON.
+//! `#[doc(hidden)]` are not in rustdoc's JSON. A synthesized auto-trait impl whose bounds name a private type is
+//! rendered with the bounds [`STATED_AUTO_TRAIT_BOUNDS`] states (ROADMAP 10.1.36).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,6 +20,20 @@ pub const FORMAT_VERSION: u64 = 61;
 /// The auto traits whose impls are listed: the ones a user relies on (a handle moved to a thread, kept across a
 /// panic). `Freeze` and `UnsafeUnpin` are unstable or compiler detail.
 const AUTO_TRAITS: [&str; 5] = ["Send", "Sync", "Unpin", "UnwindSafe", "RefUnwindSafe"];
+
+/// The bounds of synthesized auto-trait impls, stated in public terms where rustdoc's would name a private type
+/// (ROADMAP 10.1.36, ADR-0064's 2026-11-27 amendment): `(type, trait, where-predicates)`. rustdoc writes a synthesized
+/// impl's bounds as the types of the fields that carry the parameters (`where Arc<Slot<T>>: Send`), so a field of a
+/// private type names it. An impl whose bounds name a type rustdoc's `paths` does not list is rendered with its entry
+/// here, and is an error without one. The entries are not computed: each is what the compiler derives from the
+/// fields, checked by the type's tests (for `JobFuture`, `crates/persia/tests/job_future_auto_traits.rs`), which fail
+/// to compile or fail when the type is `Send` or `Sync` under other conditions. An entry for a type of the rendered
+/// crate that no impl looks up fails the rendering too, so the table cannot outlive the impl it states.
+const STATED_AUTO_TRAIT_BOUNDS: [(&str, &str, &str); 2] = [
+    // `Arc<Slot<T>>` is `Send` and `Sync` when `Slot<T>` is both, which its `Mutex<State<T>>` is when `T: Send`.
+    ("persia::JobFuture<T>", "Send", "T: core::marker::Send"),
+    ("persia::JobFuture<T>", "Sync", "T: core::marker::Send"),
+];
 
 /// One crate's rustdoc JSON.
 pub struct Crate {
@@ -80,6 +95,65 @@ impl Crate {
     }
 }
 
+/// Whether `json` (a type, or bounds) names an item `c`'s `paths` does not list: a private type, which rustdoc writes
+/// by its bare name.
+fn names_unlisted(c: &Crate, json: &J) -> bool {
+    match json {
+        J::Object(map) => {
+            let unlisted = map
+                .get("resolved_path")
+                .and_then(|p| p.get("id"))
+                .is_some_and(|id| c.canonical(id).is_none());
+            unlisted || map.values().any(|v| names_unlisted(c, v))
+        }
+        J::Array(all) => all.iter().any(|v| names_unlisted(c, v)),
+        _ => false,
+    }
+}
+
+/// The where clause `table` ([`STATED_AUTO_TRAIT_BOUNDS`] when rendering) states for the synthesized impl of the auto
+/// trait `trait_` for `for_` (` where T: core::marker::Send`).
+///
+/// # Errors
+/// No entry: rustdoc's bounds name a private type, and the renderer does not guess the public ones.
+pub(super) fn stated_bounds(
+    table: &[(&str, &str, &str)],
+    for_: &str,
+    trait_: &str,
+) -> Result<String> {
+    match table.iter().find(|(ty, t, _)| *ty == for_ && *t == trait_) {
+        Some((_, _, "")) => Ok(String::new()),
+        Some((_, _, predicates)) => Ok(format!(" where {predicates}")),
+        None => bail!(
+            "the synthesized `{trait_}` impl of `{for_}` names a private type in its bounds: state them in public \
+             terms in STATED_AUTO_TRAIT_BOUNDS (xtask/src/public_api/render.rs), with a test of the type that checks \
+             them, or make the type's fields name public types"
+        ),
+    }
+}
+
+/// Checks that every entry of `table` for a type of the crate `root` (`persia::JobFuture<T>` for `persia`) is in
+/// `used`, the `(type, trait)` pairs a rendered impl looked up. Entries of other crates are not about this rendering.
+///
+/// # Errors
+/// An entry no impl used: the type, its trait impl or its private bounds are gone, and the entry is stale.
+pub(super) fn stated_bounds_all_used(
+    table: &[(&str, &str, &str)],
+    root: &str,
+    used: &BTreeSet<(String, String)>,
+) -> Result<()> {
+    let prefix = format!("{root}::");
+    for (ty, trait_, _) in table {
+        if ty.starts_with(&prefix) && !used.contains(&((*ty).to_owned(), (*trait_).to_owned())) {
+            bail!(
+                "STATED_AUTO_TRAIT_BOUNDS (xtask/src/public_api/render.rs) states the `{trait_}` bounds of `{ty}`, \
+                 but no synthesized impl with private bounds used them: remove the entry"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// An id as the key of `index` and `paths`: ids are integers in the format, keys their decimal text.
 fn id_key(id: &J) -> Option<String> {
     match id {
@@ -133,6 +207,7 @@ pub fn render(crates: &Crates) -> Result<String> {
         crates,
         names: BTreeMap::new(),
         lines: BTreeSet::new(),
+        stated_used: BTreeSet::new(),
     };
     let root = crates.by_name.get(&crates.root).context("no root crate")?;
     let root_id = root.json.get("root").context("no root id")?.clone();
@@ -144,6 +219,7 @@ pub fn render(crates: &Crates) -> Result<String> {
     };
     r.module(&at, &crates.root, Pass::Names)?;
     r.module(&at, &crates.root, Pass::Lines)?;
+    stated_bounds_all_used(&STATED_AUTO_TRAIT_BOUNDS, &crates.root, &r.stated_used)?;
     let mut out = String::new();
     for line in &r.lines {
         out.push_str(line);
@@ -163,6 +239,8 @@ struct Renderer<'a> {
     /// Canonical path → the path a user writes.
     names: BTreeMap<String, String>,
     lines: BTreeSet<String>,
+    /// The `(type, trait)` of each [`STATED_AUTO_TRAIT_BOUNDS`] entry a rendered impl used.
+    stated_used: BTreeSet<(String, String)>,
 }
 
 impl<'a> Renderer<'a> {
@@ -485,7 +563,16 @@ impl<'a> Renderer<'a> {
                     let generics = self.generics(at.krate, i.get("generics"))?;
                     let trait_text = self.path(at.krate, t)?;
                     let for_ = self.ty(at.krate, i.get("for"))?;
-                    let wheres = self.where_clause(at.krate, i.get("generics"))?;
+                    let predicates = i.get("generics").and_then(|g| g.get("where_predicates"));
+                    let krate = self.krate(at.krate)?;
+                    let wheres =
+                        if synthetic && predicates.is_some_and(|p| names_unlisted(krate, p)) {
+                            let stated = stated_bounds(&STATED_AUTO_TRAIT_BOUNDS, &for_, last)?;
+                            self.stated_used.insert((for_.clone(), last.to_owned()));
+                            stated
+                        } else {
+                            self.where_clause(at.krate, i.get("generics"))?
+                        };
                     self.line(
                         pass,
                         format!(

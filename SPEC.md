@@ -1605,6 +1605,18 @@ A request is built for one schema, whose fields its filters, sort, facets and de
 run on a snapshot of another schema, default fields of another schema are an error, and the sort, the facets and the
 filters are checked against the snapshot's schema again.
 
+A request built in code takes a filter in its JSON form too (ROADMAP 10.1.35, ADR-0063): the embedded API's
+`SearchRequest::filter_json` and `soft_filter_json` hold the text of one §7.1.2 object, which names its fields, and the
+search parses it as this section reads `filter` and `soft_filter`: by the same parser, against the schema of the
+snapshot the search runs on, held to the same limits. Those are the database's query limits, §7.1.3's defaults, which
+the embedded API does not change; the request JSON's filters and every search are held to them. A filter so given and
+the same filter inside a request JSON therefore select the same documents, rank them alike and page with the same
+cursors, and fail alike: text that is not a filter (malformed, a repeated key, an unknown operator or field, a value of
+another type, longer than 1 MiB) is `INVALID_ARGUMENT`, and a filter past a limit is `LIMIT`, as every query past a
+§7.1.3 limit is (ADR-0063 item 8). Either setter takes its request's one hard or soft filter, as the typed setters do:
+the later call is the one kept. The filter's text is parsed when the request runs, not by the setter, since a request
+names no schema until then (as `fields` does, by name); the API has no parser that returns a typed filter.
+
 ### 7.2 Scoring: BM25F
 Per term `t` and doc `d` over fields `f` with weights `w_f`:
 ```

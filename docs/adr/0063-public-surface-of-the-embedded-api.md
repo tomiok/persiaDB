@@ -202,3 +202,35 @@ No public signature in the snapshot names a `persia_format` type now; the engine
 the last two rows. The snapshot test (`the_committed_snapshot_lists_only_what_is_kept_on_purpose` in
 `xtask/src/public_api/tests.rs`) checks that none of the hidden items, `persia_format::` or `QueryLimits` is listed,
 and that `persia::blob_ref` is.
+
+## Amendment (2026-11-27): a filter in its JSON form on `SearchRequest` (ROADMAP 10.1.35)
+
+With `Filter::from_json` hidden (10.1.29: it takes the engine's `QueryLimits`), a caller could send a filter's JSON
+only inside a whole request JSON (`Collection::search_json`). The facade now takes it on the request builder:
+`SearchRequest::filter_json(impl Into<String>)` and `soft_filter_json(impl Into<String>)` hold the text of one SPEC
+§7.1.2 object, and the search parses it when it runs (SPEC §7.1.4), with the parser `search_json` reads `filter` and
+`soft_filter` with (`Filter::from_json`, which the `filter_json` fuzz target covers), against the schema of the
+snapshot the search runs on and under the database's query limits. Those are SPEC §7.1.3's defaults, which the facade
+applies itself, in one place (`query_limits` in `crates/persia/src/search.rs`) that the request-JSON path, the filter
+JSON and the run all take; `QueryLimits` stays unexported. Each setter takes its request's one hard or soft filter, as
+`filter` and `soft_filter` do: the later call is the one kept.
+
+**Why a setter, and not a facade parser that returns a `Filter`** (the other form 10.1.29 named): the request builder
+is the facade's one way to state a search, it holds no schema, and what it takes by name is resolved when it runs
+(`fields`), so a filter by name fits there and nowhere new is needed: no method on `Collection` or `AsyncCollection`,
+no async form, no schema to pass. It parses the text where `search_json` does, on the same snapshot, so the two forms
+cannot drift apart: the same filter selects the same documents, ranks them alike and pages with the same cursors
+(the cursor's request fingerprint, ROADMAP 10.1.24, hashes the parsed filter). A parser on `Collection` would check a
+filter against the schema of the moment it is called, which the search checks again on its own snapshot, and would
+need an async twin. What the setter does not give is a typed `Filter` to combine with one built in code (an `and` of
+the two); a caller writes the whole filter in one of the two forms. If that need appears, a parser can be added beside
+the setter without changing it.
+
+**Errors** are the search's, by `ErrorCode` (item 8): text that is not a filter (malformed, a repeated key, an unknown
+operator or field, a value of another type, longer than 1 MiB) is `INVALID_ARGUMENT`; a filter past `max_terms`,
+`max_clauses` or `max_depth` is `LIMIT`, as it is inside a request JSON and as every query past a SPEC §7.1.3 limit
+is. (ROADMAP 10.1.35's text says `INVALID_ARGUMENT` for a filter past the limits; that would make the two forms of
+one filter fail with two codes and contradict item 8, so it is `LIMIT`.) The message names the setter
+(`filter_json: ...`). Tests: `crates/persia/tests/filter_json.rs` (seeded cases: the response JSON of a filter given
+to the setter equals the one of the same filter inside a request JSON, or both fail with one code; one test per
+limit; refused text; the later setter kept; a cursor of one form pages the other).
