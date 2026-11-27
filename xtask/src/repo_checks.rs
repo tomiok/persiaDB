@@ -1,8 +1,9 @@
 //! Repository invariants checked as tests (`cargo test -p xtask`): toolchain pinning, fuzz target naming,
 //! `.gitignore`/`.gitattributes` behavior (verified through git itself rather than by parsing the files),
 //! digest-pinned docker-compose images, dependencies pinned to the version a module was audited against, the
-//! website guides (`repo_checks/guides.rs`, `repo_checks/guide_api.rs`), and the include paths of the published
-//! crates and the fuzz seed copies (`repo_checks/includes.rs`).
+//! website guides (`repo_checks/guides.rs`, `repo_checks/guide_api.rs`), the include paths of the published
+//! crates and the fuzz seed copies (`repo_checks/includes.rs`), and the shown samples equal to a doctest
+//! (`repo_checks/samples.rs`).
 
 #[cfg(test)]
 mod guide_api;
@@ -10,6 +11,8 @@ mod guide_api;
 mod guides;
 #[cfg(test)]
 mod includes;
+#[cfg(test)]
+mod samples;
 
 #[cfg(test)]
 mod tests {

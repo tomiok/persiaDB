@@ -326,3 +326,17 @@ the crate too.
    workspace's `false` of today and is checked; `persia-docs`, `persia-testutil` (a dev-dependency only) and
    `xtask` (repo tooling) write `false` themselves; `fuzz/` is its own workspace. A new crate is checked unless its
    manifest opts out in the same way.
+7. **A sample shown with a fixed path equals a doctest** (ROADMAP 10.3.3). The README's quickstart opens
+   `app.persia` in the working directory, so it pastes into a fresh `cargo new` with `persia` as its one
+   dependency. It is not a page of `crates/persia-docs`: as a doctest it would write `app.persia` into that crate
+   and fail its second run (`create_collection_json` refuses an existing collection), and a doctest cannot move to
+   a temporary working directory (merged doctests share one process, so `set_current_dir` would race the others).
+   A temporary directory in the README itself would make the user add `tempfile` and lose the file the sample
+   says it creates. So `shown_samples_equal_a_doctest` (`xtask/src/repo_checks/samples.rs`) requires the shown
+   block to equal a twin, a Rust block rustdoc runs on a page `crates/persia-docs` lists, once the twin's rustdoc
+   hidden lines (`# `) and its line `let dir = tempfile::tempdir()?;` are dropped and its one
+   `dir.path().join("app.persia")` is written `"app.persia"`; nothing else may differ, and the `toml` block shown
+   before the sample must be the twin page's first. The README's twin is the getting-started guide's first sample,
+   which that page already calls the README quickstart in a temporary directory, so the two cannot drift apart
+   (the README's `main` now returns `Result<(), Box<dyn std::error::Error>>`, as the guide's does). CI runs the
+   check in the test job's `cargo test --workspace` and the twin in its `cargo test -p persia-docs`.

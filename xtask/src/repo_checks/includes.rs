@@ -27,7 +27,7 @@ const INCLUDE_MACROS: &[&str] = &["include_str!", "include_bytes!", "include!"];
 
 /// `path` without `.` and with each `..` applied to the component before it; `None` when a `..` climbs above the
 /// start of `path` or `path` is absolute (both are outside any directory of the repository the check names).
-fn normalize(path: &Path) -> Option<PathBuf> {
+pub(super) fn normalize(path: &Path) -> Option<PathBuf> {
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {

@@ -60,7 +60,7 @@ persia = { git = "https://github.com/tomiok/persiaDB" }
 ```rust
 use persia::{Db, SearchRequest};
 
-fn main() -> persia::Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = Db::open("app.persia")?; // creates app.persia if it is missing
     let notes = db.create_collection_json(
         r#"{"name": "notes", "fields": {"body": {"type": "text"}}}"#,
@@ -81,11 +81,14 @@ fn main() -> persia::Result<()> {
     println!("{:?} {:?}", page.relaxation.level, page.relaxation.corrected());
     // Fuzzy [Correction { original: "helo", corrected: "hello" }]
 
-    db.close()
+    db.close()?;
+    Ok(())
 }
 ```
 
 `Db::open` creates the file and any missing parent directories, and opens an existing database without replacing it ([SPEC §8.1](./SPEC.md#81-operations)). A second run fails at `create_collection_json` with `ErrorCode::AlreadyExists`, so use `db.collection("notes")` or delete `app.persia` first. Commits and merges also run on the database's own thread; `close` joins it ([SPEC §8.2](./SPEC.md#82-flow)).
+
+The sample runs in CI. It is the first sample of the [getting-started guide](https://tomiok.github.io/persiaDB/guide/getting-started/), a doctest, with `app.persia` in place of a temporary directory; a repo check (`xtask/src/repo_checks/samples.rs`) fails when the two differ.
 
 Beyond the snippet:
 
