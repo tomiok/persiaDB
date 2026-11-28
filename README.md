@@ -30,7 +30,7 @@
 </p>
 
 <!-- BEGIN GENERATED progress:summary by `cargo xtask progress`. Do not edit by hand. -->
-**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **482 of 635** MVP leaves done (76%), 0 in progress (last snapshot 2026-11-27). Post-MVP work is 0 of 237 and sits outside that percentage.
+**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **482 of 635** MVP leaves done (76%), 0 in progress (last snapshot 2026-11-28). Post-MVP work is 0 of 237 and sits outside that percentage.
 <!-- END GENERATED progress:summary -->
 
 On `main` today, the [`persia`](./crates/persia/src/lib.rs) crate opens a single-file database, stores documents and blobs, and runs a ranked search (BM25F, filters, sorts, facets, cursors) that relaxes by default when a query finds too few hits. Writes go through a checksummed WAL with crash recovery, and commits, merges, and compaction run on the database's own thread. Nothing is published yet, and format 1.0 is unstable until the v1.0 release ([SPEC §15](./SPEC.md#15-versioning-and-compatibility)); the internals are in [`SPEC.md`](./SPEC.md).

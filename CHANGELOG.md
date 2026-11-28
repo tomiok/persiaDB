@@ -523,9 +523,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   when the two differ. Its `main` now returns `Result<(), Box<dyn std::error::Error>>` and ends with
   `db.close()?; Ok(())`, as the guide's does; it still pastes into a fresh `cargo new` with `persia` as the only
   dependency.
-- Docs site: the landing page's sample runs in CI (ROADMAP 10.1.51), unchanged on the page: its doctest twin
-  (`crates/persia-docs/src/samples/landing.md`) opens the database in a temporary directory, and the same repo check
-  fails when the page's block differs from it.
+- Docs site: the landing page's sample is the README quickstart and runs in CI (ROADMAP 10.1.51). The hero now
+  shows the README's program (three documents, a ranked search, then the typo `helo` and its correction) instead of
+  a shorter one, and the same repo check (`xtask/src/repo_checks/samples.rs`) holds it to the getting-started
+  guide's first sample, a doctest, so the landing page, the README and that guide are one program.
 - Docs site: the other guides are rewritten against the embedded API (ROADMAP 10.1.41): getting started, blob
   storage, durability, the embedded API, code, faceted, fuzzy, synonym and prefix search, ranking, text analysis,
   features, FAQ, comparison, embedded search, SDKs, for agents, architecture and file format no longer call the

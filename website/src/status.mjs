@@ -1009,6 +1009,8 @@ function visibleExports(source) {
 /** @returns {StatusInput} */
 function readInput() {
 	const root = repoRoot();
+	// Call it with a string literal only: paths-filter.test.mjs holds each path it is given to website.yml's paths
+	// filter, so a change to a file read here rebuilds the site (ROADMAP 10.1.52).
 	const read = (rel) => readFileSync(path.join(root, rel), 'utf8');
 	const engineLib = read('crates/persia-engine/src/lib.rs');
 	const dbRs = read('crates/persia-engine/src/db.rs');
@@ -1047,8 +1049,8 @@ function readInput() {
 		hasGetBlob: facadeFn('Db::get_blob') || dbFns.has('get_blob') || /pub fn get_blob\b/.test(persiaLib) || /pub fn get_blob\b/.test(persiaBlob),
 		hasQuery: modules.includes('query'),
 		hasSearch: facadeFn('Collection::search') || dbFns.has('search') || /pub fn search\b/.test(persiaLib),
-		hasCollectionSearch: ['crates/persia-engine/src/db/search.rs', 'crates/persia-engine/src/db/views.rs'].some((rel) =>
-			implHasMethod(read(rel), 'CollectionViews', 'search'),
+		hasCollectionSearch: [searchRs, read('crates/persia-engine/src/db/views.rs')].some((source) =>
+			implHasMethod(source, 'CollectionViews', 'search'),
 		),
 		hasRelaxSearch: implHasMethod(relaxedRs, 'CollectionViews', 'search_relaxed'),
 		hasDropTerms: /RelaxLevel::DropTerms => Arc::new\(drop_terms::DropTerms\)/.test(relaxRs),
