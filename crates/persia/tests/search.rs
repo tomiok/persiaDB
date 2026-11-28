@@ -441,8 +441,8 @@ fn equal_text_scores_rank_by_the_collections_static_rank() {
         let ids: Vec<&str> = page.hits.iter().map(|h| h.document.id()).collect();
         assert_eq!(ids, ["many", "few", "none"]);
         let text = page.hits[2].score;
-        assert_eq!(page.hits[0].score, text + 901_f64.ln());
-        assert_eq!(page.hits[1].score, text + 4_f64.ln());
+        assert_eq!(page.hits[0].score, text + 900_f64.ln_1p());
+        assert_eq!(page.hits[1].score, text + 3_f64.ln_1p());
         let json: serde_json::Value = serde_json::from_str(&page.to_json().unwrap()).unwrap();
         let explanation = &json["hits"][0]["explanation"];
         let node = explanation

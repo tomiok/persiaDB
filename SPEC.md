@@ -1773,15 +1773,18 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   corruption: a search that scores such a document fails instead of ranking it above a bound another document was
   skipped by. Blocks pruning skips are not read, so their bounds are checked only by `Segment::verify`.
   With a static rank (§7.2, ROADMAP 10.1.45), the whole score is the query's plus the contribution, and the bound
-  adds a bound of the contribution the same way: per view, `M`, the contribution of the largest key each FOR block of
-  the static rank's column may hold (its minimum plus `2^width − 1`, stopped at `f64::MAX`'s key for an `f64` column,
-  §5.2.1; the contribution never decreases with the key, §6.2.3), the largest over the blocks. A bound `Q` of the
-  query's score gives `sat(Q + M)`, which bounds `sat(q + s)` exactly, as addition and saturation are monotonic. A
-  threshold `t` on the whole score reaches the query's matchers as the largest `t'` found with `sat(t' + M) ≤ t`, so
-  a document they skip scores at most `t` in all. `M` is read from the block bounds the first time the view takes a
-  threshold or a bound, not before (L5's walk and a facet count read none), and a corrupt block fails the search. A
-  view without block bounds (the memtable, a segment column without a value) takes no threshold: its matches are all
-  scored. Pruned and exhaustive top-k are still the same hits, scores bit for bit.
+  adds a bound of the contribution the same way: per segment, `M`, the contribution of the largest key the FOR blocks
+  of the static rank's column may hold (the largest of the blocks' minimum plus `2^width − 1`, §5.2.1, stopped at
+  `f64::MAX`'s key for an `f64` column; the contribution never decreases with the key, §6.2.3), and 0 for a column
+  without values (a field added since the segment was written, say). A bound `Q` of the query's score gives
+  `sat(Q + M)`, which bounds `sat(q + s)` exactly, as addition and saturation are monotonic. A threshold `t` on the
+  whole score reaches the query's matchers as the largest `t'` found with `sat(t' + M) ≤ t`, so a document they
+  skip scores at most `t` in all. The segment's largest key is read from its column's block bounds the first time a
+  view of it takes a threshold or a bound, not before (L5's walk, a facet count and an exhaustive search read none:
+  an exhaustive search's matchers ignore a threshold, so none is passed on), and kept: a segment never changes, so
+  later searches read no block for it. A corrupt block fails a search that reads it, and a failed read is not kept,
+  so every search that needs it fails the same way. A view without block bounds (the memtable) takes no threshold:
+  its matches are all scored. Pruned and exhaustive top-k are still the same hits, scores bit for bit.
 - Filters evaluate to roaring bitmaps (or column predicates) intersected with candidates before a document is
   scored. Each view evaluates a `bool`'s filters once: `term` and `terms` on a `keyword` field from its postings,
   on another field (and `range`) from the column's order-preserving keys (§5.2.1, an exclusive bound being the next

@@ -33,7 +33,7 @@
 
 mod static_rank;
 
-pub(crate) use static_rank::{key_contribution, largest_key};
+pub(crate) use static_rank::{key_contribution, largest_contribution, largest_key};
 pub use static_rank::{static_rank, static_rank_value};
 
 use crate::query::{CombinedQuery, PhraseQuery, TermQuery};

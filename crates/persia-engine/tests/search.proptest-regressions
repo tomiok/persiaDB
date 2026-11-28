@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc db8aab2d45997ca33accaafc6cf4d7e56c98ce237901334cd601c260860bbf92 # shrinks to case = Case { params: [(1.0, 1.2, 0.0), (4.916955800141018, 1.2, 0.75)], segments: [[([[], ["ant", "ant", "bee"], []], false), ([["ant"], ["ant", "bee"], []], false)]], memtable: [], queries: [Bool { must: [], should: [All, Word([Clause { field: 1, term: "ant", weight: 4.916955800141018 }]), Phrase { field: 0, terms: [("ant", 0), ("ant", 1)], weight: 1.0 }, Word([Clause { field: 0, term: "bee", weight: 1.0 }]), Word([Clause { field: 0, term: "ant", weight: 1.0 }, Clause { field: 1, term: "ant", weight: 1.0 }]), Word([Clause { field: 0, term: "bee", weight: 1.0 }]), Word([Clause { field: 0, term: "bee", weight: 1.0 }]), Phrase { field: 0, terms: [("bee", 0)], weight: 1.0 }, Word([Clause { field: 1, term: "ant", weight: 4.916955800141018 }])], must_not: [], filter: [], minimum_should_match: 2 }], k: 0, targets: [34, 18], rank: Some(Rank { linear: true, weight: 0.8180800067208225, seed: 1768803553412078792, kind: F64 }) }

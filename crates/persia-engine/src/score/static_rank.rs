@@ -91,6 +91,18 @@ pub(crate) fn largest_key(kind: FieldType, block: KeyBlock) -> u64 {
     }
 }
 
+/// A bound of the static rank of every document of a column no key of which is above `largest` (SPEC §7.3): the
+/// static rank of `largest`, which bounds every smaller key's, as for [`largest_key`]. For an `f64` column it stops
+/// at the key of `f64::MAX`: the keys above are `+∞` and NaN, whose static rank is 0, and stored floats are finite.
+/// A `largest` of 0 (a column without values) is the smallest key of every type, whose static rank is 0.
+pub(crate) fn largest_contribution(rank: &StaticRank, kind: FieldType, largest: u64) -> f64 {
+    let key = match kind {
+        FieldType::F64 => largest.min(persia_format::for_codec::f64_to_key(f64::MAX)),
+        _ => largest,
+    };
+    key_contribution(rank, kind, Some(key)).0
+}
+
 #[cfg(test)]
 #[allow(clippy::cast_precision_loss)]
 mod tests {
@@ -108,10 +120,13 @@ mod tests {
     fn log1p_and_linear() {
         let log = rank(RankFn::Log1p, 2.0);
         assert_eq!(static_rank(&log, Some(&Value::I64(0))), 0.0);
-        assert_eq!(static_rank(&log, Some(&Value::I64(99))), 2.0 * 100_f64.ln());
+        assert_eq!(
+            static_rank(&log, Some(&Value::I64(99))),
+            2.0 * 99_f64.ln_1p()
+        );
         assert_eq!(
             static_rank(&log, Some(&Value::Datetime(1_000_000))),
-            2.0 * 1_000_001_f64.ln()
+            2.0 * 1_000_000_f64.ln_1p()
         );
         let lin = rank(RankFn::Linear, 0.1);
         assert_eq!(static_rank(&lin, Some(&Value::F64(30.0))), 0.1 * 30.0);
@@ -154,5 +169,57 @@ mod tests {
             static_rank(&r, Some(&Value::I64(i64::MAX))),
             i64::MAX as f64
         );
+    }
+
+    /// The bound of a column by its largest key bounds the static rank of every key up to it, for each type and
+    /// function (the contribution never decreases with the key); a column without values (largest key 0) bounds it by
+    /// 0, and an `f64` bound past `f64::MAX`'s key (into `+∞` and NaN) stops at `f64::MAX`'s.
+    #[test]
+    fn the_largest_keys_contribution_bounds_every_smaller_keys() {
+        use persia_format::for_codec::{f64_to_key, i64_to_key};
+        let mut keys: Vec<u64> = [
+            -1e300,
+            -2.5,
+            -0.0,
+            0.0,
+            1e-300,
+            0.5,
+            1.0,
+            999.0,
+            1e300,
+            f64::MAX,
+        ]
+        .into_iter()
+        .map(f64_to_key)
+        .chain(
+            [i64::MIN, -7, 0, 1, 1_000, i64::MAX]
+                .into_iter()
+                .map(i64_to_key),
+        )
+        .chain([0, 1, u64::MAX >> 1, u64::MAX - 1, u64::MAX])
+        .collect();
+        keys.sort_unstable();
+        for kind in [FieldType::I64, FieldType::F64, FieldType::Datetime] {
+            for function in [RankFn::Log1p, RankFn::Linear] {
+                for weight in [0.001, 1.0, 1000.0] {
+                    let r = rank(function, weight);
+                    assert_eq!(largest_contribution(&r, kind, 0), 0.0, "{kind:?}");
+                    for (i, &largest) in keys.iter().enumerate() {
+                        let bound = largest_contribution(&r, kind, largest);
+                        for &key in &keys[..=i] {
+                            let (s, _) = key_contribution(&r, kind, Some(key));
+                            assert!(
+                                s <= bound,
+                                "{kind:?} {function:?} {weight}: {key:#x} {s} > {largest:#x} {bound}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let r = rank(RankFn::Linear, 1.0);
+        for past in [f64_to_key(f64::INFINITY), f64_to_key(f64::NAN), u64::MAX] {
+            assert_eq!(largest_contribution(&r, FieldType::F64, past), f64::MAX);
+        }
     }
 }

@@ -9,7 +9,8 @@
 //! 3. `top_k(k)` is the first `k` of every hit sorted by score descending, then docid ascending, whatever `k`
 //!    (7.4.3); `TopK` keeps the same hits whatever order they are pushed in.
 //! 4. `top_k_with(k, p)` returns the same hits for every [`Pruning`], scores bit for bit (7.4.4.3).
-//! 5. With a static rank on a numeric field (ROADMAP 10.1.45; SPEC §6.2.3, §7.2), half the cases, every match scores
+//! 5. With a static rank on an `i64`, `f64` or `datetime` field (ROADMAP 10.1.45; SPEC §6.2.3, §7.2), half the cases,
+//!    its values negative, `±0.0`, fractions and the extremes of the type among them, every match scores
 //!    the reference's score plus the reference's contribution of its value (`tests/reference/static_rank.rs`), and
 //!    invariants 1–4 hold on those totals; each hit's explanation scores it bit for bit, a `with_static_rank` node
 //!    exactly when the collection has a static rank.
@@ -29,7 +30,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use persia_analysis::AnalyzerRegistry;
-use persia_engine::document::{Document, Value};
+use persia_engine::document::{Document, MAX_DATETIME, MIN_DATETIME, Value};
 use persia_engine::memtable::Memtable;
 use persia_engine::query::{
     BoolQuery, BoostQuery, CombinedQuery, ConstantScoreQuery, Filter, PhraseQuery, PhraseTerm,
@@ -113,21 +114,30 @@ fn document(schema: &CollectionSchema, id: &str, doc: &Doc) -> Document {
 fn ranked_document(schema: &CollectionSchema, id: &str, doc: &Doc, rank: Option<Rank>) -> Document {
     let d = document(schema, id, doc);
     match (rank, schema.field("rank")) {
-        (Some(rank), Some(field)) => match value_of(rank.seed, id) {
-            Some(v) => d.with(field.id(), Value::I64(v)),
+        (Some(rank), Some(field)) => match rank.value(id) {
+            Some(v) => d.with(field.id(), v),
             None => d,
         },
         _ => d,
     }
 }
 
-/// A collection's static rank in a case (SPEC §6.2.3, ROADMAP 10.1.45): on the `i64` field `rank`, whose value for a
-/// document is drawn from its name and `seed` ([`rank_value`]).
+/// The type of a case's `rank` field: each one a static rank may be on (SPEC §6.2.3).
+#[derive(Debug, Clone, Copy)]
+enum RankKind {
+    I64,
+    F64,
+    Datetime,
+}
+
+/// A collection's static rank in a case (SPEC §6.2.3, ROADMAP 10.1.45): on the field `rank` of type `kind`, whose
+/// value for a document is drawn from its name and `seed` ([`Rank::value`]).
 #[derive(Debug, Clone, Copy)]
 struct Rank {
     linear: bool,
     weight: f64,
     seed: u64,
+    kind: RankKind,
 }
 
 impl Rank {
@@ -152,13 +162,14 @@ impl Rank {
         let mut rank = StaticRank::new("rank");
         rank.weight = self.weight;
         rank.function = self.function();
+        let stored = self.seed.is_multiple_of(2);
+        let kind = match self.kind {
+            RankKind::I64 => FieldKind::I64 { stored },
+            RankKind::F64 => FieldKind::F64 { stored },
+            RankKind::Datetime => FieldKind::Datetime { stored },
+        };
         builder(p)
-            .field(
-                "rank",
-                FieldKind::I64 {
-                    stored: self.seed.is_multiple_of(2),
-                },
-            )
+            .field("rank", kind)
             .ranking(RankingConfig::default().static_rank(Some(rank)))
             .build()
             .unwrap()
@@ -166,19 +177,57 @@ impl Rank {
 
     /// The contribution the reference gives the document named `name`.
     fn contribution(self, name: &str) -> f64 {
-        #[allow(clippy::cast_precision_loss)] // values far below 2^53
-        let value = value_of(self.seed, name).map(|v| v as f64);
+        // SPEC §6.2.3: an integer or a datetime's microseconds as a float.
+        #[allow(clippy::cast_precision_loss)]
+        let value = self.value(name).map(|v| match v {
+            Value::I64(v) | Value::Datetime(v) => v as f64,
+            Value::F64(v) => v,
+            other => panic!("{other:?}"),
+        });
         ref_rank::contribution(self.weight, self.reference(), value)
     }
-}
 
-/// `name`'s static rank value under `seed`: `None` for one in five, else in `-500..=1500` (a negative one ranks as 0).
-fn value_of(seed: u64, name: &str) -> Option<i64> {
-    // FNV-1a: a fixed function of the name, so a document keeps its value wherever it is written.
-    let h = name.bytes().fold(0xcbf2_9ce4_8422_2325_u64 ^ seed, |h, b| {
-        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
-    });
-    (h % 5 != 0).then(|| i64::try_from(h % 2001).unwrap() - 500)
+    /// `name`'s static rank value: `None` for one in five, else mostly in `-500..=1500` (a negative one ranks as 0),
+    /// with fractions, `±0.0`, the extremes of the type (`f64::MAX`, `i64::MIN`, the last datetime) and values large
+    /// enough that a contribution saturates or absorbs the query's score. An infinite `f64` cannot be indexed (SPEC
+    /// §6.2.2), and `-0.0` is stored as `0.0` (§6.4.1).
+    fn value(self, name: &str) -> Option<Value> {
+        // FNV-1a: a fixed function of the name, so a document keeps its value wherever it is written.
+        let h = name
+            .bytes()
+            .fold(0xcbf2_9ce4_8422_2325_u64 ^ self.seed, |h, b| {
+                (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+            });
+        if h % 5 == 0 {
+            return None;
+        }
+        let small = i64::try_from((h >> 8) % 2001).unwrap() - 500;
+        let pick = (h >> 20) % 10;
+        Some(match self.kind {
+            RankKind::I64 => Value::I64(match pick {
+                0 => i64::MAX,
+                1 => i64::MIN,
+                2 => 1 << 60,
+                _ => small,
+            }),
+            #[allow(clippy::cast_precision_loss)] // small values, exact
+            RankKind::F64 => Value::F64(match pick {
+                0 => -0.0,
+                1 => 0.0,
+                2 => f64::MAX,
+                3 => 1e300,
+                4 => -1e300,
+                5 => 1e-300,
+                _ => small as f64 / 7.0,
+            }),
+            RankKind::Datetime => Value::Datetime(match pick {
+                0 => MAX_DATETIME,
+                1 => MIN_DATETIME,
+                2 => 1_700_000_000_000_000 + small,
+                _ => small * 1_000_003,
+            }),
+        })
+    }
 }
 
 fn segment(schema: &CollectionSchema, id: u128, docs: &[(String, Doc)]) -> Segment {
@@ -405,6 +454,11 @@ fn case() -> impl Strategy<Value = Case> {
                 any::<bool>(),
                 prop_oneof![Just(1.0), Just(1000.0), 0.001..10.0_f64],
                 any::<u64>(),
+                prop_oneof![
+                    Just(RankKind::I64),
+                    Just(RankKind::F64),
+                    Just(RankKind::Datetime)
+                ],
             )),
         )
             .prop_map(
@@ -415,10 +469,11 @@ fn case() -> impl Strategy<Value = Case> {
                     queries,
                     k,
                     targets,
-                    rank: rank.map(|(linear, weight, seed)| Rank {
+                    rank: rank.map(|(linear, weight, seed, kind)| Rank {
                         linear,
                         weight,
                         seed,
+                        kind,
                     }),
                 },
             )

@@ -822,6 +822,40 @@ exhaustive. Pruning helps less there than without a static rank, since the bound
 the whole view (`log1p(999)` ≈ 6.9, above most text scores); a per-block bound is an open item. L5 rose 11 % while
 its walk took the wrapped matcher, and is back below before once it enumerates with the unscored one.
 
+After the batch review (commit "fix(engine): address batch AD review"), a segment reads its static rank column's
+largest key from the FOR blocks once and keeps it, instead of every search that takes a threshold walking every block
+of the column (the bound `M`, SPEC §7.3). Same command reduced to `'search_static_rank|search_top10/term$'`,
+2026-11-28, same machine and toolchain, all in one session, alternating fd3b855 (before the review), fix-up v1 (the
+fix-up as first committed, which checks a stashed bound error in `StaticRanked::score`) and fix-up v1 with that check
+moved to a `#[cold]` branch, each run twice in the order fd3b855, fix-up v1, cold, fd3b855, fix-up v1, cold:
+
+| Row | fd3b855 (1st, 2nd) | fix-up v1 (1st, 2nd) | fix-up v1 + cold check (1st, 2nd) |
+|---|--:|--:|--:|
+| `search_static_rank/term/plain/wand` | 437.7, 444.0 µs | 437.2, 433.1 µs | 438.2, 437.7 µs |
+| `search_static_rank/term/plain/exhaustive` | 432.3, 437.3 µs | 429.7, 431.1 µs | 435.7, 435.9 µs |
+| `search_static_rank/or/plain/wand` | 1.023, 1.024 ms | 1.033, 1.035 ms | 1.034, 1.042 ms |
+| `search_static_rank/or/plain/exhaustive` | 1.416, 1.407 ms | 1.438, 1.433 ms | 1.450, 1.428 ms |
+| `search_static_rank/term/ranked/wand` | 916.3, 920.3 µs | 899.7, 916.6 µs | 919.0, 913.9 µs |
+| `search_static_rank/term/ranked/exhaustive` | 846.1, 837.4 µs | 836.4, 851.3 µs | 849.3, 851.3 µs |
+| `search_static_rank/or/ranked/wand` | 1.404, 1.413 ms | 1.406, 1.414 ms | 1.415, 1.415 ms |
+| `search_static_rank/or/ranked/exhaustive` | 2.295, 2.304 ms | 2.286, 2.295 ms | 2.311, 2.300 ms |
+| `search_top10/term` | 456.6, 457.3 µs | 453.0, 457.0 µs | 455.7, 459.5 µs |
+
+The three agree on every row within 3.1 %, and the two runs of one commit differ by up to 1.9 %. The largest gap,
+`or/plain/exhaustive` (fd3b855 1.407 to 1.416 ms, the others 1.428 to 1.450 ms), is a row that builds no static rank
+wrapper; on the ranked rows the runs of fix-up v1 overlap those of fd3b855 or sit below them. At this size neither the
+kept bound nor the check in `score` shows, and the cold branch gained nothing, so it was not kept.
+The ranked `term` rows read 979 to 983 µs and 927 to 931 µs for fix-up v1 in an earlier session (and 892 to
+917 µs and 842 to 851 µs for the 10.1.45 change in another); in this one fix-up v1 reads 900 to 917 µs and 836 to
+851 µs, as fd3b855 does, so that earlier rise was a difference between sessions, not the change. The amended fix-up
+also passes no threshold under `Pruning::Exhaustive`, whose matchers ignore it (one comparison per rise of the
+threshold, not measured here). The bench segment's column is 49 FOR blocks, so nothing at this size was expected to
+improve. What the change removes is a cost that grows with the segment, argued here and not measured: before it, each
+search that took a threshold read and checked every FOR block of the column, its bytes and not only a header, once per
+segment and per relaxed step (about 9 800 blocks for a segment of 10 million documents, up to 80 MB of keys at full
+width, through the 8 MiB block cache that other reads share). Now the first such search of a segment reads them once,
+and every later search reads no block for `M`.
+
 ## `persia-engine` relevance
 
 `cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2, 7.8.4): 18 user-text queries with graded judgments over

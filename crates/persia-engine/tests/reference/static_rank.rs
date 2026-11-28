@@ -19,7 +19,8 @@ pub fn contribution(weight: f64, function: RankFn, value: Option<f64>) -> f64 {
     };
     let v = v.max(0.0);
     let shaped = match function {
-        RankFn::Log1p => (1.0 + v).ln(),
+        // `ln_1p`, SPEC §6.2.3's `log1p`: `(1 + v).ln()` rounds `1 + v` first, and the two may differ by an ulp.
+        RankFn::Log1p => v.ln_1p(),
         RankFn::Linear => v,
     };
     let product = weight * shaped;

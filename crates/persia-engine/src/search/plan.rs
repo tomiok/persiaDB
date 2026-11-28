@@ -260,7 +260,11 @@ impl SearchPlan {
         view: &'a V,
         pruning: Pruning,
     ) -> Result<BoxedMatcher<'a>, ReadError> {
-        Ok(self.ranked(build(&self.root, view, pruning, self.build(None))?, view))
+        Ok(self.ranked(
+            build(&self.root, view, pruning, self.build(None))?,
+            view,
+            pruning,
+        ))
     }
 
     /// As [`Self::matcher_with`], keeping in `kept` what each `bool` selects with its filters, for
@@ -274,6 +278,7 @@ impl SearchPlan {
         Ok(self.ranked(
             build(&self.root, view, pruning, self.build(Some(kept)))?,
             view,
+            pruning,
         ))
     }
 
@@ -287,14 +292,15 @@ impl SearchPlan {
     }
 
     /// `root`, the query's matcher over `view`, with the static rank added to its scores when the collection has one
-    /// (SPEC §7.2, ROADMAP 10.1.45).
+    /// (SPEC §7.2, ROADMAP 10.1.45), whose thresholds reach `root` only when `pruning` prunes.
     fn ranked<'a, V: SearchView>(
         &'a self,
         root: BoxedMatcher<'a>,
         view: &'a V,
+        pruning: Pruning,
     ) -> BoxedMatcher<'a> {
         match &self.static_rank {
-            Some(rank) => Box::new(StaticRanked::new(root, rank, view)),
+            Some(rank) => Box::new(StaticRanked::new(root, rank, view, pruning)),
             None => root,
         }
     }

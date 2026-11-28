@@ -105,12 +105,15 @@ L5 but its transform built no step, so a query no level could relax returned not
 L5 ranked by the static rank while no other hit scored it, so `ranking.static_rank` changed only the order of
 fallback hits, against SPEC §6.2.3 ("the scorer adds `weight · fn(v)`") and §7.2's total. Every hit of a query now
 adds it: a plan of a collection with a static rank wraps its root matcher, which adds the contribution read from the
-view's column after the query's score, and bounds it for pruning by the largest contribution the column's FOR blocks
-allow (SPEC §7.3). L5 is unchanged: its walk enumerates its candidates with the plan's unscored matcher
-(`SearchPlan::candidates`), and its hit score is the contribution alone, so nothing is counted twice. Both read the
-contribution through one function (`score::key_contribution`, with `largest_key` for block bounds), so an L5 hit and
-a query hit of the same document state the same contribution. Explained query hits gain a `with_static_rank` node
-(SPEC §7.7).
+view's column after the query's score, and bounds it for pruning by the contribution of the largest key the column's
+FOR blocks allow (0 for a column without values; SPEC §7.3). That key is read once per segment and kept on it, since
+a segment never changes, so a search does not walk the column's blocks again. L5 is unchanged: its walk enumerates
+its candidates with the plan's unscored matcher (`SearchPlan::candidates`), and its hit score is the contribution
+alone, so nothing is counted twice. Both read the contribution through one function (`score::key_contribution`); L5
+bounds a block by the contribution of `score::largest_key`, the block's largest key, and the query bounds a segment
+by `score::largest_contribution` of the largest key of the whole column, which `column_largest_key` (in
+`search::static_rank`) walks its FOR blocks for. So an L5 hit and a query hit of the same document state the same
+contribution. Explained query hits gain a `with_static_rank` node (SPEC §7.7).
 
 **Why the scorer, not SPEC.** The schema puts the option under `ranking`, SPEC §6.2.3 and §7.2 state the sum, and the
 use the option exists for (sales, popularity, freshness lifting otherwise equal text matches) needs it in every

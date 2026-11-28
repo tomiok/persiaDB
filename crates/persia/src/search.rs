@@ -313,9 +313,11 @@ impl SearchRequest {
         self
     }
 
-    /// How long the search may run, from when [`Collection::search`] is called (SPEC §7.1.4, §7.3; the request JSON's
-    /// `timeout_ms`). Past it, the search stops at its next check (every 256 matches of a view, every 1024 steps of
-    /// its readers, before each view, facet and page read) and fails with
+    /// How long the search may run, from when the request starts to run (SPEC §7.1.4, §7.3; the request JSON's
+    /// `timeout_ms`): after the snapshot is taken and the request is read, so the parse of a
+    /// [`Collection::search_json`] request and of a [`Self::filter_json`] filter comes before it and is not counted.
+    /// Past it, the search stops at its next check (every 256 matches of a view, every 1024 steps of its readers,
+    /// before each view, facet and page read) and fails with
     /// [`ErrorCode::Cancelled`](crate::ErrorCode::Cancelled), returning no hits: never an early or relaxed page, at
     /// any relaxation level. It is read on the database's monotonic clock, which also times the relaxation budget
     /// (`budget_ms`, a separate, softer limit that truncates the cascade instead). `Duration::ZERO` has passed at the
