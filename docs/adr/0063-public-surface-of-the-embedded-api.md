@@ -312,7 +312,10 @@ the crate too.
    change to the snapshot or to any other file outside `website/` that `status.mjs`, `progress.mjs` or the node
    tests read: the engine sources, `crates/persia/src/lib.rs` and `internal/blob.rs`, `persia-blob`'s `lib.rs`,
    `persia-analysis`'s `registry.rs`, `Cargo.toml`, `ROADMAP.md` and `PROGRESS.md`; `website/src/paths-filter.test.mjs`
-   fails when a path they read is outside the `pull_request` paths filter or the `push` list differs from it). A
+   scans the website's code for the path forms it lists and fails when one names a file outside the `pull_request`
+   paths filter, when a file-system call's path is in none of those forms, or when the `push` list differs from it;
+   the scan is static and does not follow variables, so a path that reaches one of the bases it trusts through a
+   variable is not seen). A
    method named on a value (`page.next_cursor()`) and a renamed import
    (`use persia as p; p::internal`) are not resolved: the check does not type the text, and rustdoc compiling the
    samples (run alone, `cargo test -p persia-docs`) refuses those that name nothing public.
