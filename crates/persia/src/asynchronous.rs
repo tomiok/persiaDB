@@ -640,7 +640,9 @@ impl AsyncCollection {
     }
 
     /// [`Collection::search`] on the pool. Dropping the future of a search that has started sets its cancellation
-    /// token: the search stops soon after (SPEC §7.3) with [`ErrorCode::Cancelled`], which nobody receives.
+    /// token: the search stops soon after (SPEC §7.3) with [`ErrorCode::Cancelled`], which nobody receives. A
+    /// [`SearchRequest::timeout`] runs from when the job starts on the pool, not while it waits in the queue, as for
+    /// [`Collection::search`] called on that thread.
     ///
     /// ```
     /// # use std::future::Future;

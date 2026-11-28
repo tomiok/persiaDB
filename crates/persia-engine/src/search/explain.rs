@@ -72,6 +72,21 @@ pub enum Explanation {
         /// collection has no static rank or the document no value.
         value: Option<f64>,
     },
+    /// A hit of a query in a collection with a static rank (SPEC §6.2.3, §7.2, §7.7, ROADMAP 10.1.45): the query's tree,
+    /// then the static rank's contribution added to it. Its score is `query`'s plus `static_rank`, saturated at
+    /// `f64::MAX`. Around a relaxed step's tree (inside [`Explanation::Relaxed`]) too, but not an L5 hit's, which is
+    /// [`Explanation::StaticRank`] alone.
+    WithStaticRank {
+        /// The score.
+        score: f64,
+        /// How the query scored the document.
+        query: Box<Explanation>,
+        /// The static rank's contribution (SPEC §6.2.3): `weight · fn(v)`, 0 when the document has no value.
+        static_rank: f64,
+        /// The static rank field's value as the static rank reads it (a `datetime` in microseconds); `None` when the
+        /// document has none.
+        value: Option<f64>,
+    },
     /// A hit of the relaxation cascade (SPEC §7.6, §7.7, ROADMAP 8.3.4): the level and step that matched it, around how
     /// its step scored it. Only a relaxed search's hits have it, at the root, and only there.
     Relaxed(RelaxedExplanation),
@@ -86,7 +101,8 @@ impl Explanation {
             Self::Bool { score, .. }
             | Self::Boost { score, .. }
             | Self::Constant { score, .. }
-            | Self::StaticRank { score, .. } => *score,
+            | Self::StaticRank { score, .. }
+            | Self::WithStaticRank { score, .. } => *score,
             Self::All => 0.0,
             Self::Relaxed(r) => r.explanation.score(),
         }
@@ -105,7 +121,8 @@ pub struct RelaxedExplanation {
     /// What the step applied, as the response's `applied` lists it (`"drop_terms:75%"`, `"prefix:cut"`, `"fallback"`);
     /// `None` for L0, which applies nothing.
     pub applied: Option<String>,
-    /// How the step scored the hit: its query's tree, or L5's [`Explanation::StaticRank`].
+    /// How the step scored the hit: its query's tree (around its static rank, [`Explanation::WithStaticRank`], in a
+    /// collection with one), or L5's [`Explanation::StaticRank`].
     pub explanation: Box<Explanation>,
 }
 

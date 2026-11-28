@@ -1,9 +1,12 @@
 //! Fuzz the request JSON (ROADMAP 10.1.10; SPEC §7.1, ADR-0062): no input panics `QueryRequest::from_json`, an
 //! accepted request holds only parts its own parsers accept, and running it on a small collection returns, with hits
-//! or an error, never a panic. A response it returns is written as valid JSON (ROADMAP 10.1.13).
+//! or an error, never a panic. A response it returns is written as valid JSON (ROADMAP 10.1.13). An accepted
+//! `timeout_ms` is the timeout the request holds, and on a clock that never moves only a timeout of 0 stops the run,
+//! as a failed search, never a page (ROADMAP 10.1.44; SPEC §7.1.4, §7.3).
 #![no_main]
 
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use libfuzzer_sys::fuzz_target;
 use persia_engine::db::{
@@ -14,8 +17,8 @@ use persia_engine::query::QueryLimits;
 use persia_engine::schema::{
     CollectionSchema, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
 };
-use persia_engine::search::request::{QueryRequest, RunOptions};
-use persia_engine::search::{MAX_FACETS, MAX_SORT_KEYS, Projection};
+use persia_engine::search::request::{QueryRequest, QueryRequestError, RunOptions};
+use persia_engine::search::{Interrupt, MAX_FACETS, MAX_SORT_KEYS, Projection};
 use persia_engine::wal::Durability;
 use persia_storage::container::sim::SimFile;
 
@@ -105,12 +108,33 @@ fuzz_target!(|data: &[u8]| {
         let token = cursor.to_token();
         assert_eq!(Cursor::from_token(&token).map(|c| c.to_token()), Ok(token));
     }
+    // `timeout_ms` (SPEC §7.1.4): an accepted request's key is a whole number of milliseconds, the timeout it holds;
+    // without the key, no timeout. The strict reader refuses a repeated key, so the plain reading has the one value.
+    if let Ok(written) = serde_json::from_str::<serde_json::Value>(json) {
+        let millis = written
+            .get("timeout_ms")
+            .map(|ms| ms.as_u64().map(Duration::from_millis));
+        assert_eq!(request.timeout().map(Some), millis, "{json}");
+    }
     // On the calling thread, with a budget clock that never moves: the run is the input's alone.
     let options = RunOptions::new()
         .threads(Threads::Current)
         .budget_clock(Arc::new(ManualClock::new(0)));
+    let ran = request.run(collection, &options);
+    // That clock never moves, and the run has no deadline or token: only a timeout of 0 has passed, at the search's
+    // first check, and it fails the search, never returning a page (SPEC §7.3); any other timeout never stops it.
+    let interrupt = ran.as_ref().err().and_then(QueryRequestError::interrupt);
+    if request.timeout() == Some(Duration::ZERO) {
+        assert!(ran.is_err(), "a timeout of 0 returned a page: {json}");
+        assert!(
+            matches!(interrupt, None | Some(Interrupt::DeadlineExceeded)),
+            "{interrupt:?}: {json}"
+        );
+    } else {
+        assert_eq!(interrupt, None, "{json}");
+    }
     // A response the search returned always has its JSON (SPEC §7.5.2), and that JSON is valid.
-    if let Ok(response) = request.run(collection, &options) {
+    if let Ok(response) = ran {
         let json = response
             .to_json(collection.schema())
             .expect("a response the search returned has its JSON");

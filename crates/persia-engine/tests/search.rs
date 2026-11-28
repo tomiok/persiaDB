@@ -9,6 +9,11 @@
 //! 3. `top_k(k)` is the first `k` of every hit sorted by score descending, then docid ascending, whatever `k`
 //!    (7.4.3); `TopK` keeps the same hits whatever order they are pushed in.
 //! 4. `top_k_with(k, p)` returns the same hits for every [`Pruning`], scores bit for bit (7.4.4.3).
+//! 5. With a static rank on an `i64`, `f64` or `datetime` field (ROADMAP 10.1.45; SPEC §6.2.3, §7.2), half the cases,
+//!    its values negative, `±0.0`, fractions and the extremes of the type among them, every match scores
+//!    the reference's score plus the reference's contribution of its value (`tests/reference/static_rank.rs`), and
+//!    invariants 1–4 hold on those totals; each hit's explanation scores it bit for bit, a `with_static_rank` node
+//!    exactly when the collection has a static rank.
 
 #![allow(
     clippy::unwrap_used,
@@ -25,16 +30,17 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use persia_analysis::AnalyzerRegistry;
-use persia_engine::document::{Document, Value};
+use persia_engine::document::{Document, MAX_DATETIME, MIN_DATETIME, Value};
 use persia_engine::memtable::Memtable;
 use persia_engine::query::{
     BoolQuery, BoostQuery, CombinedQuery, ConstantScoreQuery, Filter, PhraseQuery, PhraseTerm,
     Query, QueryLimits, TermQuery, WeightedTerm,
 };
 use persia_engine::schema::{
-    AnalyzerRef, CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
+    AnalyzerRef, CollectionSchema, FieldId, FieldKind, KeywordOptions, RankFn, RankingConfig,
+    SchemaBuilder, StaticRank, TextOptions,
 };
-use persia_engine::search::{Hit, Matcher, Pruning, SearchError, SearchPlan, TopK};
+use persia_engine::search::{Explanation, Hit, Matcher, Pruning, SearchError, SearchPlan, TopK};
 use persia_engine::segment::{ReadError, Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
 use persia_engine::stats::{SearchStatistics, SegmentStatistics};
 use persia_engine::view::{SearchView, SegmentView};
@@ -42,6 +48,7 @@ use persia_format::ByteSource;
 use proptest::prelude::*;
 use reference::bm25f::{Clause, Corpus, Doc, Field as RefField};
 use reference::search::Query as RefQuery;
+use reference::static_rank as ref_rank;
 use roaring::RoaringBitmap;
 
 /// The largest difference allowed between an engine score and the reference's, relative to the query's scale
@@ -103,10 +110,140 @@ fn document(schema: &CollectionSchema, id: &str, doc: &Doc) -> Document {
     d
 }
 
+/// [`document`], with its `rank` value when the case has a static rank (ROADMAP 10.1.45).
+fn ranked_document(schema: &CollectionSchema, id: &str, doc: &Doc, rank: Option<Rank>) -> Document {
+    let d = document(schema, id, doc);
+    match (rank, schema.field("rank")) {
+        (Some(rank), Some(field)) => match rank.value(id) {
+            Some(v) => d.with(field.id(), v),
+            None => d,
+        },
+        _ => d,
+    }
+}
+
+/// The type of a case's `rank` field: each one a static rank may be on (SPEC §6.2.3).
+#[derive(Debug, Clone, Copy)]
+enum RankKind {
+    I64,
+    F64,
+    Datetime,
+}
+
+/// A collection's static rank in a case (SPEC §6.2.3, ROADMAP 10.1.45): on the field `rank` of type `kind`, whose
+/// value for a document is drawn from its name and `seed` ([`Rank::value`]).
+#[derive(Debug, Clone, Copy)]
+struct Rank {
+    linear: bool,
+    weight: f64,
+    seed: u64,
+    kind: RankKind,
+}
+
+impl Rank {
+    fn function(self) -> RankFn {
+        if self.linear {
+            RankFn::Linear
+        } else {
+            RankFn::Log1p
+        }
+    }
+
+    fn reference(self) -> ref_rank::RankFn {
+        if self.linear {
+            ref_rank::RankFn::Linear
+        } else {
+            ref_rank::RankFn::Log1p
+        }
+    }
+
+    /// The case's schema with the `rank` field and this static rank on it.
+    fn schema(self, p: &Params) -> CollectionSchema {
+        let mut rank = StaticRank::new("rank");
+        rank.weight = self.weight;
+        rank.function = self.function();
+        let stored = self.seed.is_multiple_of(2);
+        let kind = match self.kind {
+            RankKind::I64 => FieldKind::I64 { stored },
+            RankKind::F64 => FieldKind::F64 { stored },
+            RankKind::Datetime => FieldKind::Datetime { stored },
+        };
+        builder(p)
+            .field("rank", kind)
+            .ranking(RankingConfig::default().static_rank(Some(rank)))
+            .build()
+            .unwrap()
+    }
+
+    /// The contribution the reference gives the document named `name`.
+    fn contribution(self, name: &str) -> f64 {
+        // SPEC §6.2.3: an integer or a datetime's microseconds as a float.
+        #[allow(clippy::cast_precision_loss)]
+        let value = self.value(name).map(|v| match v {
+            Value::I64(v) | Value::Datetime(v) => v as f64,
+            Value::F64(v) => v,
+            other => panic!("{other:?}"),
+        });
+        ref_rank::contribution(self.weight, self.reference(), value)
+    }
+
+    /// `name`'s static rank value: `None` for one in five, else mostly in `-500..=1500` (a negative one ranks as 0),
+    /// with fractions, `±0.0`, the extremes of the type (`f64::MAX`, `i64::MIN`, the last datetime) and values large
+    /// enough that a contribution saturates or absorbs the query's score. An infinite `f64` cannot be indexed (SPEC
+    /// §6.2.2), and `-0.0` is stored as `0.0` (§6.4.1).
+    fn value(self, name: &str) -> Option<Value> {
+        // FNV-1a: a fixed function of the name, so a document keeps its value wherever it is written.
+        let h = name
+            .bytes()
+            .fold(0xcbf2_9ce4_8422_2325_u64 ^ self.seed, |h, b| {
+                (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+            });
+        if h % 5 == 0 {
+            return None;
+        }
+        let small = i64::try_from((h >> 8) % 2001).unwrap() - 500;
+        let pick = (h >> 20) % 10;
+        Some(match self.kind {
+            RankKind::I64 => Value::I64(match pick {
+                0 => i64::MAX,
+                1 => i64::MIN,
+                2 => 1 << 60,
+                _ => small,
+            }),
+            #[allow(clippy::cast_precision_loss)] // small values, exact
+            RankKind::F64 => Value::F64(match pick {
+                0 => -0.0,
+                1 => 0.0,
+                2 => f64::MAX,
+                3 => 1e300,
+                4 => -1e300,
+                5 => 1e-300,
+                _ => small as f64 / 7.0,
+            }),
+            RankKind::Datetime => Value::Datetime(match pick {
+                0 => MAX_DATETIME,
+                1 => MIN_DATETIME,
+                2 => 1_700_000_000_000_000 + small,
+                _ => small * 1_000_003,
+            }),
+        })
+    }
+}
+
 fn segment(schema: &CollectionSchema, id: u128, docs: &[(String, Doc)]) -> Segment {
+    ranked_segment(schema, id, docs, None)
+}
+
+/// [`segment`], each document with its `rank` value under `rank` ([`ranked_document`]).
+fn ranked_segment(
+    schema: &CollectionSchema,
+    id: u128,
+    docs: &[(String, Doc)],
+    rank: Option<Rank>,
+) -> Segment {
     let mut b = SegmentBuilder::new(schema, &AnalyzerRegistry::builtin()).unwrap();
     for (name, doc) in docs {
-        b.add(&document(schema, name, doc)).unwrap();
+        b.add(&ranked_document(schema, name, doc, rank)).unwrap();
     }
     let meta = SegmentMeta {
         segment_id: id,
@@ -299,6 +436,8 @@ struct Case {
     queries: Vec<RefQuery>,
     k: usize,
     targets: Vec<u32>,
+    /// The collection's static rank, when it has one (ROADMAP 10.1.45).
+    rank: Option<Rank>,
 }
 
 fn case() -> impl Strategy<Value = Case> {
@@ -311,15 +450,33 @@ fn case() -> impl Strategy<Value = Case> {
             prop::collection::vec(query(p), 1..6),
             0..12_usize,
             prop::collection::vec(0..40_u32, 0..8),
+            prop::option::of((
+                any::<bool>(),
+                prop_oneof![Just(1.0), Just(1000.0), 0.001..10.0_f64],
+                any::<u64>(),
+                prop_oneof![
+                    Just(RankKind::I64),
+                    Just(RankKind::F64),
+                    Just(RankKind::Datetime)
+                ],
+            )),
         )
-            .prop_map(|(params, segments, memtable, queries, k, targets)| Case {
-                params,
-                segments,
-                memtable,
-                queries,
-                k,
-                targets,
-            })
+            .prop_map(
+                |(params, segments, memtable, queries, k, targets, rank)| Case {
+                    params,
+                    segments,
+                    memtable,
+                    queries,
+                    k,
+                    targets,
+                    rank: rank.map(|(linear, weight, seed, kind)| Rank {
+                        linear,
+                        weight,
+                        seed,
+                        kind,
+                    }),
+                },
+            )
     })
 }
 
@@ -356,10 +513,11 @@ fn ranked(mut hits: Vec<Hit>) -> Vec<Hit> {
     hits
 }
 
-/// Invariants 1–4 for one view: `docs[docid]` is its document when live.
+/// Invariants 1–5 for one view: `docs[docid]` is its document when live, with the static rank contribution the
+/// reference gives it (0 without a static rank).
 fn check_view<V: SearchView>(
     view: &V,
-    docs: &BTreeMap<u32, Doc>,
+    docs: &BTreeMap<u32, (Doc, f64)>,
     plan: &SearchPlan,
     q: &RefQuery,
     corpus: &Corpus,
@@ -369,7 +527,11 @@ fn check_view<V: SearchView>(
     let hits = exhaust(&mut plan.matcher(view).unwrap());
     let expected: Vec<(u32, (f64, f64))> = docs
         .iter()
-        .filter_map(|(&d, doc)| corpus.eval(q, doc).map(|s| (d, s)))
+        .filter_map(|(&d, (doc, rank))| {
+            corpus
+                .eval(q, doc)
+                .map(|(score, scale)| (d, (ref_rank::total(score, *rank), scale + rank)))
+        })
         .collect();
     assert_eq!(
         hits.iter().map(|h| h.docid).collect::<Vec<_>>(),
@@ -384,6 +546,13 @@ fn check_view<V: SearchView>(
             hit.docid,
             hit.score
         );
+    }
+    // Invariant 5: the explanation scores the hit bit for bit, around its static rank when the collection has one.
+    for hit in &hits {
+        let explained = plan.explain(view, hit.docid).unwrap().unwrap();
+        assert_eq!(explained.score().to_bits(), hit.score.to_bits(), "{q:?}");
+        let ranked = matches!(explained, Explanation::WithStaticRank { .. });
+        assert_eq!(ranked, case.rank.is_some(), "{explained:?}");
     }
 
     // Invariant 2: advance to each target in turn.
@@ -429,7 +598,11 @@ fn bits(hits: &[Hit]) -> Vec<(u32, u64)> {
 }
 
 fn check(case: &Case) {
-    let schema = schema(&case.params);
+    let schema = match case.rank {
+        Some(rank) => rank.schema(&case.params),
+        None => schema(&case.params),
+    };
+    let contribution = |name: &str| case.rank.map_or(0.0, |r| r.contribution(name));
     let fields = ids(&schema);
     let registry = AnalyzerRegistry::builtin();
     let mut corpus = Corpus {
@@ -466,7 +639,7 @@ fn check(case: &Case) {
             .enumerate()
             .map(|(j, (d, _))| (format!("s{s}-{j}"), d.clone()))
             .collect();
-        let seg = Arc::new(segment(&schema, s as u128 + 1, &named));
+        let seg = Arc::new(ranked_segment(&schema, s as u128 + 1, &named, case.rank));
         let mut deleted = RoaringBitmap::new();
         let mut live = BTreeMap::new();
         for (j, (d, del)) in docs.iter().enumerate() {
@@ -474,7 +647,7 @@ fn check(case: &Case) {
             if *del {
                 deleted.insert(j as u32);
             } else {
-                live.insert(j as u32, d.clone());
+                live.insert(j as u32, (d.clone(), contribution(&named[j].0)));
             }
         }
         let tombstones = (!deleted.is_empty()).then(|| seg.tombstones(deleted).unwrap());
@@ -485,12 +658,13 @@ fn check(case: &Case) {
     let mut mem_docs = BTreeMap::new();
     for (j, (d, del)) in case.memtable.iter().enumerate() {
         let name = format!("m{j}");
-        mem.put(&document(&schema, &name, d)).unwrap();
+        mem.put(&ranked_document(&schema, &name, d, case.rank))
+            .unwrap();
         if *del {
             assert!(mem.delete(&name).unwrap());
         } else {
             corpus.counted.push(d.clone());
-            mem_docs.insert(j as u32, d.clone());
+            mem_docs.insert(j as u32, (d.clone(), contribution(&name)));
         }
     }
     let view = mem.view();

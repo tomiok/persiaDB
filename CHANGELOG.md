@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia::SearchRequest::timeout(Duration)` and the request JSON's `timeout_ms` (ROADMAP 10.1.44, ADR-0063 amended;
+  SPEC §7.1.4, §7.3): how long a search may run, from when the request starts to run, after it is parsed (for
+  `AsyncCollection::search`, when its job starts on the pool). Past it the search fails at the engine's next check
+  with `ErrorCode::Cancelled` and no hits, at every relaxation level: never a truncated or early relaxed page. `0`
+  has passed at the first check; a timeout past what the clock represents is no limit. `timeout_ms` is an integer of
+  at least 0 (`-0`, a fraction, an exponent, a string or a misspelt key are `ErrorCode::InvalidArgument`). It is
+  read on the database's monotonic clock, which the relaxation budget (`budget_ms`) now reads too. The engine's
+  `QueryRequest::with_timeout` and `timeout` are its typed form.
 - `persia::SearchRequest::filter_json` and `soft_filter_json` (ROADMAP 10.1.35, ADR-0063 amended; SPEC §7.1.4): a
   hard or soft filter in its JSON form (SPEC §7.1.2, fields by name) on a request built in code, parsed when the
   search runs as `Collection::search_json` parses `filter` and `soft_filter`: the same parser, the schema of the
@@ -518,6 +526,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- A collection's static rank (`ranking.static_rank`, SPEC §6.2.3, §7.2) is now added to the score of every hit of a
+  query, not only to L5 `fallback` hits (ROADMAP 10.1.45, ADR-0044 amended): the query's score, then
+  `weight · fn(v)`, saturated at `f64::MAX`, in a plain search and every relaxed step that scores words. Of two
+  documents with equal text scores, the higher static rank now ranks first; `score` sort keys, cursors and
+  `Hit::rank_score` see the total. Explained hits gain an `Explanation::WithStaticRank` node (`with_static_rank` in
+  the response JSON: `score`, `query`, `static_rank` with its `score` and `value`). L5 hits still score the
+  contribution alone. Pruning stays exact: a segment bounds the contribution by the largest key its column's FOR
+  blocks allow, read once per segment and kept (0 for a column without values); a memtable view scores every match.
+  Collections without a static rank (or with `weight` 0) rank and score exactly as before. A cursor issued before
+  this change on a collection with a static rank resumes against the new scores (its fingerprint does not tell), so
+  the pages after it may skip or repeat hits: start such a walk again.
 - README: the quickstart runs in CI (ROADMAP 10.3.3). It is the getting-started guide's first sample, a doctest,
   with `app.persia` in place of a temporary directory, and a repo check (`xtask/src/repo_checks/samples.rs`) fails
   when the two differ. Its `main` now returns `Result<(), Box<dyn std::error::Error>>` and ends with

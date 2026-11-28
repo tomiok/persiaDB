@@ -24,7 +24,7 @@ use super::*;
 use crate::db::{
     CancelToken, Clock, Database, DatabaseOptions, ManualClock, SearchRequest, Threads,
 };
-use crate::document::Document;
+use crate::document::{Document, Value};
 use crate::query::{
     Compiled, DefaultFields, Filter, FilterValue, Query, QueryCompiler, QueryLimits,
 };

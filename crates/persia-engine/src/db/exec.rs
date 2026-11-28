@@ -13,7 +13,7 @@ use core::ops::Bound;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::clock::{Clock, SystemClock};
 use super::views::{CollectionViews, each_view_term};
@@ -139,6 +139,9 @@ pub struct Execution {
     pub(super) pruning: Pruning,
     pub(super) threads: Threads,
     deadline: Option<(Arc<dyn Clock>, Instant)>,
+    /// The end of a request's `timeout` (SPEC §7.1.4), on [`Self::relax_clock`] from when the request started to run:
+    /// read as a deadline, beside [`Self::deadline`]'s ([`Self::with_timeout`]).
+    timeout: Option<(Arc<dyn Clock>, Instant)>,
     cancel: Option<CancelToken>,
     /// What the relaxation budget reads (SPEC §7.6); [`SystemClock`] when `None`.
     clock: Option<Arc<dyn Clock>>,
@@ -183,7 +186,7 @@ impl Execution {
 
     /// Reads the relaxation cascade's time budget (`budget_ms`, SPEC §7.6) on `clock`: a test's
     /// [`super::ManualClock`], or the database's own clock. Without one, the budget reads [`Self::deadline`]'s clock,
-    /// or else [`SystemClock`].
+    /// or else [`SystemClock`]. A request's `timeout` (SPEC §7.1.4) is read on the same clock.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -200,7 +203,8 @@ impl Execution {
         self
     }
 
-    /// The clock the relaxation budget reads: [`Self::budget_clock`]'s, else the deadline's, else the system's.
+    /// The clock the relaxation budget and a request's timeout read: [`Self::budget_clock`]'s, else the deadline's,
+    /// else the system's.
     pub(super) fn relax_clock(&self) -> Arc<dyn Clock> {
         static SYSTEM: LazyLock<Arc<dyn Clock>> = LazyLock::new(|| Arc::new(SystemClock));
         self.clock
@@ -220,12 +224,31 @@ impl Execution {
         }
     }
 
-    /// The interrupt in force, if any: a cancellation first, then the deadline, then a relaxation step's budget.
+    /// This execution, also stopping with [`Interrupt::DeadlineExceeded`] once [`Self::relax_clock`] reads `timeout`
+    /// after now (a request's `timeout`, SPEC §7.1.4): the clock is read once here, when the request starts to run.
+    /// [`Self::deadline`], if any, still applies: the first of the two to pass stops the search. An end the clock
+    /// cannot represent (a timeout of centuries) is no end: it would never pass.
+    pub(crate) fn with_timeout(&self, timeout: Duration) -> Self {
+        let clock = self.relax_clock();
+        let end = clock.now().checked_add(timeout);
+        Self {
+            timeout: end.map(|at| (clock, at)),
+            ..self.clone()
+        }
+    }
+
+    /// The interrupt in force, if any: a cancellation first, then the deadline and the request's timeout, then a
+    /// relaxation step's budget.
     pub(super) fn interrupt(&self) -> Result<(), Interrupt> {
         if self.cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
             return Err(Interrupt::Cancelled);
         }
         if let Some((clock, at)) = &self.deadline
+            && clock.now() >= *at
+        {
+            return Err(Interrupt::DeadlineExceeded);
+        }
+        if let Some((clock, at)) = &self.timeout
             && clock.now() >= *at
         {
             return Err(Interrupt::DeadlineExceeded);
@@ -591,12 +614,55 @@ mod tests {
     #[test]
     fn the_deadline_is_read_from_the_clock() {
         let clock = Arc::new(super::super::ManualClock::new(0));
-        let at = clock.now() + std::time::Duration::from_millis(5);
+        let at = clock.now() + Duration::from_millis(5);
         let exec = Execution::default().deadline(clock.clone(), at);
         assert_eq!(exec.interrupt(), Ok(()));
-        clock.advance(std::time::Duration::from_millis(4));
+        clock.advance(Duration::from_millis(4));
         assert_eq!(exec.interrupt(), Ok(()));
-        clock.advance(std::time::Duration::from_millis(1));
+        clock.advance(Duration::from_millis(1));
         assert_eq!(exec.interrupt(), Err(Interrupt::DeadlineExceeded));
+    }
+
+    /// A request's timeout (SPEC §7.1.4) runs from the call, on the budget clock, beside the deadline: the first to
+    /// pass stops the search, and an end the clock cannot represent never passes.
+    #[test]
+    fn a_timeout_runs_on_the_budget_clock_from_the_call() {
+        let clock = Arc::new(super::super::ManualClock::new(0));
+        let ms = Duration::from_millis;
+        let exec = Execution::default().budget_clock(clock.clone());
+        clock.advance(ms(10));
+        // Timed from the call, not from when the clock started.
+        let timed = exec.with_timeout(ms(5));
+        clock.advance(ms(4));
+        assert_eq!(timed.interrupt(), Ok(()));
+        // Nor does it change the execution it was made from.
+        clock.advance(ms(1));
+        assert_eq!(timed.interrupt(), Err(Interrupt::DeadlineExceeded));
+        assert_eq!(exec.interrupt(), Ok(()));
+        // A timeout of 0 has passed at the first read.
+        assert_eq!(
+            exec.with_timeout(Duration::ZERO).interrupt(),
+            Err(Interrupt::DeadlineExceeded)
+        );
+        // Past what an `Instant` holds: no end, and no panic.
+        assert_eq!(exec.with_timeout(Duration::MAX).interrupt(), Ok(()));
+        // An earlier deadline still stops it, and so does a later timeout's end before a later deadline.
+        let both = exec
+            .clone()
+            .deadline(clock.clone(), clock.now() + ms(1))
+            .with_timeout(ms(3));
+        clock.advance(ms(1));
+        assert_eq!(both.interrupt(), Err(Interrupt::DeadlineExceeded));
+        let both = exec
+            .clone()
+            .deadline(clock.clone(), clock.now() + ms(9))
+            .with_timeout(ms(3));
+        clock.advance(ms(3));
+        assert_eq!(both.interrupt(), Err(Interrupt::DeadlineExceeded));
+        // A cancellation still wins.
+        let token = CancelToken::new();
+        token.cancel();
+        let cancelled = exec.clone().cancel(token).with_timeout(Duration::ZERO);
+        assert_eq!(cancelled.interrupt(), Err(Interrupt::Cancelled));
     }
 }

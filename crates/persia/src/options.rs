@@ -1,7 +1,7 @@
 //! How a database is opened (SPEC §8.1, §14; ROADMAP 10.1.1).
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -447,6 +447,15 @@ impl OpenOptions {
     #[allow(clippy::unused_self)] // The `async` form reads the pool's options.
     fn refused_pool(&self) -> Option<&'static str> {
         None
+    }
+
+    /// The clock a search reads its timeout and its relaxation budget on (SPEC §7.1.4, §7.6, ROADMAP 10.1.44): the
+    /// database's, the one its commit policy reads (`OpenOptions::clock`, a test hook), else the system's
+    /// monotonic clock, one shared by every search rather than allocated for each.
+    pub(crate) fn search_clock(&self) -> Arc<dyn Clock> {
+        static SYSTEM: LazyLock<Arc<dyn Clock>> =
+            LazyLock::new(|| Arc::new(persia_engine::db::SystemClock));
+        self.clock.as_ref().unwrap_or(&SYSTEM).clone()
     }
 
     /// The engine's options for one open (they are not `Clone`: each open draws its own segment ids).

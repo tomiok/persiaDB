@@ -17,8 +17,8 @@ mod stream;
 mod terms;
 mod verify;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use persia_format::checksum::crc32c;
 use persia_format::{BlobRef, ByteSource, Reader};
@@ -112,6 +112,9 @@ pub struct Segment {
     /// Unique per [`Segment::open`] in this process: tells this segment's [`TermInfo`]s from any other's, even
     /// one with the same segment id.
     instance: u64,
+    /// The largest key of each numeric column, once read ([`Self::largest_key`]): the segment never changes, so a
+    /// bound read from its column's FOR blocks holds for its lifetime (SPEC §7.3).
+    largest_keys: Box<[(FieldId, OnceLock<u64>)]>,
 }
 
 impl Segment {
@@ -179,6 +182,17 @@ impl Segment {
             term_dicts: Vec::new(),
             cache,
             instance: NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed),
+            largest_keys: schema
+                .fields()
+                .iter()
+                .filter(|f| {
+                    matches!(
+                        f.field_type(),
+                        FieldType::I64 | FieldType::F64 | FieldType::Datetime
+                    )
+                })
+                .map(|f| (f.id(), OnceLock::new()))
+                .collect(),
         };
         segment.check_presence()?;
         segment.validate_tables()?;
@@ -390,6 +404,29 @@ impl Segment {
             self.doc_count(),
             false,
         )
+    }
+
+    /// A key no document's key in `field`'s numeric column is above, as `read` finds it from the column's FOR blocks:
+    /// read once per segment, since a segment never changes (SPEC §7.3, the static rank's bound). A failed read is
+    /// returned and not kept, so the next call reads again and fails the same way on a corrupt block.
+    ///
+    /// # Errors
+    /// What `read` returns.
+    pub(crate) fn largest_key(
+        &self,
+        field: FieldId,
+        read: impl FnOnce() -> Result<u64, ReadError>,
+    ) -> Result<u64, ReadError> {
+        let Some((_, slot)) = self.largest_keys.iter().find(|(f, _)| *f == field) else {
+            // Not a numeric field of the segment's schema: nothing to keep it in.
+            return read();
+        };
+        if let Some(&key) = slot.get() {
+            return Ok(key);
+        }
+        let key = read()?;
+        // A search on another thread may have read it first: the same bytes give the same key.
+        Ok(*slot.get_or_init(|| key))
     }
 
     /// The doc values of a `bool` field (ROADMAP 5.3.5).

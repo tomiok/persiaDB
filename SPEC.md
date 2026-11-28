@@ -1354,7 +1354,8 @@ returned as it is, and copied as bytes, never re-validated.
   "relax": { "min_results": 1 },          // overrides collection default
   "explain": false,
   "proximity": false,                     // true scores the proximity bonus (§7.2); needs "relax": false
-  "projection": "all"                     // or "none", or ["title", "price"]: the stored fields a hit returns (§7.5.1)
+  "projection": "all",                    // or "none", or ["title", "price"]: the stored fields a hit returns (§7.5.1)
+  "timeout_ms": 200                       // optional: past it the search fails, deadline exceeded (§7.1.4, §7.3)
 }
 ```
 Programmatic query AST (term, combined, phrase, prefix, fuzzy, bool must/should/must_not, filter, boost,
@@ -1571,6 +1572,7 @@ never fails (§7.1.1).
 | `explain` | `true` or `false` (§7.7) | `false` |
 | `proximity` | `true` or `false` (§7.2) | `false` |
 | `projection` | `"all"`, `"none"`, or a non-empty array of distinct names, each a stored field or, in a collection that is not `strict`, an extra field (§7.5.1) | `"all"` |
+| `timeout_ms` | an integer of milliseconds of at least 0, written without a fraction or an exponent, at most 2^64 − 1 (ROADMAP 10.1.44); `-0` is an error of its own | no timeout |
 
 Each value is read by the rules of its own section. A `sort` key object takes `field`, `order` and `missing`, or
 `score` alone with an object of `order` (§7.4); a facet object takes `field` and `size` (default 10); any other key in
@@ -1616,6 +1618,23 @@ another type, longer than 1 MiB) is `INVALID_ARGUMENT`, and a filter past a limi
 §7.1.3 limit is (ADR-0063 item 8). Either setter takes its request's one hard or soft filter, as the typed setters do:
 the later call is the one kept. The filter's text is parsed when the request runs, not by the setter, since a request
 names no schema until then (as `fields` does, by name); the API has no parser that returns a typed filter.
+
+`timeout_ms` (ROADMAP 10.1.44, ADR-0063) is the request's deadline (§7.3), given as a time from when the request
+starts to run, not as an instant: an instant means something only on one clock (a monotonic instant is not even
+comparable across processes), and JSON, a server header or a C call carries a duration as it is. The embedded API's
+`SearchRequest::timeout` takes a `Duration` (sub-millisecond ones too) and is the same timeout. The run reads the
+clock once, before anything else it does, and the deadline is that instant plus the timeout, on the database's clock:
+the monotonic clock its commit policy reads (§8.2), the system's unless a test injects one. The relaxation budget
+(§7.6) reads the same clock; a run given its own deadline as well (the engine's `RunOptions::deadline`) stops at the
+first of the two. `0` has passed at the search's first read, so the search fails there: a caller that hands on what
+is left of a deadline of its own gets the error, not an invalid request. There is no upper bound: an end the clock
+cannot represent (checked arithmetic; a timeout of centuries) is no end. A search past it fails as at any deadline:
+at the first read of §7.3 that finds the clock at or past it, with no hits, at every relaxation level, L0 and L5
+included, never as a truncated or early relaxed page (§7.6: the budget is what truncates). In the embedded API that
+error is `CANCELLED` (ADR-0063 item 7: the call was cancelled or ran past its deadline): a synchronous search has no
+other interrupt, and an async search whose future was dropped returns to nobody. An async search's timeout runs from
+when its job starts on the pool, not while it is queued. The timeout is not part of the cursor's request fingerprint
+(§7.4): it does not change the ranking.
 
 ### 7.2 Scoring: BM25F
 Per term `t` and doc `d` over fields `f` with weights `w_f`:
@@ -1675,12 +1694,20 @@ edit-distance weight of §7.1, which orders hits within a step. Across a relaxat
 edits, or match words as typed rather than by completion, rank first because they are earlier steps of the cascade,
 not because they score higher.
 
-> **Note (2026-11-27).** The engine does not add the static rank contribution to a hit of a query with words yet:
-> such a hit's score is the clause sum (with the proximity bonus above when the request asks for it), and the static
-> rank scores only L5 `fallback` hits (§7.6). Whether the total below holds for every hit, or this section changes
-> to match the code, is ROADMAP 10.1.45.
+Total = Σ_t score + static_rank contribution (§6.2.3). **Static rank** (ROADMAP 10.1.45). With
+`ranking.static_rank`, every hit of a query scores its query's score `q` (the root's, the proximity bonus included
+when the plan scores it) plus the contribution `s` of its document, added last: `sat(q + s)`, saturated at
+`f64::MAX` as any score. That holds in every view, for a plain search and for every relaxed step that scores a
+query (L0 to L4 and L6, §7.6), so it is the score a `score` sort key, a cursor and a rank score see, and of two
+documents with equal text scores the one of higher static rank ranks first. L5 `fallback` hits score `s` alone: its
+step scores no word, and L5 ranks by the contribution itself, not adding it again (§7.6). Without a static rank, or
+with `weight` 0, nothing is added and a hit scores its query's score. The contribution is not normalized to the text
+score: BM25F scores are a few units of `idf`, so a `weight` of 1 on `log1p` of a count in the thousands (about 7) can
+outweigh the text, and a caller tunes `weight` to the share it wants (the relevance gates of §16.1 run on
+collections without a static rank). A view reads each scored document's value from its column (§5.3.5); pruning
+bounds the contribution as §7.3 says.
 
-Total = Σ_t score + static_rank contribution (§6.2.3). `N`, `df`, `avglen` are **collection-level**, summed across live segments
+`N`, `df`, `avglen` are **collection-level**, summed across live segments
 (and across shards when `global_stats: true`, SPEC §11.5). They are summed from each segment's stored statistics
 (§5.1, term `df`, field statistics), which count the segment's deleted documents too until a merge drops them
 (§5.5), as in Lucene: a merge of segments without deletions leaves every score unchanged, and one that drops deleted
@@ -1745,6 +1772,19 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   (checked when the block decodes) or whose norm is below its block's `min_norm` (checked when it is scored) is
   corruption: a search that scores such a document fails instead of ranking it above a bound another document was
   skipped by. Blocks pruning skips are not read, so their bounds are checked only by `Segment::verify`.
+  With a static rank (§7.2, ROADMAP 10.1.45), the whole score is the query's plus the contribution, and the bound
+  adds a bound of the contribution the same way: per segment, `M`, the contribution of the largest key the FOR blocks
+  of the static rank's column may hold (the largest of the blocks' minimum plus `2^width − 1`, §5.2.1, stopped at
+  `f64::MAX`'s key for an `f64` column; the contribution never decreases with the key, §6.2.3), and 0 for a column
+  without values (a field added since the segment was written, say). A bound `Q` of the query's score gives
+  `sat(Q + M)`, which bounds `sat(q + s)` exactly, as addition and saturation are monotonic. A threshold `t` on the
+  whole score reaches the query's matchers as the largest `t'` found with `sat(t' + M) ≤ t`, so a document they
+  skip scores at most `t` in all. The segment's largest key is read from its column's block bounds the first time a
+  view of it takes a threshold or a bound, not before (L5's walk, a facet count and an exhaustive search read none:
+  an exhaustive search's matchers ignore a threshold, so none is passed on), and kept: a segment never changes, so
+  later searches read no block for it. A corrupt block fails a search that reads it, and a failed read is not kept,
+  so every search that needs it fails the same way. A view without block bounds (the memtable) takes no threshold:
+  its matches are all scored. Pruned and exhaustive top-k are still the same hits, scores bit for bit.
 - Filters evaluate to roaring bitmaps (or column predicates) intersected with candidates before a document is
   scored. Each view evaluates a `bool`'s filters once: `term` and `terms` on a `keyword` field from its postings,
   on another field (and `range`) from the column's order-preserving keys (§5.2.1, an exclusive bound being the next
@@ -1777,8 +1817,9 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   view fails can depend on the timing: a pruned view does not read the blocks a threshold skips (their bounds are
   checked only by `Segment::verify`), and the threshold may come from another view. Hits returned without an error
   are the same either way.
-- A search may carry a deadline (an instant of an injected clock) and a cancellation token. They are read before the
-  search starts (so a search with no view to run, or `k = 0`, stops too), as each view's collector starts (after its
+- A search may carry a deadline (an instant of an injected clock; a request gives it as `timeout_ms`, a time from when
+  it starts to run, §7.1.4) and a cancellation token. They are read before the search starts (so a search with no
+  view to run, or `k = 0`, stops too), as each view's collector starts (after its
   matcher is built), every 256 matches a view yields, before each facet a view counts, before the page's
   documents are read, and before the hits of each view are explained (§7.7). The readers of a view a search opens read them too, every
   1024 steps of all of them together: a postings list (a document moved to, a block bound skipped to), a term stream,
@@ -1982,7 +2023,9 @@ the keys of each object in it; a value that is absent is left out, never `null`:
   `length`, `factor`, `tf`), `bool` (`score`, `must`, `proximity` when it has one: `score` and `pairs`, each `first`,
   `weight`, `field` and `distance` when a field holds both words, `closeness`, `score`; then `should`), `boost`
   (`score`, `boost`, `query`), `constant_score` (`score`, `query`), `match_all` (`score`), `static_rank` (`score`,
-  `value` when the document has one) and `relaxed` (`level`, `step`, `applied` except at L0, `score`, `explanation`).
+  `value` when the document has one), `with_static_rank` (`score`, `query`, `static_rank`: an object of `score` and
+  `value` when the document has one, as the `static_rank` node holds them; ROADMAP 10.1.45) and `relaxed` (`level`,
+  `step`, `applied` except at L0, `score`, `explanation`).
 
 Writing a response fails only on a broken invariant (a field id of another schema, a value of another type than its
 field, a number that is not finite): it is reported, not written as JSON a reader would take for a value.
@@ -2391,7 +2434,8 @@ error (its settings, above). A cursor from a step the plan no longer builds unde
 §7.1.3, which the cursor does not record) pages nothing.
 
 Budget (ROADMAP 8.1.4): `budget_ms` runs on the clock the search is given (injected: its budget clock, else its
-deadline's, else the system's) from the moment L0 finishes, so L0 is never cut by it. The request's own deadline and
+deadline's, else the system's; the embedded API gives the database's, which its `timeout_ms` reads too, §7.1.4) from
+the moment L0 finishes, so L0 is never cut by it. The request's own deadline (its `timeout_ms` included) and
 cancellation (§7.3) still apply to every step, L0 included, and are errors. The budget is checked before each level
 builds its steps, before each step, and inside each step's planning and search, at the reads of §7.3. Once it has
 passed, the cascade stops. A step in progress is dropped whole: it has not seen all its matches, so the hits it holds
@@ -2455,7 +2499,12 @@ A `bool` lists every `must` clause and the `should` clauses that match, in query
 nothing and are not listed); a `bool` with proximity pairs (§7.2) also lists, between them, its bonus and per pair the
 first word's index, `λ · min(idf)`, the field the closeness came from, `d`, `π` and their product (0 when no field
 holds both within the window); a `boost` reports its factor (for a fuzzy term, the edit-distance weight from §7.1); a
-`constant_score` its score; `match_all` scores 0. An L5 `fallback` hit (§7.6) is explained as `static_rank`: its score, the static rank of §6.2.3 (0 without `ranking.static_rank`), and the field's value it came from (none when the document lacks it). Each node gives its score, and the root's is the hit's, bit for
+`constant_score` its score; `match_all` scores 0. An L5 `fallback` hit (§7.6) is explained as `static_rank`: its score, the static rank of §6.2.3 (0 without `ranking.static_rank`), and the field's value it came from (none when the document lacks it). A hit of a query in a collection with a static rank
+(§7.2, ROADMAP 10.1.45) is explained as `with_static_rank` around its query's tree: its score, the tree, and the
+contribution as L5 states it (`static_rank`: its score and the value), the tree's score plus the contribution; in a
+relaxed hit's `relaxed` node (below) the step's tree is this node, except at L5, whose tree is `static_rank` alone.
+Without a static rank, or with `weight` 0, there is no such node. Each node gives its score, and the root's is the
+hit's, bit for
 bit: it reads the same postings and norms, and sums in the same order. The page's hits are explained one view at a
 time, in one pass: the view's tree is built once (each leaf an unpruned matcher, each `bool`'s filters the documents
 the search's matcher selected in that view, ROADMAP 7.7.3; selected the first time they are needed when that matcher

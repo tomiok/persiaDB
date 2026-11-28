@@ -53,6 +53,7 @@ mod plan;
 mod proximity;
 pub mod request;
 mod sort;
+mod static_rank;
 mod top_k;
 mod word;
 

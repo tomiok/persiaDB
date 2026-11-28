@@ -3,11 +3,15 @@
 #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)] // Tests: inputs are fixed.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::time::Duration;
 
 use persia::{
     Collection, Db, ErrorCode, FacetRequest, Filter, FilterValue, OpenOptions, Order, RelaxLevel,
     RelaxOptions, SearchRequest, Sort, SortKey,
 };
+use persia_engine::db::Clock;
 
 const SCHEMA: &str = r#"{"name": "items", "fields": {
     "title": {"type": "text"},
@@ -262,4 +266,191 @@ fn a_search_after_close_is_closed() {
         c.search_json(r#"{"q": "red"}"#).unwrap_err().code(),
         ErrorCode::Closed
     );
+}
+
+/// Each read of the database's clock moves it 1 ms forward and is counted (ROADMAP 10.1.44): a search's timeout of
+/// `T` ms passes at the `T`-th read after the one the search takes its start from.
+#[derive(Debug)]
+struct Ticking {
+    start: std::time::Instant,
+    reads: AtomicU64,
+}
+
+impl Clock for Ticking {
+    fn now(&self) -> std::time::Instant {
+        self.start + Duration::from_millis(self.reads.fetch_add(1, AtomicOrdering::Relaxed))
+    }
+
+    fn unix_micros(&self) -> i64 {
+        1_700_000_000_000_000
+    }
+}
+
+/// A search with a timeout (ROADMAP 10.1.44; SPEC §7.1.4, §7.3) fails with `Cancelled` at the first check that reads
+/// the database's clock past it, never with an early or relaxed page; one the clock does not reach returns the page a
+/// search without it does. The clock is injected and moves at each read: nothing sleeps.
+#[test]
+fn a_search_past_its_timeout_fails_at_the_next_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = Arc::new(Ticking {
+        start: std::time::Instant::now(),
+        reads: AtomicU64::new(0),
+    });
+    let options = OpenOptions::new()
+        .clock(Arc::clone(&clock) as Arc<dyn Clock>)
+        .hold_maintenance(true);
+    let db = options.open(dir.path().join("app.persia")).unwrap();
+    // In the memtable alone: one view, searched on the calling thread, so the reads come in one order.
+    let c = items(&db, 12);
+    // "zebra" is in no document: the relaxed search finds its hits after L0, and the budget never passes here.
+    let generous = RelaxOptions {
+        budget_ms: Some(60_000),
+        ..RelaxOptions::default()
+    };
+    for (relax, q, relax_json) in [
+        (exact(), "red shoe", "false"),
+        (generous, "red zebra", r#"{"budget_ms": 60000}"#),
+    ] {
+        let request = SearchRequest::new(q).relax(relax);
+        let ids = |page: &persia::SearchResponse| -> Vec<String> {
+            page.hits
+                .iter()
+                .map(|h| h.document.id().to_owned())
+                .collect()
+        };
+        let untimed = ids(&c.search(&request).unwrap());
+        assert!(!untimed.is_empty(), "{q}");
+        let timed = |timeout: Duration| {
+            let before = clock.reads.load(AtomicOrdering::Relaxed);
+            let found = c.search(&request.clone().timeout(timeout));
+            (found, clock.reads.load(AtomicOrdering::Relaxed) - before)
+        };
+        let (whole, reads) = timed(Duration::from_secs(3_600));
+        assert_eq!(ids(&whole.unwrap()), untimed);
+        let mut failed = 0_u64;
+        for ms in 0..reads {
+            match timed(Duration::from_millis(ms)).0 {
+                Err(e) => {
+                    assert_eq!(e.code(), ErrorCode::Cancelled, "{ms} ms: {e}");
+                    assert_eq!(failed, ms, "{ms} ms failed after a longer one did not");
+                    failed += 1;
+                }
+                Ok(page) => assert_eq!(ids(&page), untimed, "{ms} ms"),
+            }
+        }
+        assert!(failed >= 1, "{failed} of {reads} reads");
+        // A timeout the clock cannot represent is no limit, not a panic.
+        assert_eq!(ids(&timed(Duration::MAX).0.unwrap()), untimed);
+        // The request JSON's `timeout_ms` is the same timeout.
+        let json = |ms: u64| {
+            c.search_json(&format!(
+                r#"{{"q": "{q}", "relax": {relax_json}, "timeout_ms": {ms}}}"#
+            ))
+        };
+        assert_eq!(json(0).unwrap_err().code(), ErrorCode::Cancelled);
+        assert_eq!(ids(&json(3_600_000).unwrap()), untimed);
+        assert_eq!(ids(&json(u64::MAX).unwrap()), untimed);
+    }
+}
+
+/// The timeout is read on the database's clock, not the system's: on an injected clock that does not move, a
+/// timeout of 1 ns never passes however long the search takes, and one of 0 has passed (the clock reads its end).
+#[test]
+fn the_timeout_reads_the_databases_clock() {
+    let dir = tempfile::tempdir().unwrap();
+    let still = Arc::new(persia_engine::db::ManualClock::new(1_700_000_000_000_000));
+    let options = OpenOptions::new()
+        .clock(Arc::clone(&still) as Arc<dyn Clock>)
+        .hold_maintenance(true);
+    let db = options.open(dir.path().join("app.persia")).unwrap();
+    let c = items(&db, 5);
+    db.commit().unwrap();
+    for relax in [exact(), RelaxOptions::default()] {
+        let request = SearchRequest::new("red shoe").relax(relax);
+        let tiny = request.clone().timeout(Duration::from_nanos(1));
+        assert_eq!(c.search(&tiny).unwrap().hits.len(), 5);
+        let zero = request.timeout(Duration::ZERO);
+        assert_eq!(c.search(&zero).unwrap_err().code(), ErrorCode::Cancelled);
+    }
+}
+
+/// `timeout_ms` is read as strictly as every key of the request JSON (SPEC §7.1.4): a value of another shape and a
+/// misspelt key are `InvalidArgument`, never a search without a timeout. `Duration::ZERO` and `timeout_ms: 0` have
+/// passed at the first check, on the system clock too.
+#[test]
+fn timeout_values_and_misspellings() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path().join("app.persia")).unwrap();
+    let c = items(&db, 3);
+    for relax in [exact(), RelaxOptions::default()] {
+        let zero = SearchRequest::new("red")
+            .relax(relax)
+            .timeout(Duration::ZERO);
+        assert_eq!(c.search(&zero).unwrap_err().code(), ErrorCode::Cancelled);
+    }
+    assert_eq!(
+        c.search_json(r#"{"q": "red", "timeout_ms": 0}"#)
+            .unwrap_err()
+            .code(),
+        ErrorCode::Cancelled
+    );
+    // The later setter call is the one kept.
+    let kept = SearchRequest::new("red")
+        .timeout(Duration::ZERO)
+        .timeout(Duration::from_secs(3_600));
+    assert_eq!(c.search(&kept).unwrap().hits.len(), 3);
+    for bad in [
+        r#"{"q": "red", "timeout_ms": -1}"#,
+        r#"{"q": "red", "timeout_ms": -0}"#,
+        r#"{"q": "red", "timeout_ms": 2.5}"#,
+        r#"{"q": "red", "timeout_ms": 1e3}"#,
+        r#"{"q": "red", "timeout_ms": 18446744073709551616}"#,
+        r#"{"q": "red", "timeout_ms": "100"}"#,
+        r#"{"q": "red", "timeout_ms": null}"#,
+        r#"{"q": "red", "timeout": 100}"#,
+        r#"{"q": "red", "timeoutMs": 100}"#,
+        r#"{"q": "red", "deadline": 100}"#,
+    ] {
+        let err = c.search_json(bad).unwrap_err();
+        assert_eq!(err.code(), ErrorCode::InvalidArgument, "{bad}: {err}");
+    }
+}
+
+/// ROADMAP 10.1.45 (SPEC §6.2.3, §7.2): a query over documents of equal text score ranks the one of higher static
+/// rank first, its score the text score plus the contribution, and its explanation says so (`with_static_rank`).
+#[test]
+fn equal_text_scores_rank_by_the_collections_static_rank() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path().join("app.persia")).unwrap();
+    let c = db
+        .create_collection_json(
+            r#"{"name": "shoes", "fields": {"title": {"type": "text"}, "sales": {"type": "i64"}},
+                "ranking": {"static_rank": {"field": "sales"}}}"#,
+        )
+        .unwrap();
+    c.put_json(r#"{"id": "few", "title": "red shoes", "sales": 3}"#)
+        .unwrap();
+    c.put_json(r#"{"id": "many", "title": "red shoes", "sales": 900}"#)
+        .unwrap();
+    c.put_json(r#"{"id": "none", "title": "red shoes"}"#)
+        .unwrap();
+    for relax in [exact(), RelaxOptions::default()] {
+        let page = c
+            .search(&SearchRequest::new("red").relax(relax).explain(true))
+            .unwrap();
+        let ids: Vec<&str> = page.hits.iter().map(|h| h.document.id()).collect();
+        assert_eq!(ids, ["many", "few", "none"]);
+        let text = page.hits[2].score;
+        assert_eq!(page.hits[0].score, text + 900_f64.ln_1p());
+        assert_eq!(page.hits[1].score, text + 3_f64.ln_1p());
+        let json: serde_json::Value = serde_json::from_str(&page.to_json().unwrap()).unwrap();
+        let explanation = &json["hits"][0]["explanation"];
+        let node = explanation
+            .get("relaxed")
+            .map_or(explanation, |r| &r["explanation"]);
+        assert_eq!(
+            node["with_static_rank"]["static_rank"]["value"], 900.0,
+            "{json}"
+        );
+    }
 }

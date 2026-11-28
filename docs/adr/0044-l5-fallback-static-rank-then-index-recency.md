@@ -99,3 +99,25 @@ L5 but its transform built no step, so a query no level could relax returned not
 - **A boolean marker**: it would not say how the hits were ordered; `"static_rank" | "recency"` says both.
 - **Relax filters at L5**: filters are hard constraints (permissions, tenancy); relaxing them is ROADMAP 8.2.6's
   explicit opt-in, one step after L5 (ADR-0047).
+
+## Amendment (2026-11-28): every query hit adds the static rank (ROADMAP 10.1.45)
+
+L5 ranked by the static rank while no other hit scored it, so `ranking.static_rank` changed only the order of
+fallback hits, against SPEC §6.2.3 ("the scorer adds `weight · fn(v)`") and §7.2's total. Every hit of a query now
+adds it: a plan of a collection with a static rank wraps its root matcher, which adds the contribution read from the
+view's column after the query's score, and bounds it for pruning by the contribution of the largest key the column's
+FOR blocks allow (0 for a column without values; SPEC §7.3). That key is read once per segment and kept on it, since
+a segment never changes, so a search does not walk the column's blocks again. L5 is unchanged: its walk enumerates
+its candidates with the plan's unscored matcher (`SearchPlan::candidates`), and its hit score is the contribution
+alone, so nothing is counted twice. Both read the contribution through one function (`score::key_contribution`); L5
+bounds a block by the contribution of `score::largest_key`, the block's largest key, and the query bounds a segment
+by `score::largest_contribution` of the largest key of the whole column, which `column_largest_key` (in
+`search::static_rank`) walks its FOR blocks for. So an L5 hit and a query hit of the same document state the same
+contribution. Explained query hits gain a `with_static_rank` node (SPEC §7.7).
+
+**Why the scorer, not SPEC.** The schema puts the option under `ranking`, SPEC §6.2.3 and §7.2 state the sum, and the
+use the option exists for (sales, popularity, freshness lifting otherwise equal text matches) needs it in every
+ranking, not only when no word matched. Reading SPEC down to "static rank orders L5 only" would leave a ranking option
+that ranks nothing a caller searches for. The cost is a column read per scored document and looser bounds (measured in
+`docs/benchmarks.md`, `search_static_rank`), only in collections that set a static rank; others plan exactly as
+before (no wrapper).

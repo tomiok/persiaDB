@@ -194,9 +194,33 @@ SPEC §6.2.3 and §7.2 define a static rank the collection can add to a text sco
 { "ranking": { "static_rank": { "field": "sales", "weight": 0.1, "fn": "log1p" } } }
 ```
 
-SPEC §7.2 writes the total as the sum of the term scores plus this contribution, and its dated note says a hit of a query with words does not add it yet ([SPEC §7.2](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#72-scoring-bm25f); ROADMAP 10.1.45 decides which holds): its score is the clause sum, and the proximity bonus when the request asked for it. The static rank orders only L5's hits (below).
+SPEC §7.2 writes a hit's score as the sum of its term scores plus this contribution, and every hit of a query adds it (ROADMAP 10.1.45): the query's score first, the proximity bonus included when the request asked for it, then `weight · fn(v)`, saturated at `f64::MAX`. That holds for a plain search and for every relaxed step that scores words, so of two documents with the same text score, the one with the higher static rank ranks first, on every page a cursor walks, and a `score` sort key and `Hit::rank_score` see the total. Without a static rank, or with `weight` 0, nothing is added. The contribution is not scaled to the text score: a BM25F score is a few units, and `log1p` of a count in the thousands is about 7 at `weight` 1, so pick `weight` for the share you want the static rank to have. Pruning stays exact: each segment bounds the contribution by the largest value its column's FOR blocks allow, read once per segment and kept (a segment never changes, so later searches read no block for it; 0 for a column without values), and a memtable view, which has no block bounds, scores every match (SPEC §7.3). An explained hit is an `Explanation::WithStaticRank` around the query's tree ([Explain](#explain)).
 
-L5 fallback has no query words, so its hit score is the contribution (ROADMAP 8.2.5). Ties break by index location, most recent first: the memtable, then segments from the last the manifest lists to the first, each by docid descending. That recency is where the index holds the document, not when it was written. With no static rank, or with `weight` 0, every L5 score is 0, recency alone orders the hits, and `Relaxation::fallback` is `FallbackOrder::Recency`. Otherwise it is `FallbackOrder::StaticRank`. The request's `sort` does not order these hits. Each hit still carries the request's sort values, and a `score` key on an L5 hit is this contribution. [Fuzzy search](/guide/fuzzy-search/#fallback-when-nothing-matches) is the rest of L5.
+```rust
+use persia::{Db, SearchRequest};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let db = Db::open(dir.path().join("shop.persia"))?;
+    let shoes = db.create_collection_json(
+        r#"{"name": "shoes", "fields": {"title": {"type": "text"}, "sales": {"type": "i64"}},
+            "ranking": {"static_rank": {"field": "sales"}}}"#,
+    )?;
+    shoes.put_json(r#"{"id": "few", "title": "red shoes", "sales": 3}"#)?;
+    shoes.put_json(r#"{"id": "many", "title": "red shoes", "sales": 900}"#)?;
+
+    // The same text, so the same text score: the higher static rank ranks first.
+    let page = shoes.search(&SearchRequest::new("red shoes"))?;
+    let ids: Vec<&str> = page.hits.iter().map(|h| h.document.id()).collect();
+    assert_eq!(ids, ["many", "few"]);
+    // The difference is the static ranks' difference: ln(1 + 900) − ln(1 + 3).
+    let gap = page.hits[0].score - page.hits[1].score;
+    assert!((gap - (901_f64.ln() - 4_f64.ln())).abs() < 1e-9);
+    Ok(())
+}
+```
+
+L5 fallback has no query words, so its hit score is the contribution alone, not added twice (ROADMAP 8.2.5). Ties break by index location, most recent first: the memtable, then segments from the last the manifest lists to the first, each by docid descending. That recency is where the index holds the document, not when it was written. With no static rank, or with `weight` 0, every L5 score is 0, recency alone orders the hits, and `Relaxation::fallback` is `FallbackOrder::Recency`. Otherwise it is `FallbackOrder::StaticRank`. The request's `sort` does not order these hits. Each hit still carries the request's sort values, and a `score` key on an L5 hit is this contribution. [Fuzzy search](/guide/fuzzy-search/#fallback-when-nothing-matches) is the rest of L5.
 
 ## Score bounds and top-k
 
@@ -205,7 +229,7 @@ This section describes engine internals, how a search skips documents that canno
 
 Per view (a segment, or the memtable), the matcher walks postings and keeps a top-k. The default strategy is block-max WAND; MaxScore, which uses whole-list bounds only, is the other (SPEC §7.3, ROADMAP 7.3.3, 7.4.4). A term or a block stores `max_tf` and `min_norm`. Substituted for a document's frequency and norm, they are an upper bound of every score in that range, because the score is monotonic in `tf~`. A document is skipped only when that bound, summed in query order, is at most the worst hit kept. With further sort keys, only a document scoring strictly below that hit is skipped. Pruned and exhaustive top-k are the same hits, scores bit for bit.
 
-A phrase has no block bounds, so block-max WAND uses its whole-list bound. A conjunction with several required clauses, or with optional clauses beside required ones, takes the threshold itself and sums its clauses' bounds. With a proximity bonus, that sum includes the bonus's upper bound, so the skip stays exact. Scoring a document whose frequency is above its block's `max_tf`, or whose norm is below its block's `min_norm`, is corruption: the search fails (`ErrorCode::Corrupt`) instead of ranking that document above a bound another document was skipped by. Blocks that pruning skips are not read; `persia verify` checks those bounds.
+A phrase has no block bounds, so block-max WAND uses its whole-list bound. A conjunction with several required clauses, or with optional clauses beside required ones, takes the threshold itself and sums its clauses' bounds. With a proximity bonus, that sum includes the bonus's upper bound, so the skip stays exact. With a static rank, the bound adds the largest contribution the segment's column blocks allow (read once per segment), and a threshold reaches the query less that bound, so the skip stays exact there too; a memtable view has no such block bounds and scores every match. Scoring a document whose frequency is above its block's `max_tf`, or whose norm is below its block's `min_norm`, is corruption: the search fails (`ErrorCode::Corrupt`) instead of ranking that document above a bound another document was skipped by. Blocks that pruning skips are not read; `persia verify` checks those bounds.
 
 Tombstones are dropped by the postings iterator before a document is scored, so a deleted document cannot enter the heap or raise the threshold. Block bounds may still cover deleted documents. That only prunes less.
 
@@ -278,12 +302,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `Constant` | Its score. |
 | `All` | An empty `q`: 0. |
 | `StaticRank` | An L5 hit: the contribution, and the field value it came from. `None` when the document lacks it, or when the collection has no static rank. |
+| `WithStaticRank` | A hit of a query in a collection with a static rank: the query's tree (`query`), then the contribution (`static_rank`) and the field value it came from (`value`, `None` when the document lacks it). Its score is the tree's plus the contribution. |
 
 Filters and excluded clauses are left out. They score nothing. The root score (`Explanation::score`) is the hit's score: the same postings and norms, summed in the same order. Explain covers the page's hits only, in one more pass over the views that hold them.
 
 `SearchResponse::to_json` writes the tree as each hit's `explanation`, one object per node naming its kind (SPEC §7.5.2). Highlighted snippets are not this tree. Highlights are post-v1.
 
-A hit of a relaxed search wraps that tree in `Explanation::Relaxed` (ROADMAP 8.3.4). `RelaxedExplanation` names the `level`, the `step` (0 is L0), and that step's `applied` entry; L0 has no `applied`. `Explanation::scoring` is the inner tree, and the node's score is its. L5's inner node is `Explanation::StaticRank`. `Hit::level` states the same level on every hit, explained or not.
+A hit of a relaxed search wraps that tree in `Explanation::Relaxed` (ROADMAP 8.3.4). `RelaxedExplanation` names the `level`, the `step` (0 is L0), and that step's `applied` entry; L0 has no `applied`. `Explanation::scoring` is the inner tree, and the node's score is its. With a static rank, the inner tree of L0 to L4 and L6 is `Explanation::WithStaticRank`; L5's inner node is `Explanation::StaticRank`. `Hit::level` states the same level on every hit, explained or not.
 
 ## Relaxation, typo tiers, and order
 
@@ -293,7 +318,7 @@ Within one step, BM25F orders the hits, then the request sort breaks ties. Acros
 
 Typo and exactness tiers are extra steps of that cascade, strictest first (ROADMAP 8.2.7). They add nothing to the score. A word matched as typed ranks above one matched by a completion because it is an earlier step, before BM25F. Inside a fuzzy step, the edit-distance weight still multiplies the term, so an exact term outranks a correction at the same frequency and length. When a rewritten term has 8 or more characters, L4 builds `fuzzy:1` and then `fuzzy`. When L3 expands a term besides the last one, it can build `prefix:last` before `prefix`. L0 does not rank a word above its stem: the index holds the stems alone. Which stem that is, and which words the field's analyzer removed first, is [Text analysis](/guide/text-analysis/). The tier pages are [Fuzzy search](/guide/fuzzy-search/#typo-tiers) and [Synonym and prefix search](/guide/synonym-and-prefix-search/#prefix-search).
 
-L1 through L4 and L6 score their words with this formula and then follow the request sort. L5 does not: its order is static rank, then index-location recency, and its hits still sit below every earlier step because the step comes first. L6, the opt-in filter step, ranks by the request sort. %%RELAXATION_CELL%% Each step prunes on its own. Thresholds are not shared across steps.
+L1 through L4 and L6 score their words with this formula, add the static rank when the collection has one, and then follow the request sort. L5 does not: its order is static rank, then index-location recency, and its hits still sit below every earlier step because the step comes first. L6, the opt-in filter step, ranks by the request sort. %%RELAXATION_CELL%% Each step prunes on its own. Thresholds are not shared across steps.
 
 ## What is still planned
 
@@ -303,7 +328,6 @@ L1 through L4 and L6 score their words with this formula and then follow the req
 | Proximity bonus | Off unless the request asks, on a search that does not relax (ROADMAP 7.3.5, 10.1.7). |
 | Proximity across relaxed steps | ROADMAP 10.1.14. |
 | Proximity on by default | Waits on judged queries (ROADMAP 15.1.6). |
-| Static rank in a query hit's score | SPEC §7.2 adds it, and notes that a hit of a query with words does not yet (ROADMAP 10.1.45). It orders L5's hits. |
 | Collection tie-break and a proximity weight in `ranking` | ROADMAP 32.5.1. Needs a new manifest version. |
 | Static rank `saturation` | ROADMAP 27.6.1. |
 | `global_stats` across shards | SPEC §11.5. Milestone M13. |
