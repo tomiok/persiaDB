@@ -1269,6 +1269,33 @@ fn timeout_ms_takes_whole_milliseconds() {
     assert!(matches!(kind(&error), Kind::Relax), "{error:?}");
 }
 
+/// `timeout_ms` is "written without a fraction or an exponent" (SPEC §7.1.4): a whole value spelt as a float is
+/// refused however it is spelt, a negative zero spelt as a float too, and a key written with escapes is the key.
+#[test]
+fn timeout_ms_refuses_every_float_spelling_of_a_whole_number() {
+    for ms in [
+        "0.0",
+        "-0.0",
+        "-0e0",
+        "0e0",
+        "1E3",
+        "1e+3",
+        "100.000",
+        "18446744073709551615.0",
+        "1.8446744073709552e19",
+        "-18446744073709551615",
+    ] {
+        let json = format!(r#"{{"timeout_ms": {ms}}}"#);
+        let error = parse(&json).unwrap_err();
+        assert!(matches!(kind(&error), Kind::Json), "{json}: {error:?}");
+        assert!(error.to_string().contains("timeout_ms"), "{json}: {error}");
+    }
+    assert_eq!(
+        parse(r#"{"timeout_ms": 7}"#).unwrap().timeout(),
+        Some(Duration::from_millis(7))
+    );
+}
+
 /// A request's timeout (ROADMAP 10.1.44; SPEC §7.3) runs on the budget clock from when `run` is called: past it the
 /// search fails as a passed deadline does, at whichever read sees it (in L0 or in a later relaxation step), and is
 /// never an early or truncated page. A timeout the clock cannot reach is no limit.

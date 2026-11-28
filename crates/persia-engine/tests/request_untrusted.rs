@@ -27,6 +27,7 @@
 )] // Tests: inputs are fixed.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use persia_engine::db::{
     CollectionSnapshot, Cursor, CursorOrigin, Database, DatabaseOptions, Located, ManualClock,
@@ -43,7 +44,7 @@ use persia_engine::search::request::{
     CURSOR_TOKEN_VERSION, CursorTokenError, QueryRequest, QueryRequestError, QueryResults,
     RunOptions,
 };
-use persia_engine::search::{Missing, Order, RequestError, SortKey, SortValue};
+use persia_engine::search::{Interrupt, Missing, Order, RequestError, SortKey, SortValue};
 use persia_engine::wal::Durability;
 use persia_format::checksum::crc32c;
 use persia_storage::container::sim::SimFile;
@@ -892,18 +893,33 @@ fn the_fuzz_seeds_are_valid_requests_and_tokens() {
         include_str!("fixtures/fuzz_seeds/request_json/plain"),
         include_str!("fixtures/fuzz_seeds/request_json/proximity"),
         include_str!("fixtures/fuzz_seeds/request_json/projection"),
+        include_str!("fixtures/fuzz_seeds/request_json/timeout"),
+        include_str!("fixtures/fuzz_seeds/request_json/timeout_far"),
     ];
     let db = database();
     let snapshot = db.snapshot();
     let c = snapshot.collection("c").unwrap();
+    let mut timeouts = Vec::new();
     for seed in requests {
         let request = parse(seed).unwrap_or_else(|e| panic!("{seed}: {e}"));
-        // Each runs, or is refused by the run for its cursor of another snapshot: a seed reaches the search.
+        timeouts.extend(request.timeout());
+        // Each runs, or is refused by the run for its cursor of another snapshot, or (its `timeout_ms` 0 on a clock
+        // that never moves, SPEC §7.1.4) fails at the search's first check: a seed reaches the search.
         match request.run(c, &options()) {
             Ok(_) | Err(QueryRequestError::Request(RequestError::CursorView { .. })) => {}
+            Err(e)
+                if request.timeout() == Some(Duration::ZERO)
+                    && e.interrupt() == Some(Interrupt::DeadlineExceeded) => {}
             Err(e) => panic!("{seed}: {e}"),
         }
     }
+    // The target's `timeout_ms` arm (ROADMAP 10.1.44) is seeded at both ends: 0, and the largest, which no clock
+    // reaches.
+    assert_eq!(
+        timeouts,
+        [Duration::ZERO, Duration::from_millis(u64::MAX)],
+        "the timeout seeds"
+    );
     // `fuzz/corpus/cursor_token`: each the canonical token of a cursor.
     for seed in [
         include_str!("fixtures/fuzz_seeds/cursor_token/full"),

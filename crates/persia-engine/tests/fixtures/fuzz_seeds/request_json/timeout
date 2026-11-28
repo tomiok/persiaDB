@@ -1,0 +1,1 @@
+{"q": "red shoes", "filter": {"term": ["brand", "nike"]}, "relax": {"min_results": 3, "fill": true}, "facets": ["brand"], "timeout_ms": 0}
