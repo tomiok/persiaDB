@@ -1154,15 +1154,16 @@ proptest! {
     }
 }
 
-/// The committed fuzz seeds mean what their names say: one canonical document, one nested too deep.
+/// The committed fuzz seeds mean what their names say: one canonical document, one nested too deep. Read from
+/// their copies under `tests/fixtures/fuzz_seeds/`, which a repo check keeps equal to `fuzz/corpus/` (ROADMAP 10.1.53).
 #[test]
 fn fuzz_seeds_decode_as_intended() {
     let schema = all_types(false);
-    let seed: &[u8] = include_bytes!("../../../fuzz/corpus/document/blob_extras_heads");
+    let seed: &[u8] = include_bytes!("fixtures/fuzz_seeds/document/blob_extras_heads");
     let doc = Document::decode(seed, &schema).unwrap();
     assert!(doc.blob_ref().is_some() && doc.extra().len() == 2);
     assert_eq!(doc.encode(&schema, FieldSet::All).unwrap(), seed);
-    let deep: &[u8] = include_bytes!("../../../fuzz/corpus/document/deep_stored");
+    let deep: &[u8] = include_bytes!("fixtures/fuzz_seeds/document/deep_stored");
     assert_eq!(
         Document::decode(deep, &schema),
         corrupt(7 + MAX_STORED_DEPTH as u64, DocumentCorruption::TooDeep)

@@ -172,9 +172,18 @@ to install, in the repo tooling that already reads JSON (`serde_json`, allowed i
    layer, ADR-0051) or `test-hooks`, which are not stable.
 5. **The gate.** The listing is committed as `crates/persia/public-api.txt`; `just public-api` regenerates it, and
    `cargo xtask public-api --check` (CI's `repo-checks` job, and `just repo-checks`) fails with the lines added and
-. **Generated on Linux.** rustdoc renders the target it runs on, so the committed file is the surface on Linux
+   removed when the surface moved without the file.
+6. **Generated on Linux.** rustdoc renders the target it runs on, so the committed file is the surface on Linux
    (x86_64): CI's `repo-checks` job runs on `ubuntu-latest`. Items behind `cfg(windows)` or another target are not in
    it; none of `persia`'s public items is target-specific today.
+7. **No rustdoc warning** (ROADMAP 10.1.49). The build of item 1 runs rustdoc with `-D warnings`, so a rustdoc
+   warning in `persia` or a crate it re-exports from (`persia-engine`, `persia-blob`, `persia-format`,
+   `persia-analysis`), such as a broken or private intra-doc link, fails `cargo xtask public-api` and its `--check`
+   in CI. Here rather than a `cargo doc` line in the lint job: it is the one CI step that already runs rustdoc on
+   those crates, so the gate costs no second documentation build, and these are the crates whose docs a `persia`
+   user reads (re-exported items carry their defining crate's docs). The crates `persia` does not re-export from
+   (`persia-storage`, `persia-cli`, `persia-server`, `persia-proto`, `persia-docs`, `persia-testutil`, `xtask`: every
+   crate other than `persia` and the four above) are not gated.
 
 ## Amendment (2026-11-26): `Correction` and `FallbackOrder` join item 2 (ROADMAP 10.1.25, review)
 
@@ -235,7 +244,7 @@ one filter fail with two codes and contradict item 8, so it is `LIMIT`.) The mes
 to the setter equals the one of the same filter inside a request JSON, or both fail with one code; one test per
 limit; refused text; the later setter kept; a cursor of one form pages the other).
 
-## Amendment (2026-11-27): the website guides are checked against the public surface, outside `persia` (ROADMAP 10.1.34, 10.1.41, 10.1.42, 10.1.43)
+## Amendment (2026-11-27): the website guides are checked against the public surface, outside `persia` (ROADMAP 10.1.34, 10.1.41, 10.1.42, 10.1.43, 10.1.53)
 
 ROADMAP 10.1.34 made the Rust samples of two website guides doctests of `persia` (`crates/persia/src/guides.rs`,
 `#[doc = include_str!("../../../website/...")]`). A crate's directory is all `cargo package` ships, so those paths
@@ -262,12 +271,13 @@ the crate too.
    with E0603 and passes the workspace run). So CI's test job (and `just test`) runs `cargo test -p persia-docs`
    after `cargo test --workspace`, which still runs the doctests too. A `#[doc(hidden)]` item compiles in both, so
    the repo check of 3 also refuses names in the samples.
-3. **Repo checks** (`xtask/src/repo_checks/guides.rs`). `persia_includes_nothing_outside_its_directory`: no
-   `include_str!`, `include_bytes!` or `include!` (any of its three delimiters) and no `#[path = "..."]` module
-   attribute in a `.rs` file under `crates/persia/` names a path outside that directory, resolved against the naming file's directory and normalized lexically; an argument that is not a plain
-   string literal is refused, as it cannot be resolved. `guide_samples_are_doctests_of_the_public_api`: the module is
-   wired, every page it lists exists and has a Rust sample, and no sample names `persia_engine`, `persia::internal`,
-   `QueryLimits` or `Filter::from_json`.
+3. **Repo checks** (`xtask/src/repo_checks/guides.rs`, `includes.rs`). `persia_includes_nothing_outside_its_directory`,
+   now `published_crates_include_nothing_outside_their_directory` (item 6): no `include_str!`, `include_bytes!` or
+   `include!` (any of its three delimiters) and no `#[path = "..."]` module attribute in a `.rs` file under a
+   published crate's directory (item 6) names a path outside that directory, resolved against the naming file's
+   directory and normalized lexically; an argument that is not a plain string literal is refused, as it cannot be resolved.
+   `guide_samples_are_doctests_of_the_public_api`: the module is wired, every page it lists exists and has a Rust
+   sample, and no sample names `persia_engine`, `persia::internal`, `QueryLimits` or `Filter::from_json`.
 4. **Which blocks are samples: the ones rustdoc runs** (ROADMAP 10.1.43). The check reads a fence as rustdoc does
    (`doctest` in `xtask/src/repo_checks/guides.rs`, a port of rustdoc 1.99's info-string tokenizer and of
    `LangString::parse`'s Rust rule on stable): Rust when the info string has no word, or has `rust`, or a rustdoc
@@ -298,6 +308,58 @@ the crate too.
    an internal); an unclosed, nested or unannounced part fails. Paths may start with `::` and have blanks around
    `::`, and inline code is every backtick span and `<code>` element. The status sentences
    `website/src/status.mjs` puts into pages (`%%TOKEN%%`) are checked by `website/src/status.test.mjs`, which reads
-   the same snapshot for the calls it names. A method named on a value (`page.next_cursor()`) and a renamed import
+   the same snapshot for the calls it names (run by `website.yml`'s build job, ROADMAP 10.1.52, which also runs on a
+   change to the snapshot). A method named on a value (`page.next_cursor()`) and a renamed import
    (`use persia as p; p::internal`) are not resolved: the check does not type the text, and rustdoc compiling the
    samples (run alone, `cargo test -p persia-docs`) refuses those that name nothing public.
+6. **The include check covers every published crate** (ROADMAP 10.1.53). `persia-engine`'s integration tests
+   included 11 committed fuzz seeds from `fuzz/corpus/`, which the engine's package would not ship. They now read
+   copies under `crates/persia-engine/tests/fixtures/fuzz_seeds/<target>/<name>` (a few hundred bytes in all;
+   `binary` by `.gitattributes`' `**/tests/fixtures/**`), and `fuzz_seed_copies_equal_the_corpus`
+   (`xtask/src/repo_checks/includes.rs`) requires each copy, in any member's `tests/fixtures/fuzz_seeds/`, to be
+   byte for byte its `fuzz/corpus/` file: the corpus stays the source (cargo-fuzz reads it, and the tests check the
+   seeds it runs), so a seed changed or removed there fails until its copy follows. `persia-format`'s two seed
+   tests (`frame_props.rs`, `container_header_props.rs`), which read their 14 seeds at run time rather than
+   including them, read copies under `crates/persia-format/tests/fixtures/fuzz_seeds/` the same way (about 80 KB,
+   the container headers' full slots). Copies rather than moving the
+   tests into a never-published crate as item 1 did: they test engine internals (`Document::decode`,
+   `Cursor::from_token`, the query compiler's property test), which a crate depending on `persia` cannot reach, and a
+   second never-published crate depending on `persia-engine` would be a new edge for three tests. The include check,
+   `published_crates_include_nothing_outside_their_directory`, runs on every crate meant to be published, read from
+   the manifests: each member of the root workspace (`members`, `dir/*` expanded) unless its own manifest writes
+   `publish = false` (or `publish = []`). A crate inheriting `publish.workspace = true` is held back only by the
+   workspace's `false` of today and is checked; `persia-docs`, `persia-testutil` (a dev-dependency only) and
+   `xtask` (repo tooling) write `false` themselves; `fuzz/` is its own workspace. A new crate is checked unless its
+   manifest opts out in the same way. What this leaves open, ROADMAP 10.1.55: the check reads compile-time
+   includes only, and two gaps of the same kind remain. `persia-testutil` is a path-only dev-dependency of
+   `persia-engine`, which `cargo package` strips, so the engine tests that use it (`relax_zero_results.rs`,
+   `relax_quality.rs`) do not build from the engine's package; and tests of published crates read files outside
+   their directory at run time (the golden files under `tests/fixtures/` of the root, among others).
+7. **A sample shown with a fixed path equals a doctest** (ROADMAP 10.3.3). The README's quickstart opens
+   `app.persia` in the working directory, so it pastes into a fresh `cargo new` with `persia` as its one
+   dependency. It is not a page of `crates/persia-docs`: as a doctest it would write `app.persia` into that crate
+   and fail its second run (`create_collection_json` refuses an existing collection), and a doctest cannot move to
+   a temporary working directory (merged doctests share one process, so `set_current_dir` would race the others).
+   A temporary directory in the README itself would make the user add `tempfile` and lose the file the sample
+   says it creates. So `shown_samples_equal_a_doctest` (`xtask/src/repo_checks/samples.rs`) requires the shown
+   block to equal a twin, a Rust block rustdoc runs on a page `crates/persia-docs` lists, once the twin is read as
+   rustdoc shows it (`##` shows `#`, a hidden `# ` line is dropped), its one line binding `dir` from
+   `tempfile::tempdir()` (hidden or not) is dropped, and its one `dir.path().join("app.persia")` is written
+   `"app.persia"`. Nothing else may differ: a hidden line other than a comment or that binding is refused (it
+   would be code the shown page lacks), so is a `dir` left after the rewrite, and the `toml` block the page shows
+   before the sample must be there (both pages require it: without it the sample does not paste into a fresh
+   crate) and be the twin page's first. The README's twin is the getting-started guide's first sample,
+   which that page already calls the README quickstart in a temporary directory, so the two cannot drift apart
+   (the README's `main` now returns `Result<(), Box<dyn std::error::Error>>`, as the guide's does). CI runs the
+   check in the test job's `cargo test --workspace` and the twin in its `cargo test -p persia-docs`.
+8. **The landing page's sample is checked the same way** (ROADMAP 10.1.51). `website/src/content/docs/index.mdx`
+   shows a `rust title="src/main.rs"` block, which rustdoc does not collect (item 4), opening `app.persia` as the
+   README does. A title rustdoc reads (Expressive Code also takes one from a first-line `// src/main.rs` comment)
+   would not be enough: run as shown, the fixed path has item 7's problem, and a temporary directory on the page
+   would change the hero. So its twin is `crates/persia-docs/src/samples/landing.md`, the doc of an item of the new
+   `#[cfg(doctest)] mod samples` (wired in `lib.rs`, checked by item 7's check): the same program, with a hidden
+   line making the directory (`tempfile::tempdir().expect(..)`, test setup: the shown `main` returns
+   `persia::Result`, which an `io::Error` does not convert into) and the same `toml` block. The hero is unchanged.
+   It stays a shorter program than the README's: two twins, each shown sample equal to what runs. The check is in
+   the Rust workflow (`ci.yml`, no paths filter), not `website.yml`, whose paths filter would skip a change to the
+   twin alone.

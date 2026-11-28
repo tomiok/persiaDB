@@ -301,13 +301,14 @@ proptest! {
     }
 }
 
-/// The committed fuzz seeds (`fuzz/corpus/container_header/`, first byte = mode) are what their names say, so
+/// The committed fuzz seeds (`fuzz/corpus/container_header/`, first byte = mode; read from their copies under
+/// `tests/fixtures/fuzz_seeds/`, kept equal by a repo check, ROADMAP 10.1.53) are what their names say, so
 /// they keep covering each case if the layout changes.
 #[test]
 fn fuzz_seeds_match_their_names() {
     let dir = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../fuzz/corpus/container_header/"
+        "/tests/fixtures/fuzz_seeds/container_header/"
     );
     let seed = |name: &str| std::fs::read(format!("{dir}{name}")).unwrap()[1..].to_vec();
     let slots = |name: &str| {

@@ -117,7 +117,7 @@ impl MemtableReader {
         &self.shared
     }
 
-    /// A view of every write applied so far; while the memtable is held ([`Memtable::hold`]), of the writes applied
+    /// A view of every write applied so far; while the memtable is held (`Memtable::hold`), of the writes applied
     /// before the hold.
     pub fn view(&self) -> MemtableView {
         MemtableView::new(Arc::clone(&self.shared), &read(&self.shared))
@@ -571,7 +571,7 @@ impl Memtable {
         Ok(inner.record(id, NONE, version))
     }
 
-    /// A view of every write applied so far; while the memtable is held ([`Memtable::hold`]), of the writes applied
+    /// A view of every write applied so far; while the memtable is held (`Memtable::hold`), of the writes applied
     /// before the hold.
     pub fn view(&self) -> MemtableView {
         MemtableView::new(Arc::clone(&self.shared), &read(&self.shared))

@@ -10,6 +10,10 @@
 //!
 //! rustdoc renders the target it runs on: the committed file is generated, and checked, on Linux (CI's `repo-checks`
 //! job). A `cfg(windows)` item would not be in it; `persia` has none today.
+//!
+//! rustdoc runs with `-D warnings` (ROADMAP 10.1.49): a rustdoc warning in `persia` or one of [`SOURCES`] fails the
+//! command, with or without `--check`. This build is the one CI runs rustdoc on those crates in, so it is the gate
+//! for their docs; the other workspace crates' docs are built by nothing in CI.
 
 mod render;
 
@@ -125,7 +129,12 @@ fn build(root: &Path) -> Result<Crates> {
             .args(["doc", "--no-deps", "--locked"])
             .args(&packages)
             .env("CARGO_TARGET_DIR", &target)
-            .env("RUSTDOCFLAGS", "-Z unstable-options --output-format json")
+            // `-D warnings` (ROADMAP 10.1.49): a rustdoc warning of these crates (a broken or private intra-doc link,
+            // an unclosed HTML tag) fails the build, and so `--check` in CI, instead of scrolling past.
+            .env(
+                "RUSTDOCFLAGS",
+                "-Z unstable-options --output-format json -D warnings",
+            )
             // The toolchain is chosen on the command line; a pinned one in the environment must not win.
             .env_remove("RUSTUP_TOOLCHAIN")
             .status()

@@ -397,6 +397,8 @@ impl RelaxPlan {
     /// `fallback` is [`Fallback::None`], then [`RelaxLevel::Filters`] when `filters` is [`FilterRelaxation::LastResort`].
     /// Disabled (`enabled: false` in either, the query's winning), it is L0 alone.
     ///
+    /// [`CollectionSchema::relaxation`]: crate::schema::CollectionSchema::relaxation
+    ///
     /// # Errors
     /// [`RelaxError::OutOfRange`] for a `min_results` outside [`RelaxationConfig::MIN_RESULTS`] or a `budget_ms` outside
     /// [`RelaxationConfig::BUDGET_MS`]; [`RelaxError::Levels`] for custom levels that repeat one or are out of cascade order.

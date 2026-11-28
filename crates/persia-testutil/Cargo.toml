@@ -4,7 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-publish.workspace = true
+# Never published (ROADMAP 10.1.53): a dev-dependency only. `false` written here, not inherited, so it stays when
+# the workspace's `publish` is flipped; `xtask/src/repo_checks/includes.rs` reads it to pick the published crates.
+publish = false
 
 [dependencies]
 
