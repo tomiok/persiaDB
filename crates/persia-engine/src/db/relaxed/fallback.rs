@@ -21,10 +21,9 @@ use super::super::search::{Collected, Cursor, Part, Ranked};
 use super::super::snapshot::Located;
 use super::super::views::CollectionViews;
 use crate::bitmap::Ascending;
-use crate::document::Value;
 use crate::relax::FallbackOrder;
 use crate::schema::{CollectionSchema, FieldId, FieldType, StaticRank};
-use crate::score::{static_rank, static_rank_value};
+use crate::score::{key_contribution, largest_key};
 use crate::search::{
     Explanation, FacetCounter, Interruptible, Matcher, RequestError, SearchPlan, Steps, sort_values,
 };
@@ -72,32 +71,14 @@ impl<'s> Ranking<'s> {
         let Self::StaticRank { rank, kind, .. } = self else {
             return (0.0, None);
         };
-        let value = key.and_then(|key| {
-            let value = match kind {
-                FieldType::F64 => Value::F64(persia_format::for_codec::key_to_f64(key)),
-                FieldType::Datetime => Value::Datetime(persia_format::for_codec::key_to_i64(key)),
-                _ => Value::I64(persia_format::for_codec::key_to_i64(key)),
-            };
-            static_rank_value(&value)
-        });
-        let value_ref = value.map(Value::F64);
-        // `+ 0.0`: a `-0.0` (a weight of `-0.0`) ranks as `0.0`.
-        (static_rank(rank, value_ref.as_ref()) + 0.0, value)
+        key_contribution(rank, kind, key)
     }
 
-    /// The largest key `block` may hold. Its bound is the minimum plus `2^width − 1` (SPEC §5.2.1), which for an `f64`
-    /// column may pass the key of `f64::MAX` into those of `+∞` and NaN, whose static rank reads as 0; stored floats
-    /// are finite (SPEC §6.2.2), so the bound stops at `f64::MAX`.
+    /// The largest key `block` may hold ([`largest_key`]).
     fn largest(self, block: crate::segment::KeyBlock) -> u64 {
         match self {
-            Self::StaticRank {
-                kind: FieldType::F64,
-                ..
-            } => block
-                .max
-                .min(persia_format::for_codec::f64_to_key(f64::MAX))
-                .max(block.min),
-            _ => block.max,
+            Self::StaticRank { kind, .. } => largest_key(kind, block),
+            Self::Recency => block.max,
         }
     }
 
@@ -433,7 +414,7 @@ impl Walk<'_, '_> {
             }
             // Blocks are visited by bound, later docids first among equal ones, never ahead of a matcher already
             // walked: each gets a matcher of its own (ROADMAP 8.2.9 counts that cost).
-            let mut matcher = self.plan.matcher(view)?;
+            let mut matcher = self.plan.candidates(view)?;
             let mut next = matcher.advance(block.start)?;
             // The block's smallest key whose static rank reaches the worst kept hit's, for that worst hit: a key below
             // it ranks lower, and is passed over without computing its static rank.
@@ -481,7 +462,7 @@ impl Walk<'_, '_> {
         rank: usize,
         best: &mut Best,
     ) -> Result<Option<RoaringBitmap>, RequestError> {
-        let mut matcher = self.plan.matcher(view)?;
+        let mut matcher = self.plan.candidates(view)?;
         let mut keys = match self.ranking {
             Ranking::StaticRank { field, .. } => Some(view.keys(field)?),
             Ranking::Recency => None,
@@ -528,7 +509,7 @@ impl Walk<'_, '_> {
         let mut window = MIN_WINDOW;
         while end > 0 && !best.full() {
             let start = end.saturating_sub(window);
-            let mut matcher = self.plan.matcher(view)?;
+            let mut matcher = self.plan.candidates(view)?;
             let mut found = Vec::new();
             let mut next = matcher.advance(start)?;
             while let Some(docid) = next.filter(|&d| d < end) {

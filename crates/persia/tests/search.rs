@@ -415,3 +415,42 @@ fn timeout_values_and_misspellings() {
         assert_eq!(err.code(), ErrorCode::InvalidArgument, "{bad}: {err}");
     }
 }
+
+/// ROADMAP 10.1.45 (SPEC §6.2.3, §7.2): a query over documents of equal text score ranks the one of higher static
+/// rank first, its score the text score plus the contribution, and its explanation says so (`with_static_rank`).
+#[test]
+fn equal_text_scores_rank_by_the_collections_static_rank() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path().join("app.persia")).unwrap();
+    let c = db
+        .create_collection_json(
+            r#"{"name": "shoes", "fields": {"title": {"type": "text"}, "sales": {"type": "i64"}},
+                "ranking": {"static_rank": {"field": "sales"}}}"#,
+        )
+        .unwrap();
+    c.put_json(r#"{"id": "few", "title": "red shoes", "sales": 3}"#)
+        .unwrap();
+    c.put_json(r#"{"id": "many", "title": "red shoes", "sales": 900}"#)
+        .unwrap();
+    c.put_json(r#"{"id": "none", "title": "red shoes"}"#)
+        .unwrap();
+    for relax in [exact(), RelaxOptions::default()] {
+        let page = c
+            .search(&SearchRequest::new("red").relax(relax).explain(true))
+            .unwrap();
+        let ids: Vec<&str> = page.hits.iter().map(|h| h.document.id()).collect();
+        assert_eq!(ids, ["many", "few", "none"]);
+        let text = page.hits[2].score;
+        assert_eq!(page.hits[0].score, text + 901_f64.ln());
+        assert_eq!(page.hits[1].score, text + 4_f64.ln());
+        let json: serde_json::Value = serde_json::from_str(&page.to_json().unwrap()).unwrap();
+        let explanation = &json["hits"][0]["explanation"];
+        let node = explanation
+            .get("relaxed")
+            .map_or(explanation, |r| &r["explanation"]);
+        assert_eq!(
+            node["with_static_rank"]["static_rank"]["value"], 900.0,
+            "{json}"
+        );
+    }
+}

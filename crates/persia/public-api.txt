@@ -981,6 +981,10 @@ pub variant field persia::Explanation::Constant::query: alloc::boxed::Box<persia
 pub variant field persia::Explanation::Constant::score: f64
 pub variant field persia::Explanation::StaticRank::score: f64
 pub variant field persia::Explanation::StaticRank::value: core::option::Option<f64>
+pub variant field persia::Explanation::WithStaticRank::query: alloc::boxed::Box<persia::Explanation>
+pub variant field persia::Explanation::WithStaticRank::score: f64
+pub variant field persia::Explanation::WithStaticRank::static_rank: f64
+pub variant field persia::Explanation::WithStaticRank::value: core::option::Option<f64>
 pub variant field persia::FieldKind::Bool::stored: bool
 pub variant field persia::FieldKind::Datetime::stored: bool
 pub variant field persia::FieldKind::F64::stored: bool
@@ -1025,6 +1029,7 @@ pub variant persia::Explanation::Constant { .. }
 pub variant persia::Explanation::Phrase(persia::PhraseExplanation)
 pub variant persia::Explanation::Relaxed(persia::RelaxedExplanation)
 pub variant persia::Explanation::StaticRank { .. }
+pub variant persia::Explanation::WithStaticRank { .. }
 pub variant persia::Explanation::Word(persia::WordExplanation)
 pub variant persia::Fallback::None
 pub variant persia::Fallback::StaticRank

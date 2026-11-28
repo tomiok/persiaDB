@@ -3,7 +3,8 @@
 //! (block-max WAND), each strategy of 7.4.4 side by side, prefix and fuzzy expansions planned and searched (7.4.12),
 //! and a term under filters (7.4.5): a numeric range, a keyword, and a filter alone; and whole requests (7.5): sorted
 //! by a column, with a facet, and a page after a cursor; and the query suite of 7.8.3 end to end (`search_suite`); and
-//! a request through the relaxation cascade when L0 has enough hits (`search_relaxed`, 8.1.2).
+//! a request through the relaxation cascade when L0 has enough hits (`search_relaxed`, 8.1.2); and a term and an OR in
+//! a collection whose static rank every hit adds (`search_static_rank`, 10.1.45).
 //! Deterministic input (a fixed-seed generator), so runs compare. Run: `cargo bench -p persia-engine --bench search`.
 
 #![allow(missing_docs, clippy::unwrap_used)]
@@ -1312,10 +1313,60 @@ fn relaxed_facets(c: &mut Criterion) {
     group.finish();
 }
 
+/// 10 hits by score over one committed segment, in the collection that ranks by `log1p(price)` (SPEC §6.2.3, §7.2,
+/// ROADMAP 10.1.45) and in the same documents without a static rank: a term and an OR of three, pruned (block-max WAND)
+/// and exhaustive. The difference is what adding the static rank to every hit costs.
+fn static_rank(c: &mut Criterion) {
+    let (unranked, [body, ..]) = collection(1, false);
+    let (ranked, _) = ranked_collection(1);
+    let term = |w: &str| {
+        Query::Term(TermQuery {
+            field: body,
+            term: w.into(),
+        })
+    };
+    let queries = [
+        ("term", term("w3")),
+        (
+            "or",
+            Query::Bool(BoolQuery {
+                should: vec![term("w3"), term("w40"), term("w120")],
+                ..BoolQuery::default()
+            }),
+        ),
+    ];
+    let request = SearchRequest {
+        limit: 10,
+        projection: Projection::None,
+        ..SearchRequest::default()
+    };
+    let mut group = c.benchmark_group("search_static_rank");
+    for (db, kind) in [(&unranked, "plain"), (&ranked, "ranked")] {
+        let snapshot = db.snapshot();
+        let coll = snapshot.collection("bench").unwrap();
+        let memtable = coll.memtable();
+        let views = coll.views(&memtable).unwrap();
+        let stats = coll.search_statistics(&memtable);
+        for (name, query) in &queries {
+            let plan = SearchPlan::new(query, coll.schema(), &stats).unwrap();
+            for (strategy, pruning) in [
+                ("wand", Pruning::BlockMaxWand),
+                ("exhaustive", Pruning::Exhaustive),
+            ] {
+                group.bench_function(format!("{name}/{kind}/{strategy}"), |b| {
+                    b.iter(|| black_box(views.search(&plan, &request, pruning).unwrap()));
+                });
+            }
+        }
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench,
     requests,
+    static_rank,
     parallel,
     suite,
     collection_expansions,

@@ -386,6 +386,24 @@ impl Writer<'_> {
                 }
                 out.push_str("}}");
             }
+            Explanation::WithStaticRank {
+                score,
+                query,
+                static_rank,
+                value,
+            } => {
+                out.push_str("{\"with_static_rank\":{\"score\":");
+                number(out, *score, "a score")?;
+                out.push_str(",\"query\":");
+                self.explanation(out, query)?;
+                out.push_str(",\"static_rank\":{\"score\":");
+                number(out, *static_rank, "a score")?;
+                if let Some(value) = value {
+                    out.push_str(",\"value\":");
+                    number(out, *value, "a static rank value")?;
+                }
+                out.push_str("}}}");
+            }
             Explanation::Relaxed(relaxed) => self.relaxed(out, relaxed)?,
         }
         Ok(())

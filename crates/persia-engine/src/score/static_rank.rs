@@ -1,7 +1,8 @@
 //! The static rank contribution `weight · fn(v)` added to every hit's score (SPEC §6.2.3, §7.2, ROADMAP 7.3.2).
 
 use crate::document::Value;
-use crate::schema::{RankFn, StaticRank};
+use crate::schema::{FieldType, RankFn, StaticRank};
+use crate::segment::KeyBlock;
 
 /// The contribution of a document whose `rank.field` holds `value` (SPEC §6.2.3): `weight · fn(max(v, 0))`, 0 for
 /// a document without the field or with a value that is not a finite number, and saturating at `f64::MAX`. Always
@@ -51,6 +52,42 @@ pub fn static_rank_value(value: &Value) -> Option<f64> {
         Value::I64(v) | Value::Datetime(v) => Some(v as f64),
         Value::F64(v) => Some(v),
         _ => None,
+    }
+}
+
+/// The contribution of a document whose key in the static rank's column is `key` (`None`: no value), for a column of
+/// `kind` (`i64`, `f64` or `datetime`; SPEC §5.2.1 keys), and the value it came from as [`static_rank_value`] reads
+/// it: what L5 ranks by and what every query hit adds (SPEC §6.2.3, §7.2), read from a view's column.
+pub(crate) fn key_contribution(
+    rank: &StaticRank,
+    kind: FieldType,
+    key: Option<u64>,
+) -> (f64, Option<f64>) {
+    let value = key.and_then(|key| {
+        let value = match kind {
+            FieldType::F64 => Value::F64(persia_format::for_codec::key_to_f64(key)),
+            FieldType::Datetime => Value::Datetime(persia_format::for_codec::key_to_i64(key)),
+            _ => Value::I64(persia_format::for_codec::key_to_i64(key)),
+        };
+        static_rank_value(&value)
+    });
+    let value_ref = value.map(Value::F64);
+    // `+ 0.0`: a `-0.0` (a weight of `-0.0`) ranks as `0.0`.
+    (static_rank(rank, value_ref.as_ref()) + 0.0, value)
+}
+
+/// The largest key `block` may hold, as a bound of its documents' static rank. Its bound is the minimum plus
+/// `2^width − 1` (SPEC §5.2.1), which for an `f64` column may pass the key of `f64::MAX` into those of `+∞` and NaN,
+/// whose static rank reads as 0; stored floats are finite (SPEC §6.2.2), so the bound stops at `f64::MAX`. The static
+/// rank never decreases with the key (key order is value order, and `fn` and the weight are monotone, SPEC §6.2.3),
+/// so the static rank of this key bounds every document's in the block.
+pub(crate) fn largest_key(kind: FieldType, block: KeyBlock) -> u64 {
+    match kind {
+        FieldType::F64 => block
+            .max
+            .min(persia_format::for_codec::f64_to_key(f64::MAX))
+            .max(block.min),
+        _ => block.max,
     }
 }
 

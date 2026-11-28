@@ -338,6 +338,19 @@ impl Serialize for ExplanationJson<'_> {
             Explanation::StaticRank { score, value } => {
                 out.serialize_entry("static_rank", &ScoreOnly(*score, *value))?;
             }
+            Explanation::WithStaticRank {
+                score,
+                query,
+                static_rank,
+                value,
+            } => out.serialize_entry(
+                "with_static_rank",
+                &WithStaticRankJson {
+                    score: *score,
+                    query: self.of(query),
+                    static_rank: ScoreOnly(*static_rank, *value),
+                },
+            )?,
             Explanation::Relaxed(relaxed) => {
                 out.serialize_entry(
                     "relaxed",
@@ -400,6 +413,24 @@ impl Serialize for Wrapped<'_> {
             out.serialize_entry("boost", &Finite(boost, "a boost"))?;
         }
         out.serialize_entry("query", &self.query)?;
+        out.end()
+    }
+}
+
+/// `with_static_rank` (SPEC §7.7, ROADMAP 10.1.45): the score, the query's tree, and the static rank as an L5 hit's
+/// `static_rank` node states it.
+struct WithStaticRankJson<'a> {
+    score: f64,
+    query: ExplanationJson<'a>,
+    static_rank: ScoreOnly,
+}
+
+impl Serialize for WithStaticRankJson<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        let mut out = s.serialize_map(None)?;
+        out.serialize_entry("score", &Finite(self.score, "a score"))?;
+        out.serialize_entry("query", &self.query)?;
+        out.serialize_entry("static_rank", &self.static_rank)?;
         out.end()
     }
 }

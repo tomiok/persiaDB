@@ -1694,12 +1694,20 @@ edit-distance weight of §7.1, which orders hits within a step. Across a relaxat
 edits, or match words as typed rather than by completion, rank first because they are earlier steps of the cascade,
 not because they score higher.
 
-> **Note (2026-11-27).** The engine does not add the static rank contribution to a hit of a query with words yet:
-> such a hit's score is the clause sum (with the proximity bonus above when the request asks for it), and the static
-> rank scores only L5 `fallback` hits (§7.6). Whether the total below holds for every hit, or this section changes
-> to match the code, is ROADMAP 10.1.45.
+Total = Σ_t score + static_rank contribution (§6.2.3). **Static rank** (ROADMAP 10.1.45). With
+`ranking.static_rank`, every hit of a query scores its query's score `q` (the root's, the proximity bonus included
+when the plan scores it) plus the contribution `s` of its document, added last: `sat(q + s)`, saturated at
+`f64::MAX` as any score. That holds in every view, for a plain search and for every relaxed step that scores a
+query (L0 to L4 and L6, §7.6), so it is the score a `score` sort key, a cursor and a rank score see, and of two
+documents with equal text scores the one of higher static rank ranks first. L5 `fallback` hits score `s` alone: its
+step scores no word, and L5 ranks by the contribution itself, not adding it again (§7.6). Without a static rank, or
+with `weight` 0, nothing is added and a hit scores its query's score. The contribution is not normalized to the text
+score: BM25F scores are a few units of `idf`, so a `weight` of 1 on `log1p` of a count in the thousands (about 7) can
+outweigh the text, and a caller tunes `weight` to the share it wants (the relevance gates of §16.1 run on
+collections without a static rank). A view reads each scored document's value from its column (§5.3.5); pruning
+bounds the contribution as §7.3 says.
 
-Total = Σ_t score + static_rank contribution (§6.2.3). `N`, `df`, `avglen` are **collection-level**, summed across live segments
+`N`, `df`, `avglen` are **collection-level**, summed across live segments
 (and across shards when `global_stats: true`, SPEC §11.5). They are summed from each segment's stored statistics
 (§5.1, term `df`, field statistics), which count the segment's deleted documents too until a merge drops them
 (§5.5), as in Lucene: a merge of segments without deletions leaves every score unchanged, and one that drops deleted
@@ -1764,6 +1772,16 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   (checked when the block decodes) or whose norm is below its block's `min_norm` (checked when it is scored) is
   corruption: a search that scores such a document fails instead of ranking it above a bound another document was
   skipped by. Blocks pruning skips are not read, so their bounds are checked only by `Segment::verify`.
+  With a static rank (§7.2, ROADMAP 10.1.45), the whole score is the query's plus the contribution, and the bound
+  adds a bound of the contribution the same way: per view, `M`, the contribution of the largest key each FOR block of
+  the static rank's column may hold (its minimum plus `2^width − 1`, stopped at `f64::MAX`'s key for an `f64` column,
+  §5.2.1; the contribution never decreases with the key, §6.2.3), the largest over the blocks. A bound `Q` of the
+  query's score gives `sat(Q + M)`, which bounds `sat(q + s)` exactly, as addition and saturation are monotonic. A
+  threshold `t` on the whole score reaches the query's matchers as the largest `t'` found with `sat(t' + M) ≤ t`, so
+  a document they skip scores at most `t` in all. `M` is read from the block bounds the first time the view takes a
+  threshold or a bound, not before (L5's walk and a facet count read none), and a corrupt block fails the search. A
+  view without block bounds (the memtable, a segment column without a value) takes no threshold: its matches are all
+  scored. Pruned and exhaustive top-k are still the same hits, scores bit for bit.
 - Filters evaluate to roaring bitmaps (or column predicates) intersected with candidates before a document is
   scored. Each view evaluates a `bool`'s filters once: `term` and `terms` on a `keyword` field from its postings,
   on another field (and `range`) from the column's order-preserving keys (§5.2.1, an exclusive bound being the next
@@ -2002,7 +2020,9 @@ the keys of each object in it; a value that is absent is left out, never `null`:
   `length`, `factor`, `tf`), `bool` (`score`, `must`, `proximity` when it has one: `score` and `pairs`, each `first`,
   `weight`, `field` and `distance` when a field holds both words, `closeness`, `score`; then `should`), `boost`
   (`score`, `boost`, `query`), `constant_score` (`score`, `query`), `match_all` (`score`), `static_rank` (`score`,
-  `value` when the document has one) and `relaxed` (`level`, `step`, `applied` except at L0, `score`, `explanation`).
+  `value` when the document has one), `with_static_rank` (`score`, `query`, `static_rank`: an object of `score` and
+  `value` when the document has one, as the `static_rank` node holds them; ROADMAP 10.1.45) and `relaxed` (`level`,
+  `step`, `applied` except at L0, `score`, `explanation`).
 
 Writing a response fails only on a broken invariant (a field id of another schema, a value of another type than its
 field, a number that is not finite): it is reported, not written as JSON a reader would take for a value.
@@ -2476,7 +2496,12 @@ A `bool` lists every `must` clause and the `should` clauses that match, in query
 nothing and are not listed); a `bool` with proximity pairs (§7.2) also lists, between them, its bonus and per pair the
 first word's index, `λ · min(idf)`, the field the closeness came from, `d`, `π` and their product (0 when no field
 holds both within the window); a `boost` reports its factor (for a fuzzy term, the edit-distance weight from §7.1); a
-`constant_score` its score; `match_all` scores 0. An L5 `fallback` hit (§7.6) is explained as `static_rank`: its score, the static rank of §6.2.3 (0 without `ranking.static_rank`), and the field's value it came from (none when the document lacks it). Each node gives its score, and the root's is the hit's, bit for
+`constant_score` its score; `match_all` scores 0. An L5 `fallback` hit (§7.6) is explained as `static_rank`: its score, the static rank of §6.2.3 (0 without `ranking.static_rank`), and the field's value it came from (none when the document lacks it). A hit of a query in a collection with a static rank
+(§7.2, ROADMAP 10.1.45) is explained as `with_static_rank` around its query's tree: its score, the tree, and the
+contribution as L5 states it (`static_rank`: its score and the value), the tree's score plus the contribution; in a
+relaxed hit's `relaxed` node (below) the step's tree is this node, except at L5, whose tree is `static_rank` alone.
+Without a static rank, or with `weight` 0, there is no such node. Each node gives its score, and the root's is the
+hit's, bit for
 bit: it reads the same postings and norms, and sums in the same order. The page's hits are explained one view at a
 time, in one pass: the view's tree is built once (each leaf an unpruned matcher, each `bool`'s filters the documents
 the search's matcher selected in that view, ROADMAP 7.7.3; selected the first time they are needed when that matcher

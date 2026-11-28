@@ -526,6 +526,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- A collection's static rank (`ranking.static_rank`, SPEC §6.2.3, §7.2) is now added to the score of every hit of a
+  query, not only to L5 `fallback` hits (ROADMAP 10.1.45, ADR-0044 amended): the query's score, then
+  `weight · fn(v)`, saturated at `f64::MAX`, in a plain search and every relaxed step that scores words. Of two
+  documents with equal text scores, the higher static rank now ranks first; `score` sort keys, cursors and
+  `Hit::rank_score` see the total. Explained hits gain an `Explanation::WithStaticRank` node (`with_static_rank` in
+  the response JSON: `score`, `query`, `static_rank` with its `score` and `value`). L5 hits still score the
+  contribution alone. Pruning stays exact: a segment bounds the contribution by its column's FOR blocks; a memtable
+  view scores every match. Collections without a static rank (or with `weight` 0) rank and score exactly as before.
 - README: the quickstart runs in CI (ROADMAP 10.3.3). It is the getting-started guide's first sample, a doctest,
   with `app.persia` in place of a temporary directory, and a repo check (`xtask/src/repo_checks/samples.rs`) fails
   when the two differ. Its `main` now returns `Result<(), Box<dyn std::error::Error>>` and ends with

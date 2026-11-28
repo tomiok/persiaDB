@@ -26,6 +26,7 @@ use super::filter::{FilterDocs, Filtered, Selections, narrow, select};
 use super::max_score::MaxScore;
 use super::phrase::{PhraseMatcher, PhrasePostings};
 use super::proximity::{LAMBDA, PairPlan, Proximity, ProximityPlan};
+use super::static_rank::{RankPlan, StaticRanked, total};
 use super::word::{WordField, WordMatcher};
 use super::{Hit, Matcher, Pruning, SearchError, collect};
 
@@ -39,6 +40,9 @@ pub struct SearchPlan {
     check_share: Option<u64>,
     /// Whether `bool`s add their proximity bonus (SPEC §7.2): off unless [`Self::with_proximity`].
     proximity: bool,
+    /// The collection's static rank, which every hit's score adds after its query's (SPEC §6.2.3, §7.2, ROADMAP
+    /// 10.1.45); `None` without one or with `weight` 0.
+    static_rank: Option<RankPlan>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +99,7 @@ impl SearchPlan {
         Ok(Self {
             check_share: None,
             proximity: false,
+            static_rank: RankPlan::of(schema),
             root: plan(
                 query,
                 schema,
@@ -159,6 +164,7 @@ impl SearchPlan {
         Ok(Self {
             check_share: None,
             proximity: false,
+            static_rank: RankPlan::of(schema),
             root: plan(
                 query,
                 schema,
@@ -254,7 +260,7 @@ impl SearchPlan {
         view: &'a V,
         pruning: Pruning,
     ) -> Result<BoxedMatcher<'a>, ReadError> {
-        build(&self.root, view, pruning, self.build(None))
+        Ok(self.ranked(build(&self.root, view, pruning, self.build(None))?, view))
     }
 
     /// As [`Self::matcher_with`], keeping in `kept` what each `bool` selects with its filters, for
@@ -265,7 +271,63 @@ impl SearchPlan {
         pruning: Pruning,
         kept: &Selections,
     ) -> Result<BoxedMatcher<'a>, ReadError> {
-        build(&self.root, view, pruning, self.build(Some(kept)))
+        Ok(self.ranked(
+            build(&self.root, view, pruning, self.build(Some(kept)))?,
+            view,
+        ))
+    }
+
+    /// The documents the plan matches in `view`, unpruned, for a walk that never asks for a score (L5's, ROADMAP
+    /// 8.2.5): [`Self::matcher`] without the static rank's column reads, whose scores are not the hits' (SPEC §7.2).
+    pub(crate) fn candidates<'a, V: SearchView>(
+        &'a self,
+        view: &'a V,
+    ) -> Result<BoxedMatcher<'a>, ReadError> {
+        build(&self.root, view, Pruning::Exhaustive, self.build(None))
+    }
+
+    /// `root`, the query's matcher over `view`, with the static rank added to its scores when the collection has one
+    /// (SPEC §7.2, ROADMAP 10.1.45).
+    fn ranked<'a, V: SearchView>(
+        &'a self,
+        root: BoxedMatcher<'a>,
+        view: &'a V,
+    ) -> BoxedMatcher<'a> {
+        match &self.static_rank {
+            Some(rank) => Box::new(StaticRanked::new(root, rank, view)),
+            None => root,
+        }
+    }
+
+    /// `explained`, the explanations of `docids` of `view` by the query, each around its static rank when the
+    /// collection has one ([`Explanation::WithStaticRank`]): the query's score, then the contribution, as the hit's.
+    fn ranked_explanations<V: SearchView>(
+        &self,
+        view: &V,
+        docids: &[u32],
+        explained: Vec<Option<Explanation>>,
+    ) -> Result<Vec<Option<Explanation>>, ReadError> {
+        let Some(rank) = &self.static_rank else {
+            return Ok(explained);
+        };
+        let mut keys = rank.keys(view)?;
+        docids
+            .iter()
+            .zip(explained)
+            .map(|(&docid, explanation)| {
+                explanation
+                    .map(|query| {
+                        let (static_rank, value) = rank.contribution(&mut keys, docid)?;
+                        Ok(Explanation::WithStaticRank {
+                            score: total(query.score(), static_rank),
+                            query: Box::new(query),
+                            static_rank,
+                            value,
+                        })
+                    })
+                    .transpose()
+            })
+            .collect()
     }
 
     /// The best `k` hits of the plan in `view`: score descending, then docid ascending (ROADMAP 7.4.3), with the
@@ -335,11 +397,11 @@ impl SearchPlan {
         view: &V,
         docid: u32,
     ) -> Result<Option<Explanation>, ReadError> {
-        Ok(
-            explain_all(&self.root, view, &[docid], None, self.proximity)?
-                .pop()
-                .flatten(),
-        )
+        let explained = explain_all(&self.root, view, &[docid], None, self.proximity)?;
+        Ok(self
+            .ranked_explanations(view, &[docid], explained)?
+            .pop()
+            .flatten())
     }
 
     /// As [`Self::explain`] for each of `docids`, in that order, in one pass over `view` (ROADMAP 7.7.2): the tree is
@@ -385,7 +447,8 @@ impl SearchPlan {
         view: &V,
         docids: &[u32],
     ) -> Result<Vec<Option<Explanation>>, ReadError> {
-        explain_all(&self.root, view, docids, None, self.proximity)
+        let explained = explain_all(&self.root, view, docids, None, self.proximity)?;
+        self.ranked_explanations(view, docids, explained)
     }
 
     /// As [`Self::explain_all`], each `bool` starting from what [`Self::matcher_keeping`] kept over the same view
@@ -396,7 +459,8 @@ impl SearchPlan {
         docids: &[u32],
         kept: &Selections,
     ) -> Result<Vec<Option<Explanation>>, ReadError> {
-        explain_all(&self.root, view, docids, Some(kept), self.proximity)
+        let explained = explain_all(&self.root, view, docids, Some(kept), self.proximity)?;
+        self.ranked_explanations(view, docids, explained)
     }
 }
 

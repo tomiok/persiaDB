@@ -786,6 +786,42 @@ in, each with every match visited, only to count them: that is the whole differe
 query on a snapshot (later pages of the query read the kept counts, `facets/deep` above). A page without facets pays
 nothing.
 
+`search_static_rank` (ROADMAP 10.1.45): 10 hits by score over one committed segment of the 50 000 documents, in the
+collection without a static rank (`plain`) and in the same documents ranked by `log1p(price)` (`ranked`, prices
+0–999), for `w3` and `w3 OR w40 OR w120`, block-max WAND and exhaustive. Since 10.1.45 every hit of the ranked
+collection adds its static rank, read from the `price` column per scored document, and pruning bounds it by the
+column's FOR blocks. Command: `cargo bench -p persia-engine --bench search -- --warm-up-time 1 --measurement-time 3
+--noplot 'search_static_rank|search_top10/(term|or|and|or50|phrase)$|search_request/score$|search_relaxed/(plain|l5/static_rank)$'`
+(shortened warm-up and measurement, the same before and after). 2026-11-28, rustc 1.99.0, AMD Ryzen 5 3600, Linux.
+Before is 40267a1 with the bench added; after is the 10.1.45 change, run twice (the second after L5 stopped wrapping
+its candidate walk, `SearchPlan::candidates`). Means of criterion's estimates.
+
+| Row | before | after (1st, 2nd) |
+|---|--:|--:|
+| `search_static_rank/term/plain/wand` | 470 µs | 440, 440 µs |
+| `search_static_rank/term/plain/exhaustive` | 451 µs | 435, 434 µs |
+| `search_static_rank/or/plain/wand` | 1.113 ms | 1.041, 1.030 ms |
+| `search_static_rank/or/plain/exhaustive` | 1.477 ms | 1.427, 1.439 ms |
+| `search_static_rank/term/ranked/wand` | 471 µs | 892, 917 µs |
+| `search_static_rank/term/ranked/exhaustive` | 452 µs | 842, 851 µs |
+| `search_static_rank/or/ranked/wand` | 1.119 ms | 1.427, 1.421 ms |
+| `search_static_rank/or/ranked/exhaustive` | 1.486 ms | 2.249, 2.336 ms |
+| `search_top10/term` | 468 µs | 456, 450 µs |
+| `search_top10/and` | 457 µs | 445, 465 µs |
+| `search_top10/or` | 1.168 ms | 1.097, 1.199 ms |
+| `search_top10/or50` | 24.33 ms | 23.96, 25.23 ms |
+| `search_top10/phrase` | 668 µs | 648, 679 µs |
+| `search_request/score` | 477 µs | 430, 440 µs |
+| `search_relaxed/plain` | 475 µs | 454, 447 µs |
+| `search_relaxed/l5/static_rank` | 856 µs | 951, 810 µs |
+
+A collection without a static rank plans as before (no wrapper): its rows move by −10 % to +4 % across the runs, in
+both directions, which is this machine's run-to-run spread. In the ranked collection the static rank costs one column
+read per scored document: `w3` about doubles (+89 to +95 %), and the OR of three rises by 27 % pruned and 51 to 57 %
+exhaustive. Pruning helps less there than without a static rank, since the bound adds the largest contribution of
+the whole view (`log1p(999)` ≈ 6.9, above most text scores); a per-block bound is an open item. L5 rose 11 % while
+its walk took the wrapped matcher, and is back below before once it enumerates with the unscored one.
+
 ## `persia-engine` relevance
 
 `cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2, 7.8.4): 18 user-text queries with graded judgments over
