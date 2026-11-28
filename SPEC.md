@@ -1354,7 +1354,8 @@ returned as it is, and copied as bytes, never re-validated.
   "relax": { "min_results": 1 },          // overrides collection default
   "explain": false,
   "proximity": false,                     // true scores the proximity bonus (§7.2); needs "relax": false
-  "projection": "all"                     // or "none", or ["title", "price"]: the stored fields a hit returns (§7.5.1)
+  "projection": "all",                    // or "none", or ["title", "price"]: the stored fields a hit returns (§7.5.1)
+  "timeout_ms": 200                       // optional: past it the search fails, deadline exceeded (§7.1.4, §7.3)
 }
 ```
 Programmatic query AST (term, combined, phrase, prefix, fuzzy, bool must/should/must_not, filter, boost,
@@ -1571,6 +1572,7 @@ never fails (§7.1.1).
 | `explain` | `true` or `false` (§7.7) | `false` |
 | `proximity` | `true` or `false` (§7.2) | `false` |
 | `projection` | `"all"`, `"none"`, or a non-empty array of distinct names, each a stored field or, in a collection that is not `strict`, an extra field (§7.5.1) | `"all"` |
+| `timeout_ms` | an integer of milliseconds of at least 0, written without a fraction or an exponent, at most 2^64 − 1 (ROADMAP 10.1.44); `-0` is an error of its own | no timeout |
 
 Each value is read by the rules of its own section. A `sort` key object takes `field`, `order` and `missing`, or
 `score` alone with an object of `order` (§7.4); a facet object takes `field` and `size` (default 10); any other key in
@@ -1616,6 +1618,23 @@ another type, longer than 1 MiB) is `INVALID_ARGUMENT`, and a filter past a limi
 §7.1.3 limit is (ADR-0063 item 8). Either setter takes its request's one hard or soft filter, as the typed setters do:
 the later call is the one kept. The filter's text is parsed when the request runs, not by the setter, since a request
 names no schema until then (as `fields` does, by name); the API has no parser that returns a typed filter.
+
+`timeout_ms` (ROADMAP 10.1.44, ADR-0063) is the request's deadline (§7.3), given as a time from when the request
+starts to run, not as an instant: an instant means something only on one clock (a monotonic instant is not even
+comparable across processes), and JSON, a server header or a C call carries a duration as it is. The embedded API's
+`SearchRequest::timeout` takes a `Duration` (sub-millisecond ones too) and is the same timeout. The run reads the
+clock once, before anything else it does, and the deadline is that instant plus the timeout, on the database's clock:
+the monotonic clock its commit policy reads (§8.2), the system's unless a test injects one. The relaxation budget
+(§7.6) reads the same clock; a run given its own deadline as well (the engine's `RunOptions::deadline`) stops at the
+first of the two. `0` has passed at the search's first read, so the search fails there: a caller that hands on what
+is left of a deadline of its own gets the error, not an invalid request. There is no upper bound: an end the clock
+cannot represent (checked arithmetic; a timeout of centuries) is no end. A search past it fails as at any deadline:
+at the first read of §7.3 that finds the clock at or past it, with no hits, at every relaxation level, L0 and L5
+included, never as a truncated or early relaxed page (§7.6: the budget is what truncates). In the embedded API that
+error is `CANCELLED` (ADR-0063 item 7: the call was cancelled or ran past its deadline): a synchronous search has no
+other interrupt, and an async search whose future was dropped returns to nobody. An async search's timeout runs from
+when its job starts on the pool, not while it is queued. The timeout is not part of the cursor's request fingerprint
+(§7.4): it does not change the ranking.
 
 ### 7.2 Scoring: BM25F
 Per term `t` and doc `d` over fields `f` with weights `w_f`:
@@ -1777,8 +1796,9 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   view fails can depend on the timing: a pruned view does not read the blocks a threshold skips (their bounds are
   checked only by `Segment::verify`), and the threshold may come from another view. Hits returned without an error
   are the same either way.
-- A search may carry a deadline (an instant of an injected clock) and a cancellation token. They are read before the
-  search starts (so a search with no view to run, or `k = 0`, stops too), as each view's collector starts (after its
+- A search may carry a deadline (an instant of an injected clock; a request gives it as `timeout_ms`, a time from when
+  it starts to run, §7.1.4) and a cancellation token. They are read before the search starts (so a search with no
+  view to run, or `k = 0`, stops too), as each view's collector starts (after its
   matcher is built), every 256 matches a view yields, before each facet a view counts, before the page's
   documents are read, and before the hits of each view are explained (§7.7). The readers of a view a search opens read them too, every
   1024 steps of all of them together: a postings list (a document moved to, a block bound skipped to), a term stream,
@@ -2391,7 +2411,8 @@ error (its settings, above). A cursor from a step the plan no longer builds unde
 §7.1.3, which the cursor does not record) pages nothing.
 
 Budget (ROADMAP 8.1.4): `budget_ms` runs on the clock the search is given (injected: its budget clock, else its
-deadline's, else the system's) from the moment L0 finishes, so L0 is never cut by it. The request's own deadline and
+deadline's, else the system's; the embedded API gives the database's, which its `timeout_ms` reads too, §7.1.4) from
+the moment L0 finishes, so L0 is never cut by it. The request's own deadline (its `timeout_ms` included) and
 cancellation (§7.3) still apply to every step, L0 included, and are errors. The budget is checked before each level
 builds its steps, before each step, and inside each step's planning and search, at the reads of §7.3. Once it has
 passed, the cascade stops. A step in progress is dropped whole: it has not seen all its matches, so the hits it holds

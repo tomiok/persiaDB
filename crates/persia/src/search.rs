@@ -7,6 +7,7 @@
 //! [`SearchResponse::next_cursor`] and [`SearchRequest::after`].
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use persia_engine::db::{Relaxation as EngineRelaxation, RelaxedHit, SearchHit};
 use persia_engine::document::Document;
@@ -64,6 +65,7 @@ pub struct SearchRequest {
     explain: bool,
     relax: Option<RelaxOptions>,
     proximity: bool,
+    timeout: Option<Duration>,
 }
 
 impl SearchRequest {
@@ -89,6 +91,7 @@ impl SearchRequest {
             explain: false,
             relax: None,
             proximity: false,
+            timeout: None,
         }
     }
 
@@ -310,6 +313,36 @@ impl SearchRequest {
         self
     }
 
+    /// How long the search may run, from when [`Collection::search`] is called (SPEC §7.1.4, §7.3; the request JSON's
+    /// `timeout_ms`). Past it, the search stops at its next check (every 256 matches of a view, every 1024 steps of
+    /// its readers, before each view, facet and page read) and fails with
+    /// [`ErrorCode::Cancelled`](crate::ErrorCode::Cancelled), returning no hits: never an early or relaxed page, at
+    /// any relaxation level. It is read on the database's monotonic clock, which also times the relaxation budget
+    /// (`budget_ms`, a separate, softer limit that truncates the cascade instead). `Duration::ZERO` has passed at the
+    /// first check; a timeout past what the clock can represent is no limit. The later call is the one kept.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use persia::{ErrorCode, SearchRequest};
+    ///
+    /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// # let db = persia::Db::open(dir.path().join("app.persia"))?;
+    /// let notes = db.create_collection_json(r#"{"name": "notes", "fields": {"body": {"type": "text"}}}"#)?;
+    /// notes.put_json(r#"{"id": "n1", "body": "hello world"}"#)?;
+    /// let page = notes.search(&SearchRequest::new("hello").timeout(Duration::from_secs(5)))?;
+    /// assert_eq!(page.hits.len(), 1);
+    /// // A timeout that has already passed fails at the first check, with no hits.
+    /// let late = notes.search(&SearchRequest::new("hello").timeout(Duration::ZERO)).unwrap_err();
+    /// assert_eq!(late.code(), ErrorCode::Cancelled);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
     /// The engine's request for `schema`.
     fn lower(&self, schema: &CollectionSchema) -> Result<QueryRequest> {
         let mut request = QueryRequest::new(self.q.clone())
@@ -343,6 +376,9 @@ impl SearchRequest {
         }
         if let Some(relax) = &self.relax {
             request = request.with_relax(relax.clone());
+        }
+        if let Some(timeout) = self.timeout {
+            request = request.with_timeout(timeout);
         }
         Ok(request)
     }
@@ -727,6 +763,7 @@ impl Collection {
     /// JSON) or §17;
     /// [`ErrorCode::NotFound`](crate::ErrorCode::NotFound) if the collection was dropped;
     /// [`ErrorCode::Corrupt`](crate::ErrorCode::Corrupt) if a segment is damaged;
+    /// [`ErrorCode::Cancelled`](crate::ErrorCode::Cancelled) once the request's [`SearchRequest::timeout`] passed;
     /// [`ErrorCode::Closed`](crate::ErrorCode::Closed).
     pub fn search(&self, request: &SearchRequest) -> Result<SearchResponse> {
         self.search_with(request, RunOptions::new())
@@ -747,9 +784,14 @@ impl Collection {
         self.search_with(request, run)
     }
 
+    /// `run` reading the request's timeout and the relaxation budget on the database's clock (ROADMAP 10.1.44).
+    fn run_options(&self, run: RunOptions) -> RunOptions {
+        run.budget_clock(self.db.options.search_clock())
+    }
+
     /// [`search`](Self::search) run as `run` says.
     fn search_with(&self, request: &SearchRequest, run: RunOptions) -> Result<SearchResponse> {
-        let run = run.limits(query_limits());
+        let run = self.run_options(run).limits(query_limits());
         self.read(|c| {
             let lowered = request.lower(c.schema())?;
             let ran = lowered.run(c, &run).map_err(Error::wrap)?;
@@ -759,7 +801,7 @@ impl Collection {
 
     /// [`search`](Self::search) of the request JSON `json` (SPEC §7.1, ADR-0062): `q`, `fields`, `filter`,
     /// `soft_filter`, `sort`, `limit`, `offset`, `search_after` (a cursor token), `facets`, `relax`, `explain`,
-    /// `proximity` and `projection`, read strictly.
+    /// `proximity`, `projection` and `timeout_ms` (as [`SearchRequest::timeout`]), read strictly.
     ///
     /// ```
     /// # if cfg!(miri) { return Ok(()); } // real files: Miri's isolation has no filesystem
@@ -799,7 +841,7 @@ impl Collection {
     /// [`search_json`](Self::search_json) run as `run` says.
     fn search_json_with(&self, json: &str, run: RunOptions) -> Result<SearchResponse> {
         let limits = query_limits();
-        let run = run.limits(limits);
+        let run = self.run_options(run).limits(limits);
         self.read(|c| {
             let request =
                 QueryRequest::from_json(json, c.schema(), &limits).map_err(Error::wrap)?;

@@ -192,7 +192,8 @@ impl AsyncCollection {
 
     /// [`Collection::search_json`](crate::Collection::search_json) on the pool: the request JSON is read on the pool's
     /// thread. Dropping the future of a search that has started sets its cancellation token: the search stops soon
-    /// after (SPEC §7.3) with [`ErrorCode::Cancelled`](crate::ErrorCode::Cancelled), which nobody receives.
+    /// after (SPEC §7.3) with [`ErrorCode::Cancelled`](crate::ErrorCode::Cancelled), which nobody receives. A
+    /// `timeout_ms` runs from when the job starts on the pool, not while it waits in the queue.
     ///
     /// ```
     /// # use std::future::Future;

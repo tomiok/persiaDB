@@ -9,7 +9,7 @@
 
 use std::borrow::Cow;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::cursor::CursorTokenError;
 use super::fingerprint::fingerprint;
@@ -28,8 +28,8 @@ use crate::search::{
 /// setters, or parsed ([`Self::from_json`]); run with [`Self::run`].
 ///
 /// The default is an empty `q` (which matches every document, SPEC §7.1.1) over every `text` field, no filter, the
-/// first 20 hits by score, no facet, every stored field, the collection's relaxation settings, no explanation and no
-/// proximity bonus.
+/// first 20 hits by score, no facet, every stored field, the collection's relaxation settings, no explanation, no
+/// proximity bonus and no timeout.
 ///
 /// A request is built for one schema: its filters, sort, facets, default fields and projection name fields by id
 /// (SPEC §6.2.1). Run it on a snapshot of that schema.
@@ -80,6 +80,7 @@ pub struct QueryRequest {
     pub(super) page: SearchRequest,
     pub(super) relax: RelaxOptions,
     pub(super) proximity: bool,
+    pub(super) timeout: Option<Duration>,
 }
 
 impl QueryRequest {
@@ -180,6 +181,25 @@ impl QueryRequest {
         self
     }
 
+    /// Stops the search with [`Interrupt::DeadlineExceeded`] once `timeout` has passed since [`Self::run`] was called
+    /// (`timeout_ms`, SPEC §7.1.4, §7.3, ROADMAP 10.1.44), on the clock of [`RunOptions::budget_clock`] (else that of
+    /// [`RunOptions::deadline`], else the system's monotonic clock). It is an error at every relaxation step, never an
+    /// early page. `Duration::ZERO` has passed at the search's first read; an end the clock cannot represent is no
+    /// end. A deadline of [`RunOptions::deadline`] applies beside it: the first to pass stops the search.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use persia_engine::search::request::QueryRequest;
+    ///
+    /// let request = QueryRequest::new("red").with_timeout(Duration::from_millis(100));
+    /// assert_eq!(request.timeout(), Some(Duration::from_millis(100)));
+    /// ```
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
     /// The user text (`q`).
     pub fn q(&self) -> &str {
         &self.q
@@ -213,6 +233,11 @@ impl QueryRequest {
     /// Whether the search scores the proximity bonus (`proximity`).
     pub fn proximity(&self) -> bool {
         self.proximity
+    }
+
+    /// How long the search may run (`timeout_ms`); `None` for no limit but [`RunOptions::deadline`]'s.
+    pub fn timeout(&self) -> Option<Duration> {
+        self.timeout
     }
 
     /// The fingerprint every hit's cursor of this request records when it runs with `limits` on a collection of
@@ -275,13 +300,18 @@ impl QueryRequest {
     /// query over the limits or a filter that does not fit the schema; [`QueryRequestError::Relax`] for a `relax`
     /// value that breaks its rule; [`QueryRequestError::Request`] for a page, cursor, sort or facet the search
     /// refuses ([`RequestError::CursorProximity`] for a cursor from a search with the other proximity setting), a
-    /// view that cannot be read, a deadline or a cancellation; [`QueryRequestError::Plan`] for a query that cannot be
-    /// planned.
+    /// view that cannot be read, a deadline (the request's timeout too) or a cancellation;
+    /// [`QueryRequestError::Plan`] for a query that cannot be planned.
     pub fn run(
         &self,
         collection: &CollectionSnapshot,
         options: &RunOptions,
     ) -> Result<QueryResponse, QueryRequestError> {
+        // The timeout runs from here, before anything else the search does (SPEC §7.3: read before it starts).
+        let exec = match self.timeout {
+            Some(timeout) => Cow::Owned(options.exec.with_timeout(timeout)),
+            None => Cow::Borrowed(&options.exec),
+        };
         let schema = collection.schema();
         let limits = options.limits;
         self.check_schema(collection)?;
@@ -310,7 +340,7 @@ impl QueryRequest {
                 (&compiled).into(),
                 &self.page,
                 &relax,
-                &options.exec,
+                &exec,
                 Some(fingerprint),
             )?;
             let unread = Relaxation::of(
@@ -323,14 +353,14 @@ impl QueryRequest {
             (QueryResults::Relaxed(results), unread)
         } else {
             let stats = collection.search_statistics(&memtable);
-            let terms = options.exec.terms(&views);
+            let terms = exec.terms(&views);
             let plan = SearchPlan::with_terms(compiled.query(), schema, &stats, &terms)?;
             let plan = if self.proximity {
                 plan.with_proximity()
             } else {
                 plan.without_proximity()
             };
-            let results = views.search_for(&plan, &self.page, &options.exec, Some(fingerprint))?;
+            let results = views.search_for(&plan, &self.page, &exec, Some(fingerprint))?;
             (QueryResults::Plain(results), Relaxation::exact(&compiled))
         };
         Ok(QueryResponse {
@@ -395,7 +425,8 @@ impl RunOptions {
     }
 
     /// Stops the search with [`Interrupt::DeadlineExceeded`] once `clock` reads `at` or later (SPEC §7.3). The
-    /// relaxation budget reads the same clock unless [`Self::budget_clock`] gives another.
+    /// relaxation budget and the request's timeout ([`QueryRequest::with_timeout`]) read the same clock unless
+    /// [`Self::budget_clock`] gives another. With a timeout too, the first of the two to pass stops the search.
     #[must_use]
     pub fn deadline(mut self, clock: Arc<dyn Clock>, at: Instant) -> Self {
         self.exec = self.exec.deadline(clock, at);
@@ -409,7 +440,8 @@ impl RunOptions {
         self
     }
 
-    /// Reads the relaxation cascade's time budget (`relax.budget_ms`, SPEC §7.6) on `clock`.
+    /// Reads the relaxation cascade's time budget (`relax.budget_ms`, SPEC §7.6) and the request's timeout
+    /// ([`QueryRequest::with_timeout`], `timeout_ms`) on `clock`.
     #[must_use]
     pub fn budget_clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.exec = self.exec.budget_clock(clock);

@@ -369,3 +369,44 @@ the crate too.
    a shorter program of its own, with its own twin in a `#[cfg(doctest)] mod samples` of `crates/persia-docs`; the
    #141 review chose one program over two twins.) The check is in the Rust workflow (`ci.yml`, no paths filter), not
    `website.yml`, whose paths filter would skip a change to the README alone.
+
+## Amendment (2026-11-28): a search timeout on `SearchRequest` (ROADMAP 10.1.44)
+
+The engine stops a search at a deadline (SPEC §7.3, ROADMAP 7.6.2), but the facade had no way to give one: only a
+dropped async future stopped a running search. The request now takes one, in both of its forms:
+`SearchRequest::timeout(Duration)` and the request JSON's `timeout_ms` (SPEC §7.1.4), the engine's
+`QueryRequest::with_timeout`, which both lower to.
+
+1. **A timeout, not a deadline instant.** A `std::time::Instant` means something only on the clock that made it, and
+   the database's clock can be injected (the `OpenOptions::clock` test hook, whose `ManualClock` instants are offsets
+   of its own start): an `Instant::now() + d` a caller computed would be compared with another clock's instants. A
+   wall-clock deadline (epoch milliseconds) would follow clock steps. JSON, a future server's header (gRPC sends a
+   timeout too) and a C call carry a duration as it is. So the request says how long the search may run, and the run
+   turns that into the engine's deadline: it reads the clock once, before anything else it does (compiling, the
+   views), and adds the timeout with checked arithmetic.
+2. **The clock is the database's.** It is the monotonic clock the commit policy reads, the system's unless a test
+   injects one; the facade now gives it to every search as the engine's budget clock (`RunOptions::budget_clock`), so
+   the timeout and the relaxation budget read one clock (before, the budget read the system clock even under an
+   injected one; with the system clock nothing changes). Tests inject a clock that moves at each read, so a timeout
+   passes at a chosen check with no sleep (`crates/persia/tests/search.rs`,
+   `a_search_past_its_timeout_fails_at_the_next_check`).
+3. **Its values.** `timeout_ms` is read as `limit` is: an integer of at least 0, no fraction or exponent, `-0` an error
+   of its own, and nothing above `u64::MAX` (an error, as JSON gives no larger integer exactly). `0` is not refused: it
+   has passed at the first check, so the search fails there, which is what a caller handing on the rest of a deadline
+   of its own needs (an exhausted budget is a deadline error, not an invalid request). There is no upper bound, as a
+   bound would be arbitrary: an end the clock cannot represent is no end (`Duration::MAX` included), never a panic. A
+   misspelt key is an unknown key, refused like any (`INVALID_ARGUMENT`). The setter keeps its last call.
+4. **The code is `CANCELLED` (15).** Item 7's code already reads "cancelled or ran past its deadline". A synchronous
+   search has no other interrupt (only a dropped async future cancels, and its error reaches no one), so the code
+   alone tells a caller what happened, and the message says which. A `DEADLINE_EXCEEDED` code of its own would add a
+   number to the C ABI table (`docs/sdk/c-abi.md`) and `ErrorCode::ALL` for no case a caller could not already tell
+   apart.
+5. **Relaxation.** The timeout is an error at every step, L0 and L5 included, as SPEC §7.6 has the deadline: it never
+   turns into a truncated or early relaxed page, which is what `budget_ms`, the softer limit, does. The engine reads
+   both through one check, the timeout as a second deadline beside one a caller of `RunOptions::deadline` gives (the
+   first to pass stops), so the cascade's test for "the budget passed, not the deadline" sees the timeout as a
+   deadline.
+6. **Async.** An `AsyncCollection::search`'s timeout runs from when its job starts on the pool, as a
+   `Collection::search` called on that thread, not while it waits in the queue. A timeout that counts the queue is
+   left open (a new ROADMAP leaf, if a caller needs it). The timeout is not part of a cursor's request fingerprint
+   (ROADMAP 10.1.24): it does not change the ranking.

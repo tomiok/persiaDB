@@ -58,13 +58,17 @@ test('the live tree names the embedded API, not the engine', () => {
 	assert.match(status.preAlpha, /Collection::search runs a ranked search/);
 	assert.match(status.writePathNow, /Opening a database reloads the committed manifest/);
 	assert.match(status.tokens['%%QUERY_CELL%%'], /return ranked hits through Collection::search/);
+	// The facade's deadline is SearchRequest::timeout (ROADMAP 10.1.44): a token offers deadlines through the facade
+	// only while the snapshot lists that setter.
+	const snapshot = readFileSync(path.join(root, 'crates/persia/public-api.txt'), 'utf8');
+	const hasTimeout = /^pub fn persia::SearchRequest::timeout[(<]/m.test(snapshot);
 	assert.match(
 		status.tokens['%%MATCHING_CELL%%'],
-		/filters, sorts, cursor pages, facets, and explain, through Collection::search/,
+		hasTimeout
+			? /filters, sorts, cursor pages, facets, deadlines, and explain, through Collection::search/
+			: /filters, sorts, cursor pages, facets, and explain, through Collection::search/,
 	);
-	// A SearchRequest has no deadline setter (ROADMAP 10.1.44): no token may offer one through the facade.
-	const snapshot = readFileSync(path.join(root, 'crates/persia/public-api.txt'), 'utf8');
-	if (!/^pub fn persia::SearchRequest::deadline[(<]/m.test(snapshot)) {
+	if (!hasTimeout) {
 		for (const token of ['%%MATCHING_CELL%%', '%%QUERY_PATH_NOW%%', '%%QUERY_CELL%%', '%%FEATURES_LEAD%%']) {
 			assert.equal(status.tokens[token].includes('deadline'), false, `${token} offers a deadline`);
 		}

@@ -95,9 +95,10 @@ off or the budget runs out. Facets, sort, and cursors on the engine are [Faceted
 
 Go methods take `context.Context` and return `error` values with `errors.Is` sentinels. TypeScript
 methods return promises and throw `PersiaError` with a `code`; `get` of a missing id returns `null`.
-The engine reads a search deadline and a cancellation token (SPEC §7.3). The `persia` facade does not take a
-deadline yet; an async search (`AsyncCollection::search`) dropped before it ends is cancelled. These planned bindings
-do not wire `context.Context` or `AbortSignal` to a cancellation. The cascade budget is `relax.budget_ms` on the query,
+The engine reads a search deadline and a cancellation token (SPEC §7.3). The `persia` facade takes the deadline as
+`SearchRequest::timeout` (`"timeout_ms"` in the request JSON), and an async search (`AsyncCollection::search`)
+dropped before it ends is cancelled. These planned bindings do not wire `context.Context` or `AbortSignal` to
+them yet. The cascade budget is `relax.budget_ms` on the query,
 separate from the search deadline. [Faceted search](/guide/faceted-search/) is that split.
 
 Pagination is a page per call (`limit` / `offset`, or a `search_after` cursor, SPEC §7.4). There is no

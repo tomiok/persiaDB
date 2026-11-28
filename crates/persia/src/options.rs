@@ -449,6 +449,15 @@ impl OpenOptions {
         None
     }
 
+    /// The clock a search reads its timeout and its relaxation budget on (SPEC §7.1.4, §7.6, ROADMAP 10.1.44): the
+    /// database's, the one its commit policy reads (`OpenOptions::clock`, a test hook), else the system's
+    /// monotonic clock.
+    pub(crate) fn search_clock(&self) -> Arc<dyn Clock> {
+        self.clock
+            .clone()
+            .unwrap_or_else(|| Arc::new(persia_engine::db::SystemClock))
+    }
+
     /// The engine's options for one open (they are not `Clone`: each open draws its own segment ids).
     pub(crate) fn database_options(&self, cache: &Arc<BlockCache>) -> DatabaseOptions {
         let defaults = DatabaseOptions::default();

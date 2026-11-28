@@ -8,6 +8,7 @@
 //! `projection` as the fields a hit returns (SPEC §7.5.1).
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use serde_json::{Map, Value as J};
 
@@ -29,7 +30,7 @@ pub const MAX_REQUEST_JSON_LEN: usize = crate::query::MAX_FILTER_JSON_LEN;
 impl QueryRequest {
     /// Parses the request JSON (SPEC §7.1) for a collection of `schema`, holding its filters to `limits` (SPEC
     /// §7.1.3). The keys are `q`, `fields`, `filter`, `soft_filter`, `sort`, `limit`, `offset`, `search_after`,
-    /// `facets`, `relax`, `explain`, `proximity` and `projection`, each optional: a key left out has
+    /// `facets`, `relax`, `explain`, `proximity`, `projection` and `timeout_ms`, each optional: a key left out has
     /// [`QueryRequest::default`]'s value.
     ///
     /// ```
@@ -124,6 +125,9 @@ impl QueryRequest {
                 "explain" => request.page.explain = boolean(&key, &value)?,
                 "proximity" => request.proximity = boolean(&key, &value)?,
                 "projection" => request.page.projection = projection(&value, schema)?,
+                "timeout_ms" => {
+                    request.timeout = Some(Duration::from_millis(millis(&key, &value)?));
+                }
                 _ => return Err(shape(format!("unknown key {}", shown_key(&key)))),
             }
         }
@@ -171,6 +175,23 @@ fn count(key: &str, value: &J) -> Result<usize, QueryRequestError> {
         .as_u64()
         .and_then(|n| usize::try_from(n).ok())
         .ok_or_else(|| wrong(key, "an integer of at least 0", value))
+}
+
+/// A number of milliseconds (`timeout_ms`, SPEC §7.1.4): an integer of at least 0, written without a fraction or an
+/// exponent, up to `u64::MAX` (an end past what the clock holds is no end, [`QueryRequest::with_timeout`]). `-0` is
+/// refused with its own message, as a count's.
+fn millis(key: &str, value: &J) -> Result<u64, QueryRequestError> {
+    if value
+        .as_f64()
+        .is_some_and(|n| n == 0.0 && n.is_sign_negative())
+    {
+        return Err(shape(format!(
+            "`{key}` takes an integer of at least 0: -0 is not a number of milliseconds, write 0"
+        )));
+    }
+    value
+        .as_u64()
+        .ok_or_else(|| wrong(key, "an integer of milliseconds of at least 0", value))
 }
 
 fn strings(key: &str, value: &J) -> Result<Vec<String>, QueryRequestError> {

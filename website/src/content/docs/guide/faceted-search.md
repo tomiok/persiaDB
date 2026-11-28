@@ -51,7 +51,7 @@ head:
             "name": "Can a search set a deadline?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "Not through the embedded API yet: a SearchRequest has no deadline. An async search (AsyncCollection::search) whose future is dropped stops at the engine's next check and returns nothing. The relaxation budget, budget_ms, is a different thing: it starts after the exact level and cuts only the looser levels."
+              "text": "Yes. SearchRequest::timeout, or timeout_ms in the request JSON, bounds how long a search may run. Past it the search fails at the engine's next check with ErrorCode::Cancelled and returns no hits, at every relaxation level. An async search whose future is dropped stops the same way. The relaxation budget, budget_ms, is a different thing: it starts after the exact level, cuts only the looser levels, and keeps the hits found so far."
             }
           },
           {
@@ -169,9 +169,33 @@ When the first key is the score descending, the search skips a document that can
 
 ## Deadlines
 
-A `SearchRequest` has no deadline in the embedded API yet. The engine checks for a deadline and a cancellation as it searches (SPEC §7.3), and the embedded API uses that check for its async form: an `AsyncCollection::search` whose future is dropped stops at the next check and returns nothing (feature `async`).
+`SearchRequest::timeout(Duration)` (`"timeout_ms"` in the request JSON) bounds how long a search may run, counted from when it starts (SPEC §7.1.4, §7.3, ROADMAP 10.1.44). The engine checks the database's monotonic clock as it searches: before each view, every 256 matches, every 1024 steps of its readers, before each facet and before the page's documents are read. At the first check past the timeout, the search fails with `ErrorCode::Cancelled` and returns no hits, at every relaxation level. A page cut short is never returned. A timeout of 0 has passed at the first check. A timeout too large for the clock is no limit. `timeout_ms` is an integer of at least 0, and any other value, or a misspelt key, is `ErrorCode::InvalidArgument`. An `AsyncCollection::search` takes the same timeout, counted from when its job starts on the pool, and a dropped future cancels it at the next check (feature `async`).
 
-That is not the relaxation budget. `budget_ms` (default 50) is read after the exact level finishes, so the exact level is never cut by it (SPEC §7.6, ROADMAP 8.1.4). L1 synonyms, L2 `drop_terms`, L3 prefix, L4 fuzzy, and L5 fallback can spend the budget on a looser query; past it, the response sets `Relaxation::truncated`. [Query relaxation](/guide/typo-tolerant-search/#query-relaxation) is the budget.
+```rust
+use std::time::Duration;
+
+use persia::{Db, ErrorCode, SearchRequest};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let db = Db::open(dir.path().join("notes.persia"))?;
+    let notes = db.create_collection_json(r#"{"name": "notes", "fields": {"body": {"type": "text"}}}"#)?;
+    notes.put_json(r#"{"id": "n1", "body": "hello world"}"#)?;
+
+    let page = notes.search(&SearchRequest::new("hello").timeout(Duration::from_millis(200)))?;
+    assert_eq!(page.hits.len(), 1);
+    // The same timeout in the request JSON.
+    let page = notes.search_json(r#"{"q": "hello", "timeout_ms": 200}"#)?;
+    assert_eq!(page.hits.len(), 1);
+
+    // A timeout that has already passed fails at the first check, with no page.
+    let late = notes.search(&SearchRequest::new("hello").timeout(Duration::ZERO)).unwrap_err();
+    assert_eq!(late.code(), ErrorCode::Cancelled);
+    Ok(())
+}
+```
+
+That is not the relaxation budget. `budget_ms` (default 50) is read after the exact level finishes, so the exact level is never cut by it (SPEC §7.6, ROADMAP 8.1.4). L1 synonyms, L2 `drop_terms`, L3 prefix, L4 fuzzy, and L5 fallback can spend the budget on a looser query; past it, the response sets `Relaxation::truncated` and keeps the hits found so far. The timeout is the hard limit: past it there is no response. Both read the same clock. [Query relaxation](/guide/typo-tolerant-search/#query-relaxation) is the budget.
 
 ## Explain
 
@@ -212,7 +236,6 @@ Highlighted snippets are not this tree. Highlights are post-v1 (SPEC §7.7).
 | Piece | Status |
 |---|---|
 | Filters, facets, sort, cursor pages, explain | %%MATCHING_CELL%% |
-| A deadline on `SearchRequest` | Not in the embedded API. The engine has one (SPEC §7.3); the async search's cancellation uses it. |
 | Cascade levels after exact | %%RELAXATION_CELL%% |
 | A flag for partial facet counts under the budget | ROADMAP 8.1.31. |
 | Highlighted fragments | Post-v1. |
@@ -235,7 +258,7 @@ The default sort is score descending, then segment order with the memtable last,
 
 ### Can a search set a deadline?
 
-Not through the embedded API yet: a `SearchRequest` has no deadline. An `AsyncCollection::search` whose future is dropped stops at the engine's next check and returns nothing. The relaxation budget, `budget_ms`, is a different thing: it starts after the exact level and cuts only the looser levels. %%RELAXATION_CELL%%
+Yes. `SearchRequest::timeout`, or `"timeout_ms"` in the request JSON, bounds how long a search may run. Past it the search fails at the engine's next check with `ErrorCode::Cancelled` and returns no hits, at every relaxation level ([Deadlines](#deadlines)). An `AsyncCollection::search` whose future is dropped stops the same way. The relaxation budget, `budget_ms`, is a different thing: it starts after the exact level, cuts only the looser levels, and keeps the hits found so far. %%RELAXATION_CELL%%
 
 ### Does explain return highlighted snippets?
 

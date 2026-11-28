@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia::SearchRequest::timeout(Duration)` and the request JSON's `timeout_ms` (ROADMAP 10.1.44, ADR-0063 amended;
+  SPEC §7.1.4, §7.3): how long a search may run, from when it starts (for `AsyncCollection::search`, when its job
+  starts on the pool). Past it the search fails at the engine's next check with `ErrorCode::Cancelled` and no hits,
+  at every relaxation level: never a truncated or early relaxed page. `0` has passed at the first check; a timeout
+  past what the clock represents is no limit. `timeout_ms` is an integer of at least 0 (`-0`, a fraction, an
+  exponent, a string or a misspelt key are `ErrorCode::InvalidArgument`). It is read on the database's monotonic
+  clock, which the relaxation budget (`budget_ms`) now reads too. The engine's `QueryRequest::with_timeout` and
+  `timeout` are its typed form.
 - `persia::SearchRequest::filter_json` and `soft_filter_json` (ROADMAP 10.1.35, ADR-0063 amended; SPEC §7.1.4): a
   hard or soft filter in its JSON form (SPEC §7.1.2, fields by name) on a request built in code, parsed when the
   search runs as `Collection::search_json` parses `filter` and `soft_filter`: the same parser, the schema of the

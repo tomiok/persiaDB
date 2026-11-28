@@ -210,6 +210,7 @@ fn every_key_parses_to_its_typed_value() {
         "relax": {"min_results": 4, "fill": true},
         "explain": true,
         "proximity": true,
+        "timeout_ms": 250,
     });
     let built = QueryRequest::new("zapatillas rojas nike")
         .with_fields(DefaultFields::parse(&schema, &["title^3", "body"]).unwrap())
@@ -249,7 +250,8 @@ fn every_key_parses_to_its_typed_value() {
             ..RelaxOptions::default()
         })
         .with_explain(true)
-        .with_proximity(true);
+        .with_proximity(true)
+        .with_timeout(Duration::from_millis(250));
     let parsed = parse(&json.to_string()).unwrap();
     assert_eq!(parsed, built);
     // The getters read what the setters wrote.
@@ -267,6 +269,7 @@ fn every_key_parses_to_its_typed_value() {
     assert_eq!(page.projection, Projection::All);
     assert_eq!(parsed.relax().min_results, Some(4));
     assert!(parsed.proximity());
+    assert_eq!(parsed.timeout(), Some(Duration::from_millis(250)));
 }
 
 #[test]
@@ -282,6 +285,7 @@ fn a_key_left_out_has_its_default() {
     assert!(page.search_after.is_none() && page.facets.is_empty() && !page.explain);
     assert_eq!(empty.relax(), &RelaxOptions::default());
     assert!(!empty.proximity());
+    assert_eq!(empty.timeout(), None);
     // One key says nothing about the others.
     assert_eq!(
         parse(r#"{"limit": 3}"#).unwrap(),
@@ -1172,6 +1176,175 @@ fn a_deadline_or_a_cancellation_is_not_an_invalid_request() {
     let deep = QueryRequest::new("red").with_offset(10_000).with_limit(1);
     assert_eq!(deep.run(c, &options()).unwrap_err().interrupt(), None);
     assert_eq!(parse("[]").unwrap_err().interrupt(), None);
+}
+
+/// Each read of [`Clock::now`] moves the clock 1 ms forward and is counted, so a timeout of `T` ms passes at the
+/// `T`-th read after the one `run` takes its start from.
+#[derive(Debug)]
+struct Ticking {
+    start: std::time::Instant,
+    reads: std::sync::atomic::AtomicU64,
+}
+
+impl Ticking {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            start: std::time::Instant::now(),
+            reads: std::sync::atomic::AtomicU64::new(0),
+        })
+    }
+
+    fn reads(&self) -> u64 {
+        self.reads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Clock for Ticking {
+    fn now(&self) -> std::time::Instant {
+        let n = self
+            .reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.start + Duration::from_millis(n)
+    }
+
+    fn unix_micros(&self) -> i64 {
+        0
+    }
+}
+
+/// `timeout_ms` (SPEC §7.1.4, ROADMAP 10.1.44) is a whole number of milliseconds of at least 0, up to `u64::MAX`: 0
+/// and the largest are values, anything else an error that names the key. The request JSON refuses unknown keys, so
+/// a misspelt one is an error too, never a request without a timeout.
+#[test]
+fn timeout_ms_takes_whole_milliseconds() {
+    let timeout = |json: &str| parse(json).unwrap().timeout();
+    assert_eq!(timeout(r#"{"timeout_ms": 0}"#), Some(Duration::ZERO));
+    assert_eq!(
+        timeout(r#"{"timeout_ms": 1500}"#),
+        Some(Duration::from_millis(1500))
+    );
+    let largest = json!({ "timeout_ms": u64::MAX }).to_string();
+    assert_eq!(timeout(&largest), Some(Duration::from_millis(u64::MAX)));
+    assert_eq!(
+        parse(r#"{"q": "red", "timeout_ms": 20}"#).unwrap(),
+        QueryRequest::new("red").with_timeout(Duration::from_millis(20))
+    );
+    for json in [
+        r#"{"timeout_ms": -1}"#,
+        r#"{"timeout_ms": -0}"#,
+        r#"{"timeout_ms": 1.5}"#,
+        r#"{"timeout_ms": 1.0}"#,
+        r#"{"timeout_ms": 1e3}"#,
+        r#"{"timeout_ms": 18446744073709551616}"#,
+        r#"{"timeout_ms": "100"}"#,
+        r#"{"timeout_ms": true}"#,
+        r#"{"timeout_ms": [100]}"#,
+        r#"{"timeout_ms": {"ms": 100}}"#,
+        r#"{"timeout_ms": null}"#,
+        r#"{"timeout_ms": 1, "timeout_ms": 2}"#,
+    ] {
+        let error = parse(json).unwrap_err();
+        assert!(matches!(kind(&error), Kind::Json), "{json}: {error:?}");
+        assert!(error.to_string().contains("timeout_ms"), "{json}: {error}");
+    }
+    assert!(
+        parse(r#"{"timeout_ms": -0}"#)
+            .unwrap_err()
+            .to_string()
+            .contains("-0 is not a number of milliseconds")
+    );
+    for json in [
+        r#"{"timeout": 100}"#,
+        r#"{"timeoutMs": 100}"#,
+        r#"{"timeout_ms ": 100}"#,
+        r#"{"deadline": 100}"#,
+        r#"{"deadline_ms": 100}"#,
+    ] {
+        let error = parse(json).unwrap_err();
+        assert!(matches!(kind(&error), Kind::Json), "{json}: {error:?}");
+        assert!(error.to_string().contains("unknown key"), "{json}: {error}");
+    }
+    // It is a key of the request, not of `relax`.
+    let error = parse(r#"{"relax": {"timeout_ms": 100}}"#).unwrap_err();
+    assert!(matches!(kind(&error), Kind::Relax), "{error:?}");
+}
+
+/// A request's timeout (ROADMAP 10.1.44; SPEC §7.3) runs on the budget clock from when `run` is called: past it the
+/// search fails as a passed deadline does, at whichever read sees it (in L0 or in a later relaxation step), and is
+/// never an early or truncated page. A timeout the clock cannot reach is no limit.
+#[test]
+fn a_timeout_fails_the_search_at_the_read_that_sees_it_pass() {
+    let db = database(schema());
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("shoes").unwrap();
+    // "zebra" is in no document: the relaxed search finds its hits after L0. The budget never passes here.
+    for relax in [json!(false), json!({"budget_ms": 60_000})] {
+        let request = |ms: Option<u64>| {
+            let mut json = json!({"q": "red zebra", "relax": relax});
+            if let Some(ms) = ms {
+                json["timeout_ms"] = json!(ms);
+            }
+            parse(&json.to_string()).unwrap()
+        };
+        let untimed = request(None).run(c, &options()).unwrap().results;
+        // The clock of `options()` never moves: 0 has passed at the first read, any other timeout never passes.
+        let zero = request(Some(0)).run(c, &options()).unwrap_err();
+        assert_eq!(
+            zero.interrupt(),
+            Some(Interrupt::DeadlineExceeded),
+            "{zero}"
+        );
+        for ms in [1, u64::MAX] {
+            assert_eq!(
+                request(Some(ms)).run(c, &options()).unwrap().results,
+                untimed
+            );
+        }
+        let ticking = |ms: u64| {
+            let clock = Ticking::new();
+            let run = RunOptions::new()
+                .threads(Threads::Current)
+                .budget_clock(Arc::clone(&clock) as _);
+            (request(Some(ms)).run(c, &run), clock.reads())
+        };
+        // An hour of 1 ms reads is never reached: the reads of a whole search.
+        let (whole, reads) = ticking(3_600_000);
+        assert_eq!(whole.unwrap().results, untimed);
+        // Each shorter timeout fails, or (passing only at a read after the last check) returns the whole page.
+        let mut failed = 0_u64;
+        for ms in 0..reads {
+            match ticking(ms).0 {
+                Err(e) => {
+                    assert_eq!(
+                        e.interrupt(),
+                        Some(Interrupt::DeadlineExceeded),
+                        "{ms} ms: {e}"
+                    );
+                    assert_eq!(failed, ms, "{ms} ms failed after a longer one did not");
+                    failed += 1;
+                }
+                Ok(response) => assert_eq!(response.results, untimed, "{ms} ms"),
+            }
+        }
+        assert!(failed >= 1, "{relax}: {failed} of {reads} reads");
+        if relax != json!(false) {
+            // The relaxed search's hits came from a later step, and timeouts past every read of L0 failed too.
+            let hits = relaxed(untimed.clone());
+            assert!(hits.hits.iter().all(|h| h.level != RelaxLevel::Exact));
+            let (_, l0) = {
+                let clock = Ticking::new();
+                let run = RunOptions::new()
+                    .threads(Threads::Current)
+                    .budget_clock(Arc::clone(&clock) as _);
+                let exact = parse(
+                    &json!({"q": "red zebra", "relax": false, "timeout_ms": 3_600_000}).to_string(),
+                )
+                .unwrap();
+                (exact.run(c, &run).unwrap(), clock.reads())
+            };
+            assert!(failed > l0, "{failed} failed, L0 alone reads {l0}");
+        }
+    }
 }
 
 #[test]

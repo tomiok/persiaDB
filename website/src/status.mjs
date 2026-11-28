@@ -136,7 +136,7 @@ const FACADE_REQUEST = [
 	['sort', 'sorts'],
 	['after', 'cursor pages'],
 	['facets', 'facets'],
-	['deadline', 'deadlines'],
+	['timeout', 'deadlines'],
 	['explain', 'explain'],
 ];
 
@@ -877,7 +877,7 @@ export function buildStatus(ctx) {
 	requestBits.push('sorts', 'cursor pages', 'facets');
 	if (deadlineState === 'done') requestBits.push('deadlines');
 	if (explainState === 'done') requestBits.push('explain');
-	// Through the facade, only what a SearchRequest setter offers: the engine's deadline has no setter (ROADMAP 10.1.44).
+	// Through the facade, only what a SearchRequest setter offers (the deadline is SearchRequest::timeout, 10.1.44).
 	const setters = ctx.requestSetters ?? [];
 	const facadeBits = FACADE_REQUEST.filter(([setter, label]) => setters.includes(setter) && requestBits.includes(label)).map(
 		([, label]) => label,

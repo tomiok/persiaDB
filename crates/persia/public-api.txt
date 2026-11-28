@@ -935,6 +935,7 @@ pub fn persia::SearchRequest::relax(self, relax: persia::RelaxOptions) -> Self
 pub fn persia::SearchRequest::soft_filter(self, filter: persia::Filter) -> Self
 pub fn persia::SearchRequest::soft_filter_json(self, json: impl core::convert::Into<alloc::string::String>) -> Self
 pub fn persia::SearchRequest::sort(self, sort: persia::Sort) -> Self
+pub fn persia::SearchRequest::timeout(self, timeout: core::time::Duration) -> Self
 pub fn persia::SearchResponse::next_cursor(&self) -> core::option::Option<&str>
 pub fn persia::SearchResponse::to_json(&self) -> persia::Result<alloc::string::String>
 pub fn persia::Sort::is_score(&self) -> bool
