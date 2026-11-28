@@ -8,9 +8,23 @@ on:
     paths:
       - 'website/**'
       - 'scripts/waitlist/**'
+      # What the site reads outside website/ at build and test time (status.mjs, progress.mjs and the node tests):
+      # a change to one changes the pages. website/src/paths-filter.test.mjs scans the website's code for the paths
+      # it reads, in the forms that test lists, and fails when one is not covered here, when a file-system call's
+      # path is in no form it can resolve, or when the push and pull_request lists differ (ROADMAP 10.1.52). The
+      # scan is static and does not follow variables (it trusts a few named bases and the walks over website/'s
+      # own directories), so it holds those forms to this list, not every read code could make. The engine sources
+      # are one glob: status.mjs reads lib.rs, db.rs, db/, relax.rs, relax/ and search/explain.rs, and a module
+      # split there should not need a filter edit; the other crates' files are named one by one.
+      - 'Cargo.toml'
+      - 'ROADMAP.md'
       - 'PROGRESS.md'
-      # status.mjs reads the facade's calls from it (ROADMAP 10.1.52).
       - 'crates/persia/public-api.txt'
+      - 'crates/persia/src/lib.rs'
+      - 'crates/persia/src/internal/blob.rs'
+      - 'crates/persia-engine/src/**'
+      - 'crates/persia-blob/src/lib.rs'
+      - 'crates/persia-analysis/src/registry.rs'
       - '.github/workflows/website.yml'
       - '.github/workflows/waitlist.yml'
   push:
@@ -18,9 +32,16 @@ on:
     paths:
       - 'website/**'
       - 'scripts/waitlist/**'
+      # The pull_request list, line for line (website/src/paths-filter.test.mjs checks it).
+      - 'Cargo.toml'
+      - 'ROADMAP.md'
       - 'PROGRESS.md'
-      # status.mjs reads the facade's calls from it (ROADMAP 10.1.52).
       - 'crates/persia/public-api.txt'
+      - 'crates/persia/src/lib.rs'
+      - 'crates/persia/src/internal/blob.rs'
+      - 'crates/persia-engine/src/**'
+      - 'crates/persia-blob/src/lib.rs'
+      - 'crates/persia-analysis/src/registry.rs'
       - '.github/workflows/website.yml'
       - '.github/workflows/waitlist.yml'
   workflow_dispatch:
@@ -61,10 +82,14 @@ jobs:
             website/relay/waitlist/src/*.test.mjs \
             scripts/waitlist/*.test.mjs
       # ROADMAP 10.1.52: the status sentences status.mjs puts into pages name no engine item and no capability the
-      # facade's crates/persia/public-api.txt lacks (ADR-0063, website-guides amendment item 5), and the layer diagram
-      # and its captions follow PROGRESS.md. Node built-ins only, so before `npm ci`.
+      # facade's crates/persia/public-api.txt lacks (ADR-0063, website-guides amendment item 5), the layer diagram
+      # and its captions and the progress tokens follow PROGRESS.md (layers.test.mjs, progress.test.mjs), and the
+      # paths filter above covers the files outside website/ they read (paths-filter.test.mjs). Node built-ins
+      # only, so before `npm ci`.
       - name: Status and layer tests
-        run: node --test website/src/status.test.mjs website/src/layers.test.mjs
+        run: >-
+          node --test website/src/status.test.mjs website/src/layers.test.mjs website/src/progress.test.mjs
+          website/src/paths-filter.test.mjs
       - name: Install
         working-directory: website
         run: npm ci

@@ -1,11 +1,12 @@
 //! Samples a page shows that rustdoc cannot run as shown (ROADMAP 10.3.3, 10.1.51).
 //!
-//! The README's quickstart opens `app.persia` in the working directory, so a user can paste it into a fresh
-//! `cargo new` with `persia` as the only dependency. Run as a doctest it would write that file into the crate under
-//! test, and a second run would fail (`create_collection_json` refuses a collection that exists); a doctest cannot
-//! move to a temporary working directory either (merged doctests share one process). So each such sample has a twin
-//! that runs: a Rust block of a page `crates/persia-docs` runs as a doctest, in a temporary directory. This check
-//! keeps the shown block equal to its twin, line for line, once the twin is read as the page shows it:
+//! The README's quickstart, which the landing page shows too, opens `app.persia` in the working directory, so a user
+//! can paste it into a fresh `cargo new` with `persia` as the only dependency. Run as a doctest it would write that
+//! file into the crate under test, and a second run would fail (`create_collection_json` refuses a collection that
+//! exists); a doctest cannot move to a temporary working directory either (merged doctests share one process). So
+//! each such sample has a twin that runs: a Rust block of a page `crates/persia-docs` runs as a doctest, in a
+//! temporary directory. This check keeps the shown block equal to its twin, line for line, once the twin is read as
+//! the page shows it:
 //!
 //! - rustdoc's reading of each line is taken: `##` after the indentation shows `#`, and a hidden line (`# ` after
 //!   the indentation, or a lone `#`) is dropped;
@@ -16,8 +17,8 @@
 //!   left (the shown page never makes it).
 //!
 //! Nothing else may differ: comments, assertions and calls are the twin's, so the shown sample calls what the twin
-//! runs and asserts what it asserts. The twin must be a block rustdoc runs (no `ignore` or `no_run`) on a page a
-//! module of `crates/persia-docs` lists (`#[doc = include_str!("...")]`, [`pages`]), and the dependency block
+//! runs and asserts what it asserts. The twin must be a block rustdoc runs (no `ignore` or `no_run`) on a page
+//! `crates/persia-docs/src/guides.rs` lists (`#[doc = include_str!("...")]`, [`pages`]), and the dependency block
 //! (`toml`) the page shows before the sample must equal the twin page's first `toml` block, and must be there when
 //! [`Shown::requires_toml`] says so: the sample pastes into a fresh crate only with it.
 
@@ -38,29 +39,32 @@ struct Shown {
     requires_toml: bool,
 }
 
-/// Every shown sample with a twin. The README's is the getting-started guide's first sample, so the two cannot
-/// drift apart (the guide says it is the README quickstart in a temporary directory). The landing page's has its
-/// own twin (`crates/persia-docs/src/samples/landing.md`): a shorter program, kept as the page shows it.
+/// The getting-started guide's first sample, which that page calls the README quickstart in a temporary directory.
+const GETTING_STARTED: &str = "website/src/content/docs/guide/getting-started.md";
+const GETTING_STARTED_AFTER: &str = "## Open a database, index, and search";
+
+/// Every shown sample with a twin. The README's and the landing page's are one program, so both have the
+/// getting-started guide's first sample as their twin, and the three pages cannot drift apart.
 const SHOWN: &[Shown] = &[
     Shown {
         page: "README.md",
         after: "## Quickstart",
-        twin: "website/src/content/docs/guide/getting-started.md",
-        twin_after: "## Open a database, index, and search",
+        twin: GETTING_STARTED,
+        twin_after: GETTING_STARTED_AFTER,
         requires_toml: true,
     },
     Shown {
         page: "website/src/content/docs/index.mdx",
         after: "",
-        twin: "crates/persia-docs/src/samples/landing.md",
-        twin_after: "",
+        twin: GETTING_STARTED,
+        twin_after: GETTING_STARTED_AFTER,
         requires_toml: true,
     },
 ];
 
-/// The modules of `crates/persia-docs` whose item docs are pages run as doctests: `src/<name>.rs`, each wired by
-/// `#[cfg(doctest)] mod <name>;` in its `lib.rs`.
-const DOC_MODULES: &[&str] = &["guides", "samples"];
+/// The module of `crates/persia-docs` whose item docs are pages run as doctests: `src/guides.rs`, wired by
+/// `#[cfg(doctest)] mod guides;` in its `lib.rs`.
+const DOC_MODULE: &str = "guides";
 
 /// The fences of `text` after its line `after` (all of them when `after` is empty).
 fn fences_after<'a>(text: &'a str, after: &str, page: &str) -> Vec<Fence<'a>> {
@@ -178,23 +182,18 @@ fn difference(shown: &Fence<'_>, want: &[String]) -> Option<String> {
     ))
 }
 
-/// The pages `crates/persia-docs` runs, relative to the root: those of each of [`DOC_MODULES`], which must be wired.
+/// The pages `crates/persia-docs` runs, relative to the root: those [`DOC_MODULE`] lists, which must be wired.
 fn doctested_pages() -> Vec<std::path::PathBuf> {
     let src = Path::new("crates/persia-docs/src");
     let lib = read("crates/persia-docs/src/lib.rs");
-    DOC_MODULES
-        .iter()
-        .flat_map(|module| {
-            assert!(
-                lib.contains(&format!("#[cfg(doctest)]\nmod {module};")),
-                "crates/persia-docs/src/lib.rs: `#[cfg(doctest)] mod {module};` is missing, so its pages do not run"
-            );
-            let text = read(&format!("crates/persia-docs/src/{module}.rs"));
-            pages(&text)
-                .into_iter()
-                .filter_map(|page| normalize(&src.join(page)))
-                .collect::<Vec<_>>()
-        })
+    assert!(
+        lib.contains(&format!("#[cfg(doctest)]\nmod {DOC_MODULE};")),
+        "crates/persia-docs/src/lib.rs: `#[cfg(doctest)] mod {DOC_MODULE};` is missing, so its pages do not run"
+    );
+    let text = read(&format!("crates/persia-docs/src/{DOC_MODULE}.rs"));
+    pages(&text)
+        .into_iter()
+        .filter_map(|page| normalize(&src.join(page)))
         .collect()
 }
 
@@ -205,7 +204,7 @@ fn shown_samples_equal_a_doctest() {
     for s in SHOWN {
         assert!(
             run.iter().any(|p| p == Path::new(s.twin)),
-            "{}: its twin {} is no page crates/persia-docs runs ({DOC_MODULES:?})",
+            "{}: its twin {} is no page crates/persia-docs runs (src/{DOC_MODULE}.rs)",
             s.page,
             s.twin
         );

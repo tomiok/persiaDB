@@ -38,26 +38,35 @@ import WinButton from '../../components/WinButton.astro';
 
 ```toml title="Cargo.toml"
 [dependencies]
-persia = { git = "https://github.com/tomiok/persiaDB" } # not on crates.io yet
+persia = { git = "https://github.com/tomiok/persiaDB" }
 ```
 
 ```rust title="src/main.rs"
 use persia::{Db, SearchRequest};
 
-fn main() -> persia::Result<()> {
-    let db = Db::open("app.persia")?; // one file, created if missing
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db = Db::open("app.persia")?; // creates app.persia if it is missing
     let notes = db.create_collection_json(
         r#"{"name": "notes", "fields": {"body": {"type": "text"}}}"#,
     )?;
-    notes.put_json(r#"{"id": "n1", "body": "hello, world"}"#)?;
+    notes.put_json(r#"{"id": "n1", "body": "Hello, world"}"#)?;
+    notes.put_json(r#"{"id": "n2", "body": "hello, hello again"}"#)?;
+    notes.put_json(r#"{"id": "n3", "body": "goodbye"}"#)?;
     notes.commit()?;
 
-    // A typo still finds n1, and the response names the step that relaxed it.
-    let page = notes.search(&SearchRequest::new("helo"))?;
-    assert_eq!(page.hits[0].document.id(), "n1");
-    println!("{:?}", page.relaxation.level); // Fuzzy
+    // Ranked with BM25F: "n2" says hello twice, so it ranks first. "goodbye" does not match.
+    let page = notes.search(&SearchRequest::new("hello"))?;
+    let ids: Vec<_> = page.hits.iter().map(|h| h.document.id()).collect();
+    assert_eq!(ids, ["n2", "n1"]);
 
-    db.close()
+    // A typo still returns hits, and the response says how the query was relaxed.
+    let page = notes.search(&SearchRequest::new("helo"))?;
+    assert!(!page.hits.is_empty());
+    println!("{:?} {:?}", page.relaxation.level, page.relaxation.corrected());
+    // Fuzzy [Correction { original: "helo", corrected: "hello" }]
+
+    db.close()?;
+    Ok(())
 }
 ```
 

@@ -309,7 +309,14 @@ the crate too.
    `::`, and inline code is every backtick span and `<code>` element. The status sentences
    `website/src/status.mjs` puts into pages (`%%TOKEN%%`) are checked by `website/src/status.test.mjs`, which reads
    the same snapshot for the calls it names (run by `website.yml`'s build job, ROADMAP 10.1.52, which also runs on a
-   change to the snapshot). A method named on a value (`page.next_cursor()`) and a renamed import
+   change to the snapshot or to any other file outside `website/` that `status.mjs`, `progress.mjs` or the node
+   tests read: the engine sources, `crates/persia/src/lib.rs` and `internal/blob.rs`, `persia-blob`'s `lib.rs`,
+   `persia-analysis`'s `registry.rs`, `Cargo.toml`, `ROADMAP.md` and `PROGRESS.md`; `website/src/paths-filter.test.mjs`
+   scans the website's code for the path forms it lists and fails when one names a file outside the `pull_request`
+   paths filter, when a file-system call's path is in none of those forms, or when the `push` list differs from it;
+   the scan is static and does not follow variables, so a path that reaches one of the bases it trusts through a
+   variable is not seen). A
+   method named on a value (`page.next_cursor()`) and a renamed import
    (`use persia as p; p::internal`) are not resolved: the check does not type the text, and rustdoc compiling the
    samples (run alone, `cargo test -p persia-docs`) refuses those that name nothing public.
 6. **The include check covers every published crate** (ROADMAP 10.1.53). `persia-engine`'s integration tests
@@ -352,14 +359,13 @@ the crate too.
    which that page already calls the README quickstart in a temporary directory, so the two cannot drift apart
    (the README's `main` now returns `Result<(), Box<dyn std::error::Error>>`, as the guide's does). CI runs the
    check in the test job's `cargo test --workspace` and the twin in its `cargo test -p persia-docs`.
-8. **The landing page's sample is checked the same way** (ROADMAP 10.1.51). `website/src/content/docs/index.mdx`
-   shows a `rust title="src/main.rs"` block, which rustdoc does not collect (item 4), opening `app.persia` as the
-   README does. A title rustdoc reads (Expressive Code also takes one from a first-line `// src/main.rs` comment)
-   would not be enough: run as shown, the fixed path has item 7's problem, and a temporary directory on the page
-   would change the hero. So its twin is `crates/persia-docs/src/samples/landing.md`, the doc of an item of the new
-   `#[cfg(doctest)] mod samples` (wired in `lib.rs`, checked by item 7's check): the same program, with a hidden
-   line making the directory (`tempfile::tempdir().expect(..)`, test setup: the shown `main` returns
-   `persia::Result`, which an `io::Error` does not convert into) and the same `toml` block. The hero is unchanged.
-   It stays a shorter program than the README's: two twins, each shown sample equal to what runs. The check is in
-   the Rust workflow (`ci.yml`, no paths filter), not `website.yml`, whose paths filter would skip a change to the
-   twin alone.
+8. **The landing page's sample is the README quickstart, checked the same way** (ROADMAP 10.1.51).
+   `website/src/content/docs/index.mdx` shows a `rust title="src/main.rs"` block, which rustdoc does not collect
+   (item 4), opening `app.persia` as the README does. A title rustdoc reads (Expressive Code also takes one from a
+   first-line `// src/main.rs` comment) would not be enough: run as shown, the fixed path has item 7's problem, and a
+   temporary directory on the page would change the hero. So the hero shows the README's program and its `toml`
+   block, line for line, and item 7's check holds it to the same twin, the getting-started guide's first sample: the
+   landing page, the README and that guide are one program, which runs as a doctest. (The landing page first kept
+   a shorter program of its own, with its own twin in a `#[cfg(doctest)] mod samples` of `crates/persia-docs`; the
+   #141 review chose one program over two twins.) The check is in the Rust workflow (`ci.yml`, no paths filter), not
+   `website.yml`, whose paths filter would skip a change to the README alone.
